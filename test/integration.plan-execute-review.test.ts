@@ -453,7 +453,7 @@ function makeHarness(): Harness {
 
   const queue = createRunQueue({
     workspaceRoot: repo,
-    adapter: new StubAdapter(),
+    adapterForRole: () => new StubAdapter(),
     git: gitService,
     terminalHost,
     watcherFactory: factory,
@@ -764,7 +764,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     fs.mkdirSync(path.dirname(journalPath), { recursive: true });
     const queue = createRunQueue({
       workspaceRoot: repo,
-      adapter: new StubAdapter(),
+      adapterForRole: () => new StubAdapter(),
       git: gitService,
       terminalHost,
       watcherFactory: factory,

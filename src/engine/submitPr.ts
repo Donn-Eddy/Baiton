@@ -17,8 +17,8 @@
  *      `status: pr` into the frontmatter, and commits the metadata. Each of
  *      push / create / record is journaled so recovery can tell how far it got.
  *
- * Host-independent like the queue: the adapter, terminal host, watcher
- * factory, git service and PR tool are injected.
+ * Host-independent like the queue: the per-role adapter lookup, terminal host,
+ * watcher factory, git service and PR tool are injected.
  */
 import { exec } from 'child_process';
 import { mkdirSync, writeFileSync } from 'fs';
@@ -56,7 +56,6 @@ export interface SubmitPrDeps {
   workspaceRoot: string;
   /** The `.baiton/specs` directory. */
   specsDir: string;
-  adapter: Adapter;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
   git: GitService;
@@ -67,6 +66,11 @@ export interface SubmitPrDeps {
   verify?: string;
   runCommand?: CommandRunner;
   modelForRole(role: Role): { model: string; effort?: string };
+  /**
+   * Per-role adapter, selected from the role's configured `agent` id;
+   * `undefined` when that id is not a known agent (Requirement 14.1).
+   */
+  adapterForRole(role: Role): Adapter | undefined;
   /** Surfaces an invalid-result detail while the terminal stays open. */
   reportInvalid?: (detail: string) => void;
   clock?: () => number;
@@ -77,6 +81,7 @@ export type SubmitPrError =
   | { kind: 'not-ready'; message: string }
   | { kind: 'dirty-tree'; message: string }
   | { kind: 'verify-failed'; message: string; output: string }
+  | { kind: 'unknown-agent'; message: string }
   | { kind: 'probe-failed'; message: string }
   | { kind: 'launch-failed'; message: string }
   | { kind: 'outcome'; outcome: RunOutcome; message: string }
@@ -121,8 +126,16 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
     }
   }
 
-  // 3. Probe the adapter before launching, as every stage does (Req 14.2).
-  const probe = await deps.adapter.probe();
+  // 3. Resolve the pr-writer's configured adapter, then probe it before
+  //    launching, as every stage does (Req 14.1, 14.2).
+  const adapter = deps.adapterForRole('pr-writer');
+  if (adapter === undefined) {
+    return fail({
+      kind: 'unknown-agent',
+      message: 'role "pr-writer" is configured with an unsupported agent; update "roles.pr-writer.agent" in .baiton/config.json',
+    });
+  }
+  const probe = await adapter.probe();
   if (!probe.ok) {
     return fail({ kind: 'probe-failed', message: `adapter probe failed: ${probe.reason ?? 'unknown reason'}` });
   }
@@ -160,7 +173,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
         branch,
       }),
     },
-    { adapter: deps.adapter, terminalHost: deps.terminalHost },
+    { adapter, terminalHost: deps.terminalHost },
   );
   if (!launched.ok) {
     return fail({ kind: 'launch-failed', message: `stage launch failed: ${launched.error.message}` });

@@ -19,9 +19,9 @@
  * completion record to `.baiton/specs/<slug>/runs.jsonl`, and leaves a failed
  * run's `.baiton/runs/<runId>/` directory in place for inspection.
  *
- * Everything host-specific is injected — adapter, terminal host, result-watcher
- * factory, git, the per-role model lookup and the completion sink — so the
- * runner is unit-testable without `vscode`.
+ * Everything host-specific is injected — the per-role adapter lookup, terminal
+ * host, result-watcher factory, git, the per-role model lookup and the
+ * completion sink — so the runner is unit-testable without `vscode`.
  */
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
@@ -69,6 +69,7 @@ export type SpecDraftRefusal =
   | { kind: 'busy'; message: string }
   | { kind: 'duplicate-slug'; message: string }
   | { kind: 'invalid-slug'; message: string }
+  | { kind: 'unknown-agent'; message: string }
   | { kind: 'probe-failed'; message: string }
   | { kind: 'launch-failed'; message: string };
 
@@ -83,7 +84,6 @@ export interface SpecDraftDeps {
   workspaceRoot: string;
   /** Absolute `.baiton/specs/` directory. */
   specsDir: string;
-  adapter: Adapter;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
   /**
@@ -94,6 +94,11 @@ export interface SpecDraftDeps {
   services: ToolServices;
   /** Per-role model, resolved from config; selects the adapter `--model`. */
   modelForRole(role: Role): { model: string; effort?: string };
+  /**
+   * Per-role adapter, selected from the role's configured `agent` id;
+   * `undefined` when that id is not a known agent (Requirement 14.1).
+   */
+  adapterForRole(role: Role): Adapter | undefined;
   /** True while the todo-scoped run queue has a stage in flight. */
   isQueueRunning(): boolean;
   /** Run-id generator; defaults to a slug/time composite. */
@@ -159,8 +164,17 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
       });
     }
 
+    // Resolve the spec-writer's configured adapter before probing (Req 14.1).
+    const adapter = this.deps.adapterForRole(SPEC_WRITER_ROLE);
+    if (adapter === undefined) {
+      return refuse({
+        kind: 'unknown-agent',
+        message: 'role "spec-writer" is configured with an unsupported agent; update "roles.spec-writer.agent" in .baiton/config.json',
+      });
+    }
+
     // Probe the adapter before launching, exactly as the queue does (Req 14.2).
-    const probe = await this.deps.adapter.probe();
+    const probe = await adapter.probe();
     if (!probe.ok) {
       return refuse({
         kind: 'probe-failed',
@@ -184,7 +198,7 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
         sessionId,
         briefContext: requirementsContext(req.requirements),
       },
-      { adapter: this.deps.adapter, terminalHost: this.deps.terminalHost },
+      { adapter, terminalHost: this.deps.terminalHost },
     );
     if (!launched.ok) {
       return refuse({

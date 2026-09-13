@@ -183,11 +183,11 @@ function makeHarness(options: { probeOk?: boolean; commitFails?: boolean } = {})
   const runner = createSpecDraftRunner({
     workspaceRoot: root,
     specsDir,
-    adapter,
     terminalHost,
     watcherFactory,
     services,
     modelForRole: () => ({ model: 'writer-model', effort: 'high' }),
+    adapterForRole: () => adapter,
     isQueueRunning: () => queueRunning,
     newRunId: () => 'draft-run-1',
     newSessionId: () => '11111111-1111-4111-8111-111111111111',

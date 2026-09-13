@@ -78,8 +78,8 @@ import type {
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { ClaudeAdapter } from '../adapter';
-import type { Adapter } from '../adapter';
+import { createAdapterRegistry } from '../adapter';
+import type { Adapter, AdapterRegistry } from '../adapter';
 import type { WorkspaceContext } from './workspace';
 import type { ResolvedExecutable } from './executable';
 import { Surface } from './surface';
@@ -161,7 +161,9 @@ export function registerCommands(
   // --- shared seams -------------------------------------------------------
   const git = createGitService(repoRoot);
   const specStore = createSpecStore(specsDir, git);
-  const adapter = new ClaudeAdapter();
+  // Roles may mix agents, so each dispatch site selects its adapter from the
+  // role's configured `agent` id instead of sharing one instance (Req 14.1).
+  const adapters = createAdapterRegistry();
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
@@ -184,13 +186,13 @@ export function registerCommands(
     ).fsPath;
     const queue = createRunQueue({
       workspaceRoot: repoRoot,
-      adapter,
       git,
       terminalHost,
       watcherFactory,
       specStore,
       journalPath,
       modelForRole: (role) => modelForRole(config, role),
+      adapterForRole: (role) => adapterForRole(config, adapters, role),
       report: (error) => surface.reportDispatchError(error),
       // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
       isExternallyBusy: () => specDraftRunner.isRunning(),
@@ -233,7 +235,6 @@ export function registerCommands(
       const result = await submitPr(slug, {
         workspaceRoot: repoRoot,
         specsDir,
-        adapter,
         terminalHost,
         watcherFactory,
         git,
@@ -241,6 +242,7 @@ export function registerCommands(
         remote,
         verify: config.git.verify,
         modelForRole: (role) => modelForRole(config, role),
+        adapterForRole: (role) => adapterForRole(config, adapters, role),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -269,11 +271,11 @@ export function registerCommands(
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
     specsDir,
-    adapter,
     terminalHost,
     watcherFactory,
     services: draftServices,
     modelForRole: (role) => modelForRole(config, role),
+    adapterForRole: (role) => adapterForRole(config, adapters, role),
     isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
@@ -324,7 +326,15 @@ export function registerCommands(
     registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, surface),
     registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, surface),
     registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, surface),
-    registerViewCommand(activation, specsDir, repoRoot, queueForSlug, adapter, terminalHost, surface),
+    registerViewCommand(
+      activation,
+      specsDir,
+      repoRoot,
+      queueForSlug,
+      (role) => adapterForRole(config, adapters, role),
+      terminalHost,
+      surface,
+    ),
   );
 
   // --- approve / re-approve (Req 5.3, 10.3) -------------------------------
@@ -632,7 +642,7 @@ function registerViewCommand(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapter: Adapter,
+  adapterForRole: (role: Role) => Adapter | undefined,
   terminalHost: TerminalHost,
   surface: Surface,
 ): vscode.Disposable {
@@ -647,7 +657,7 @@ function registerViewCommand(
       if (target === undefined) {
         return;
       }
-      runView(target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapter, terminalHost, surface);
+      runView(target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -658,7 +668,10 @@ function registerViewCommand(
  * the Session_Id the journal's most recent start recorded for it, launching a
  * new terminal at the workspace root; otherwise warn that no session is
  * recorded. The role passed to `attach` comes from the stage recorded on that
- * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6).
+ * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6). The adapter
+ * used is that role's *currently* configured agent, which may differ from the
+ * agent that created the session if the config changed since (a known
+ * limitation of mixed-agent configs).
  */
 function runView(
   slug: string,
@@ -666,7 +679,7 @@ function runView(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapter: Adapter,
+  adapterForRole: (role: Role) => Adapter | undefined,
   terminalHost: TerminalHost,
   surface: Surface,
 ): void {
@@ -683,8 +696,15 @@ function runView(
     return;
   }
 
+  const role = STAGE_ROLE[entry.stage];
+  const adapter = adapterForRole(role);
+  if (adapter === undefined) {
+    surface.warn(`Baiton: role "${role}" is configured with an unsupported agent; update "roles.${role}.agent" in .baiton/config.json`);
+    return;
+  }
+
   const spec = adapter.attach({
-    role: STAGE_ROLE[entry.stage],
+    role,
     runId: entry.runId,
     sessionId: entry.sessionId,
   });
@@ -1188,4 +1208,12 @@ function modelForRole(config: Config, role: Role): { model: string; effort?: str
     model: entry.model,
     ...(entry.effort !== undefined ? { effort: entry.effort } : {}),
   };
+}
+
+/**
+ * Resolve the per-role adapter from the loaded config's `agent` id;
+ * `undefined` when that id is not a known agent (Req 14.1).
+ */
+function adapterForRole(config: Config, adapters: AdapterRegistry, role: Role): Adapter | undefined {
+  return adapters.get(config.roles[role].agent);
 }

@@ -187,7 +187,7 @@ function makeDeps(
 ): RunQueueDeps {
   return {
     workspaceRoot,
-    adapter: okAdapter,
+    adapterForRole: () => okAdapter,
     git: makeGit(),
     terminalHost,
     watcherFactory,
@@ -288,6 +288,40 @@ describe('run queue approval gate (property)', () => {
         );
       }),
       { numRuns: 100 },
+    );
+  });
+});
+
+// --- Unknown-agent refusal (Req 14.1) ---------------------------------------
+
+describe('run queue unknown-agent refusal', () => {
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = makeWorkspace();
+  });
+
+  afterEach(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('refuses a dispatch with unknown-agent when adapterForRole returns undefined, without probing or launching', async () => {
+    const specStore = makeSpecStore({ state: 'planned', approved: true });
+    const terminalHost = makeTerminalHost();
+    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const queue = createRunQueue({ ...deps, adapterForRole: () => undefined });
+
+    const result = await queue.dispatch(executeRequest());
+
+    assert.strictEqual(result.ok, false, 'an unknown agent id must refuse the dispatch');
+    if (result.ok === false) {
+      assert.strictEqual(result.error.kind, 'unknown-agent');
+    }
+    assert.strictEqual(terminalHost.created.length, 0, 'no terminal is created for an unknown agent');
+    assert.strictEqual(
+      specStore.writes.filter((s) => s === 'executing').length,
+      0,
+      'no running state is written for an unknown agent',
     );
   });
 });
