@@ -8,9 +8,21 @@ import type { Role } from '../model/role';
  *
  * The first pass ships a single adapter, {@link ClaudeAdapter}.
  */
+
+/** The stable set of supported agent ids, shared by adapters, the registry and executable resolution. */
+export type AgentId = 'claude' | 'opencode' | 'antigravity' | 'codex';
+
+/** Maps each agent id to the CLI binary name it launches (Requirement 14.1). */
+export const AGENT_BINARY: Record<AgentId, string> = {
+  claude: 'claude',
+  opencode: 'opencode',
+  antigravity: 'agy',
+  codex: 'codex',
+};
+
 export interface Adapter {
   /** Stable adapter identifier. */
-  readonly id: 'claude';
+  readonly id: AgentId;
 
   /**
    * Check that the underlying CLI is present and usable. Runs before every
