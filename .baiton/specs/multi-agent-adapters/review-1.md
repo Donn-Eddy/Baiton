@@ -7,7 +7,7 @@
   "tests": {
     "ran": true,
     "passed": true,
-    "output_tail": "417 passing (18s)\n1 pending\n\nnpm run compile: clean (tsc -p ./ no errors)\nnpm run lint: clean (eslint src test --ext .ts, no output)\nNew test 'declares an executable-override setting for every supported agent id (Req 22.7)' passes; the 1 pending test predates T08 and is unrelated."
+    "output_tail": "449 passing (20s)\n1 pending\n\nAll 30 OpencodeAdapter cases pass (probe shape x2, launch session branches x7, attach x2, role->--agent mapping x9, documented degrades x12 across 6 roles). npm run lint and npm run compile are also clean. No file under src/ was modified; only test/adapter.opencode.test.ts was added."
   }
 }
 ```
