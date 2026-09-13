@@ -120,7 +120,9 @@ function makeRepo(states: string[], withRemote = true): Repo {
 class StubAdapter implements Adapter {
   readonly id = 'claude' as const;
   public launches: LaunchRequest[] = [];
+  public probeCount = 0;
   async probe(): Promise<ProbeResult> {
+    this.probeCount += 1;
     return { version: 'stub', ok: true };
   }
   launch(req: LaunchRequest): LaunchSpec {
@@ -290,6 +292,20 @@ describe('submitPr (design section 8 "PR")', () => {
       assert.ok(result.error.kind === 'verify-failed' && result.error.output.includes('1 failing'));
     }
     assert.strictEqual(h.terminals.created.length, 0);
+  });
+
+  it('refuses with unknown-agent when adapterForRole returns undefined, before probing or launching (Req 14.1)', async () => {
+    const h = harness(makeRepo(['done']), { adapterForRole: () => undefined });
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false, 'an unknown agent id must refuse the PR submission');
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'unknown-agent');
+      assert.match(result.error.message, /pr-writer/);
+      assert.match(result.error.message, /roles\.pr-writer\.agent/);
+      assert.match(result.error.message, /\.baiton\/config\.json/);
+    }
+    assert.strictEqual(h.adapter.probeCount, 0, 'no probe runs for an unknown agent');
+    assert.strictEqual(h.terminals.created.length, 0, 'no terminal is created for an unknown agent');
   });
 
   it('drafts, pushes, creates the PR, records it and journals each step', async () => {

@@ -1,5 +1,7 @@
 import * as assert from 'assert';
 import { ClaudeAdapter } from '../src/adapter/claude';
+import { createAdapterRegistry } from '../src/adapter';
+import { AGENT_BINARY } from '../src/adapter/adapter';
 import type { LaunchRequest } from '../src/adapter/adapter';
 import {
   ACCEPT_EDITS_MODE,
@@ -8,7 +10,8 @@ import {
   READ_ONLY_ALLOWED_TOOLS,
   READ_ONLY_ROLES,
 } from '../src/adapter/permissions';
-import { Role } from '../src/model/role';
+import { Role, ROLES } from '../src/model/role';
+import { defaultConfig } from '../src/config/defaultConfig';
 
 /**
  * Task 9.3 — focused unit tests for the Claude adapter's probe shape and its
@@ -239,5 +242,61 @@ describe('ClaudeAdapter read-only acceptEdits fallback (Req 15.7)', () => {
     const off = new ClaudeAdapter(DEFAULT_PERMISSION_MODE).launch(req({ role: reviewer }));
     assert.deepStrictEqual(on.shellArgs, off.shellArgs);
     assert.ok(on.shellArgs.includes('--allowedTools'));
+  });
+});
+
+describe('default claude-only config is unchanged by the multi-agent wiring', () => {
+  it('selects claude for every role in the default config', () => {
+    const config = defaultConfig();
+    for (const role of ROLES) {
+      assert.strictEqual(config.roles[role].agent, 'claude', `role ${role} must default to claude`);
+    }
+  });
+
+  it("resolves every default-config role's agent to the claude adapter via the registry", () => {
+    const registry = createAdapterRegistry();
+    const config = defaultConfig();
+    for (const role of ROLES) {
+      const adapter = registry.get(config.roles[role].agent);
+      assert.ok(adapter, `expected an adapter for role ${role}'s agent ${config.roles[role].agent}`);
+      assert.strictEqual(adapter!.id, 'claude');
+    }
+  });
+
+  it('produces argv through the registry identical to a directly constructed ClaudeAdapter, for every role, fresh and resumed', () => {
+    const registry = createAdapterRegistry();
+    const direct = new ClaudeAdapter();
+
+    for (const role of ROLES) {
+      const freshReq = req({ role, resume: false, sessionId: 'session-fresh' });
+      assert.deepStrictEqual(
+        registry.require('claude').launch(freshReq),
+        direct.launch(freshReq),
+        `fresh launch argv diverged for role ${role}`,
+      );
+
+      const resumeReq = req({ role, resume: true, resumeSessionId: 'session-prior' });
+      assert.deepStrictEqual(
+        registry.require('claude').launch(resumeReq),
+        direct.launch(resumeReq),
+        `resume launch argv diverged for role ${role}`,
+      );
+
+      const attachArgs = { role, runId: 'run-attach', sessionId: 'session-attach' };
+      assert.deepStrictEqual(
+        registry.require('claude').attach(attachArgs),
+        direct.attach(attachArgs),
+        `attach argv diverged for role ${role}`,
+      );
+    }
+  });
+
+  it('pins the claude adapter shellPath to AGENT_BINARY.claude on both launch and attach', () => {
+    const adapter = new ClaudeAdapter();
+    const launchSpec = adapter.launch(req());
+    const attachSpec = adapter.attach({ role: 'executor', runId: 'run-1', sessionId: 'session-1' });
+
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.claude);
+    assert.strictEqual(attachSpec.shellPath, AGENT_BINARY.claude);
   });
 });
