@@ -7,12 +7,12 @@ import {
   engineVersionAtLeast,
   unsupportedEngineMessage,
   resolveWorkspace,
-  resolveExecutable,
+  resolveAgentExecutables,
   type WorkspaceContext,
   type WorkspaceFolder,
   type ExecutableLookup,
   type OverrideGetter,
-  type ResolvedExecutable,
+  type AgentExecutables,
 } from './activation';
 import { isErr } from './model/result';
 import { loadConfig } from './config';
@@ -25,6 +25,7 @@ import { writeTodoState } from './model/writer';
 import type { TodoState } from './model/todoState';
 import { Surface } from './activation/surface';
 import { registerCommands, registerInitializeCommand } from './activation/commands';
+import { ROLES } from './model/role';
 
 /**
  * Extension entry point — the thin `vscode`-backed shell over the pure
@@ -38,7 +39,9 @@ import { registerCommands, registerInitializeCommand } from './activation/comman
  *   3. Trust / restricted read — `vscode.workspace.isTrusted` becomes the
  *      context's `restricted` flag; under Restricted Mode all writes and
  *      dispatch are disabled (Req 22.1, 22.2).
- *   4. Config load — validate `.baiton/config.json` (task 5.1's `loadConfig`).
+ *   4. Config load — validate `.baiton/config.json` (task 5.1's `loadConfig`),
+ *      then resolve one executable per distinct agent id named in
+ *      `config.roles` (Req 22.7, 22.8, 14.5).
  *   5. Crash recovery — reconcile every result-less journal entry per spec
  *      (task 11.2's `recoverJournal`).
  *
@@ -54,14 +57,10 @@ import { registerCommands, registerInitializeCommand } from './activation/comman
 /** The extension settings namespace read for executable overrides (Req 22.7). */
 const SETTINGS_NS = 'baiton';
 
-/** The single first-pass agent and its executable name, resolved on PATH (Req 22.7). */
-const CLAUDE_AGENT = 'claude';
-const CLAUDE_EXECUTABLE = 'claude';
-
 /**
  * The resolved activation state shared with the command layer (task 15.2). Held
  * on the extension host so later wiring reads a single source of truth for the
- * workspace context, loaded config, and whether stage dispatch is permitted.
+ * workspace context, loaded config, and per-agent executable resolution.
  */
 export interface ActivationState {
   /** The resolved workspace the extension operates on (Req 22.3–22.5). */
@@ -69,16 +68,13 @@ export interface ActivationState {
   /** The validated configuration loaded from `.baiton/config.json`. */
   readonly config: Config;
   /**
-   * The resolved Claude executable, or `undefined` when it could not be located
-   * and no override is configured — in which case stage dispatch is disabled
-   * (Req 22.8, 14.5).
+   * One resolution per distinct agent id referenced by `config.roles` (Req
+   * 22.7, 22.8, 14.5). Dispatch for a role is permitted when the workspace is
+   * not restricted (Req 22.2) and that role's agent resolved here — a stale or
+   * missing executable disables dispatch only for the roles configured with
+   * that agent, not for the whole extension.
    */
-  readonly executable: ResolvedExecutable | undefined;
-  /**
-   * Whether stage dispatch is permitted: false under Restricted Mode (Req 22.2)
-   * or when the executable is missing with no override (Req 22.8, 14.5).
-   */
-  readonly canDispatch: boolean;
+  readonly executables: AgentExecutables;
 }
 
 /** The single resolved activation state, exposed for the command layer (task 15.2). */
@@ -131,26 +127,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   const config = configResult.value;
 
-  // Locate the agent executable on PATH with a settings override (Req 22.7).
-  // A miss with no override disables dispatch rather than aborting activation
-  // (Req 22.8, 14.5) — the workspace still opens read-only for browsing.
-  const executableResult = resolveExecutable(
-    CLAUDE_AGENT,
-    CLAUDE_EXECUTABLE,
+  // Locate every configured agent's executable on PATH with a per-agent
+  // settings override (Req 22.7). Roles may name different agents, so
+  // resolution is per distinct agent id and a miss disables dispatch only for
+  // the roles that use it (Req 22.8, 14.5) — the workspace still opens for
+  // browsing.
+  const executables = resolveAgentExecutables(
+    ROLES.map((role) => config.roles[role].agent),
     pathLookup,
     settingsOverride,
   );
-  let executable: ResolvedExecutable | undefined;
-  if (isErr(executableResult)) {
-    void vscode.window.showWarningMessage(executableResult.error.message);
-    executable = undefined;
-  } else {
-    executable = executableResult.value;
+  for (const failure of executables.errors) {
+    void vscode.window.showWarningMessage(failure.message);
   }
-
-  // Dispatch is disabled under Restricted Mode (Req 22.2) or when the
-  // executable is unavailable with no override (Req 22.8, 14.5).
-  const canDispatch = !workspace.restricted && executable !== undefined;
 
   // 5. Crash recovery (task 11.2, Req 21.3–21.7). Reconcile each spec's
   //    result-less journal entries. Skipped under Restricted Mode, which
@@ -159,16 +148,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await runCrashRecovery(workspace, surface);
   }
 
-  activationState = { workspace, config, executable, canDispatch };
+  activationState = { workspace, config, executables };
 
   // Wire the command surface: per-stage triggers, approve/re-approve, the chat
   // orchestrator entry, and the spec CodeLens, all against the run queue and
   // tool registry built from this activation state (task 15.2). Writes and
-  // dispatch stay gated under Restricted Mode and `canDispatch` (Req 22.1,
-  // 22.2, 14.5).
+  // dispatch stay gated under Restricted Mode and per-role executable
+  // resolution (Req 22.1, 22.2, 14.5).
   const commandSurface = registerCommands(
     context,
-    { workspace, config, executable, canDispatch },
+    { workspace, config, executables },
     surface,
   );
   context.subscriptions.push(...commandSurface.disposables);

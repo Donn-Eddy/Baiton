@@ -2,23 +2,12 @@
 
 ```json
 {
-  "summary": "Replaced the single ClaudeAdapter instance threaded through commands.ts, RunQueue, SpecDraftRunner, and submitPr with a per-role adapter lookup (adapterForRole) resolved from the T05 AdapterRegistry and each role's configured `agent` id. Every dispatch site now resolves and probes the role's own adapter (never a shared/default one) before launching, and refuses with a new `unknown-agent` kind (classified as a hard halt in surface.ts) when a role names an unsupported agent id. The View command resolves its adapter from the journal-recorded stage's role and warns instead of throwing on an unknown agent. LaunchDeps.adapter and launchStage's signature/behavior are unchanged except for a clarifying doc comment. Updated all engine test doubles to the renamed dependency and added a new test asserting the unknown-agent refusal writes no state, launches no terminal, and never probes.",
+  "summary": "Replaced the single-agent claude-only executable gate with a per-agent resolution table. Added AgentExecutables and resolveAgentExecutables(agents, lookup, override) to src/activation/executable.ts, wrapping the unchanged single-agent resolveExecutable core and adding an `unknown-agent` ExecutableError variant. src/extension.ts now resolves one executable per distinct agent id named in config.roles (via ROLES.map(role => config.roles[role].agent)) instead of hard-wiring `claude`, and ActivationState carries a single `executables: AgentExecutables` field in place of `executable`/`canDispatch`. src/activation/commands.ts's CommandActivation mirrors that change; ensureCanDispatch/ensureExecutable are now role-gated (ensureExecutable(activation, surface, role) checks that role's configured agent), with a new ensureNotRestricted extracted for the Restricted-Mode-only check. Stage triggers gate on STAGE_ROLE[stage], Submit PR on 'pr-writer', and the View command's executable check moved into runView after the journal-recorded stage's role is known (so a missing binary for one agent no longer blocks viewing a session that used a different, installed agent). replan/stop no longer gate on an executable at all (they launch no sub-agent), only on Restricted Mode - a deliberate, documented loosening called out in the plan's risks. Added a new `resolveAgentExecutables` test suite (6 cases: multi-agent resolution incl. antigravity->agy, de-duplication, partial failure, per-agent override, unknown-agent, never-asked-for) beside the existing untouched resolveExecutable tests.",
   "files_changed": [
-    "src/adapter/index.ts",
-    "src/engine/runQueue.ts",
-    "src/engine/specDraft.ts",
-    "src/engine/submitPr.ts",
-    "src/engine/launcher.ts",
+    "src/activation/executable.ts",
+    "src/extension.ts",
     "src/activation/commands.ts",
-    "src/activation/surface.ts",
-    "test/runQueue.approvalGate.property.test.ts",
-    "test/runQueue.attemptCount.property.test.ts",
-    "test/runQueue.revert.property.test.ts",
-    "test/runQueue.serialization.property.test.ts",
-    "test/integration.plan-execute-review.test.ts",
-    "test/engineFacade.resume.test.ts",
-    "test/submitPr.test.ts",
-    "test/engine.specDraft.test.ts"
+    "test/activation.gating.test.ts"
   ],
   "commands_run": [
     "npm run compile",
@@ -26,12 +15,10 @@
     "npm test"
   ],
   "notes": [
-    "src/adapter/index.ts was not modified beyond what T05 already landed; it already exposed isAgentId/AdapterRegistry/createAdapterRegistry exactly as this todo's plan assumed, so it required no edits.",
-    "runQueue.ts's launchAndComplete takes the already-resolved Adapter as an explicit parameter (the plan's preferred form) rather than re-resolving adapterForRole a second time, removing any probe/launch divergence risk.",
-    "commands.ts gained a private `adapterForRole(config, adapters, role)` helper sited next to the existing `modelForRole` helper, matching that file's existing style (option 3 in the plan).",
-    "Default .baiton/config.json still names `claude` for all six roles, so every launch/attach spec remains byte-identical to before this todo; test/adapter.launch.property.test.ts and test/integration.plan-execute-review.test.ts pass unchanged.",
-    "No changes to src/activation/executable.ts, src/extension.ts, or package.json (left for T07/T08); adapters still emit the bare binary name as shellPath.",
-    "All 410 existing tests plus the new unknown-agent test pass; npm run compile and npm run lint are clean."
+    "Two deliberate behaviour changes fall out per the plan: (a) the View command is no longer implicitly blocked by Restricted Mode via the old combined canDispatch flag - it now only checks the role's executable, matching its existing doc comment that it writes nothing; (b) replan/stop are no longer executable-gated since they launch no sub-agent (only Restricted Mode still blocks them) - flagged here for the reviewer as requested by the plan's risks section.",
+    "No change to package.json (T08) - left for that todo; a settings override for opencode/antigravity/codex reads as unset until package.json declares the keys, but PATH resolution still works so this todo is not blocked by that.",
+    "No adapter now receives a resolved absolute path via shellPath; adapters still emit the bare binary name, matching the plan's acceptance criteria.",
+    "grep confirms no remaining `canDispatch` identifier and no remaining `claude` literal in src/extension.ts; all 416 tests (410 prior + 6 new resolveAgentExecutables cases) plus 1 pending pass, and npm run compile / npm run lint are both clean."
   ]
 }
 ```
