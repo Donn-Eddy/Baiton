@@ -7,7 +7,7 @@
   "tests": {
     "ran": true,
     "passed": true,
-    "output_tail": "409 passing (20s)\n1 pending\n\nnpx eslint src/adapter/antigravity.ts --ext .ts: no output (clean)\nnpm run compile (tsc -p ./): no errors"
+    "output_tail": "409 passing (19s)\n1 pending\n\nnpm run compile: clean (tsc -p ./)\nnpx eslint src/adapter/codex.ts --ext .ts: clean, no output"
   }
 }
 ```
