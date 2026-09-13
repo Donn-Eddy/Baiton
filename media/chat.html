@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<!--
+  Chat_View webview markup (Requirements 12, 16, 19.2).
+
+  This is the static shell the Chat WebviewView provider loads. The provider
+  substitutes three placeholders at load time before handing the HTML to the
+  webview:
+
+    ${nonce}     — a fresh, unpredictable per-load nonce (Req 16.1). Every
+                   <script> tag carries it; the CSP admits only scripts bearing
+                   this exact nonce, so any injected script without it is never
+                   executed (Req 16.2).
+    ${cspSource} — the webview's cspSource, used to allow the media/ scripts and
+                   styles that VS Code rewrites to vscode-webview-resource: URIs.
+    ${baseUri}   — the webview URI of the media/ folder, used to resolve the
+                   sibling scripts. localResourceRoots is limited to media/ by
+                   the provider (Req 16.3).
+
+  The provider also enables retainContextWhenHidden (Req 16.4). No UI framework
+  is used; the view is plain markup plus the scripts under media/ (Req 19.2).
+  All colors come from VS Code theme CSS variables so the view follows the
+  active theme and reflects theme changes without a reload (Req 16.6, 16.7).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Baiton Chat</title>
+    <style nonce="${nonce}">
+      /* Every color is derived from a VS Code theme variable — no hardcoded
+         color values — so the view matches the active theme and updates live
+         when the theme changes (Req 16.6, 16.7). */
+      :root {
+        --baiton-gap: 8px;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        /* The two panes own all the scrolling; the root document never scrolls,
+           so a long transcript can never push the composer off screen. */
+        overflow: hidden;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+        height: 100vh;
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-foreground);
+        background-color: var(--vscode-editor-background);
+      }
+
+      /* Sessions pane: the scope selector, the New Chat action and the list of
+         this scope's chat sessions. It takes the top quarter of the view and
+         scrolls on its own. */
+      #sessions-pane {
+        flex: 0 0 25%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+        border-bottom: 1px solid var(--vscode-panel-border);
+      }
+
+      /* Chat pane: everything below the sessions pane. `min-height: 0` lets it
+         shrink below its content so #transcript, not the document, scrolls. */
+      #chat-pane {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* Conversation (scope) selector */
+      .selector-bar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap);
+      }
+
+      .selector-bar label {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #new-chat {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+
+      /* Session list */
+      #session-list {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .session-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px var(--baiton-gap);
+        cursor: pointer;
+        outline-offset: -1px;
+      }
+
+      .session-row:hover {
+        background-color: var(--vscode-list-hoverBackground);
+      }
+
+      .session-row.active {
+        background-color: var(--vscode-list-activeSelectionBackground);
+        color: var(--vscode-list-activeSelectionForeground);
+      }
+
+      .session-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .session-time {
+        flex: 0 0 auto;
+        font-size: 0.85em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .session-row.active .session-time {
+        color: inherit;
+      }
+
+      .session-delete {
+        flex: 0 0 auto;
+        background: none;
+        border: none;
+        padding: 0 2px;
+        color: inherit;
+        opacity: 0;
+        cursor: pointer;
+        line-height: 1;
+      }
+
+      .session-row:hover .session-delete,
+      .session-row.active .session-delete,
+      .session-delete:focus {
+        opacity: 0.8;
+      }
+
+      .session-delete:hover:not(:disabled) {
+        background: none;
+        opacity: 1;
+      }
+
+      .session-delete:disabled {
+        opacity: 0;
+        cursor: default;
+      }
+
+      .session-empty {
+        padding: 2px var(--baiton-gap);
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #conversation-select {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--vscode-dropdown-foreground);
+        background-color: var(--vscode-dropdown-background);
+        border: 1px solid var(--vscode-dropdown-border);
+        padding: 2px 4px;
+      }
+
+      /* Inline error banner (Req 13) */
+      #error-banner {
+        flex: 0 0 auto;
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap);
+        color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+        background-color: var(--vscode-inputValidation-errorBackground);
+        border-bottom: 1px solid var(--vscode-inputValidation-errorBorder);
+      }
+
+      #error-banner.visible {
+        display: flex;
+      }
+
+      #error-message {
+        flex: 1 1 auto;
+      }
+
+      /* Transcript */
+      #transcript {
+        flex: 1 1 auto;
+        /* Without this the flex item never shrinks below its content and the
+           document, not the transcript, ends up scrolling. */
+        min-height: 0;
+        overflow-y: auto;
+        padding: var(--baiton-gap);
+        display: flex;
+        flex-direction: column;
+        gap: var(--baiton-gap);
+      }
+
+      /* Direct children of the column-flex transcript must keep their natural
+         height rather than being squeezed to fit. */
+      #transcript > .message,
+      #transcript > .tool-group {
+        flex-shrink: 0;
+      }
+
+      .message {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .message .role {
+        font-size: 0.85em;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .message.user .body {
+        color: var(--vscode-foreground);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .message.assistant .body,
+      .message.system .body {
+        color: var(--vscode-foreground);
+        word-break: break-word;
+      }
+
+      /* A streaming assistant message shows a blinking caret after its text. */
+      .message.streaming .body::after {
+        content: '▍';
+        color: var(--vscode-descriptionForeground);
+        animation: baiton-blink 1s steps(2, start) infinite;
+      }
+
+      @keyframes baiton-blink {
+        to {
+          visibility: hidden;
+        }
+      }
+
+      /* Rendered markdown blocks */
+      .body p {
+        margin: 0.3em 0;
+      }
+
+      .body pre {
+        background-color: var(--vscode-textCodeBlock-background);
+        padding: var(--baiton-gap);
+        overflow-x: auto;
+      }
+
+      .body code {
+        font-family: var(--vscode-editor-font-family, monospace);
+        background-color: var(--vscode-textCodeBlock-background);
+      }
+
+      .body a {
+        color: var(--vscode-textLink-foreground);
+      }
+
+      /* Tool-call rows (Req 12.3, 12.4).
+         Rows are closed by default and read as one compact line: a small
+         status dot, the tool name, and its first string argument. Consecutive
+         rows are grouped into a single tight block. Every colour comes from a
+         VS Code theme variable. */
+      .tool-group {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        background-color: var(--vscode-editorWidget-background);
+        overflow: hidden;
+      }
+
+      .tool-group .tool-row + .tool-row {
+        border-top: 1px solid var(--vscode-panel-border);
+      }
+
+      .tool-row {
+        font-size: 0.9em;
+      }
+
+      .tool-summary {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 1px 6px;
+        cursor: pointer;
+        user-select: none;
+        list-style: none;
+        line-height: 1.5;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+
+      .tool-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .tool-dot {
+        flex: 0 0 auto;
+        align-self: center;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: var(--vscode-descriptionForeground);
+      }
+
+      .tool-dot.ok {
+        background-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-foreground)));
+      }
+
+      .tool-dot.error {
+        background-color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--vscode-foreground)));
+      }
+
+      .tool-dot.pending {
+        background-color: var(--vscode-descriptionForeground);
+      }
+
+      .tool-name {
+        flex: 0 0 auto;
+        font-family: var(--vscode-editor-font-family, monospace);
+        color: var(--vscode-foreground);
+      }
+
+      .tool-detail {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: var(--vscode-editor-font-family, monospace);
+        color: var(--vscode-descriptionForeground);
+      }
+
+      /* The status is shown as a coloured dot; keep its name for screen readers. */
+      .tool-status-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+
+      .tool-args,
+      .tool-result-body {
+        margin: 0;
+        padding: 4px 6px;
+        border-top: 1px solid var(--vscode-panel-border);
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--vscode-editor-font-family, monospace);
+        color: var(--vscode-foreground);
+      }
+
+      .tool-result-body {
+        max-height: 20em;
+        overflow-y: auto;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      /* Empty state (Req 13.5) */
+      #empty-state {
+        flex: 1 1 auto;
+        display: none;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--baiton-gap);
+        padding: calc(var(--baiton-gap) * 2);
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #empty-state.visible {
+        display: flex;
+      }
+
+      #empty-state dl {
+        margin: 0;
+      }
+
+      #empty-state dt {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #empty-state dd {
+        margin: 0 0 var(--baiton-gap) 0;
+        color: var(--vscode-foreground);
+      }
+
+      /* Composer */
+      .composer {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap);
+        border-top: 1px solid var(--vscode-panel-border);
+      }
+
+      #input {
+        resize: vertical;
+        min-height: 3em;
+        width: 100%;
+        box-sizing: border-box;
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-input-foreground);
+        background-color: var(--vscode-input-background);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+        padding: 4px;
+      }
+
+      #input::placeholder {
+        color: var(--vscode-input-placeholderForeground);
+      }
+
+      .composer-actions {
+        display: flex;
+        gap: var(--baiton-gap);
+        justify-content: flex-end;
+      }
+
+      button {
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-button-foreground);
+        background-color: var(--vscode-button-background);
+        border: 1px solid var(--vscode-button-border, transparent);
+        padding: 4px 12px;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        background-color: var(--vscode-button-hoverBackground);
+      }
+
+      button.secondary {
+        color: var(--vscode-button-secondaryForeground);
+        background-color: var(--vscode-button-secondaryBackground);
+      }
+
+      button.secondary:hover:not(:disabled) {
+        background-color: var(--vscode-button-secondaryHoverBackground);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .link-button {
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--vscode-textLink-foreground);
+        text-decoration: underline;
+        cursor: pointer;
+      }
+
+      .link-button:hover:not(:disabled) {
+        background: none;
+        color: var(--vscode-textLink-activeForeground);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="sessions-pane">
+      <div class="selector-bar">
+        <label for="conversation-select">Conversation</label>
+        <select id="conversation-select"></select>
+        <button id="new-chat" class="secondary" type="button" title="Start a new chat">New Chat</button>
+      </div>
+      <div id="session-list" role="listbox" aria-label="Chat sessions" tabindex="0"></div>
+    </div>
+
+    <div id="chat-pane">
+      <div id="error-banner" role="alert">
+        <span id="error-message"></span>
+        <button id="error-fix" class="link-button" type="button"></button>
+      </div>
+
+      <div id="transcript" aria-live="polite"></div>
+
+      <div id="empty-state">
+        <p>No messages yet. Configure the orchestrator to get started.</p>
+        <dl>
+          <dt>Endpoint</dt>
+          <dd id="empty-endpoint"></dd>
+          <dt>Model</dt>
+          <dd id="empty-model"></dd>
+        </dl>
+        <button id="empty-set-key" class="secondary" type="button">Set Orchestrator API Key</button>
+      </div>
+
+      <div class="composer">
+        <textarea
+          id="input"
+          rows="3"
+          placeholder="Message the orchestrator…"
+          aria-label="Message input"
+        ></textarea>
+        <div class="composer-actions">
+          <button id="stop" class="secondary" type="button" disabled>Stop</button>
+          <button id="send" type="button">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- The owned sanitizer, the protocol reducer, and the vendored markdown
+         renderer are loaded before the entry script. Each carries the per-load
+         nonce; scripts without it are refused by the CSP (Req 16.1, 16.2). The
+         markdown renderer is vendored by task 11.2; chat.js degrades to a
+         built-in minimal renderer when it is absent. -->
+    <script nonce="${nonce}" src="${baseUri}/sanitize.js"></script>
+    <script nonce="${nonce}" src="${baseUri}/protocol.js"></script>
+    <script nonce="${nonce}" src="${baseUri}/vendor/marked.min.js"></script>
+    <script nonce="${nonce}" src="${baseUri}/chat.js"></script>
+  </body>
+</html>
