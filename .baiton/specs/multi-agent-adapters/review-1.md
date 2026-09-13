@@ -7,7 +7,7 @@
   "tests": {
     "ran": true,
     "passed": true,
-    "output_tail": "npm run compile: tsc -p ./ succeeded with no errors.\nnpm run lint: eslint src test --ext .ts succeeded with no errors.\nnpm test: 409 passing (18s), 1 pending (pre-existing pending test, unrelated to this todo)."
+    "output_tail": "410 passing (18s)\n1 pending\n\nAll suites pass, including new test 'run queue unknown-agent refusal > refuses a dispatch with unknown-agent when adapterForRole returns undefined, without probing or launching'. npm run compile and npm run lint are also clean."
   }
 }
 ```
