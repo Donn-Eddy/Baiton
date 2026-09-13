@@ -44,7 +44,7 @@ Architecture implications beyond "add three files": the extension currently wire
 # TODOS
 
 - [done] T01 Widen the Adapter id union and add the agent-id -> CLI-binary-name map in src/adapter/adapter.ts (files: src/adapter/adapter.ts)
-- [executing] T02 Add src/adapter/opencode.ts implementing Adapter for the opencode CLI (probe/launch/attach per the opencode findings, including the missing --add-dir degrade) (after T01; files: src/adapter/adapter.ts, src/adapter/claude.ts, src/adapter/permissions.ts)
+- [executed] T02 Add src/adapter/opencode.ts implementing Adapter for the opencode CLI (probe/launch/attach per the opencode findings, including the missing --add-dir degrade) (after T01; files: src/adapter/adapter.ts, src/adapter/claude.ts, src/adapter/permissions.ts)
 - [pending] T03 Add src/adapter/antigravity.ts implementing Adapter for the agy CLI (probe/launch/attach per the antigravity findings) (after T01; files: src/adapter/adapter.ts, src/adapter/claude.ts, src/adapter/permissions.ts)
 - [pending] T04 Add src/adapter/codex.ts implementing Adapter for the codex CLI (probe/launch/attach per the codex findings, including the interactive-vs-exec subcommand choice and the -c model_reasoning_effort degrade) (after T01; files: src/adapter/adapter.ts, src/adapter/claude.ts, src/adapter/permissions.ts)
 - [pending] T05 Export the new adapters from src/adapter/index.ts and add an adapter registry keyed by agent id (claude/opencode/antigravity/codex -> Adapter instance) (after T02, T03, T04; files: src/adapter/index.ts)
