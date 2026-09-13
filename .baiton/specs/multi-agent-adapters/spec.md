@@ -1,12 +1,12 @@
 ---
 version: 1
 name: multi-agent-adapters
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 5d5371777389073a209ee28de8d8a74f52fba763
+branch: baiton/multi-agent-adapters
+approved_rev: f59bdbd5e6b4822ddfa0750a36dce64e062d2612d8ed7d259964f4ef4614574b
 ---
 
 # OVERVIEW
