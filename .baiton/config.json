@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "roles": {
+    "spec-writer": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    },
+    "planner": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    },
+    "plan-reviewer": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    },
+    "executor": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    },
+    "reviewer": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    },
+    "pr-writer": {
+      "agent": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "medium"
+    }
+  },
+  "limits": {
+    "plan_review_rounds": 1,
+    "exec_attempts": 3,
+    "stall_notice_minutes": 10
+  },
+  "git": {
+    "remote": "origin",
+    "base": "main"
+  },
+  "pr": {
+    "tool": "auto"
+  }
+}

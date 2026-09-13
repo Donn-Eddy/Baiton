@@ -1,0 +1,8 @@
+# Baiton-owned files that must never be committed.
+/.lock
+/chat.jsonl
+/chat/
+/runs/
+specs/*/chat.jsonl
+specs/*/chat/
+specs/*/runs.jsonl
