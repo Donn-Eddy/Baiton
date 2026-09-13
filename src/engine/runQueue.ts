@@ -30,11 +30,11 @@
  *      journal completion record (Req 21.2). A non-`completed` outcome halts the
  *      stage and leaves state unchanged (Req 12.6, 14.7).
  *
- * Everything host-specific is injected — the adapter, git service, terminal
- * host, result-watcher factory, journal path, the serializer-backed spec store,
- * a clock and an id generator, and a reporter — so the queue is unit- and
- * property-testable without `vscode`. The activation layer wires the real
- * implementations.
+ * Everything host-specific is injected — the per-role adapter lookup, git
+ * service, terminal host, result-watcher factory, journal path, the
+ * serializer-backed spec store, a clock and an id generator, and a reporter —
+ * so the queue is unit- and property-testable without `vscode`. The activation
+ * layer wires the real implementations.
  */
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -99,6 +99,9 @@ export interface RunRequest {
  *                          18.8).
  * - `input-rev-mismatch` — the plan's Input_Rev no longer matches; the todo was
  *                          reverted to `pending` (Req 18.9).
+ * - `unknown-agent`      — the role's configured `agent` is not a supported
+ *                          agent id; no stage is launched and state is
+ *                          unchanged (Req 14.1).
  * - `probe-failed`       — the adapter probe reported not-ok (Req 14.5).
  * - `launch-failed`      — writing the brief or resolving the root failed (Req
  *                          11.5).
@@ -118,6 +121,7 @@ export type DispatchError =
   | { kind: 'blocked'; message: string }
   | { kind: 'dirty-tree'; message: string }
   | { kind: 'input-rev-mismatch'; message: string }
+  | { kind: 'unknown-agent'; message: string }
   | { kind: 'probe-failed'; message: string }
   | { kind: 'launch-failed'; message: string }
   | { kind: 'reset-failed'; message: string }
@@ -229,7 +233,6 @@ export interface RunQueueDeps {
   /** Absolute workspace root; the terminal cwd and artifact base. */
   workspaceRoot: string;
   /** The spec slug's git branch is assumed already checked out (Req 16.6). */
-  adapter: Adapter;
   git: GitService;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
@@ -238,6 +241,11 @@ export interface RunQueueDeps {
   journalPath: string;
   /** Per-role model, resolved from config; selects the adapter `--model`. */
   modelForRole(role: Role): { model: string; effort?: string };
+  /**
+   * Per-role adapter, selected from the role's configured `agent` id;
+   * `undefined` when that id is not a known agent (Requirement 14.1).
+   */
+  adapterForRole(role: Role): Adapter | undefined;
   /** Surfaces refusals/halts; defaults to a no-op the activation layer overrides. */
   report?: QueueReporter;
   /** Monotonic clock; defaults to `Date.now`. */
@@ -438,9 +446,20 @@ class SerialRunQueue implements RunQueue {
       return this.refuse(guarded.error);
     }
 
+    // Resolve the role's configured adapter before probing (Req 14.1). An
+    // unrecognised agent id is a config problem, reported distinctly from a
+    // probe failure, and refuses before any process is spawned.
+    const adapter = this.deps.adapterForRole(req.role);
+    if (adapter === undefined) {
+      return this.refuse({
+        kind: 'unknown-agent',
+        message: `role "${req.role}" is configured with an unsupported agent; update "roles.${req.role}.agent" in .baiton/config.json`,
+      });
+    }
+
     // Probe the adapter before every stage (Req 14.2). A not-ok probe stops the
     // stage with the returned reason surfaced (Req 14.5).
-    const probe = await this.deps.adapter.probe();
+    const probe = await adapter.probe();
     if (!probe.ok) {
       return this.refuse({
         kind: 'probe-failed',
@@ -448,7 +467,7 @@ class SerialRunQueue implements RunQueue {
       });
     }
 
-    return this.launchAndComplete(req, transition, stage);
+    return this.launchAndComplete(req, transition, stage, adapter);
   }
 
   /**
@@ -550,6 +569,7 @@ class SerialRunQueue implements RunQueue {
     req: RunRequest,
     transition: Transition,
     stage: Stage,
+    adapter: Adapter,
   ): Promise<DispatchResult> {
     const runId = this.newRunId(req);
     const sessionId = this.newSessionId();
@@ -592,7 +612,7 @@ class SerialRunQueue implements RunQueue {
         : {}),
     };
     const launched = launchStage(launchInput, {
-      adapter: this.deps.adapter,
+      adapter,
       terminalHost: this.deps.terminalHost,
     });
     if (!launched.ok) {

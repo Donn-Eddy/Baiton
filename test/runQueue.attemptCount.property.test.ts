@@ -231,7 +231,7 @@ function makeRig(journalPath: string): Rig {
   let idCounter = 0;
   const deps: RunQueueDeps = {
     workspaceRoot,
-    adapter,
+    adapterForRole: () => adapter,
     git,
     terminalHost,
     watcherFactory,

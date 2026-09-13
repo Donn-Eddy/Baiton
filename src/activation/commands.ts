@@ -12,7 +12,7 @@
  *   - The per-stage triggers `baiton.plan` / `baiton.execute` / `baiton.review`
  *     / `baiton.replan` / `baiton.stop`, dispatched through the run queue via
  *     {@link dispatchTrigger} (Req 10.3, 19.1). Each write/dispatch is gated
- *     under Restricted Mode and when `canDispatch` is false (Req 14.5, 22.1,
+ *     under Restricted Mode and that stage's role executable (Req 14.5, 22.1,
  *     22.2).
  *   - `baiton.approve` — the approve/re-approve action through the orchestrator
  *     `approve_spec` control tool (Req 5.3, 10.3).
@@ -78,10 +78,10 @@ import type {
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { ClaudeAdapter } from '../adapter';
-import type { Adapter } from '../adapter';
+import { createAdapterRegistry } from '../adapter';
+import type { Adapter, AdapterRegistry } from '../adapter';
 import type { WorkspaceContext } from './workspace';
-import type { ResolvedExecutable } from './executable';
+import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
 import { createSpecStore } from './specStore';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
@@ -126,8 +126,7 @@ export const COMMANDS = {
 export interface CommandActivation {
   workspace: WorkspaceContext<vscode.Uri>;
   config: Config;
-  executable: ResolvedExecutable | undefined;
-  canDispatch: boolean;
+  executables: AgentExecutables;
 }
 
 /**
@@ -161,7 +160,9 @@ export function registerCommands(
   // --- shared seams -------------------------------------------------------
   const git = createGitService(repoRoot);
   const specStore = createSpecStore(specsDir, git);
-  const adapter = new ClaudeAdapter();
+  // Roles may mix agents, so each dispatch site selects its adapter from the
+  // role's configured `agent` id instead of sharing one instance (Req 14.1).
+  const adapters = createAdapterRegistry();
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
@@ -184,13 +185,13 @@ export function registerCommands(
     ).fsPath;
     const queue = createRunQueue({
       workspaceRoot: repoRoot,
-      adapter,
       git,
       terminalHost,
       watcherFactory,
       specStore,
       journalPath,
       modelForRole: (role) => modelForRole(config, role),
+      adapterForRole: (role) => adapterForRole(config, adapters, role),
       report: (error) => surface.reportDispatchError(error),
       // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
       isExternallyBusy: () => specDraftRunner.isRunning(),
@@ -233,7 +234,6 @@ export function registerCommands(
       const result = await submitPr(slug, {
         workspaceRoot: repoRoot,
         specsDir,
-        adapter,
         terminalHost,
         watcherFactory,
         git,
@@ -241,6 +241,7 @@ export function registerCommands(
         remote,
         verify: config.git.verify,
         modelForRole: (role) => modelForRole(config, role),
+        adapterForRole: (role) => adapterForRole(config, adapters, role),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -269,11 +270,11 @@ export function registerCommands(
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
     specsDir,
-    adapter,
     terminalHost,
     watcherFactory,
     services: draftServices,
     modelForRole: (role) => modelForRole(config, role),
+    adapterForRole: (role) => adapterForRole(config, adapters, role),
     isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
@@ -324,7 +325,15 @@ export function registerCommands(
     registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, surface),
     registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, surface),
     registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, surface),
-    registerViewCommand(activation, specsDir, repoRoot, queueForSlug, adapter, terminalHost, surface),
+    registerViewCommand(
+      activation,
+      specsDir,
+      repoRoot,
+      queueForSlug,
+      (role) => adapterForRole(config, adapters, role),
+      terminalHost,
+      surface,
+    ),
   );
 
   // --- approve / re-approve (Req 5.3, 10.3) -------------------------------
@@ -575,7 +584,11 @@ function registerActionCommand(
   return vscode.commands.registerCommand(
     commandId,
     async (a?: TreeNode | string, b?: string) => {
-      if (!ensureCanDispatch(activation, surface)) {
+      // replan/stop launch no sub-agent (they dispatch through the facade with
+      // a placeholder role), so they are gated on Restricted Mode alone —
+      // gating `stop` on a binary being present would block cancelling a run
+      // whose CLI has gone missing.
+      if (!ensureNotRestricted(activation, surface)) {
         return;
       }
       const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
@@ -623,31 +636,28 @@ function registerActionCommand(
 
 /**
  * Register the View command (Req 3.3, 3.4, 3.5). Unlike the stage/action
- * commands it is not gated by Restricted Mode — it writes nothing — but still
- * requires the executable, so it reuses {@link ensureExecutable} rather than
- * duplicating that check.
+ * commands it is not gated by Restricted Mode — it writes nothing. The
+ * executable check happens inside {@link runView} once the role a session's
+ * recorded stage maps to is known, rather than here.
  */
 function registerViewCommand(
   activation: CommandActivation,
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapter: Adapter,
+  adapterForRole: (role: Role) => Adapter | undefined,
   terminalHost: TerminalHost,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     COMMANDS.view,
     async (a?: TreeNode | string, b?: string) => {
-      if (!ensureExecutable(activation, surface)) {
-        return;
-      }
       const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
       const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
       if (target === undefined) {
         return;
       }
-      runView(target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapter, terminalHost, surface);
+      runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -658,15 +668,22 @@ function registerViewCommand(
  * the Session_Id the journal's most recent start recorded for it, launching a
  * new terminal at the workspace root; otherwise warn that no session is
  * recorded. The role passed to `attach` comes from the stage recorded on that
- * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6).
+ * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6). The
+ * executable check runs here, once that role is known, gating on the *same*
+ * role `attach` uses — a mixed-agent config can view a session whose agent is
+ * installed even while another role's agent is missing. The adapter used is
+ * that role's *currently* configured agent, which may differ from the agent
+ * that created the session if the config changed since (a known limitation of
+ * mixed-agent configs).
  */
 function runView(
+  activation: CommandActivation,
   slug: string,
   todoId: string,
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapter: Adapter,
+  adapterForRole: (role: Role) => Adapter | undefined,
   terminalHost: TerminalHost,
   surface: Surface,
 ): void {
@@ -683,8 +700,18 @@ function runView(
     return;
   }
 
+  const role = STAGE_ROLE[entry.stage];
+  if (!ensureExecutable(activation, surface, role)) {
+    return;
+  }
+  const adapter = adapterForRole(role);
+  if (adapter === undefined) {
+    surface.warn(`Baiton: role "${role}" is configured with an unsupported agent; update "roles.${role}.agent" in .baiton/config.json`);
+    return;
+  }
+
   const spec = adapter.attach({
-    role: STAGE_ROLE[entry.stage],
+    role,
     runId: entry.runId,
     sessionId: entry.sessionId,
   });
@@ -698,7 +725,7 @@ function runView(
   terminal.show();
 }
 
-/** Dispatch a stage trigger, gated under Restricted Mode / canDispatch. */
+/** Dispatch a stage trigger, gated under Restricted Mode and the stage's role executable. */
 async function runStage(
   activation: CommandActivation,
   specsDir: string,
@@ -708,7 +735,7 @@ async function runStage(
   slugArg: string | undefined,
   todoArg: string | undefined,
 ): Promise<void> {
-  if (!ensureCanDispatch(activation, surface)) {
+  if (!ensureCanDispatch(activation, surface, STAGE_ROLE[stage])) {
     return;
   }
   const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
@@ -725,31 +752,44 @@ async function runStage(
 }
 
 /**
- * Gate a write/dispatch under Restricted Mode (Req 22.1, 22.2) and the
- * `canDispatch` flag — false when the executable is missing with no override
- * (Req 22.8, 14.5). Surfaces the reason and returns whether to proceed.
+ * Gate a write/dispatch under Restricted Mode alone (Req 22.1, 22.2), with no
+ * executable check. Used by the control actions (replan/stop), which launch
+ * no sub-agent, so gating them on a binary being present would be actively
+ * wrong — you want to be able to cancel a run and clear the queue even when
+ * the CLI has gone missing. Reused by {@link ensureCanDispatch} for its
+ * Restricted Mode half, so there is one copy of the wording.
  */
-function ensureCanDispatch(activation: CommandActivation, surface: Surface): boolean {
+function ensureNotRestricted(activation: CommandActivation, surface: Surface): boolean {
   if (activation.workspace.restricted) {
     surface.warn(
       'Baiton is read-only in Restricted Mode: trust this workspace to run stages.',
     );
     return false;
   }
-  return ensureExecutable(activation, surface);
+  return true;
 }
 
 /**
- * Gate a command on the executable half of `canDispatch` alone — false when
- * the Claude executable is missing with no override (Req 22.8, 14.5). Reused
- * by {@link ensureCanDispatch} and the View command, which is not gated by
+ * Gate a stage/submit-PR dispatch under Restricted Mode (Req 22.1, 22.2) and
+ * that `role`'s configured agent executable (Req 22.8, 14.5). Surfaces the
+ * reason and returns whether to proceed.
+ */
+function ensureCanDispatch(activation: CommandActivation, surface: Surface, role: Role): boolean {
+  return ensureNotRestricted(activation, surface) && ensureExecutable(activation, surface, role);
+}
+
+/**
+ * Gate a command on `role`'s configured agent executable alone — false when
+ * that agent's executable is missing with no override (Req 22.8, 14.5). The
+ * message names both the role and the agent/binary at fault. Reused by
+ * {@link ensureCanDispatch} and the View command, which is not gated by
  * Restricted Mode because it writes nothing (Req 3.3–3.5).
  */
-function ensureExecutable(activation: CommandActivation, surface: Surface): boolean {
-  if (!activation.canDispatch) {
-    surface.warn(
-      'Baiton cannot dispatch a stage: the Claude executable was not found on PATH and no override is configured.',
-    );
+function ensureExecutable(activation: CommandActivation, surface: Surface, role: Role): boolean {
+  const agent = activation.config.roles[role].agent;
+  const failure = activation.executables.errorFor(agent);
+  if (failure !== undefined) {
+    surface.warn(`Baiton cannot dispatch the "${role}" stage: ${failure.message}`);
     return false;
   }
   return true;
@@ -823,7 +863,7 @@ async function runSubmitPr(
   submit: (slug: string) => Promise<SubmitPrOutcome>,
   slugArg: string | undefined,
 ): Promise<void> {
-  if (!ensureCanDispatch(activation, surface)) {
+  if (!ensureCanDispatch(activation, surface, 'pr-writer')) {
     return;
   }
   const slug = slugArg ?? (await pickSpecSlug(specsDir));
@@ -1188,4 +1228,12 @@ function modelForRole(config: Config, role: Role): { model: string; effort?: str
     model: entry.model,
     ...(entry.effort !== undefined ? { effort: entry.effort } : {}),
   };
+}
+
+/**
+ * Resolve the per-role adapter from the loaded config's `agent` id;
+ * `undefined` when that id is not a known agent (Req 14.1).
+ */
+function adapterForRole(config: Config, adapters: AdapterRegistry, role: Role): Adapter | undefined {
+  return adapters.get(config.roles[role].agent);
 }

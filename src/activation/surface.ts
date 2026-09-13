@@ -64,9 +64,10 @@ export class Surface {
   /**
    * Surface a run-queue {@link DispatchError} through the channel closest to the
    * user's action (design "Error Handling"). Probe failure, invalid result,
-   * git-state drift, a non-zero reset, and the other refusal kinds are logged to
-   * the running log and raised as a notification whose severity matches the
-   * kind: a hard halt (probe/launch/reset/git) is an error; a guard refusal
+   * git-state drift, a non-zero reset, an unsupported configured agent, and the
+   * other refusal kinds are logged to the running log and raised as a
+   * notification whose severity matches the kind: a hard halt
+   * (probe/launch/reset/git/unknown-agent) is an error; a guard refusal
    * (busy/blocked/not-approved/illegal/dirty/input-rev/outcome) is a warning
    * the user can act on (Req 5.3, 10.3, 14.5, 19.1).
    */
@@ -91,6 +92,7 @@ function isHardHalt(kind: DispatchError['kind']): boolean {
     case 'reset-failed':
     case 'git-state-changed':
     case 'spec-write-failed':
+    case 'unknown-agent':
       return true;
     default:
       return false;

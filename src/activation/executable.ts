@@ -19,8 +19,17 @@
  * file which does not exist is itself a "not found" — the shell's `lookup` is
  * used to verify an override path too, so a stale override does not silently
  * fall through to PATH.
+ *
+ * Roles may configure different agents (Requirement 14.1), so activation
+ * resolves one executable per *distinct* agent id referenced by
+ * `config.roles` via {@link resolveAgentExecutables}, which wraps the
+ * single-agent {@link resolveExecutable} core above. A per-role dispatch gate
+ * is derived from that table rather than from a single global flag: a stale
+ * or missing executable disables dispatch only for the roles configured with
+ * that agent, not for the whole extension.
  */
-import { Result, ok, err } from '../model/result';
+import { Result, ok, err, isErr } from '../model/result';
+import { AGENT_BINARY, isAgentId } from '../adapter';
 
 /**
  * Locates an executable for the given agent, either as an absolute/override
@@ -68,10 +77,14 @@ export interface ResolvedExecutable {
  *   names does not exist / is not executable; `overridePath` is what was tried.
  * - `not-on-path`      — no override was configured and the executable was not
  *   found on PATH.
+ * - `unknown-agent`    — the configured `agent` id is not one this build
+ *   supports, so no executable name is known for it; the roles using it
+ *   cannot dispatch.
  */
 export type ExecutableError =
   | { kind: 'override-missing'; agent: string; overridePath: string; message: string }
-  | { kind: 'not-on-path'; agent: string; message: string };
+  | { kind: 'not-on-path'; agent: string; message: string }
+  | { kind: 'unknown-agent'; agent: string; message: string };
 
 /** Whether a settings value is a usable, non-blank override path. */
 function hasOverride(value: string | undefined): value is string {
@@ -124,6 +137,95 @@ export function resolveExecutable(
       `The "${executableName}" executable for agent "${agent}" was not found on PATH and no ` +
       `override path is configured. Baiton will not dispatch a stage until it is available.`,
   });
+}
+
+/**
+ * The set of supported agent ids, as a message fragment (e.g. "claude,
+ * opencode, antigravity, codex"). Built from `AGENT_BINARY`'s keys rather than
+ * a literal so a future agent id cannot drift out of sync with the message.
+ */
+const SUPPORTED_AGENTS = Object.keys(AGENT_BINARY).join(', ');
+
+/** The per-role, per-agent config key an `unknown-agent` message points the user at. */
+function unknownAgentMessage(agent: string): string {
+  return (
+    `"${agent}" is not a supported agent id; use one of ${SUPPORTED_AGENTS} in ` +
+    `"roles.<role>.agent" in .baiton/config.json.`
+  );
+}
+
+/**
+ * The resolved table of one {@link resolveExecutable} outcome per distinct
+ * agent id asked for by {@link resolveAgentExecutables}.
+ *
+ * Exactly one of `get`/`errorFor` answers for an agent that was resolved (the
+ * other is `undefined`); both are `undefined` for an agent that was never
+ * asked for at all — that third case is distinct from a resolution failure,
+ * which callers must not confuse with "failed".
+ */
+export interface AgentExecutables {
+  /** The resolved executable for `agent`, or `undefined` if it failed or was never asked for. */
+  get(agent: string): ResolvedExecutable | undefined;
+  /** The resolution failure for `agent`, or `undefined` if it resolved or was never asked for. */
+  errorFor(agent: string): ExecutableError | undefined;
+  /** Every resolution failure, in first-seen agent order, for surfacing once at activation. */
+  readonly errors: readonly ExecutableError[];
+  /** The distinct agent ids that were asked for, in first-seen order. */
+  readonly agents: readonly string[];
+}
+
+/**
+ * Resolve one executable per *distinct* agent id in `agents` (Requirements
+ * 22.7, 22.8, 14.5). Several roles normally share one agent, so `agents` is
+ * de-duplicated preserving first-seen order before any PATH lookup runs — a
+ * PATH walk per role would be wasted work and would duplicate warnings.
+ *
+ * An id `isAgentId` rejects is recorded as an `unknown-agent` error without
+ * consulting `lookup`/`override`. A recognised id is resolved via the
+ * single-agent {@link resolveExecutable} core, keyed by its binary name from
+ * `AGENT_BINARY`. The override seam is already keyed by agent
+ * (`baiton.agents.<agent>.path`), so each agent gets its own override key for
+ * free.
+ */
+export function resolveAgentExecutables(
+  agents: readonly string[],
+  lookup: ExecutableLookup,
+  override: OverrideGetter,
+): AgentExecutables {
+  const distinct: string[] = [];
+  const seen = new Set<string>();
+  for (const agent of agents) {
+    if (!seen.has(agent)) {
+      seen.add(agent);
+      distinct.push(agent);
+    }
+  }
+
+  const resolved = new Map<string, ResolvedExecutable>();
+  const failed = new Map<string, ExecutableError>();
+  for (const agent of distinct) {
+    if (!isAgentId(agent)) {
+      failed.set(agent, { kind: 'unknown-agent', agent, message: unknownAgentMessage(agent) });
+      continue;
+    }
+    const result = resolveExecutable(agent, AGENT_BINARY[agent], lookup, override);
+    if (isErr(result)) {
+      failed.set(agent, result.error);
+    } else {
+      resolved.set(agent, result.value);
+    }
+  }
+
+  return {
+    get(agent: string): ResolvedExecutable | undefined {
+      return resolved.get(agent);
+    },
+    errorFor(agent: string): ExecutableError | undefined {
+      return failed.get(agent);
+    },
+    errors: distinct.map((agent) => failed.get(agent)).filter((e): e is ExecutableError => e !== undefined),
+    agents: distinct,
+  };
 }
 
 /** Run the injected lookup, treating any thrown error as "not found". */

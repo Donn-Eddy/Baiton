@@ -11,10 +11,12 @@ import {
 } from '../src/activation/engineVersion';
 import {
   resolveExecutable,
+  resolveAgentExecutables,
   ExecutableLookup,
   OverrideGetter,
 } from '../src/activation/executable';
 import { isErr, isOk } from '../src/model/result';
+import { AGENT_BINARY } from '../src/adapter/adapter';
 
 /**
  * Unit tests for workspace resolution, the engine-version guard, executable
@@ -37,7 +39,8 @@ import { isErr, isOk } from '../src/model/result';
  *   (Req 22.7, 22.8).
  * - Packaging: extensionKind includes "workspace", engines.vscode "^1.106.0",
  *   MIT license in package.json + LICENSE file, zero native modules
- *   (Req 23.1, 23.2, 23.4).
+ *   (Req 23.1, 23.2, 23.4); an executable-override setting declared for every
+ *   AGENT_BINARY id (Req 22.7).
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -275,6 +278,89 @@ describe('resolveExecutable (Req 22.7, 22.8)', () => {
   });
 });
 
+describe('resolveAgentExecutables (Req 22.7, 22.8, 14.5)', () => {
+  /** A PATH lookup that resolves the given names to fixed absolute paths. */
+  function lookupFrom(table: Record<string, string>): ExecutableLookup {
+    return (nameOrPath) => table[nameOrPath];
+  }
+
+  /** An override getter reading from a per-agent table. */
+  function overrideTable(t: Record<string, string>): OverrideGetter {
+    return (agent) => t[agent];
+  }
+
+  it('resolves several distinct agents in one call, honouring the antigravity -> agy binary mapping', () => {
+    const table = resolveAgentExecutables(
+      ['claude', 'antigravity'],
+      lookupFrom({ claude: '/usr/local/bin/claude', agy: '/usr/local/bin/agy' }),
+      overrideTable({}),
+    );
+    assert.strictEqual(table.get('claude')?.path, '/usr/local/bin/claude');
+    assert.strictEqual(table.get('antigravity')?.path, '/usr/local/bin/agy');
+    assert.strictEqual(table.errors.length, 0);
+  });
+
+  it('de-duplicates repeated agent ids, preserving first-seen order', () => {
+    let claudeLookups = 0;
+    const lookup: ExecutableLookup = (nameOrPath) => {
+      if (nameOrPath === 'claude') {
+        claudeLookups++;
+        return '/usr/local/bin/claude';
+      }
+      if (nameOrPath === 'codex') {
+        return '/usr/local/bin/codex';
+      }
+      return undefined;
+    };
+    const table = resolveAgentExecutables(['claude', 'claude', 'codex'], lookup, overrideTable({}));
+    assert.strictEqual(claudeLookups, 1);
+    assert.deepStrictEqual(table.agents, ['claude', 'codex']);
+  });
+
+  it('reports partial failure per agent: one missing agent does not fail the rest', () => {
+    const table = resolveAgentExecutables(
+      ['claude', 'opencode'],
+      lookupFrom({ claude: '/usr/local/bin/claude' }),
+      overrideTable({}),
+    );
+    assert.strictEqual(table.get('claude')?.path, '/usr/local/bin/claude');
+    assert.strictEqual(table.errorFor('opencode')?.kind, 'not-on-path');
+    assert.strictEqual(table.errors.length, 1);
+  });
+
+  it('resolves a per-agent override independently of PATH', () => {
+    const table = resolveAgentExecutables(
+      ['claude', 'codex'],
+      lookupFrom({ claude: '/usr/local/bin/claude', '/opt/codex/codex': '/opt/codex/codex' }),
+      overrideTable({ codex: '/opt/codex/codex' }),
+    );
+    assert.strictEqual(table.get('claude')?.override, false);
+    assert.strictEqual(table.get('codex')?.path, '/opt/codex/codex');
+    assert.strictEqual(table.get('codex')?.override, true);
+  });
+
+  it('reports unknown-agent for an id isAgentId rejects, naming the supported ids', () => {
+    const table = resolveAgentExecutables(['nope'], lookupFrom({}), overrideTable({}));
+    assert.strictEqual(table.get('nope'), undefined);
+    const failure = table.errorFor('nope');
+    assert.strictEqual(failure?.kind, 'unknown-agent');
+    assert.ok(failure?.message.includes('claude'));
+    assert.ok(failure?.message.includes('opencode'));
+    assert.ok(failure?.message.includes('antigravity'));
+    assert.ok(failure?.message.includes('codex'));
+  });
+
+  it('returns undefined from both get and errorFor for an agent never asked for', () => {
+    const table = resolveAgentExecutables(
+      ['claude'],
+      lookupFrom({ claude: '/usr/local/bin/claude' }),
+      overrideTable({}),
+    );
+    assert.strictEqual(table.get('codex'), undefined);
+    assert.strictEqual(table.errorFor('codex'), undefined);
+  });
+});
+
 describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
   let pkg: Record<string, unknown>;
 
@@ -339,6 +425,19 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       [],
       `expected no native modules, found: ${nativeArtifacts.join(', ')}`,
     );
+  });
+
+  it('declares an executable-override setting for every supported agent id (Req 22.7)', () => {
+    type SettingProps = Record<string, { type?: string; default?: unknown }>;
+    const contributes = pkg.contributes as { configuration?: { properties?: SettingProps } };
+    const props: SettingProps | undefined = contributes.configuration?.properties;
+    assert.ok(props, 'contributes.configuration.properties must be present');
+    for (const agent of Object.keys(AGENT_BINARY)) {
+      const entry: { type?: string; default?: unknown } | undefined = props[`baiton.agents.${agent}.path`];
+      assert.ok(entry, `missing baiton.agents.${agent}.path setting`);
+      assert.strictEqual(entry.type, 'string');
+      assert.strictEqual(entry.default, '');
+    }
   });
 });
 

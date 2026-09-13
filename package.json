@@ -225,6 +225,21 @@
           "default": "",
           "description": "Override path to the Claude CLI executable. When set, this path is used instead of searching PATH."
         },
+        "baiton.agents.opencode.path": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to the opencode CLI executable. When set, this path is used instead of searching PATH."
+        },
+        "baiton.agents.antigravity.path": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to the Antigravity CLI executable (agy). When set, this path is used instead of searching PATH."
+        },
+        "baiton.agents.codex.path": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to the Codex CLI executable. When set, this path is used instead of searching PATH."
+        },
         "baiton.git.remote": {
           "type": "string",
           "default": "origin",

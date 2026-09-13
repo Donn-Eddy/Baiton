@@ -147,7 +147,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     let sessionCounter = 0;
     const deps: RunQueueDeps = {
       workspaceRoot: tmpDir,
-      adapter: new ClaudeAdapter(),
+      adapterForRole: () => new ClaudeAdapter(),
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
@@ -202,7 +202,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     const terminalHost = makeTerminalHost();
     const deps: RunQueueDeps = {
       workspaceRoot: tmpDir,
-      adapter: new ClaudeAdapter(),
+      adapterForRole: () => new ClaudeAdapter(),
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),

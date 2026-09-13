@@ -270,7 +270,7 @@ function makeRig(journalPath: string, scenario: Scenario): Rig {
 
   const deps: RunQueueDeps = {
     workspaceRoot,
-    adapter,
+    adapterForRole: () => adapter,
     git,
     terminalHost,
     watcherFactory,

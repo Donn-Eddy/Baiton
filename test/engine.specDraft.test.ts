@@ -37,11 +37,13 @@ import { Result, ok } from '../src/model/result';
 class StubAdapter implements Adapter {
   readonly id = 'claude' as const;
   public launches: LaunchRequest[] = [];
+  public probeCount = 0;
   private readonly probeOk: boolean;
   constructor(probeOk = true) {
     this.probeOk = probeOk;
   }
   async probe(): Promise<ProbeResult> {
+    this.probeCount += 1;
     return this.probeOk
       ? { version: '0.0.0-stub', ok: true }
       : { version: '', ok: false, reason: 'the CLI was not found' };
@@ -156,7 +158,7 @@ function recordingGit(commits: string[], fail = false): GitService {
 }
 
 /** A harness bundling the stubs and the runner under test. */
-function makeHarness(options: { probeOk?: boolean; commitFails?: boolean } = {}) {
+function makeHarness(options: { probeOk?: boolean; commitFails?: boolean; unknownAgent?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-draft-'));
   const specsDir = path.join(root, '.baiton', 'specs');
   fs.mkdirSync(specsDir, { recursive: true });
@@ -183,11 +185,11 @@ function makeHarness(options: { probeOk?: boolean; commitFails?: boolean } = {})
   const runner = createSpecDraftRunner({
     workspaceRoot: root,
     specsDir,
-    adapter,
     terminalHost,
     watcherFactory,
     services,
     modelForRole: () => ({ model: 'writer-model', effort: 'high' }),
+    adapterForRole: () => (options.unknownAgent ? undefined : adapter),
     isQueueRunning: () => queueRunning,
     newRunId: () => 'draft-run-1',
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
@@ -449,5 +451,21 @@ describe('spec-draft runner (unit)', () => {
     if (!started.ok) {
       assert.strictEqual(started.error.kind, 'invalid-slug');
     }
+  });
+
+  it('refuses with unknown-agent when adapterForRole returns undefined, before probing or launching (Req 14.1)', async () => {
+    const h = track(makeHarness({ unknownAgent: true }));
+
+    const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
+
+    assert.strictEqual(started.ok, false, 'an unknown agent id must refuse the draft');
+    if (!started.ok) {
+      assert.strictEqual(started.error.kind, 'unknown-agent');
+      assert.match(started.error.message, /spec-writer/);
+      assert.match(started.error.message, /roles\.spec-writer\.agent/);
+      assert.match(started.error.message, /\.baiton\/config\.json/);
+    }
+    assert.strictEqual(h.adapter.probeCount, 0, 'no probe runs for an unknown agent');
+    assert.strictEqual(h.terminalHost.created.length, 0, 'no terminal is created for an unknown agent');
   });
 });

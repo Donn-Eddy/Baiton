@@ -101,6 +101,7 @@ export function initialPromptFor(briefPath: string): string {
  * overridable in tests).
  */
 export interface LaunchDeps {
+  /** The adapter already selected for `input.role` by the caller — not a global one (Req 14.1). */
   adapter: Adapter;
   terminalHost: TerminalHost;
   /** Writes the Brief and returns its text; throws on write failure (Req 11.5). */
