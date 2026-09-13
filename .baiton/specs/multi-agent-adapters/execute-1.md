@@ -2,24 +2,22 @@
 
 ```json
 {
-  "summary": "Declared baiton.agents.opencode.path, baiton.agents.antigravity.path and baiton.agents.codex.path in package.json's contributes.configuration.properties, immediately after the existing baiton.agents.claude.path, each keyed by agent id (not binary name), type string, default \"\", following the claude row's description sentence shape (the antigravity entry additionally names the agy binary). No src/ files were touched, since settingsOverride and resolveAgentExecutables already handle arbitrary agent ids generically. As a deliberate, scope-noted deviation beyond the todo's stated package.json-only file list, added a packaging-gating test to test/activation.gating.test.ts that derives the expected baiton.agents.<id>.path keys from AGENT_BINARY (imported from src/adapter/adapter.ts) so a future agent id cannot be added without a matching override setting; extended the file's coverage doc comment accordingly.",
+  "summary": "Created test/adapter.opencode.test.ts, mirroring test/adapter.claude.test.ts's mocha+assert scaffolding for the OpencodeAdapter. Covers probe() ok/reason shape (including a check that the failure reason names AGENT_BINARY.opencode), the fresh-vs-resume launch branches (run -s <id> / run -c / empty-string resumeSessionId treated as absent) shifted right by the leading `run` subcommand, verbatim provider/model passthrough and --variant gating, the trailing bare-positional prompt convention (-i <prompt>, no -- separator), attach()'s exact six-element array with no prompt/model/runId leakage, the --agent plan|build mapping for every Role driven by isReadOnlyRole (plus direct opencodeAgentFlags assertions and the profile constant values), and a dedicated 'documented degrades' block asserting the absence of --add-dir, the run-dir path, --allowedTools, --permission-mode and --auto for every role on both launch and attach, with a comment explaining Requirement 15.4 is unenforced for opencode. No source file under src/ was modified; no other test file was touched.",
   "files_changed": [
-    "package.json",
-    "test/activation.gating.test.ts"
+    "test/adapter.opencode.test.ts"
   ],
   "commands_run": [
-    "node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"",
-    "grep -n 'baiton.agents' package.json",
-    "npm run compile",
+    "npx mocha test/adapter.opencode.test.ts",
+    "npx mocha --spec test/adapter.opencode.test.ts",
     "npm run lint",
+    "npm run compile",
     "npm test"
   ],
   "notes": [
-    "Deviation from the todo's stated file list (package.json only): added one test case plus an AGENT_BINARY import to test/activation.gating.test.ts, per the plan's explicit allowance for this deviation. No other src/ or test file was touched.",
-    "The setting keys are segmented by agent id, not binary name: baiton.agents.antigravity.path (not baiton.agents.agy.path), since settingsOverride interpolates the id from config.roles[role].agent.",
-    "This is a manifest-only change; it does not make opencode/antigravity/codex reachable end-to-end (that is T09-T11's adapter work and T12's sweep). A stale override still yields the existing 'override-missing' hard failure rather than a silent PATH fallback, consistent with current claude behaviour.",
-    "All 417 existing tests plus the 1 new test pass; npm run compile and npm run lint are clean.",
-    "TypeScript strict mode required an explicit type annotation on the new test's `entry` local (indexing a Record<string, ...> via a template-literal key inside a function whose return type was itself being inferred triggered TS7022 implicit-any-in-own-initializer); fixed by declaring a named SettingProps type and annotating `props`/`entry` explicitly, no behavioral effect on the assertions."
+    "The .mocharc.json spec glob (test/**/*.test.ts) overrides a file argument passed on the mocha CLI, so both `npx mocha test/adapter.opencode.test.ts` and `npx mocha --spec test/adapter.opencode.test.ts` ran the full suite rather than just the new file; the new file's own describe blocks in the output confirmed all of its cases passed.",
+    "One unrelated flaky failure was observed on the first full-suite run: `planner context confinement (property)` in test/plannerContext.confinement.property.test.ts failed for a randomly generated counterexample (seed -1088770820). It passed cleanly on every subsequent run (npm run lint's `npm test`-equivalent, `npm run compile`, and the final `npm test` all green at 449 passing / 1 pending / 0 failing), so this is pre-existing test flakiness unrelated to this todo's change and was left untouched per the brief's scope discipline.",
+    "Followed the plan's guidance not to modify src/adapter/opencode.ts, test/adapter.claude.test.ts, or test/adapter.launch.property.test.ts, and did not start the antigravity or codex adapter tests (T10, T11) or the cross-cutting suite sweep (T12).",
+    "git status shows one unrelated pre-existing local modification, .claude/settings.local.json (a tool-permission artifact from this session's approvals), which was not created or edited as part of this todo."
   ]
 }
 ```
