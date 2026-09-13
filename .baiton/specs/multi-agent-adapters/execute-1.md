@@ -2,25 +2,23 @@
 
 ```json
 {
-  "summary": "Added src/adapter/antigravity.ts implementing Adapter for the agy CLI (probe/launch/attach), mirroring the shape of opencode.ts/claude.ts. Re-verified the agy CLI surface (v1.2.2) via `agy --version` and `agy --help` before writing args: confirmed --add-dir, --conversation, -c/--continue, --effort, --mode (accept-edits, plan), --model, and -i/--prompt-interactive, and that -v is not a version alias. probe() runs `agy --version` and returns a trimmed version string on success or a non-empty reason on failure. launch() builds args in claude's order: resume branch (--conversation <id> or -c, absent on fresh launch, req.sessionId dropped on fresh launch), --model, optional --effort, --mode via antigravityModeFlags (plan for read-only roles, accept-edits otherwise, derived from isReadOnlyRole), the run-dir grant via runDirGrant(req.runId) (agy supports --add-dir unlike opencode), and finally --prompt-interactive <prompt> with no -- marker. attach() returns --conversation <id>, mode flags, and the run-dir grant with no --prompt-interactive pair. The class doc comment documents the dropped session id degrade, the --mode plan reliance in place of a scoped allow-list, and that --add-dir is supported (in contrast to opencode's missing-grant degrade). No other file was touched (index.ts/registry/engine/package.json/tests are later tasks per the plan).",
+  "summary": "Added src/adapter/codex.ts implementing CodexAdapter (id 'codex') mirroring the opencode/antigravity/claude adapter shape: probe() via `codex --version`, launch() branching on fresh/resume-with-id/resume-without-id (codex's resume is a subcommand, not a flag), attach() as a no-prompt `codex resume <id>`, role-based --sandbox/--ask-for-approval permission flags derived from isReadOnlyRole, and the effort degrade via --config model_reasoning_effort=<effort> since codex has no dedicated effort flag. No existing file was touched.",
   "files_changed": [
-    "src/adapter/antigravity.ts"
+    "src/adapter/codex.ts"
   ],
   "commands_run": [
-    "agy --version",
-    "agy --help",
     "npm run compile",
-    "npm test",
-    "npx eslint src/adapter/antigravity.ts --ext .ts",
-    "git status --porcelain"
+    "npx eslint src/adapter/codex.ts --ext .ts",
+    "npm test"
   ],
   "notes": [
-    "npm run compile passed with no errors.",
-    "npm test matched T02's recorded baseline exactly: 409 passing, 1 pending, no new failures.",
-    "npx eslint src/adapter/antigravity.ts --ext .ts produced no output (clean).",
-    "git status --porcelain shows only src/adapter/antigravity.ts as untracked/new; no existing file was modified.",
-    "Per the plan's acceptance criteria, AntigravityAdapter.id === 'antigravity', shellPath is sourced from AGENT_BINARY.antigravity (not a hard-coded literal), and no --dangerously-skip-permissions, --sandbox, --print/-p/--prompt, --agent, or -- end-of-options marker is ever emitted.",
-    "The plan's flagged risks (dropped req.sessionId on fresh launch causing journal/attach id mismatch for antigravity roles; whether --mode plan permits the required result.json write) are unresolved by design — they belong to T06/T07 (session id reconciliation) and manual verification during T10/T12 respectively, and were intentionally not papered over in this adapter."
+    "npm run compile passed with no edits to any other file.",
+    "npx eslint src/adapter/codex.ts --ext .ts produced no output (clean).",
+    "npm test matched the T03 baseline exactly: 409 passing, 1 pending, no new failures.",
+    "git status shows only src/adapter/codex.ts as untracked; no other file was modified, matching the acceptance criteria that index.ts, claude.ts, opencode.ts, antigravity.ts, permissions.ts, adapter.ts, the engine, activation/*, package.json and tests remain untouched.",
+    "As planned, resume-without-a-known-id (`resume --last`) drops the prompt entirely and emits no `--` marker, since `codex resume --last <text>` binds <text> to SESSION_ID, not PROMPT.",
+    "The class doc comment records the tested version (codex-cli 0.154.0), the ignored req.sessionId on fresh launches, the interactive-vs-`codex exec` choice, the --config model_reasoning_effort degrade, the resume --last prompt-binding hazard, the --sandbox read-only vs scoped-allow-list gap with its one-constant fallback, and the never-emitted dangerous flags.",
+    "Did not invoke the real codex binary; the probe was not exercised against a live CLI in this task per the plan (that is T11's job with an emptied PATH)."
   ]
 }
 ```
