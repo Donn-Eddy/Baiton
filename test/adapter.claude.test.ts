@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { ClaudeAdapter } from '../src/adapter/claude';
+import { ClaudeAdapter, claudeSystemPromptFlags } from '../src/adapter/claude';
 import { createAdapterRegistry } from '../src/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
 import type { LaunchRequest } from '../src/adapter/adapter';
@@ -10,6 +10,7 @@ import {
   READ_ONLY_ALLOWED_TOOLS,
   READ_ONLY_ROLES,
 } from '../src/adapter/permissions';
+import { roleProfile } from '../src/adapter/roleProfile';
 import { Role, ROLES } from '../src/model/role';
 import { defaultConfig } from '../src/config/defaultConfig';
 
@@ -27,7 +28,9 @@ import { defaultConfig } from '../src/config/defaultConfig';
  *   13.3);
  * - the read-only `acceptEdits` fallback arg set is emitted for read-only roles
  *   exactly when `PermissionMode.readOnlyFallbackToAcceptEdits` is true, and is
- *   otherwise the scoped `Write(...)` allow-list (Requirement 15.7).
+ *   otherwise the scoped `Write(...)` allow-list (Requirement 15.7);
+ * - `--append-system-prompt` carries the role profile's prose policy on both
+ *   launch and attach, for every role.
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -242,6 +245,52 @@ describe('ClaudeAdapter read-only acceptEdits fallback (Req 15.7)', () => {
     const off = new ClaudeAdapter(DEFAULT_PERMISSION_MODE).launch(req({ role: reviewer }));
     assert.deepStrictEqual(on.shellArgs, off.shellArgs);
     assert.ok(on.shellArgs.includes('--allowedTools'));
+  });
+});
+
+describe('ClaudeAdapter --append-system-prompt carries the role profile', () => {
+  const adapter = new ClaudeAdapter();
+
+  for (const role of ROLES) {
+    it(`carries ${role}'s profile prompt on launch and attach`, () => {
+      const expected = roleProfile(role).systemPrompt;
+      assert.deepStrictEqual(claudeSystemPromptFlags(role), ['--append-system-prompt', expected]);
+
+      const launchSpec = adapter.launch(req({ role }));
+      assert.ok(
+        findPair(launchSpec.shellArgs, '--append-system-prompt', expected) >= 0,
+        `expected ${role}'s profile prompt on launch: ${JSON.stringify(launchSpec.shellArgs)}`,
+      );
+      assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '--append-system-prompt').length, 1);
+
+      const attachSpec = adapter.attach({ role, runId: 'run-1', sessionId: 's-1' });
+      assert.ok(
+        findPair(attachSpec.shellArgs, '--append-system-prompt', expected) >= 0,
+        `expected ${role}'s profile prompt on attach: ${JSON.stringify(attachSpec.shellArgs)}`,
+      );
+      assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '--append-system-prompt').length, 1);
+    });
+  }
+
+  // The prompt text is variadic-adjacent and contains spaces and backticks;
+  // it must land before the `--` end-of-options marker so the CLI does not
+  // swallow the initial user prompt as another flag value.
+  it('places the flag before the -- separator, leaving the prompt last', () => {
+    const request = req();
+    const args = adapter.launch(request).shellArgs;
+    const sep = args.indexOf('--');
+    assert.ok(sep > 0, `expected a -- separator: ${JSON.stringify(args)}`);
+    assert.ok(args.indexOf('--append-system-prompt') < sep);
+    assert.strictEqual(args[args.length - 1], request.prompt);
+    assert.strictEqual(args[sep + 1], request.prompt);
+  });
+
+  it('is unaffected by the readOnlyFallbackToAcceptEdits flip', () => {
+    const on = new ClaudeAdapter({ readOnlyFallbackToAcceptEdits: true }).launch(req({ role: 'planner' }));
+    const off = new ClaudeAdapter(DEFAULT_PERMISSION_MODE).launch(req({ role: 'planner' }));
+    const expected = roleProfile('planner').systemPrompt;
+    assert.ok(findPair(on.shellArgs, '--append-system-prompt', expected) >= 0);
+    assert.ok(findPair(off.shellArgs, '--append-system-prompt', expected) >= 0);
   });
 });
 

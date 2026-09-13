@@ -11,6 +11,7 @@
  * outcome without importing `vscode`.
  */
 import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type {
   HostTerminal,
@@ -45,8 +46,24 @@ class VscodeResultWatcher implements ResultWatcher {
   private disposed = false;
 
   constructor(resultPath: string, ownTerminal: vscode.Terminal | undefined) {
-    // Scope the watcher to exactly the run's result.json (Req 12.1).
-    this.fileWatcher = vscode.workspace.createFileSystemWatcher(resultPath);
+    // Scope the watcher to exactly the run's result.json (Req 12.1). This must
+    // be a RelativePattern with a Uri base rather than a plain absolute-path
+    // glob string: `canonicalizeRoot` (src/activation/workspace.ts) resolves
+    // the workspace root through realpath, so on a host where the root sits
+    // under a symlink (e.g. `/home` -> `/var/home`) Baiton's own path spelling
+    // can differ from the spelling VS Code opened the workspace folder with.
+    // A string pattern is only matched by VS Code's workspace-wide watcher,
+    // whose events are spelled with the workspace-folder path, so an absolute
+    // glob spelled the canonical way would never match and a real
+    // result.json write would go unnoticed. A RelativePattern with an
+    // explicit Uri base instead gets its own dedicated, non-recursive watcher
+    // on that directory and is matched against that same base spelling,
+    // so it works regardless of which spelling Baiton used to build it.
+    const pattern = new vscode.RelativePattern(
+      vscode.Uri.file(path.dirname(resultPath)),
+      path.basename(resultPath),
+    );
+    this.fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
     const onChange = (): void => this.emitResult(resultPath);
     this.fileWatcher.onDidCreate(onChange);
     this.fileWatcher.onDidChange(onChange);

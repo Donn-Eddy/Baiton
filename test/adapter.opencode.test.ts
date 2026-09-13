@@ -1,8 +1,14 @@
 import * as assert from 'assert';
-import { OpencodeAdapter, OPENCODE_PLAN_AGENT, OPENCODE_BUILD_AGENT, opencodeAgentFlags } from '../src/adapter/opencode';
+import {
+  OpencodeAdapter,
+  OPENCODE_CONFIG_ENV,
+  opencodeAgentFlags,
+  opencodeConfigEnv,
+} from '../src/adapter/opencode';
+import type { OpencodeAgentDefinition } from '../src/adapter/opencode';
 import type { LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
-import { isReadOnlyRole } from '../src/adapter/permissions';
+import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 
 /**
@@ -13,9 +19,11 @@ import { ROLES } from '../src/model/role';
  * - the fresh-vs-resume `-s`/`-c` branches behind the leading `run` subcommand
  *   (Req 13.2, 13.3);
  * - attach()'s no-prompt reopen (Req 3.3, 3.4);
- * - two documented degrades from the claude adapter: no run-dir grant (no
- *   `--add-dir`, Req 15.4 is unenforceable here) and `req.sessionId` being
- *   ignored on a fresh launch.
+ * - the whole per-role policy (Req 15.1-15.4), which opencode gets as an
+ *   inline `OPENCODE_CONFIG_CONTENT` env layer defining one Baiton-owned
+ *   custom agent rather than as command-line flags;
+ * - the one remaining documented degrade from the claude adapter:
+ *   `req.sessionId` is ignored on a fresh launch.
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -144,10 +152,10 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
 describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('builds run -s <id> --agent <profile> -i with no prompt, model, or run id', () => {
+  it('builds run -s <id> --agent baiton-<role> -i with no prompt, model, or run id', () => {
     const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
 
-    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'session-42', '--agent', OPENCODE_BUILD_AGENT, '-i']);
+    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'session-42', '--agent', 'baiton-executor', '-i']);
     assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
 
     assert.strictEqual(spec.shellArgs.length, 6);
@@ -157,49 +165,155 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
     assert.ok(!spec.shellArgs.includes('--add-dir'));
   });
 
-  it('uses the plan profile for a read-only role', () => {
+  it('uses the role-specific Baiton agent for a read-only role', () => {
     const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--agent', OPENCODE_PLAN_AGENT) >= 0);
+    assert.ok(findPair(spec.shellArgs, '--agent', 'baiton-planner') >= 0);
   });
 });
 
-describe('OpencodeAdapter role -> --agent profile mapping', () => {
+describe('OpencodeAdapter role -> --agent baiton-<role> mapping (Decision 4)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('pins the profile constants', () => {
-    assert.strictEqual(OPENCODE_PLAN_AGENT, 'plan');
-    assert.strictEqual(OPENCODE_BUILD_AGENT, 'build');
+  // opencode's built-in `plan` agent is never used: `plan` is a NAME its
+  // SessionReminders keys on to inject an unconditional read-only reminder
+  // (v1.18.30 session/reminders.ts, `agent.name === "plan"`), which overrode
+  // the run-dir write grant and stopped the planner writing result.json. Every
+  // Baiton agent name is prefixed so it can never match that condition.
+  it('never names opencode built-in profiles', () => {
+    for (const role of ROLES) {
+      const flags = opencodeAgentFlags(role);
+      assert.strictEqual(flags[0], '--agent');
+      assert.notStrictEqual(flags[1], 'plan');
+      assert.notStrictEqual(flags[1], 'build');
+      assert.ok(flags[1].startsWith('baiton-'), `agent name must be Baiton-owned: ${flags[1]}`);
+    }
   });
 
   for (const role of ROLES) {
-    it(`maps role ${role} to the expected --agent profile for launch and attach`, () => {
-      const expected = isReadOnlyRole(role) ? OPENCODE_PLAN_AGENT : OPENCODE_BUILD_AGENT;
+    it(`maps role ${role} to --agent ${roleProfile(role).agentName} on launch and attach`, () => {
+      const expected = roleProfile(role).agentName;
+      assert.deepStrictEqual(opencodeAgentFlags(role), ['--agent', expected]);
 
       const launchSpec = adapter.launch(req({ role }));
       assert.ok(findPair(launchSpec.shellArgs, '--agent', expected) >= 0);
+      assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '--agent').length, 1);
 
       const attachSpec = adapter.attach({ role, runId: 'run-1', sessionId: 's-1' });
       assert.ok(findPair(attachSpec.shellArgs, '--agent', expected) >= 0);
+      assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '--agent').length, 1);
+    });
+  }
+});
+
+/** Parse the single custom agent out of a spec's `OPENCODE_CONFIG_CONTENT`. */
+function agentDefinition(
+  env: Record<string, string> | undefined,
+  agentName: string,
+): OpencodeAgentDefinition {
+  assert.ok(env !== undefined, 'expected an env on the LaunchSpec');
+  const parsed = JSON.parse((env as Record<string, string>)[OPENCODE_CONFIG_ENV]) as {
+    agent: Record<string, OpencodeAgentDefinition>;
+  };
+  assert.deepStrictEqual(
+    Object.keys(parsed.agent),
+    [agentName],
+    'exactly one agent must be defined, keyed by the profile agent name',
+  );
+  return parsed.agent[agentName];
+}
+
+describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 15.1-15.4)', () => {
+  const adapter = new OpencodeAdapter();
+
+  for (const role of ROLES) {
+    it(`launch() for role ${role} defines one agent carrying the profile prompt and description`, () => {
+      const profile = roleProfile(role);
+      const spec = adapter.launch(req({ role, runId: 'run-777' }));
+
+      assert.ok(spec.env !== undefined);
+      assert.deepStrictEqual(Object.keys(spec.env as Record<string, string>), [OPENCODE_CONFIG_ENV]);
+
+      const agent = agentDefinition(spec.env, profile.agentName);
+      assert.strictEqual(agent.prompt, profile.systemPrompt);
+      assert.strictEqual(agent.description, profile.description);
+      assert.strictEqual(agent.mode, 'primary');
+    });
+
+    it(`launch() for role ${role} translates the profile's edit and bash rules`, () => {
+      const profile = roleProfile(role);
+      const spec = adapter.launch(req({ role, runId: 'run-777' }));
+      const agent = agentDefinition(spec.env, profile.agentName);
+
+      if (profile.write === 'workspace') {
+        assert.deepStrictEqual(agent.permission.edit, { '*': 'allow' });
+      } else {
+        // Deny everything, then re-allow the run dir; the more specific glob wins.
+        assert.deepStrictEqual(agent.permission.edit, {
+          '*': 'deny',
+          '.baiton/runs/run-777/*': 'allow',
+        });
+      }
+
+      if (profile.shell) {
+        // No bash block at all: opencode's own default (allow) applies.
+        assert.strictEqual(agent.permission.bash, undefined, `role ${role} must not pin bash`);
+      } else {
+        assert.deepStrictEqual(agent.permission.bash, { '*': 'deny' });
+      }
     });
   }
 
-  it('opencodeAgentFlags returns the plan profile for a read-only role', () => {
-    assert.deepStrictEqual(opencodeAgentFlags('planner'), ['--agent', OPENCODE_PLAN_AGENT]);
+  it('attach() emits exactly the same config as launch() for the same role and run', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 's-1' });
+    assert.deepStrictEqual(spec.env, adapter.launch(req({ role: 'planner', runId: 'run-777' })).env);
   });
 
-  it('opencodeAgentFlags returns the build profile for the executor', () => {
-    assert.deepStrictEqual(opencodeAgentFlags('executor'), ['--agent', OPENCODE_BUILD_AGENT]);
+  it('uses a workspace-relative run-dir pattern containing the run id verbatim', () => {
+    const agent = agentDefinition(opencodeConfigEnv('planner', 'run-abc'), 'baiton-planner');
+    const pattern = Object.keys(agent.permission.edit).filter((k) => k !== '*')[0];
+    assert.ok(!pattern.startsWith('/'), `expected a relative pattern, got ${pattern}`);
+    assert.ok(pattern.includes('run-abc'));
+    assert.strictEqual(pattern, '.baiton/runs/run-abc/*');
+  });
+
+  it('pins the env var name and the full config shape for the planner', () => {
+    assert.strictEqual(OPENCODE_CONFIG_ENV, 'OPENCODE_CONFIG_CONTENT');
+    assert.deepStrictEqual(JSON.parse(opencodeConfigEnv('planner', 'r1')[OPENCODE_CONFIG_ENV]), {
+      agent: {
+        'baiton-planner': {
+          description: roleProfile('planner').description,
+          mode: 'primary',
+          prompt: roleProfile('planner').systemPrompt,
+          permission: {
+            edit: { '*': 'deny', '.baiton/runs/r1/*': 'allow' },
+            bash: { '*': 'deny' },
+          },
+        },
+      },
+    });
+  });
+
+  it('is pure: same inputs deep-equal, different run ids differ', () => {
+    assert.deepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-1'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-2'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('executor', 'run-1'));
   });
 });
 
-// opencode has no `--add-dir` flag and no granular allow-list, so Requirement
-// 15.4's per-run write scoping is UNENFORCED for opencode roles and is
-// conveyed only by the brief. This block asserts today's true behaviour so
-// the gap stays visible; update it (do not delete it) if opencode ever gains
-// the flag.
-describe('OpencodeAdapter documented degrades (no run-dir grant, no claude permission flags)', () => {
+// The per-role policy reaches opencode through the environment (see the block
+// above), never through claude's command-line permission flags. This block
+// asserts that the argv stays free of those flags and of `--auto`, which would
+// auto-approve everything rather than scope to the run dir.
+describe('OpencodeAdapter documented degrades (no claude permission flags, no --auto)', () => {
   const adapter = new OpencodeAdapter();
-  const forbidden = ['--add-dir', '.baiton/runs/run-777/', '--allowedTools', '--permission-mode', '--auto'];
+  const forbidden = [
+    '--add-dir',
+    '.baiton/runs/run-777/',
+    '--allowedTools',
+    '--permission-mode',
+    '--append-system-prompt',
+    '--auto',
+  ];
 
   for (const role of ROLES) {
     it(`omits claude-only permission flags for role ${role} on launch`, () => {

@@ -188,6 +188,13 @@ export function launchStage(
  * Validate the workspace root: it must be a non-empty absolute path. Returning
  * a Result (rather than throwing) lets the caller surface a root-resolution
  * failure and leave state unchanged (Req 11.5).
+ *
+ * The root is expected to be canonical already — it is symlink-resolved once at
+ * activation ingress (see `canonicalizeRoot` in `src/activation/workspace.ts`) —
+ * so this deliberately validates only shape and does not realpath. Resolving
+ * here instead would make the brief's paths canonical while the run queue and
+ * result validation still compared against the raw root, introducing a second
+ * spelling mismatch inside Baiton itself.
  */
 function resolveRoot(
   workspaceRoot: string,

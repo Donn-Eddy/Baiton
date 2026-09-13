@@ -40,6 +40,18 @@ export function antigravityModeFlags(role: Role): string[] {
  *    per-run grant is emitted normally via `runDirGrant(req.runId)` — this is
  *    not a degrade.
  * 4. `--dangerously-skip-permissions` is deliberately never emitted.
+ * 5. Unlike claude, opencode, and codex, agy receives NO role-profile system
+ *    prompt (`src/adapter/roleProfile.ts`). `agy` 1.2.2 exposes `--agent
+ *    <name>` and an `agy agents` listing, but the listing printed nothing on
+ *    the development host and the agent-definition format is undocumented in
+ *    `--help`, so there is no verified way to deliver the profile's prose.
+ *    The consequence is concrete: for an antigravity role the Brief
+ *    (`src/engine/roleInstructions.ts`) is the ONLY place the constraints are
+ *    stated — which is why `EXECUTOR_NO_GIT_INSTRUCTION` stays in the brief
+ *    even though the executor profile now repeats it.
+ *    TODO: investigate `agy --agent` / `agy agents` and, if agents can be
+ *    defined, translate the role profile here the way the opencode adapter
+ *    does.
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;

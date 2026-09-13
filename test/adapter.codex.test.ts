@@ -5,12 +5,15 @@ import {
   CODEX_WORKSPACE_WRITE_SANDBOX,
   CODEX_ASK_FOR_APPROVAL,
   CODEX_EFFORT_CONFIG_KEY,
+  CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY,
   codexPermissionFlags,
   codexEffortFlags,
+  codexSystemPromptFlags,
+  tomlQuote,
 } from '../src/adapter/codex';
 import type { LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
-import { isReadOnlyRole } from '../src/adapter/permissions';
+import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 
 /**
@@ -22,8 +25,10 @@ import { ROLES } from '../src/model/role';
  * - the fresh vs `codex resume <id>` vs `codex resume --last` launch branches
  *   (Req 3.1, 3.2, 13.2, 13.3);
  * - attach()'s no-prompt reopen (Req 3.3, 3.4);
- * - the `--sandbox`/`--ask-for-approval` per-role permission mapping and the
- *   per-run `--add-dir` grant (Req 15.1-15.4);
+ * - the `--sandbox`/`--ask-for-approval` mapping — role-independent by
+ *   Decision 2 — and the per-run `--add-dir` grant (Req 15.1-15.4);
+ * - `-c developer_instructions="..."` carrying the role profile's prose policy,
+ *   and the TOML quoting that survives quotes and newlines in it;
  * - the codex-specific degrades: `req.sessionId` dropped on a fresh launch,
  *   the `--config model_reasoning_effort=<effort>` effort degrade, the
  *   interactive form (not `codex exec`), and the prompt dropped on the
@@ -109,7 +114,6 @@ describe('CodexAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () =
     assert.strictEqual(spec.shellArgs[0], '--model');
     assert.ok(!spec.shellArgs.includes('resume'));
     assert.ok(!spec.shellArgs.includes('--last'));
-    assert.ok(!spec.shellArgs.includes('-c'));
     assert.ok(!spec.shellArgs.includes('--continue'));
     assert.ok(!spec.shellArgs.includes('--session-id'));
     assert.ok(!spec.shellArgs.includes('exec'));
@@ -120,7 +124,6 @@ describe('CodexAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () =
     const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
     assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['resume', 'prior-session']);
     assert.ok(!spec.shellArgs.includes('--last'));
-    assert.ok(!spec.shellArgs.includes('-c'));
   });
 
   it('resume with no prior Session_Id falls back to `resume --last` (Req 3.2, 13.2)', () => {
@@ -187,21 +190,23 @@ describe('CodexAdapter attach() (Req 3.3, 3.4)', () => {
       CODEX_ASK_FOR_APPROVAL,
       '--add-dir',
       '.baiton/runs/run-9/',
+      '-c',
+      `${CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY}=${tomlQuote(roleProfile('executor').systemPrompt)}`,
     ]);
     assert.strictEqual(spec.shellPath, AGENT_BINARY.codex);
-    assert.strictEqual(spec.shellArgs.length, 8);
+    assert.strictEqual(spec.shellArgs.length, 10);
 
     assert.ok(!spec.shellArgs.includes('--'));
     assert.ok(!spec.shellArgs.includes('Read brief.md and do what it says.'));
     assert.ok(!spec.shellArgs.includes('--model'));
     assert.ok(!spec.shellArgs.includes('--config'));
     assert.ok(!spec.shellArgs.includes('--last'));
-    assert.ok(!spec.shellArgs.includes('-c'));
   });
 
-  it('uses the read-only sandbox and run-dir grant for a read-only role', () => {
+  it('uses the workspace-write sandbox and run-dir grant for a read-only role too (Decision 2)', () => {
     const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--sandbox', CODEX_READ_ONLY_SANDBOX) >= 0);
+    assert.ok(findPair(spec.shellArgs, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0);
+    assert.ok(!spec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
     assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
   });
 });
@@ -220,9 +225,13 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
     assert.notStrictEqual(CODEX_WORKSPACE_WRITE_SANDBOX, 'accept-edits');
   });
 
+  // Decision 2: `--sandbox read-only` is a whole-session sandbox that blocks
+  // the run-dir result write every role must perform, so every role — the
+  // read-only ones included — runs `workspace-write`, and the no-edit rule is
+  // carried by developer_instructions plus the brief plus the post-run reset.
   for (const role of ROLES) {
-    it(`maps role ${role} to the expected --sandbox/--ask-for-approval values for launch and attach`, () => {
-      const expectedSandbox = isReadOnlyRole(role) ? CODEX_READ_ONLY_SANDBOX : CODEX_WORKSPACE_WRITE_SANDBOX;
+    it(`maps role ${role} to workspace-write plus on-request approval for launch and attach`, () => {
+      const expectedSandbox = CODEX_WORKSPACE_WRITE_SANDBOX;
 
       const launchSpec = new CodexAdapter().launch(req({ role }));
       assert.ok(findPair(launchSpec.shellArgs, '--sandbox', expectedSandbox) >= 0);
@@ -231,18 +240,21 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
       assert.ok(findPair(launchSpec.shellArgs, '--ask-for-approval', CODEX_ASK_FOR_APPROVAL) >= 0);
       assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '--ask-for-approval').length, 1);
 
+      assert.ok(!launchSpec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
+
       const attachSpec = new CodexAdapter().attach({ role, runId: 'run-1', sessionId: 's-1' });
       assert.ok(findPair(attachSpec.shellArgs, '--sandbox', expectedSandbox) >= 0);
+      assert.ok(!attachSpec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
       assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '--sandbox').length, 1);
       assert.ok(findPair(attachSpec.shellArgs, '--ask-for-approval', CODEX_ASK_FOR_APPROVAL) >= 0);
       assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '--ask-for-approval').length, 1);
     });
   }
 
-  it('codexPermissionFlags returns the read-only sandbox flags for planner', () => {
+  it('codexPermissionFlags returns the workspace-write sandbox flags for planner too', () => {
     assert.deepStrictEqual(codexPermissionFlags('planner'), [
       '--sandbox',
-      'read-only',
+      'workspace-write',
       '--ask-for-approval',
       'on-request',
     ]);
@@ -302,4 +314,92 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
       }
     });
   }
+});
+
+describe('CodexAdapter TOML quoting of developer_instructions', () => {
+  it('wraps a plain value in double quotes', () => {
+    assert.strictEqual(tomlQuote('hello'), '"hello"');
+    assert.strictEqual(tomlQuote(''), '""');
+  });
+
+  it('escapes double quotes', () => {
+    assert.strictEqual(tomlQuote('say "hi"'), '"say \\"hi\\""');
+  });
+
+  it('escapes backslashes, and does so before quotes so the escape is not double-escaped', () => {
+    assert.strictEqual(tomlQuote('a\\b'), '"a\\\\b"');
+    assert.strictEqual(tomlQuote('a\\"b'), '"a\\\\\\"b"');
+  });
+
+  it('encodes newlines as \\n rather than emitting a literal line break', () => {
+    const quoted = tomlQuote('line one\nline two');
+    assert.strictEqual(quoted, '"line one\\nline two"');
+    assert.ok(!quoted.includes('\n'), 'a basic TOML string must not contain a raw newline');
+  });
+
+  it('round-trips a value containing both a quote and a newline through JSON.parse', () => {
+    // A basic TOML string and a JSON string share this escape grammar, so
+    // JSON.parse is a faithful decoder for what codex will read back.
+    const value = 'Write "result.json".\nThen stop. C:\\tmp';
+    assert.strictEqual(JSON.parse(tomlQuote(value)), value);
+  });
+
+  it('round-trips every role profile prompt', () => {
+    for (const role of ROLES) {
+      const prompt = roleProfile(role).systemPrompt;
+      assert.strictEqual(JSON.parse(tomlQuote(prompt)), prompt, `role ${role} prompt did not round-trip`);
+    }
+  });
+});
+
+describe('CodexAdapter -c developer_instructions carries the role profile', () => {
+  const adapter = new CodexAdapter();
+
+  it('pins the config key', () => {
+    assert.strictEqual(CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY, 'developer_instructions');
+  });
+
+  for (const role of ROLES) {
+    it(`carries ${role}'s profile prompt, TOML-quoted, on launch and attach`, () => {
+      const expected = `${CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY}=${tomlQuote(roleProfile(role).systemPrompt)}`;
+      assert.deepStrictEqual(codexSystemPromptFlags(role), ['-c', expected]);
+
+      const launchSpec = adapter.launch(req({ role }));
+      assert.ok(
+        findPair(launchSpec.shellArgs, '-c', expected) >= 0,
+        `expected ${role}'s developer_instructions on launch: ${JSON.stringify(launchSpec.shellArgs)}`,
+      );
+      assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '-c').length, 1);
+
+      const attachSpec = adapter.attach({ role, runId: 'run-1', sessionId: 's-1' });
+      assert.ok(
+        findPair(attachSpec.shellArgs, '-c', expected) >= 0,
+        `expected ${role}'s developer_instructions on attach: ${JSON.stringify(attachSpec.shellArgs)}`,
+      );
+      assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '-c').length, 1);
+    });
+  }
+
+  // The value half of `-c key=value` is parsed as TOML, so the quoting must
+  // survive all the way onto argv; an unquoted prompt would parse as a bare
+  // key and be silently taken as a literal string or rejected.
+  it('emits the value already quoted on argv, before the -- prompt separator', () => {
+    const request = req();
+    const args = adapter.launch(request).shellArgs;
+    const idx = args.indexOf('-c');
+    assert.ok(idx >= 0);
+    const value = args[idx + 1];
+    assert.ok(value.startsWith('developer_instructions="'));
+    assert.ok(value.endsWith('"'));
+
+    const sep = args.indexOf('--');
+    assert.ok(idx < sep, `developer_instructions must precede the -- separator: ${JSON.stringify(args)}`);
+    assert.strictEqual(args[args.length - 1], request.prompt);
+  });
+
+  it('is dropped along with the rest of the prompt-bearing tail on no branch: resume --last still carries it', () => {
+    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.ok(spec.shellArgs.includes('-c'));
+    assert.ok(!spec.shellArgs.includes('--'));
+  });
 });

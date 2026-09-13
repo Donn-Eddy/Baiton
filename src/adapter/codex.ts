@@ -2,7 +2,8 @@ import { execFile } from 'child_process';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from './adapter';
 import { AGENT_BINARY } from './adapter';
 import type { Role } from '../model/role';
-import { isReadOnlyRole, runDirGrant } from './permissions';
+import { runDirGrant } from './permissions';
+import { roleProfile } from './roleProfile';
 
 /** The codex CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const CODEX_BIN = AGENT_BINARY.codex;
@@ -10,22 +11,67 @@ const CODEX_BIN = AGENT_BINARY.codex;
 /** How long to wait for `codex --version` before giving up (ms). */
 const PROBE_TIMEOUT_MS = 10_000;
 
-/** The codex `--sandbox` value used for read-only roles. */
+/**
+ * codex's read-only sandbox. Deliberately NOT used for the read-only roles —
+ * see degrade 5 on the class doc comment. Kept named so the option we rejected
+ * is visible at the decision site rather than only in history.
+ */
 export const CODEX_READ_ONLY_SANDBOX = 'read-only';
 
-/** The codex `--sandbox` value used for write-capable roles. */
+/** The codex `--sandbox` value used for every role (see degrade 5). */
 export const CODEX_WORKSPACE_WRITE_SANDBOX = 'workspace-write';
 
 /** The codex `--ask-for-approval` value used for every role. */
 export const CODEX_ASK_FOR_APPROVAL = 'on-request';
 
-/** Build the `--sandbox <read-only|workspace-write> --ask-for-approval on-request` flags for a role. */
-export function codexPermissionFlags(role: Role): string[] {
+/**
+ * Build the `--sandbox workspace-write --ask-for-approval on-request` flags.
+ *
+ * Role-independent by design: `--sandbox read-only` is a whole-session sandbox
+ * that also blocks the run-dir result write every role must perform, so every
+ * role runs `workspace-write` and the no-edit rule is carried by
+ * {@link codexSystemPromptFlags} plus the brief plus the post-run reset —
+ * mirroring claude's `readOnlyFallbackToAcceptEdits` fallback. `role` is kept
+ * in the signature because it is the natural seam if codex ever gains a scoped
+ * write allow-list.
+ */
+export function codexPermissionFlags(_role: Role): string[] {
   return [
     '--sandbox',
-    isReadOnlyRole(role) ? CODEX_READ_ONLY_SANDBOX : CODEX_WORKSPACE_WRITE_SANDBOX,
+    CODEX_WORKSPACE_WRITE_SANDBOX,
     '--ask-for-approval',
     CODEX_ASK_FOR_APPROVAL,
+  ];
+}
+
+/** The config key codex reads as extra developer-level system instructions. */
+export const CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY = 'developer_instructions';
+
+/**
+ * Render `value` as a basic TOML string: wrapped in double quotes, with
+ * backslashes and double quotes escaped and newlines encoded as `\n`.
+ *
+ * codex parses the `value` half of `-c key=value` as TOML and only falls back
+ * to a literal raw string when that parse fails, so a prompt containing a
+ * quote or a newline must be quoted here or it is silently mangled.
+ */
+export function tomlQuote(value: string): string {
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n');
+  return `"${escaped}"`;
+}
+
+/**
+ * Build the `-c developer_instructions="<profile prompt>"` pair carrying the
+ * role profile's plain-language constraints (codex's analogue of claude's
+ * `--append-system-prompt`).
+ */
+export function codexSystemPromptFlags(role: Role): string[] {
+  return [
+    '-c',
+    `${CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY}=${tomlQuote(roleProfile(role).systemPrompt)}`,
   ];
 }
 
@@ -64,13 +110,16 @@ export function codexEffortFlags(effort: string | undefined): string[] {
  *    positional, not PROMPT, so passing the prompt there would silently be
  *    read as a session name and the resume would target a session that does
  *    not exist.
- * 5. Read-only roles get `--sandbox read-only`, which is a whole-session
- *    sandbox rather than claude's scoped `Write(.baiton/runs/**)` allow-list.
- *    The Requirement 15.4 run-dir grant is still emitted via `--add-dir`, but
- *    it may not make the run dir writable under `read-only`; the documented
- *    fallback if that proves true is to widen read-only roles to
- *    `--sandbox workspace-write`, a one-constant change at
- *    `CODEX_READ_ONLY_SANDBOX`'s use site.
+ * 5. Every role, read-only ones included, gets `--sandbox workspace-write`.
+ *    `--sandbox read-only` is a whole-session sandbox with no scoped
+ *    allow-list like claude's `Write(.baiton/runs/**)`, so it also blocks the
+ *    run-dir result write that is the entire deliverable of a read-only stage.
+ *    The no-edit rule is therefore carried in prose — by the role profile's
+ *    `developer_instructions` and by the brief — and backstopped by the
+ *    post-run reset, exactly as claude's `readOnlyFallbackToAcceptEdits`
+ *    fallback does. The Requirement 15.4 run-dir grant is still emitted via
+ *    `--add-dir`. This is a real degrade: a misbehaving read-only role can
+ *    write inside the workspace and is caught after the fact, not prevented.
  * 6. `--dangerously-bypass-approvals-and-sandbox`,
  *    `--dangerously-bypass-hook-trust`, `--approve-for-me`,
  *    `--sandbox danger-full-access` and `--ask-for-approval never` are
@@ -109,9 +158,9 @@ export class CodexAdapter implements Adapter {
    * Build the terminal launch for one stage.
    *
    * Fresh launch: `codex --model <m> [--config model_reasoning_effort=<e>]
-   * --sandbox <read-only|workspace-write> --ask-for-approval on-request
-   * --add-dir <run-dir> -- "<prompt>"` (`req.sessionId` is deliberately
-   * dropped, see the class doc comment). Resume: `resume <resumeSessionId>`
+   * --sandbox workspace-write --ask-for-approval on-request --add-dir
+   * <run-dir> -c developer_instructions="<profile prompt>" -- "<prompt>"`
+   * (`req.sessionId` is deliberately dropped, see the class doc comment). Resume: `resume <resumeSessionId>`
    * leads the arguments when a prior Session_Id is known, falling back to
    * `resume --last` (with no prompt) when it is not (Requirements 13.2, 13.3,
    * 15.1–15.4). Every role is additionally granted write access to its own
@@ -134,6 +183,7 @@ export class CodexAdapter implements Adapter {
     args.push(...codexEffortFlags(req.effort));
     args.push(...codexPermissionFlags(req.role));
     args.push(...runDirGrant(req.runId));
+    args.push(...codexSystemPromptFlags(req.role));
 
     if (!droppedPrompt) {
       args.push('--', req.prompt);
@@ -144,8 +194,9 @@ export class CodexAdapter implements Adapter {
 
   /**
    * Build the args to reopen an existing session with no prompt: `codex
-   * resume <id> --sandbox <read-only|workspace-write> --ask-for-approval
-   * on-request --add-dir <run-dir>` (Requirements 3.3, 3.4).
+   * resume <id> --sandbox workspace-write --ask-for-approval on-request
+   * --add-dir <run-dir> -c developer_instructions="<profile prompt>"`
+   * (Requirements 3.3, 3.4).
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec {
     const args: string[] = [
@@ -153,6 +204,7 @@ export class CodexAdapter implements Adapter {
       req.sessionId,
       ...codexPermissionFlags(req.role),
       ...runDirGrant(req.runId),
+      ...codexSystemPromptFlags(req.role),
     ];
 
     return { shellPath: CODEX_BIN, shellArgs: args };
