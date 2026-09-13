@@ -16,6 +16,7 @@ import {
   OverrideGetter,
 } from '../src/activation/executable';
 import { isErr, isOk } from '../src/model/result';
+import { AGENT_BINARY } from '../src/adapter/adapter';
 
 /**
  * Unit tests for workspace resolution, the engine-version guard, executable
@@ -38,7 +39,8 @@ import { isErr, isOk } from '../src/model/result';
  *   (Req 22.7, 22.8).
  * - Packaging: extensionKind includes "workspace", engines.vscode "^1.106.0",
  *   MIT license in package.json + LICENSE file, zero native modules
- *   (Req 23.1, 23.2, 23.4).
+ *   (Req 23.1, 23.2, 23.4); an executable-override setting declared for every
+ *   AGENT_BINARY id (Req 22.7).
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -423,6 +425,19 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       [],
       `expected no native modules, found: ${nativeArtifacts.join(', ')}`,
     );
+  });
+
+  it('declares an executable-override setting for every supported agent id (Req 22.7)', () => {
+    type SettingProps = Record<string, { type?: string; default?: unknown }>;
+    const contributes = pkg.contributes as { configuration?: { properties?: SettingProps } };
+    const props: SettingProps | undefined = contributes.configuration?.properties;
+    assert.ok(props, 'contributes.configuration.properties must be present');
+    for (const agent of Object.keys(AGENT_BINARY)) {
+      const entry: { type?: string; default?: unknown } | undefined = props[`baiton.agents.${agent}.path`];
+      assert.ok(entry, `missing baiton.agents.${agent}.path setting`);
+      assert.strictEqual(entry.type, 'string');
+      assert.strictEqual(entry.default, '');
+    }
   });
 });
 

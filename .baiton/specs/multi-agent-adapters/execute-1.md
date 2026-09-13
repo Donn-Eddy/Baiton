@@ -2,23 +2,24 @@
 
 ```json
 {
-  "summary": "Replaced the single-agent claude-only executable gate with a per-agent resolution table. Added AgentExecutables and resolveAgentExecutables(agents, lookup, override) to src/activation/executable.ts, wrapping the unchanged single-agent resolveExecutable core and adding an `unknown-agent` ExecutableError variant. src/extension.ts now resolves one executable per distinct agent id named in config.roles (via ROLES.map(role => config.roles[role].agent)) instead of hard-wiring `claude`, and ActivationState carries a single `executables: AgentExecutables` field in place of `executable`/`canDispatch`. src/activation/commands.ts's CommandActivation mirrors that change; ensureCanDispatch/ensureExecutable are now role-gated (ensureExecutable(activation, surface, role) checks that role's configured agent), with a new ensureNotRestricted extracted for the Restricted-Mode-only check. Stage triggers gate on STAGE_ROLE[stage], Submit PR on 'pr-writer', and the View command's executable check moved into runView after the journal-recorded stage's role is known (so a missing binary for one agent no longer blocks viewing a session that used a different, installed agent). replan/stop no longer gate on an executable at all (they launch no sub-agent), only on Restricted Mode - a deliberate, documented loosening called out in the plan's risks. Added a new `resolveAgentExecutables` test suite (6 cases: multi-agent resolution incl. antigravity->agy, de-duplication, partial failure, per-agent override, unknown-agent, never-asked-for) beside the existing untouched resolveExecutable tests.",
+  "summary": "Declared baiton.agents.opencode.path, baiton.agents.antigravity.path and baiton.agents.codex.path in package.json's contributes.configuration.properties, immediately after the existing baiton.agents.claude.path, each keyed by agent id (not binary name), type string, default \"\", following the claude row's description sentence shape (the antigravity entry additionally names the agy binary). No src/ files were touched, since settingsOverride and resolveAgentExecutables already handle arbitrary agent ids generically. As a deliberate, scope-noted deviation beyond the todo's stated package.json-only file list, added a packaging-gating test to test/activation.gating.test.ts that derives the expected baiton.agents.<id>.path keys from AGENT_BINARY (imported from src/adapter/adapter.ts) so a future agent id cannot be added without a matching override setting; extended the file's coverage doc comment accordingly.",
   "files_changed": [
-    "src/activation/executable.ts",
-    "src/extension.ts",
-    "src/activation/commands.ts",
+    "package.json",
     "test/activation.gating.test.ts"
   ],
   "commands_run": [
+    "node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"",
+    "grep -n 'baiton.agents' package.json",
     "npm run compile",
     "npm run lint",
     "npm test"
   ],
   "notes": [
-    "Two deliberate behaviour changes fall out per the plan: (a) the View command is no longer implicitly blocked by Restricted Mode via the old combined canDispatch flag - it now only checks the role's executable, matching its existing doc comment that it writes nothing; (b) replan/stop are no longer executable-gated since they launch no sub-agent (only Restricted Mode still blocks them) - flagged here for the reviewer as requested by the plan's risks section.",
-    "No change to package.json (T08) - left for that todo; a settings override for opencode/antigravity/codex reads as unset until package.json declares the keys, but PATH resolution still works so this todo is not blocked by that.",
-    "No adapter now receives a resolved absolute path via shellPath; adapters still emit the bare binary name, matching the plan's acceptance criteria.",
-    "grep confirms no remaining `canDispatch` identifier and no remaining `claude` literal in src/extension.ts; all 416 tests (410 prior + 6 new resolveAgentExecutables cases) plus 1 pending pass, and npm run compile / npm run lint are both clean."
+    "Deviation from the todo's stated file list (package.json only): added one test case plus an AGENT_BINARY import to test/activation.gating.test.ts, per the plan's explicit allowance for this deviation. No other src/ or test file was touched.",
+    "The setting keys are segmented by agent id, not binary name: baiton.agents.antigravity.path (not baiton.agents.agy.path), since settingsOverride interpolates the id from config.roles[role].agent.",
+    "This is a manifest-only change; it does not make opencode/antigravity/codex reachable end-to-end (that is T09-T11's adapter work and T12's sweep). A stale override still yields the existing 'override-missing' hard failure rather than a silent PATH fallback, consistent with current claude behaviour.",
+    "All 417 existing tests plus the 1 new test pass; npm run compile and npm run lint are clean.",
+    "TypeScript strict mode required an explicit type annotation on the new test's `entry` local (indexing a Record<string, ...> via a template-literal key inside a function whose return type was itself being inferred triggered TS7022 implicit-any-in-own-initializer); fixed by declaring a named SettingProps type and annotating `props`/`entry` explicitly, no behavioral effect on the assertions."
   ]
 }
 ```
