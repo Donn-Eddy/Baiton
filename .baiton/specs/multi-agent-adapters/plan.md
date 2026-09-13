@@ -4,73 +4,86 @@
 {
   "steps": [
     {
-      "title": "Create test/adapter.codex.test.ts with the shared scaffolding mirrored from the antigravity test",
-      "detail": "Create the new file following the exact structure of test/adapter.antigravity.test.ts (the closest sibling, itself mirrored from test/adapter.claude.test.ts). Imports: `import * as assert from 'assert';`, the adapter and its exported helpers/constants from '../src/adapter/codex' (CodexAdapter, CODEX_READ_ONLY_SANDBOX, CODEX_WORKSPACE_WRITE_SANDBOX, CODEX_ASK_FOR_APPROVAL, CODEX_EFFORT_CONFIG_KEY, codexPermissionFlags, codexEffortFlags), `type { LaunchRequest }` and `AGENT_BINARY` from '../src/adapter/adapter', `isReadOnlyRole` from '../src/adapter/permissions', and `ROLES` from '../src/model/role'. Add the same two local helpers verbatim: `req(overrides: Partial<LaunchRequest> = {}): LaunchRequest` returning {role:'executor', model:'sonnet', prompt:'Read brief.md and do what it says.', runId:'run-123', resume:false, sessionId:'session-abc', ...overrides}, and `findPair(args, flag, value): number` scanning for an adjacent flag/value pair. Open with a file-level doc comment naming what this file pins (probe contract Req 14.2-14.4; fresh vs `codex resume <id>` vs `codex resume --last` branches Req 3.1/3.2/13.2/13.3; attach() no-prompt reopen Req 3.3/3.4; the --sandbox/--ask-for-approval permission mapping and --add-dir run-dir grant Req 15.1-15.4; and the codex-specific degrades: dropped req.sessionId, the --config model_reasoning_effort effort degrade, the interactive-form-not-`exec` choice, and the prompt dropped on the `resume --last` branch). No mocha/ts-node config change is needed: .mocharc.json already globs test/**/*.test.ts.",
+      "title": "Establish the verification baseline: compile, lint, and the full suite",
+      "detail": "Run, in order and from the repo root: `npm run compile` (tsc -p ./, with the copy:media precompile step), `npm run lint` (eslint src test --ext .ts), and `npm test` (mocha over the .mocharc.json glob test/**/*.test.ts). Also run the two split scripts `npm run test:unit` and `npm run test:property` to confirm neither split is silently skipping files the default glob picks up. Baseline measured on the current tree at commit a0f2a1c: compile exit 0, lint exit 0, `npm test` = 515 passing / 1 pending, no failures. The single pending test is 'fails migration for an older version with no upgrade path and leaves the file unchanged' in the config-version migration suite -- it is pre-existing, unrelated to the adapter work, and must be left alone (do NOT try to 'fix' it as part of this todo). If the baseline is still fully green, T12 has no breakage to repair and the todo's work becomes the confirmation coverage in steps 2-5; record the exact command output tails for the result summary either way.",
       "files": [
-        "test/adapter.codex.test.ts",
-        "test/adapter.antigravity.test.ts",
+        "package.json",
+        ".mocharc.json"
+      ]
+    },
+    {
+      "title": "Fix any breakage surfaced by step 1 (expected: none)",
+      "detail": "Only if step 1 is not green. Triage each failure into one of three buckets and fix accordingly. (a) Type errors from the widened `AgentId` union (src/adapter/adapter.ts) -- a test or src site that still assumes `id: 'claude'` or a `Record<'claude', ...>` shape; widen the annotation rather than narrowing the union back. (b) Failures from the per-role wiring -- a test constructing `LaunchDeps`/`RunQueueDeps`/`SpecDraftDeps`/`SubmitPrDeps` with the removed single `adapter` field instead of the `adapterForRole(role)` seam (see src/engine/runQueue.ts:248, src/engine/specDraft.ts:101, src/engine/submitPr.ts:73; src/engine/launcher.ts:105 still takes a single already-selected `adapter`, which is correct -- the caller selects it). (c) Failures from per-agent executable resolution -- a test still assuming one global `canDispatch`; the current shape is `resolveAgentExecutables` returning an `AgentExecutables` table with per-agent `get`/`errorFor` (src/activation/executable.ts) and a per-role gate in src/activation/commands.ts. Prefer fixing the test to match the shipped engine shape; change src only if a genuine defect is proven, and say so explicitly in the result notes.",
+      "files": [
+        "src/adapter/adapter.ts",
+        "src/engine/runQueue.ts",
+        "src/engine/specDraft.ts",
+        "src/engine/submitPr.ts",
+        "src/activation/executable.ts",
+        "src/activation/commands.ts"
+      ]
+    },
+    {
+      "title": "Pin default (claude-only) config behavior as unchanged, in test/adapter.claude.test.ts",
+      "detail": "This is the todo's named deliverable ('confirming default (claude-only) config behavior is unchanged') and the reason test/adapter.claude.test.ts is the listed file. Append one describe block, e.g. describe('default claude-only config is unchanged by the multi-agent wiring'), importing `defaultConfig` from '../src/config/defaultConfig', `createAdapterRegistry` from '../src/adapter', `AGENT_BINARY` from '../src/adapter/adapter', and `ROLES` from '../src/model/role'. Assert: (1) every role in ROLES has `defaultConfig().roles[role].agent === 'claude'` -- the default config still selects claude for all six roles (src/config/defaultConfig.ts). (2) `createAdapterRegistry().get(defaultConfig().roles[role].agent)` is defined and has `id === 'claude'` for every role. (3) The behavioral equivalence that matters: for every role in ROLES, and for both a fresh request and a resume-with-prior-id request, `registry.get('claude')!.launch(req({role, ...}))` deepStrictEqual `new ClaudeAdapter().launch(req({role, ...}))`, and the same for `attach({role, runId, sessionId})` -- i.e. routing through the registry produces byte-identical argv to the pre-T06 direct `new ClaudeAdapter()` construction. (4) `shellPath === AGENT_BINARY.claude` on both launch and attach, which pins the one adapter that still hard-codes its binary name (src/adapter/claude.ts:12 `const CLAUDE_BIN = 'claude'`) against the shared map the executable resolver reads. Reuse the file's existing `req()` and `findPair()` helpers; do not duplicate them.",
+      "files": [
+        "test/adapter.claude.test.ts",
+        "src/config/defaultConfig.ts",
+        "src/adapter/index.ts",
+        "src/adapter/claude.ts"
+      ]
+    },
+    {
+      "title": "Close the T05 registry coverage gap with test/adapter.registry.test.ts",
+      "detail": "`createAdapterRegistry`, `isAgentId` and the `AdapterRegistry` interface (src/adapter/index.ts) are the seam every dispatch site now depends on, and nothing under test/ imports them today (only test/activation.gating.test.ts touches the adapter module, and only for AGENT_BINARY). Add a small focused file. Assert: (1) `registry.ids` deepStrictEqual the keys of AGENT_BINARY, in the same order, so a future agent id cannot be added to the map without an instance. (2) For each id in AGENT_BINARY, `registry.require(id).id === id` and `registry.get(id)!.id === id` -- catching a copy-paste mis-wiring such as codex mapped to the antigravity instance. (3) `registry.get()` returns undefined for unknown strings: 'gemini', '', ' claude ', 'CLAUDE' (case-sensitive), and 'toString'/'constructor'/'__proto__' -- the last group pins that `isAgentId` uses `Object.prototype.hasOwnProperty.call` rather than `in`/truthy indexing. (4) Instances are stable within one registry (`registry.get('claude') === registry.get('claude')`) and independent across registries (two `createAdapterRegistry()` calls yield different claude instances), matching the doc comment's stateless-sharing claim. (5) The `mode` argument threads to claude only: build `createAdapterRegistry({readOnlyFallbackToAcceptEdits: true})` and assert its claude adapter's launch args for a read-only role carry the acceptEdits fallback (use the same ACCEPT_EDITS_MODE / READ_ONLY_ALLOWED_TOOLS constants the claude test uses), while the default registry's claude adapter does not, and that the opencode/antigravity/codex adapters' args are byte-identical between the two registries (the flip is claude-specific).",
+      "files": [
+        "test/adapter.registry.test.ts",
+        "src/adapter/index.ts",
+        "src/adapter/permissions.ts",
         "test/adapter.claude.test.ts"
       ]
     },
     {
-      "title": "describe('CodexAdapter probe shape (Req 14.2, 14.3, 14.4)')",
-      "detail": "Two tests, mirroring the antigravity file. (1) 'reports ok:false with a non-empty reason and empty version when the CLI is missing': save process.env.PATH, set it to '', call `await new CodexAdapter().probe()` in a try/finally that restores PATH. Assert typeof result.version === 'string', typeof result.ok === 'boolean', result.ok === false, result.version === '', typeof result.reason === 'string', reason.length > 0, and reason.includes(AGENT_BINARY.codex) — this covers describeProbeError's ENOENT and generic branches without pinning which one fires. (2) 'returns a value conforming to the ProbeResult shape regardless of outcome': probe with the ambient PATH and assert the discriminated shape — when ok, version.length > 0 and reason === undefined; when not ok, reason is a non-empty string. Do NOT assert a concrete version string: codex prints the prefixed 'codex-cli 0.154.0' and the adapter keeps the whole trimmed stdout, so asserting content would make the test machine-dependent. Optionally add a comment noting that the prefixed-version tolerance is why no format assertion exists here.",
+      "title": "Close the unknown-agent branch gap in specDraft and submitPr",
+      "detail": "src/engine/runQueue.ts:452-458 has an unknown-agent refusal that is covered (test/runQueue.approvalGate.property.test.ts:308). The mirrored branches at src/engine/specDraft.ts:168-174 and src/engine/submitPr.ts:131-136 are not exercised by any test -- test/engine.specDraft.test.ts:190 and test/submitPr.test.ts:220 both wire `adapterForRole: () => adapter`, so the undefined path never runs. Add one test to each existing file, following the runQueue test's shape: override the existing deps with `adapterForRole: () => undefined`, drive the same entry point the happy-path test uses, and assert the failure `kind` matches the code's refusal kind (read it from the source rather than assuming it is 'unknown-agent' in all three), that the message names the role and points at \"roles.<role>.agent\" in .baiton/config.json, and -- the important part -- that no probe ran and no terminal was created (assert the stub adapter's probe counter stays 0 and the terminal host recorded no creation), pinning that the refusal happens before any process is spawned.",
       "files": [
-        "test/adapter.codex.test.ts",
-        "src/adapter/codex.ts"
+        "test/engine.specDraft.test.ts",
+        "test/submitPr.test.ts",
+        "src/engine/specDraft.ts",
+        "src/engine/submitPr.ts",
+        "test/runQueue.approvalGate.property.test.ts"
       ]
     },
     {
-      "title": "describe('CodexAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)')",
-      "detail": "Instantiate one `const adapter = new CodexAdapter();`. Tests: (a) fresh launch — spec.shellPath === AGENT_BINARY.codex (i.e. 'codex'), shellArgs[0] === '--model', args do not include 'resume', '--last', '-c', '--continue', '--session-id', 'exec', nor the dropped 'session-xyz' value (pins degrade 1 and the interactive-not-exec choice). (b) resume with a prior id — `req({resume:true, resumeSessionId:'prior-session'})` gives shellArgs.slice(0,2) deepStrictEqual ['resume','prior-session'], and args do not include '--last' or '-c'. (c) resume with no prior id — `resumeSessionId: undefined` gives shellArgs.slice(0,2) deepStrictEqual ['resume','--last']; assert exactly one 'resume' occurrence. (d) empty-string resumeSessionId behaves as no prior id (same ['resume','--last']), pinning the `.length > 0` guard. (e) fresh/resume tails identical: fresh.shellArgs deepStrictEqual resumeWithId.shellArgs.slice(2). (f) prompt placement — on fresh and on resume-with-id, the last two args are ['--', req.prompt] (defensive separator, mirroring the claude adapter). (g) the `resume --last` prompt-drop degrade — assert the args do NOT include '--' and do NOT include the prompt text, and add a comment explaining why (a trailing positional there binds to SESSION_ID, not PROMPT). (h) model/effort: with `effort:'high'`, findPair(args,'--model','sonnet') >= 0 and args include '--config' immediately followed by `${CODEX_EFFORT_CONFIG_KEY}=high` (use findPair(args,'--config','model_reasoning_effort=high') >= 0); with effort undefined and with effort '', args do not include '--config' at all.",
+      "title": "Re-verify: compile, lint, full suite, and record the deltas",
+      "detail": "Re-run `npm run compile`, `npm run lint`, `npm test`, `npm run test:unit` and `npm run test:property`. All must be exit 0 with zero failures. The passing count must be the 515 baseline plus exactly the tests added in steps 3-5, and the pending count must still be exactly 1 (the pre-existing config-version migration test) -- a second pending entry means something was accidentally skipped rather than fixed. Capture the output tail for the result file. State explicitly in the summary whether step 2 had to change anything (expected: no), and list any src/ file touched with the defect that justified it.",
       "files": [
-        "test/adapter.codex.test.ts",
-        "src/adapter/codex.ts"
-      ]
-    },
-    {
-      "title": "describe('CodexAdapter attach() (Req 3.3, 3.4)')",
-      "detail": "Mirror the antigravity attach block. (1) Exact-shape test: `adapter.attach({role:'executor', runId:'run-9', sessionId:'session-42'})` deepStrictEqual shellArgs ['resume','session-42','--sandbox',CODEX_WORKSPACE_WRITE_SANDBOX,'--ask-for-approval',CODEX_ASK_FOR_APPROVAL,'--add-dir','.baiton/runs/run-9/'], shellPath === AGENT_BINARY.codex, shellArgs.length === 8, and assert absence of '--', the prompt text, '--model', '--config', '--last' and '-c' (no prompt, no model on a reopen). (2) Read-only role test: `attach({role:'planner', runId:'run-1', sessionId:'session-1'})` has findPair(args,'--sandbox',CODEX_READ_ONLY_SANDBOX) >= 0 and findPair(args,'--add-dir','.baiton/runs/run-1/') >= 0.",
-      "files": [
-        "test/adapter.codex.test.ts",
-        "src/adapter/codex.ts"
-      ]
-    },
-    {
-      "title": "describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.4)')",
-      "detail": "(1) Pin the constants: CODEX_READ_ONLY_SANDBOX === 'read-only', CODEX_WORKSPACE_WRITE_SANDBOX === 'workspace-write', CODEX_ASK_FOR_APPROVAL === 'on-request', CODEX_EFFORT_CONFIG_KEY === 'model_reasoning_effort'; add notStrictEqual guards that the sandbox values are neither 'danger-full-access' nor claude's 'acceptEdits'/agy's 'accept-edits', the copy-paste defects this file exists to catch. (2) Loop `for (const role of ROLES)` asserting, for both launch(req({role})) and attach({role, runId:'run-1', sessionId:'s-1'}): findPair(args,'--sandbox', isReadOnlyRole(role) ? CODEX_READ_ONLY_SANDBOX : CODEX_WORKSPACE_WRITE_SANDBOX) >= 0, exactly one '--sandbox' occurrence, findPair(args,'--ask-for-approval', CODEX_ASK_FOR_APPROVAL) >= 0 for every role (codex differs from claude/agy in that the approval flag is role-independent), and exactly one '--ask-for-approval'. (3) Helper-level tests: codexPermissionFlags('planner') deepStrictEqual ['--sandbox','read-only','--ask-for-approval','on-request']; codexPermissionFlags('executor') deepStrictEqual ['--sandbox','workspace-write','--ask-for-approval','on-request']; codexEffortFlags('medium') deepStrictEqual ['--config','model_reasoning_effort=medium']; codexEffortFlags(undefined) and codexEffortFlags('') both deepStrictEqual []. (4) Run-dir grant + forbidden-flag loop over ROLES for launch and attach: findPair(args,'--add-dir','.baiton/runs/run-777/') >= 0, and none of ['--dangerously-bypass-approvals-and-sandbox','--dangerously-bypass-hook-trust','--approve-for-me','--permission-mode','--allowedTools','--mode','--agent','--auto','--dangerously-skip-permissions','--prompt-interactive','--variant','--effort'] appear, plus assert the args contain neither the value 'danger-full-access' nor 'never' (the forbidden --sandbox/--ask-for-approval values, which are values rather than flags so must be checked with includes on the whole array).",
-      "files": [
-        "test/adapter.codex.test.ts",
-        "src/adapter/codex.ts",
-        "src/adapter/permissions.ts"
-      ]
-    },
-    {
-      "title": "Verify: compile, lint, and run the new test file",
-      "detail": "Run `npx mocha test/adapter.codex.test.ts` (ts-node/register comes from .mocharc.json), then `npm run lint` and `npm run compile` to confirm no type or lint breakage. If a test fails, fix the TEST to match src/adapter/codex.ts's actual behavior — T11 is a test-only todo and must not modify the adapter; if a failure looks like a genuine adapter defect rather than a test-expectation mismatch, record it for T12 rather than changing src here. Do not run the full suite as part of this todo (that is T12).",
-      "files": [
-        "test/adapter.codex.test.ts"
+        "test/adapter.claude.test.ts",
+        "test/adapter.registry.test.ts",
+        "test/engine.specDraft.test.ts",
+        "test/submitPr.test.ts"
       ]
     }
   ],
   "risks": [
-    "The probe tests must not assume a `codex` binary is installed. Test 2 of the probe block is written to accept either outcome; only the empty-PATH test asserts a concrete failure result. Mutating process.env.PATH must always be restored in a finally block or it will leak into every later test in the mocha process.",
-    "Emptying PATH may not make execFile fail on every platform/Node version if the adapter ever resolved an absolute path; here CODEX_BIN is the bare name 'codex', so ENOENT is expected, but the assertion is deliberately on `ok === false` + non-empty reason rather than on the specific ENOENT wording.",
-    "Copy-paste drift from adapter.antigravity.test.ts is the main hazard: agy uses `--mode`/`--effort`/`--prompt-interactive` and a bare (no-subcommand) fresh launch, while codex uses `--sandbox`/`--ask-for-approval`/`--config`/`-- <prompt>` and a `resume` subcommand. Every flag name and the argv-position assertions must be re-derived from src/adapter/codex.ts, not copied.",
-    "The adapter emits the long `--config` form while the spec text described `-c key=value`. The test must pin what the code does (`--config`); if the executor writes `-c` from the spec text the test will fail spuriously. Note this discrepancy in a comment rather than changing the adapter.",
-    "Exact deepStrictEqual argv assertions (attach, and the ['resume','--last'] prefix) are intentionally brittle so that flag-order regressions surface, but they will need updating if the adapter later adds a flag; keep those exact-shape assertions confined to attach() and to slice-based prefixes on launch.",
-    "The `resume --last` prompt-drop is a behavior that looks like a bug at a glance; without the explanatory comment a future reader may 'fix' the adapter and break the test. The comment is part of the deliverable.",
-    "isReadOnlyRole/ROLES are imported rather than hard-coding the role list, so the mapping loop stays correct if a role is added; do not inline a literal role array."
+    "The premise of T12 ('fix any existing test or type-check breakage') is already satisfied on the current tree: compile, lint and the full 515-test suite are green at commit a0f2a1c. The real hazard is therefore scope drift -- treating a green suite as licence to refactor. Steps 3-5 add confirmation coverage for the genuinely untested seams (registry, default-config equivalence, two unknown-agent branches) and nothing else; do not restructure adapters, config or engine wiring under this todo.",
+    "src/adapter/claude.ts still defines its own `const CLAUDE_BIN = 'claude'` (line 12) while opencode/antigravity/codex all derive their binary from `AGENT_BINARY`. That is a latent drift between the adapter's shellPath and the name the executable resolver looks up on PATH. Step 3 pins it with an assertion in the test rather than editing src: changing claude.ts is outside T12's stated scope (T01 owned src/adapter/adapter.ts) and would touch the one adapter this spec promises not to change the behavior of. If the executor believes the src change is warranted, record it as a follow-up rather than making it.",
+    "The probe tests in the three new-adapter test files depend on ambient PATH (they accept either outcome by design, and the empty-PATH cases restore process.env.PATH in a finally). Any new test added here must not mutate PATH or cwd without restoring it -- a leak would make the suite order-dependent and would surface as a flake in the full run rather than in a single-file run.",
+    "`npm test` runs the default mocha glob, which is the same set as test:unit + test:property combined. Running only one split and reporting it as 'the full suite' would miss breakage; step 1 and step 6 deliberately run all three.",
+    "The exact refusal `kind` strings differ or could differ between runQueue, specDraft and submitPr (runQueue uses 'unknown-agent'). Step 5 must read each source's refusal literal rather than copying runQueue's, or the new tests will fail spuriously and tempt an unwarranted src edit.",
+    "The default-config equivalence test in step 3 compares registry-routed argv against a directly constructed ClaudeAdapter in the same process; it proves the wiring is transparent but does not prove parity with the pre-T06 released behavior. That stronger claim rests on test/adapter.claude.test.ts and test/adapter.launch.property.test.ts being unmodified since before this spec -- verify with `git log --oneline -- test/adapter.claude.test.ts test/adapter.launch.property.test.ts` and note the finding rather than assuming it.",
+    "`registry.ids` deepStrictEqual against Object.keys(AGENT_BINARY) pins insertion order of an object literal. That is intentional (it forces a new agent id to be registered in both places) but will need updating whenever an agent is added; the test comment must say so, or a future contributor will read the failure as a bug."
   ],
   "acceptance": [
-    "test/adapter.codex.test.ts exists and is picked up by the existing .mocharc.json glob with no config change.",
-    "`npx mocha test/adapter.codex.test.ts` passes with every test green, both with and without a `codex` binary on PATH.",
-    "`npm run compile` (tsc -p ./) and `npm run lint` (eslint src test) both pass with no new errors.",
-    "The file covers all four areas named in T11: probe success/failure shape, fresh vs `codex resume <id>` vs `codex resume --last` launch args, attach()'s no-prompt reopen, and the `--config model_reasoning_effort=<effort>` override mapping (present when effort is set, absent when undefined or '').",
-    "The per-role `--sandbox read-only|workspace-write` mapping and the `--ask-for-approval on-request` flag are asserted for every role in ROLES on both launch and attach, and the per-run `--add-dir .baiton/runs/<run-id>/` grant is asserted present.",
-    "Forbidden escape hatches (--dangerously-bypass-approvals-and-sandbox, --dangerously-bypass-hook-trust, --approve-for-me, and the values danger-full-access / never) are asserted absent from every emitted arg list.",
-    "The three codex-specific degrades are each pinned by an assertion with an explanatory comment: req.sessionId dropped on a fresh launch, the prompt dropped on the `resume --last` branch, and the interactive form used rather than the `exec` subcommand.",
-    "No file under src/ is modified by this todo."
+    "`npm run compile` (tsc -p ./) exits 0 with no errors.",
+    "`npm run lint` (eslint src test --ext .ts) exits 0 with no errors or warnings.",
+    "`npm test` exits 0 with zero failures, a passing count equal to the 515 baseline plus the tests added by this todo, and exactly 1 pending -- the pre-existing, unrelated config-version migration test, which is left untouched.",
+    "`npm run test:unit` and `npm run test:property` each exit 0 with zero failures.",
+    "test/adapter.claude.test.ts contains a block proving default claude-only behavior is unchanged: every role in defaultConfig() is agent 'claude'; the registry resolves each to an adapter with id 'claude'; and registry-routed launch()/attach() argv is deepStrictEqual to directly-constructed ClaudeAdapter argv for every role on both the fresh and resume branches.",
+    "The claude adapter's shellPath is asserted equal to AGENT_BINARY.claude on both launch and attach, pinning the hard-coded CLAUDE_BIN literal against the shared agent-id -> binary map.",
+    "createAdapterRegistry / isAgentId have direct test coverage: ids match AGENT_BINARY's keys, every id maps to an adapter whose .id is that same id, unknown and prototype-inherited strings return undefined, instances are stable per registry, and the PermissionMode flip affects the claude adapter only.",
+    "The unknown-agent refusal branches in src/engine/specDraft.ts and src/engine/submitPr.ts are each covered by a test asserting the refusal kind and message and that no probe ran and no terminal was created.",
+    "No behavioral change is made to src/adapter/claude.ts or to any other src/ file unless a genuine defect is demonstrated; the result file names every src/ file touched, with the justification, or states plainly that none were."
   ]
 }
 ```
