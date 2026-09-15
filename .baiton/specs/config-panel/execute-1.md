@@ -2,24 +2,31 @@
 
 ```json
 {
-  "summary": "Implemented the host-free ConfigPanelController and the ConfigPanelProvider WebviewPanel glue for spec 'Config Panel' (todo T05). ConfigPanelController in src/activation/configPanelController.ts handles ready/load (tolerant form mapping and dropdown options via configFormOptions), save (host-side re-validation, conflict checking, merge base selection preserving unknown keys on normal and overwrite saves, atomic disk write), post-save hot-reload via the applyConfig seam, and reset-to-defaults with modal confirmation prompt and directory creation. ConfigPanelProvider in src/activation/configPanel.ts manages the editor-area WebviewPanel singleton, nonced HTML rendering, and message plumbing, and exports openConfigPanel. Added full unit tests in test/configPanel.controller.test.ts importing the controller statically without vscodeLoader, verifying all 7 test cases.",
+  "summary": "Contributed baiton.openConfigPanel command in package.json without commandPalette gating, implemented registerConfigPanelCommand in commands.ts resolving workspace root via resolveCommandRoot and delegating to openConfigPanel while guarding subscriptions, wired the command ahead of the activation gate in extension.ts, and added unit tests in activation.gating.test.ts.",
   "files_changed": [
-    "src/activation/configPanelController.ts",
-    "src/activation/configPanel.ts",
-    "test/configPanel.controller.test.ts"
+    "package.json",
+    "src/activation/commands.ts",
+    "src/extension.ts",
+    "test/activation.gating.test.ts"
   ],
   "commands_run": [
     "npm run compile",
     "npm run lint",
+    "npx mocha -r ts-node/register --grep \"baiton.openConfigPanel\" test/activation.gating.test.ts",
     "npx mocha --no-config -r ts-node/register test/configPanel.controller.test.ts",
-    "npm test -- --grep \"ConfigPanelController\"",
-    "git status --porcelain"
+    "npm test",
+    "npm run copy:media",
+    "npm run package",
+    "git status --porcelain",
+    "git diff"
   ],
   "notes": [
-    "ConfigPanelController carries no vscode imports and is tested directly with a recording webview and fake seams.",
-    "Preserves unknown keys on both normal save and overwrite save by re-reading disk contents when necessary and merging the form onto the on-disk document.",
-    "Creates parent directories prior to atomic write during reset to handle absent .baiton/ folders.",
-    "applyConfig errors or omissions result in honest notes in the saved response rather than failing the write or prompting for window reload."
+    "COMMANDS.openConfigPanel added to src/activation/commands.ts and contributed in package.json under contributes.commands with category 'Baiton' and title 'Open Config Panel'.",
+    "No entry added to contributes.menus.commandPalette so the command remains visible when baiton.activated is false, allowing the panel to repair absent or corrupt configs.",
+    "registerConfigPanelCommand is registered in src/extension.ts right after registerInitializeCommand and before workspace resolution and config load.",
+    "resolveInitRoot renamed to resolveCommandRoot and shared between runInitialize and runOpenConfigPanel with identical single-root / one-.baiton-folder resolution semantics.",
+    "ConfigPanelProvider subscriptions are tracked in subscribedConfigPanels Set to avoid duplicate entries on repeated command invocations.",
+    "All tests passing with only the two expected pre-existing failures (keytar native module scan and setApiKey vscode module resolution)."
   ]
 }
 ```

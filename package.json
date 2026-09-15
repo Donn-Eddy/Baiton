@@ -73,6 +73,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.openConfigPanel",
+        "title": "Open Config Panel",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.approve",
         "title": "Approve Spec",
         "category": "Baiton"

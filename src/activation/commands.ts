@@ -98,6 +98,7 @@ import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
 import { setOrchestratorApiKey } from './setApiKey';
+import { openConfigPanel, type ConfigPanelProvider } from './configPanel';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
@@ -120,6 +121,7 @@ export const COMMANDS = {
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
+  openConfigPanel: 'baiton.openConfigPanel',
 } as const;
 
 /** The minimal activation state the command layer consumes. */
@@ -488,6 +490,27 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
   );
 }
 
+/**
+ * Track the providers registered with context.subscriptions so repeated
+ * invocations of `baiton.openConfigPanel` do not accumulate duplicate subscriptions.
+ */
+const subscribedConfigPanels = new Set<ConfigPanelProvider>();
+
+/**
+ * Register the `baiton.openConfigPanel` command ahead of the activation gate,
+ * so the panel can be opened to inspect errors or reset defaults when
+ * workspace resolution or config load fails. Returns the disposable for the
+ * caller to own.
+ */
+export function registerConfigPanelCommand(
+  context: vscode.ExtensionContext,
+  surface: Surface,
+): vscode.Disposable {
+  return vscode.commands.registerCommand(COMMANDS.openConfigPanel, () =>
+    runOpenConfigPanel(context, surface),
+  );
+}
+
 // --- Initialize -----------------------------------------------------------
 
 /**
@@ -499,7 +522,7 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
  */
 async function runInitialize(surface: Surface): Promise<void> {
   const folders = vscode.workspace.workspaceFolders ?? [];
-  const root = resolveInitRoot(folders);
+  const root = resolveCommandRoot(folders);
   if (root === undefined) {
     surface.error(
       'Baiton: Initialize requires exactly one workspace folder (or one multi-root folder with a .baiton/ directory).',
@@ -519,13 +542,47 @@ async function runInitialize(surface: Surface): Promise<void> {
   surface.info(`Baiton: Initialize ${detail}.`);
 }
 
+// --- Config Panel ---------------------------------------------------------
+
 /**
- * Resolve the folder to initialize: the single folder when there is exactly
- * one, or the one multi-root folder that already contains a `.baiton/` when
- * several are open (Req 22.3, 22.4). Returns `undefined` on zero folders or an
- * ambiguous multi-root (Req 1.4, 22.5).
+ * Run the Open Config Panel command. Resolves the workspace root independently
+ * of the full activation gate with the same rule as Initialize. Refuses on zero
+ * or ambiguous roots.
  */
-function resolveInitRoot(
+function runOpenConfigPanel(
+  context: vscode.ExtensionContext,
+  surface: Surface,
+): void {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const root = resolveCommandRoot(folders);
+  if (root === undefined) {
+    surface.error(
+      'Baiton: Open Config Panel requires exactly one workspace folder (or one multi-root folder with a .baiton/ directory).',
+    );
+    return;
+  }
+
+  const baitonDir = vscode.Uri.joinPath(root, '.baiton').fsPath;
+  const provider = openConfigPanel({
+    extensionUri: context.extensionUri,
+    baitonDir,
+    agentIds: createAdapterRegistry().ids,
+    log: (m) => surface.log(m),
+  });
+
+  if (!subscribedConfigPanels.has(provider)) {
+    subscribedConfigPanels.add(provider);
+    context.subscriptions.push(provider);
+  }
+}
+
+/**
+ * Resolve the folder to initialize or configure: the single folder when there
+ * is exactly one, or the one multi-root folder that already contains a `.baiton/`
+ * when several are open (Req 22.3, 22.4). Returns `undefined` on zero folders or
+ * an ambiguous multi-root (Req 1.4, 22.5).
+ */
+function resolveCommandRoot(
   folders: readonly vscode.WorkspaceFolder[],
 ): vscode.Uri | undefined {
   if (folders.length === 0) {

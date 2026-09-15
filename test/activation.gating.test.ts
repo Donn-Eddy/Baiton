@@ -40,7 +40,8 @@ import { AGENT_BINARY } from '../src/adapter/adapter';
  * - Packaging: extensionKind includes "workspace", engines.vscode "^1.106.0",
  *   MIT license in package.json + LICENSE file, zero native modules
  *   (Req 23.1, 23.2, 23.4); an executable-override setting declared for every
- *   AGENT_BINARY id (Req 22.7).
+ *   AGENT_BINARY id (Req 22.7); baiton.openConfigPanel and baiton.initialize
+ *   contributed without commandPalette gating.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -438,6 +439,43 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       assert.strictEqual(entry.type, 'string');
       assert.strictEqual(entry.default, '');
     }
+  });
+
+  it('contributes baiton.openConfigPanel without commandPalette gating', () => {
+    interface CommandContrib {
+      command: string;
+      title: string;
+      category?: string;
+    }
+    interface MenuContrib {
+      command: string;
+      when?: string;
+    }
+    const contributes = pkg.contributes as {
+      commands?: CommandContrib[];
+      menus?: { commandPalette?: MenuContrib[] };
+    };
+
+    const commands = contributes?.commands ?? [];
+    const openConfig = commands.find((c) => c.command === 'baiton.openConfigPanel');
+    assert.ok(openConfig, 'baiton.openConfigPanel must be contributed under contributes.commands');
+    assert.strictEqual(openConfig.title, 'Open Config Panel');
+    assert.strictEqual(openConfig.category, 'Baiton');
+
+    const palette = contributes?.menus?.commandPalette ?? [];
+    const openConfigPalette = palette.find((m) => m.command === 'baiton.openConfigPanel');
+    assert.strictEqual(
+      openConfigPalette,
+      undefined,
+      'baiton.openConfigPanel must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
+
+    const initPalette = palette.find((m) => m.command === 'baiton.initialize');
+    assert.strictEqual(
+      initPalette,
+      undefined,
+      'baiton.initialize must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
   });
 });
 

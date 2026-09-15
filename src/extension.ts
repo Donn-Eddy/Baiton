@@ -24,7 +24,11 @@ import type { ProcessControl } from './engine';
 import { writeTodoState } from './model/writer';
 import type { TodoState } from './model/todoState';
 import { Surface } from './activation/surface';
-import { registerCommands, registerInitializeCommand } from './activation/commands';
+import {
+  registerCommands,
+  registerInitializeCommand,
+  registerConfigPanelCommand,
+} from './activation/commands';
 import { ROLES } from './model/role';
 
 /**
@@ -104,6 +108,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // in an as-yet-uninitialized folder (where config load fails by design)
   // (Req 1.1). It resolves its own workspace independently of the gate below.
   context.subscriptions.push(registerInitializeCommand(surface));
+
+  // Register `Baiton: Open Config Panel` ahead of the gate as well. `activate`
+  // returns early on a workspace-resolution or config-load failure, and the
+  // panel's error state plus Reset to defaults is exactly what repairs an
+  // absent or unparseable `.baiton/config.json`.
+  context.subscriptions.push(registerConfigPanelCommand(context, surface));
 
   // 2. Workspace resolution (Req 22.3–22.5). Read the real workspace folders,
   //    probe each for a `.baiton/` directory, and resolve the single root.
