@@ -20,6 +20,19 @@ export const AGENT_BINARY: Record<AgentId, string> = {
   codex: 'codex',
 };
 
+/**
+ * Thrown by an adapter's `launch()` when the request cannot be expressed in
+ * the CLI's argv at all (for example a model/effort pair the CLI is known to
+ * reject). The launcher turns it into a `launch-args` refusal before any
+ * terminal is created; the `message` is user-facing and must say what to fix.
+ */
+export class AdapterLaunchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdapterLaunchError';
+  }
+}
+
 export interface Adapter {
   /** Stable adapter identifier. */
   readonly id: AgentId;
@@ -35,7 +48,9 @@ export interface Adapter {
   /**
    * Build the launch arguments for one stage. Pure: it computes `shellPath`,
    * `shellArgs` and an optional `env` from the request and does not touch the
-   * filesystem, terminal or journal.
+   * filesystem, terminal or journal. Throws {@link AdapterLaunchError} when
+   * the request cannot be expressed in the CLI's argv; any other throw is a
+   * bug.
    */
   launch(req: LaunchRequest): LaunchSpec;
 
