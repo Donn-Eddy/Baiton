@@ -46,6 +46,18 @@ export interface Adapter {
    * after its terminal is gone.
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec;
+
+  /**
+   * Map a Baiton Session_Id (the UUID the Run_Queue mints and journals) to the
+   * identifier the CLI itself needs on resume/attach. Only adapters whose CLI
+   * mints its own session ids and offers no way to pre-assign one implement
+   * this; for them `launch()` tags the fresh session with the Baiton id, and
+   * this method looks the CLI's id back up before a `launch({resume: true})`
+   * or `attach()`. Resolves `undefined` when no session carries that tag (the
+   * caller then resumes without a specific id and the adapter falls back to
+   * its "most recent session" flag). Must never throw.
+   */
+  resolveSessionId?(sessionId: string, cwd: string): Promise<string | undefined>;
 }
 
 /** The result of an adapter probe (Requirements 14.3, 14.4). */

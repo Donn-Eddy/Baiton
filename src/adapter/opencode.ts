@@ -7,8 +7,32 @@ import { roleProfile, runDirPattern } from './roleProfile';
 /** The opencode CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const OPENCODE_BIN = AGENT_BINARY.opencode;
 
-/** How long to wait for `opencode --version` before giving up (ms). */
+/** How long to wait for `opencode --version` / `opencode session list` before giving up (ms). */
 const PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * The prefix opencode puts on every session id it mints (`ses_…`). Baiton's
+ * own Session_Ids are UUIDs, so this is how the adapter tells a resolved
+ * opencode id from an unresolved Baiton one before spending it on `-s`.
+ */
+export const OPENCODE_SESSION_ID_PREFIX = 'ses_';
+
+/** True when `id` is an id opencode minted, as opposed to a Baiton Session_Id. */
+export function isOpencodeSessionId(id: string | undefined): boolean {
+  return id !== undefined && id.startsWith(OPENCODE_SESSION_ID_PREFIX);
+}
+
+/** One row of `opencode session list --format json`; only the fields the adapter reads. */
+export interface OpencodeSessionRow {
+  id: string;
+  title?: string;
+}
+
+/**
+ * Seam over `opencode session list --format json` run in `cwd`, so tests can
+ * inject a fake listing. Rejects on any failure.
+ */
+export type ListSessionsFn = (cwd: string) => Promise<OpencodeSessionRow[]>;
 
 /** Build the `--agent baiton-<role>` flag pair for a role. */
 export function opencodeAgentFlags(role: Role): string[] {
@@ -113,9 +137,18 @@ export function opencodeConfigEnv(role: Role, runId: string): Record<string, str
  *    which defeated the run-dir write grant outright. Baiton owns the agent
  *    definition now, so the policy is stated once in `roleProfile.ts` and
  *    translated here.
- * 2. opencode mints its own session id on a fresh run and exposes no flag to
- *    pre-assign one, so `launch()` ignores `req.sessionId` when `req.resume`
- *    is false.
+ * 2. opencode mints its own session id (`ses_…`) on a fresh run and exposes no
+ *    flag to pre-assign one. `launch()` therefore cannot make `req.sessionId`
+ *    the session's id; instead it passes it as the session's `--title`, and
+ *    {@link OpencodeAdapter.resolveSessionId} looks the minted id back up from
+ *    `opencode session list --format json` by that title before a resume or
+ *    attach. `-s` is only ever given an id opencode minted
+ *    ({@link isOpencodeSessionId}); handing it a Baiton UUID makes opencode
+ *    print "Session not found" and exit 1 before its logger even starts —
+ *    exactly what happened to every execute retry (attempt ≥ 2 resumes the
+ *    prior attempt's Session_Id) before this resolution existed. An
+ *    unresolvable id degrades to `-c` (most recent session in this project),
+ *    which opencode accepts even when the project has no sessions yet.
  *
  * The run-dir path this adapter hands opencode in the initial prompt relies on
  * the workspace root already being canonical (see `canonicalizeRoot` in
@@ -126,6 +159,8 @@ export function opencodeConfigEnv(role: Role, runId: string): Record<string, str
  */
 export class OpencodeAdapter implements Adapter {
   readonly id = 'opencode' as const;
+
+  constructor(private readonly listSessions: ListSessionsFn = defaultListSessions) {}
 
   /**
    * Run `opencode --version` and report readiness (Requirements 14.2–14.4). A
@@ -156,20 +191,20 @@ export class OpencodeAdapter implements Adapter {
   /**
    * Build the terminal launch for one stage.
    *
-   * Fresh launch: `opencode run -m <model> --agent baiton-<role> [--variant
-   * <effort>] -i "<prompt>"` (`req.sessionId` is deliberately dropped, see the
-   * class doc comment). Resume: `-s <resumeSessionId>` when a prior Session_Id
-   * is known, falling back to `-c` when it is not (Requirements 13.2, 13.3).
+   * Fresh launch: `opencode run --title <sessionId> -m <model> --agent
+   * baiton-<role> [--variant <effort>] -i "<prompt>"` — the title is how
+   * `req.sessionId` survives (see the class doc comment). Resume: `-s
+   * <resumeSessionId>` when the caller has already resolved it to an opencode
+   * id via {@link resolveSessionId}, falling back to `-c` when there is no
+   * prior id or it is still an unresolved Baiton UUID (Requirements 13.2, 13.3).
    */
   launch(req: LaunchRequest): LaunchSpec {
     const args: string[] = ['run'];
 
     if (req.resume) {
-      if (req.resumeSessionId !== undefined && req.resumeSessionId.length > 0) {
-        args.push('-s', req.resumeSessionId);
-      } else {
-        args.push('-c');
-      }
+      args.push(...sessionSelector(req.resumeSessionId));
+    } else if (req.sessionId.length > 0) {
+      args.push('--title', req.sessionId);
     }
 
     args.push('-m', req.model);
@@ -185,15 +220,45 @@ export class OpencodeAdapter implements Adapter {
 
   /**
    * Build the args to reopen an existing session with no prompt: `opencode
-   * run -s <id> --agent baiton-<role> -i` (Requirements 3.3, 3.4).
+   * run -s <id> --agent baiton-<role> -i` (Requirements 3.3, 3.4). As with
+   * `launch()`, `-s` is only emitted for an id opencode minted; pass the
+   * result of {@link resolveSessionId}. An unresolved id degrades to `-c`.
    *
    * `req.runId` never reaches the command line (there is no `--add-dir` here);
    * it is carried by the `OPENCODE_CONFIG_CONTENT` env layer instead.
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec {
-    const args: string[] = ['run', '-s', req.sessionId, ...opencodeAgentFlags(req.role), '-i'];
+    const args: string[] = [
+      'run',
+      ...sessionSelector(req.sessionId),
+      ...opencodeAgentFlags(req.role),
+      '-i',
+    ];
 
     return { shellPath: OPENCODE_BIN, shellArgs: args, env: opencodeConfigEnv(req.role, req.runId) };
+  }
+
+  /**
+   * Find the opencode session whose `--title` is the Baiton Session_Id
+   * `sessionId` (set by `launch()` on the fresh run) and return its minted
+   * `ses_…` id. An id that is already opencode's is returned unchanged. Any
+   * listing failure, or no session carrying that title, resolves `undefined`
+   * so the caller falls back to `-c`; this never throws.
+   */
+  async resolveSessionId(sessionId: string, cwd: string): Promise<string | undefined> {
+    if (isOpencodeSessionId(sessionId)) {
+      return sessionId;
+    }
+    if (sessionId.length === 0) {
+      return undefined;
+    }
+    try {
+      const rows = await this.listSessions(cwd);
+      const match = rows.find((row) => row.title === sessionId && isOpencodeSessionId(row.id));
+      return match?.id;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Execute `opencode --version`, resolving stdout or rejecting on failure. */
@@ -213,6 +278,42 @@ export class OpencodeAdapter implements Adapter {
       );
     });
   }
+}
+
+/**
+ * The `-s <id>` / `-c` session selector for resume and attach: `-s` only for
+ * an id opencode minted, `-c` (most recent session in this project) otherwise.
+ */
+function sessionSelector(sessionId: string | undefined): string[] {
+  return sessionId !== undefined && isOpencodeSessionId(sessionId) ? ['-s', sessionId] : ['-c'];
+}
+
+/**
+ * Run `opencode session list --format json` in `cwd` and parse its rows.
+ * opencode scopes the listing to the project containing `cwd`, so the
+ * workspace root is the right cwd. Rejects on spawn failure, non-zero exit,
+ * or unparseable output.
+ */
+function defaultListSessions(cwd: string): Promise<OpencodeSessionRow[]> {
+  return new Promise<OpencodeSessionRow[]>((resolve, reject) => {
+    execFile(
+      OPENCODE_BIN,
+      ['session', 'list', '--format', 'json'],
+      { cwd, timeout: PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        try {
+          const parsed: unknown = JSON.parse(stdout);
+          resolve(Array.isArray(parsed) ? (parsed as OpencodeSessionRow[]) : []);
+        } catch (e) {
+          reject(e);
+        }
+      },
+    );
+  });
 }
 
 /** Turn a probe failure into a human-readable, non-empty reason. */

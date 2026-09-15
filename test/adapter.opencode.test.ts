@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import {
   OpencodeAdapter,
   OPENCODE_CONFIG_ENV,
+  isOpencodeSessionId,
   opencodeAgentFlags,
   opencodeConfigEnv,
 } from '../src/adapter/opencode';
@@ -22,8 +23,11 @@ import { ROLES } from '../src/model/role';
  * - the whole per-role policy (Req 15.1-15.4), which opencode gets as an
  *   inline `OPENCODE_CONFIG_CONTENT` env layer defining one Baiton-owned
  *   custom agent rather than as command-line flags;
- * - the one remaining documented degrade from the claude adapter:
- *   `req.sessionId` is ignored on a fresh launch.
+ * - the session-id mapping: opencode mints its own `ses_…` ids, so a fresh
+ *   launch tags the session with Baiton's Session_Id via `--title`,
+ *   `resolveSessionId()` maps that title back to the minted id, and `-s` is
+ *   never given an unresolved Baiton id (opencode exits 1 with "Session not
+ *   found" on one, which is what broke every execute retry).
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -96,20 +100,36 @@ describe('OpencodeAdapter probe shape (Req 14.2, 14.3, 14.4)', () => {
 describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('fresh launch leads with run, has no -s/-c, and drops req.sessionId (Req 3.1)', () => {
+  it('fresh launch leads with run, has no -s/-c, and carries req.sessionId as --title (Req 3.1)', () => {
     const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
     assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
     assert.strictEqual(spec.shellArgs[0], 'run');
     assert.ok(!spec.shellArgs.includes('-s'));
     assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('session-xyz'));
     assert.ok(!spec.shellArgs.includes('--session-id'));
+    assert.ok(findPair(spec.shellArgs, '--title', 'session-xyz') >= 0);
+    assert.strictEqual(spec.shellArgs.filter((a) => a === '--title').length, 1);
   });
 
-  it('resume with a prior Session_Id leads run -s <id> (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 3), ['run', '-s', 'prior-session']);
+  it('fresh launch with an empty sessionId emits no --title', () => {
+    const spec = adapter.launch(req({ resume: false, sessionId: '' }));
+    assert.ok(!spec.shellArgs.includes('--title'));
+  });
+
+  it('resume with a resolved opencode id leads run -s <id> and no --title (Req 3.2)', () => {
+    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'ses_prior' }));
+    assert.deepStrictEqual(spec.shellArgs.slice(0, 3), ['run', '-s', 'ses_prior']);
     assert.ok(!spec.shellArgs.includes('-c'));
+    assert.ok(!spec.shellArgs.includes('--title'));
+  });
+
+  it('resume with an unresolved Baiton Session_Id falls back to run -c, never -s', () => {
+    const spec = adapter.launch(
+      req({ resume: true, resumeSessionId: 'd7dbb6f8-9168-4620-9e59-ddaa5bb15bd4' }),
+    );
+    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['run', '-c']);
+    assert.ok(!spec.shellArgs.includes('-s'));
+    assert.ok(!spec.shellArgs.includes('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
   });
 
   it('resume with no prior Session_Id falls back to run -c (Req 3.2, 13.2)', () => {
@@ -127,7 +147,8 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
   it('keeps the fresh and no-session-id-resume branches otherwise identical', () => {
     const fresh = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
     const resumed = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.deepStrictEqual(fresh.shellArgs.slice(1), resumed.shellArgs.slice(2));
+    // fresh: run --title <id> ...; resumed: run -c ...
+    assert.deepStrictEqual(fresh.shellArgs.slice(3), resumed.shellArgs.slice(2));
   });
 
   it('passes the model through verbatim and appends --variant only when effort is set', () => {
@@ -153,9 +174,9 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new OpencodeAdapter();
 
   it('builds run -s <id> --agent baiton-<role> -i with no prompt, model, or run id', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'ses_42' });
 
-    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'session-42', '--agent', 'baiton-executor', '-i']);
+    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'ses_42', '--agent', 'baiton-executor', '-i']);
     assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
 
     assert.strictEqual(spec.shellArgs.length, 6);
@@ -166,8 +187,57 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   });
 
   it('uses the role-specific Baiton agent for a read-only role', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'ses_1' });
     assert.ok(findPair(spec.shellArgs, '--agent', 'baiton-planner') >= 0);
+  });
+
+  it('degrades an unresolved Baiton Session_Id to -c rather than emitting -s', () => {
+    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    assert.deepStrictEqual(spec.shellArgs, ['run', '-c', '--agent', 'baiton-executor', '-i']);
+  });
+});
+
+describe('OpencodeAdapter resolveSessionId() (Baiton Session_Id -> opencode ses_ id)', () => {
+  const rows = [
+    { id: 'ses_aaa', title: 'Reading and executing brief.md instructions' },
+    { id: 'ses_bbb', title: 'd7dbb6f8-9168-4620-9e59-ddaa5bb15bd4' },
+  ];
+
+  it('recognises opencode ids by their ses_ prefix', () => {
+    assert.ok(isOpencodeSessionId('ses_f5fb5e0c5ffezf0xx6jW6VMFSr'));
+    assert.ok(!isOpencodeSessionId('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
+    assert.ok(!isOpencodeSessionId(undefined));
+    assert.ok(!isOpencodeSessionId(''));
+  });
+
+  it('maps a Baiton Session_Id to the id of the session titled with it, listing in the given cwd', async () => {
+    const seen: string[] = [];
+    const adapter = new OpencodeAdapter(async (cwd) => {
+      seen.push(cwd);
+      return rows;
+    });
+    const id = await adapter.resolveSessionId('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4', '/ws');
+    assert.strictEqual(id, 'ses_bbb');
+    assert.deepStrictEqual(seen, ['/ws']);
+  });
+
+  it('resolves undefined when no session carries the id', async () => {
+    const adapter = new OpencodeAdapter(async () => rows);
+    assert.strictEqual(await adapter.resolveSessionId('unknown-id', '/ws'), undefined);
+  });
+
+  it('returns an opencode id unchanged without listing', async () => {
+    const adapter = new OpencodeAdapter(async () => {
+      throw new Error('must not list');
+    });
+    assert.strictEqual(await adapter.resolveSessionId('ses_zzz', '/ws'), 'ses_zzz');
+  });
+
+  it('resolves undefined instead of throwing when the listing fails', async () => {
+    const adapter = new OpencodeAdapter(async () => {
+      throw new Error('opencode not found');
+    });
+    assert.strictEqual(await adapter.resolveSessionId('some-id', '/ws'), undefined);
   });
 });
 

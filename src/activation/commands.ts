@@ -671,7 +671,7 @@ function registerViewCommand(
       if (target === undefined) {
         return;
       }
-      runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
+      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -690,7 +690,7 @@ function registerViewCommand(
  * that created the session if the config changed since (a known limitation of
  * mixed-agent configs).
  */
-function runView(
+async function runView(
   activation: CommandActivation,
   slug: string,
   todoId: string,
@@ -700,7 +700,7 @@ function runView(
   adapterForRole: (role: Role) => Adapter | undefined,
   terminalHost: TerminalHost,
   surface: Surface,
-): void {
+): Promise<void> {
   const live = queueForSlug(slug).currentRun();
   if (live?.todoId === todoId) {
     live.terminal.show();
@@ -724,10 +724,23 @@ function runView(
     return;
   }
 
+  // CLIs that mint their own session ids (opencode) map the journaled Baiton
+  // Session_Id to theirs first; when nothing carries that id the adapter
+  // reopens its most recent session instead, and the user is told so.
+  let sessionId: string = entry.sessionId;
+  if (adapter.resolveSessionId !== undefined) {
+    const resolved = await adapter.resolveSessionId(entry.sessionId, repoRoot);
+    if (resolved === undefined) {
+      surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${todoId}; opening its most recent session instead`);
+    } else {
+      sessionId = resolved;
+    }
+  }
+
   const spec = adapter.attach({
     role,
     runId: entry.runId,
-    sessionId: entry.sessionId,
+    sessionId,
   });
   const terminal = terminalHost.createTerminal({
     name: `Baiton view ${slug}/${todoId}`,

@@ -598,6 +598,15 @@ class SerialRunQueue implements RunQueue {
     const inputRev = await this.deps.specStore.inputRev(req.slug, req.todoId);
 
     // 3. Launch the stage (Req 11). A launch failure halts and leaves state.
+    //    Adapters whose CLI mints its own session ids (opencode) first map the
+    //    journaled Baiton Session_Id to the CLI's own; an unresolved id is
+    //    dropped so the adapter falls back to its "most recent session" flag
+    //    instead of failing on an id the CLI has never seen.
+    const resumeSessionId = await resolveResumeSessionId(
+      adapter,
+      req,
+      this.deps.workspaceRoot,
+    );
     const launchInput: LaunchStageInput = {
       workspaceRoot: this.deps.workspaceRoot,
       runId,
@@ -607,9 +616,7 @@ class SerialRunQueue implements RunQueue {
       effort,
       resume: req.resume,
       sessionId,
-      ...(req.resumeSessionId !== undefined
-        ? { resumeSessionId: req.resumeSessionId }
-        : {}),
+      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };
     const launched = launchStage(launchInput, {
       adapter,
@@ -910,4 +917,28 @@ async function resolvePid(terminal: HostTerminal): Promise<number | undefined> {
 function defaultRunId(req: RunRequest, clock: Clock): string {
   const stage = stageForAction(req.action) ?? req.action;
   return `${req.slug}-${req.todoId}-${stage}-${req.attempt}-${clock()}`;
+}
+
+/**
+ * The Session_Id to hand the adapter for a resume: the request's own when the
+ * adapter has no id mapping, otherwise the adapter's resolution of it (which
+ * may be `undefined` when the CLI has no session tagged with that id). Never
+ * throws — a resolution failure is treated as "unknown".
+ */
+async function resolveResumeSessionId(
+  adapter: Adapter,
+  req: RunRequest,
+  cwd: string,
+): Promise<string | undefined> {
+  if (!req.resume || req.resumeSessionId === undefined || req.resumeSessionId.length === 0) {
+    return req.resumeSessionId;
+  }
+  if (adapter.resolveSessionId === undefined) {
+    return req.resumeSessionId;
+  }
+  try {
+    return await adapter.resolveSessionId(req.resumeSessionId, cwd);
+  } catch {
+    return undefined;
+  }
 }
