@@ -145,6 +145,11 @@
     token: '',
     options: { agents: [], efforts: [] },
     errors: [],
+    // True only right after a host `saveFailed` (reason 'invalid') response,
+    // while `state.errors` holds the host's authoritative field errors rather
+    // than the client mirror's own recompute. Cleared on the next edit, at
+    // which point live client-side validation resumes (renderErrors()).
+    errorsFromServer: false,
     failure: null,
     banner: null,
     status: '',
@@ -166,39 +171,6 @@
 
   function isDirty() {
     return !!state.form && formJson(state.form) !== state.baseline;
-  }
-
-  /** Read the current DOM values into a fresh ConfigForm. Raw strings, no coercion. */
-  function readForm() {
-    var roles = {};
-    for (var i = 0; i < ROLES.length; i++) {
-      var role = ROLES[i];
-      var agentEl = /** @type {HTMLSelectElement} */ (document.getElementById('role-' + role + '-agent'));
-      var modelEl = /** @type {HTMLInputElement} */ (document.getElementById('role-' + role + '-model'));
-      var effortEl = /** @type {HTMLSelectElement} */ (document.getElementById('role-' + role + '-effort'));
-      roles[role] = {
-        agent: agentEl ? agentEl.value : '',
-        model: modelEl ? modelEl.value : '',
-        effort: effortEl ? effortEl.value : '',
-      };
-    }
-    var limitPlan = /** @type {HTMLInputElement} */ (document.getElementById('limit-plan_review_rounds'));
-    var limitExec = /** @type {HTMLInputElement} */ (document.getElementById('limit-exec_attempts'));
-    var limitStall = /** @type {HTMLInputElement} */ (document.getElementById('limit-stall_notice_minutes'));
-    var gitRemote = /** @type {HTMLInputElement} */ (document.getElementById('git-remote'));
-    var gitBase = /** @type {HTMLInputElement} */ (document.getElementById('git-base'));
-    return {
-      roles: roles,
-      limits: {
-        plan_review_rounds: limitPlan ? limitPlan.value : '',
-        exec_attempts: limitExec ? limitExec.value : '',
-        stall_notice_minutes: limitStall ? limitStall.value : '',
-      },
-      git: {
-        remote: gitRemote ? gitRemote.value : '',
-        base: gitBase ? gitBase.value : '',
-      },
-    };
   }
 
   /** Write a single dotted path (e.g. `roles.executor.agent`, `limits.exec_attempts`, `git.base`) into state.form. */
@@ -376,7 +348,13 @@
     if (!state.form) {
       return;
     }
-    state.errors = validateConfigForm(state.form, { agents: state.options.agents });
+    // A host `saveFailed` (reason 'invalid') response is authoritative: the
+    // client mirror considered this exact form valid (client validation
+    // gates Save), so recomputing here would silently discard the host's
+    // field errors. Render them as-is until the next edit.
+    if (!state.errorsFromServer) {
+      state.errors = validateConfigForm(state.form, { agents: state.options.agents });
+    }
     state.errors.forEach(function (error) {
       var slot = formEl.querySelector('[data-error-for="' + error.path + '"]');
       if (slot) {
@@ -454,6 +432,7 @@
     var errors = validateConfigForm(state.form, { agents: state.options.agents });
     if (errors.length > 0) {
       state.errors = errors;
+      state.errorsFromServer = false;
       render();
       return;
     }
@@ -475,6 +454,7 @@
     }
     setField(path, /** @type {HTMLInputElement} */ (target).value);
     state.status = '';
+    state.errorsFromServer = false;
     if (state.banner && (state.banner.kind === 'conflict' || state.banner.kind === 'io')) {
       state.banner = null;
     }
@@ -490,6 +470,7 @@
     }
     setField(path, /** @type {HTMLInputElement} */ (target).value);
     state.status = '';
+    state.errorsFromServer = false;
     if (state.banner && (state.banner.kind === 'conflict' || state.banner.kind === 'io')) {
       state.banner = null;
     }
@@ -570,6 +551,7 @@
         state.options = msg.options;
         state.baseline = formJson(msg.form);
         state.errors = [];
+        state.errorsFromServer = false;
         state.failure = null;
         state.banner = null;
         state.busy = false;
@@ -587,11 +569,13 @@
         state.busy = false;
         state.status = 'Saved.' + (msg.notes && msg.notes.length > 0 ? '\n' + msg.notes.join('\n') : '');
         state.banner = null;
+        state.errorsFromServer = false;
         break;
       case 'saveFailed':
         state.busy = false;
         if (msg.reason === 'invalid') {
           state.errors = msg.errors || [];
+          state.errorsFromServer = true;
           state.banner = { kind: 'invalid', message: msg.message };
         } else if (msg.reason === 'conflict') {
           state.banner = { kind: 'conflict', message: msg.message, primary: 'Reload', secondary: 'Overwrite' };
