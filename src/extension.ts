@@ -16,7 +16,7 @@ import {
   type AgentExecutables,
 } from './activation';
 import { isErr } from './model/result';
-import { loadConfig } from './config';
+import { loadConfig, refreshGitignore } from './config';
 import type { Config } from './config';
 import { createGitService } from './git';
 import type { GitService } from './git';
@@ -147,6 +147,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   //    forbids the state writes recovery replays (Req 22.1).
   if (!workspace.restricted) {
     await runCrashRecovery(workspace, surface);
+  }
+
+  // Keep `.baiton/.gitignore` current with the canonical exclusion list so a
+  // workspace initialized by an older build does not start tracking newer
+  // Baiton-owned artifacts (e.g. per-session chat transcripts). Skipped under
+  // Restricted Mode, which forbids workspace writes (Req 22.1).
+  if (!workspace.restricted) {
+    try {
+      await refreshGitignore(workspace.baitonDir.fsPath);
+    } catch (e) {
+      surface.warn(`Baiton could not refresh .baiton/.gitignore: ${describe(e)}.`);
+    }
   }
 
   activationState = { workspace, config, executables };
