@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from './adapter';
-import { AGENT_BINARY } from './adapter';
+import { AGENT_BINARY, AdapterLaunchError } from './adapter';
 import type { Role } from '../model/role';
 import { isReadOnlyRole, runDirGrant } from './permissions';
 
@@ -15,6 +15,92 @@ export const ANTIGRAVITY_PLAN_MODE = 'plan';
 
 /** The agy `--mode` value used for write-capable roles. */
 export const ANTIGRAVITY_ACCEPT_EDITS_MODE = 'accept-edits';
+
+/**
+ * The agy model catalogue, as listed by `agy models` (v1.2.2), keyed by the
+ * bare family name Baiton config uses. agy has no separate effort control
+ * for most models: for Gemini the effort is baked into the model id as a
+ * suffix (`gemini-3.8-flash-medium`) and `--effort` is only accepted, and in
+ * fact required, alongside the *bare* family id. Claude and GPT-OSS ids take
+ * no effort at all and agy rejects `--effort` for them outright.
+ *
+ * `efforts` lists the suffixes agy offers for a family; an empty list means
+ * the id is fixed and effort is not configurable. Refresh from `agy models`
+ * when agy adds a model.
+ */
+export const ANTIGRAVITY_MODELS: Readonly<Record<string, readonly string[]>> = {
+  'gemini-3.8-flash': ['low', 'medium', 'high'],
+  'gemini-3.7-flash': ['low', 'medium', 'high'],
+  'gemini-3.6-flash': ['low', 'medium', 'high'],
+  'gemini-3.1-pro': ['low', 'high'],
+  'claude-sonnet-4-6': [],
+  'claude-opus-4-6-thinking': [],
+  'gpt-oss-120b-medium': [],
+};
+
+/**
+ * Resolve a config `model` + `effort` pair to the `--model <id>` agy needs
+ * (Requirement 14.1). The adapter is model-aware: a bare Gemini family plus
+ * an effort maps to the suffixed id (`gemini-3.8-flash` + `medium` →
+ * `gemini-3.8-flash-medium`); an already-suffixed id passes through when its
+ * effort agrees or is unset; a fixed id (Claude, GPT-OSS) passes through and
+ * any effort is dropped as a documented degrade; an id agy does not list
+ * passes through verbatim, with `--effort` if set, so a newer agy can still
+ * validate it itself.
+ *
+ * Throws {@link AdapterLaunchError} when agy is known to reject the pair: a
+ * bare Gemini family with no effort or an effort it does not offer, or a
+ * suffixed Gemini id whose suffix contradicts the configured effort.
+ */
+/** Own-key lookup into the catalogue (a model named `__proto__` must not hit the prototype). */
+function catalogueEfforts(id: string): readonly string[] | undefined {
+  return Object.prototype.hasOwnProperty.call(ANTIGRAVITY_MODELS, id) ? ANTIGRAVITY_MODELS[id] : undefined;
+}
+
+export function antigravityModelFlags(model: string, effort: string | undefined): string[] {
+  const hasEffort = effort !== undefined && effort.length > 0;
+  const wanted = hasEffort ? effort : undefined;
+
+  // Bare family known to the catalogue.
+  const efforts = catalogueEfforts(model);
+  if (efforts !== undefined) {
+    if (efforts.length === 0) {
+      // Fixed id: agy rejects --effort for it, so the effort is dropped.
+      return ['--model', model];
+    }
+    if (wanted === undefined) {
+      throw new AdapterLaunchError(
+        `agy model "${model}" requires an effort (one of: ${efforts.join(', ')}); set "effort" for the role`,
+      );
+    }
+    if (!efforts.includes(wanted)) {
+      throw new AdapterLaunchError(
+        `agy model "${model}" does not offer effort "${wanted}" (available: ${efforts.join(', ')})`,
+      );
+    }
+    return ['--model', `${model}-${wanted}`];
+  }
+
+  // Suffixed Gemini id: split off a trailing effort and check it against the
+  // family's catalogue entry.
+  const dash = model.lastIndexOf('-');
+  if (dash > 0) {
+    const family = model.slice(0, dash);
+    const suffix = model.slice(dash + 1);
+    const familyEfforts = catalogueEfforts(family);
+    if (familyEfforts !== undefined && familyEfforts.includes(suffix)) {
+      if (wanted !== undefined && wanted !== suffix) {
+        throw new AdapterLaunchError(
+          `agy model "${model}" already fixes the effort to "${suffix}", which conflicts with the role's effort "${wanted}"; use "${family}" with an effort or drop the effort`,
+        );
+      }
+      return ['--model', model];
+    }
+  }
+
+  // Unknown to the catalogue: pass through and let agy validate.
+  return wanted !== undefined ? ['--model', model, '--effort', wanted] : ['--model', model];
+}
 
 /** Build the `--mode <plan|accept-edits>` flag pair for a role. */
 export function antigravityModeFlags(role: Role): string[] {
@@ -40,6 +126,26 @@ export function antigravityModeFlags(role: Role): string[] {
  *    per-run grant is emitted normally via `runDirGrant(req.runId)` — this is
  *    not a degrade.
  * 4. `--dangerously-skip-permissions` is deliberately never emitted.
+ * 6. agy has no standalone effort control for most models: Gemini efforts
+ *    are model-id suffixes and Claude/GPT-OSS ids take none, and agy exits
+ *    with "invalid model selection" when `--effort` is passed with either.
+ *    `launch()` therefore maps model+effort through
+ *    {@link antigravityModelFlags}: a bare Gemini family gains the effort as
+ *    a suffix, a fixed id drops the effort, an unknown id passes through.
+ *    Pairs agy is known to reject throw `AdapterLaunchError` so the stage is
+ *    refused before a terminal opens.
+ * 5. Unlike claude, opencode, and codex, agy receives NO role-profile system
+ *    prompt (`src/adapter/roleProfile.ts`). `agy` 1.2.2 exposes `--agent
+ *    <name>` and an `agy agents` listing, but the listing printed nothing on
+ *    the development host and the agent-definition format is undocumented in
+ *    `--help`, so there is no verified way to deliver the profile's prose.
+ *    The consequence is concrete: for an antigravity role the Brief
+ *    (`src/engine/roleInstructions.ts`) is the ONLY place the constraints are
+ *    stated — which is why `EXECUTOR_NO_GIT_INSTRUCTION` stays in the brief
+ *    even though the executor profile now repeats it.
+ *    TODO: investigate `agy --agent` / `agy agents` and, if agents can be
+ *    defined, translate the role profile here the way the opencode adapter
+ *    does.
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;
@@ -73,7 +179,9 @@ export class AntigravityAdapter implements Adapter {
   /**
    * Build the terminal launch for one stage.
    *
-   * Fresh launch: `agy --model <m> [--effort <e>] --mode <plan|accept-edits>
+   * Fresh launch: `agy --model <m> [--effort <e>] --mode <plan|accept-edits>` where
+   * `<m>`/`<e>` come from {@link antigravityModelFlags} (model-aware mapping;
+   * throws `AdapterLaunchError` for pairs agy rejects). Full shape: `agy --model <m> [--effort <e>] --mode <plan|accept-edits>
    * --add-dir <run-dir> --prompt-interactive "<prompt>"` (`req.sessionId` is
    * deliberately dropped, see the class doc comment). Resume:
    * `--conversation <resumeSessionId>` leads the arguments when a prior
@@ -92,10 +200,7 @@ export class AntigravityAdapter implements Adapter {
       }
     }
 
-    args.push('--model', req.model);
-    if (req.effort !== undefined && req.effort.length > 0) {
-      args.push('--effort', req.effort);
-    }
+    args.push(...antigravityModelFlags(req.model, req.effort));
 
     args.push(...antigravityModeFlags(req.role));
     args.push(...runDirGrant(req.runId));

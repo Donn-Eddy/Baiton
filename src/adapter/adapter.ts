@@ -20,6 +20,19 @@ export const AGENT_BINARY: Record<AgentId, string> = {
   codex: 'codex',
 };
 
+/**
+ * Thrown by an adapter's `launch()` when the request cannot be expressed in
+ * the CLI's argv at all (for example a model/effort pair the CLI is known to
+ * reject). The launcher turns it into a `launch-args` refusal before any
+ * terminal is created; the `message` is user-facing and must say what to fix.
+ */
+export class AdapterLaunchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdapterLaunchError';
+  }
+}
+
 export interface Adapter {
   /** Stable adapter identifier. */
   readonly id: AgentId;
@@ -35,7 +48,9 @@ export interface Adapter {
   /**
    * Build the launch arguments for one stage. Pure: it computes `shellPath`,
    * `shellArgs` and an optional `env` from the request and does not touch the
-   * filesystem, terminal or journal.
+   * filesystem, terminal or journal. Throws {@link AdapterLaunchError} when
+   * the request cannot be expressed in the CLI's argv; any other throw is a
+   * bug.
    */
   launch(req: LaunchRequest): LaunchSpec;
 
@@ -46,6 +61,18 @@ export interface Adapter {
    * after its terminal is gone.
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec;
+
+  /**
+   * Map a Baiton Session_Id (the UUID the Run_Queue mints and journals) to the
+   * identifier the CLI itself needs on resume/attach. Only adapters whose CLI
+   * mints its own session ids and offers no way to pre-assign one implement
+   * this; for them `launch()` tags the fresh session with the Baiton id, and
+   * this method looks the CLI's id back up before a `launch({resume: true})`
+   * or `attach()`. Resolves `undefined` when no session carries that tag (the
+   * caller then resumes without a specific id and the adapter falls back to
+   * its "most recent session" flag). Must never throw.
+   */
+  resolveSessionId?(sessionId: string, cwd: string): Promise<string | undefined>;
 }
 
 /** The result of an adapter probe (Requirements 14.3, 14.4). */

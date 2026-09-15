@@ -1,24 +1,30 @@
 import type { Role } from '../model/role';
+import { ROLES } from '../model/role';
+import { ROLE_PROFILES, roleProfile, runDirPattern } from './roleProfile';
 
 /**
- * Per-role Claude permission flags (Requirement 15, design "Claude adapter"
- * table). Each role also receives write access to its own
+ * The Claude translation of the Baiton role profiles (Requirement 15, design
+ * "Claude adapter" table). The policy itself lives in `roleProfile.ts`; this
+ * module turns one profile into `--allowedTools` / `--permission-mode` /
+ * `--add-dir` flags. Each role also receives write access to its own
  * `.baiton/runs/<run-id>/` directory; that per-run grant is appended by the
  * adapter at launch time (Requirement 15.4).
  */
 
-/** Roles that only read and search (Requirement 15.1). */
-export const READ_ONLY_ROLES: readonly Role[] = [
-  'spec-writer',
-  'planner',
-  'plan-reviewer',
-  'pr-writer',
-] as const;
-
-/** Whether a role is one of the read-only roles. */
+/**
+ * Whether a role only reads and searches (Requirement 15.1): it may write
+ * nothing outside its run directory AND may not run shell commands. Derived
+ * from the profile table, and by construction the historical set
+ * `spec-writer, planner, plan-reviewer, pr-writer` — the reviewer is excluded
+ * because it has shell.
+ */
 export function isReadOnlyRole(role: Role): boolean {
-  return (READ_ONLY_ROLES as readonly string[]).includes(role);
+  const profile = roleProfile(role);
+  return profile.write === 'run-dir' && profile.shell === false;
 }
+
+/** Roles that only read and search (Requirement 15.1), derived from the profile table. */
+export const READ_ONLY_ROLES: readonly Role[] = ROLES.filter(isReadOnlyRole);
 
 /**
  * The `--allowedTools` value for the read-only roles: read and search plus
@@ -65,10 +71,14 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = {
  *   swaps read-only roles onto the accept-edits fallback (Requirement 15.7)
  */
 export function permissionFlags(role: Role, mode: PermissionMode = DEFAULT_PERMISSION_MODE): string[] {
-  if (role === 'executor') {
+  const profile = ROLE_PROFILES[role];
+
+  // `write: 'workspace'` is claude's accept-edits row (Requirement 15.3).
+  if (profile.write === 'workspace') {
     return ['--permission-mode', ACCEPT_EDITS_MODE];
   }
-  if (role === 'reviewer') {
+  // Run-dir roles with shell keep Bash in the allow-list (Requirement 15.2).
+  if (profile.shell) {
     return ['--allowedTools', REVIEWER_ALLOWED_TOOLS];
   }
   // Read-only roles: spec-writer, planner, plan-reviewer, pr-writer.
@@ -84,5 +94,5 @@ export function permissionFlags(role: Role, mode: PermissionMode = DEFAULT_PERMI
  * `.baiton/runs/<run-id>/`.
  */
 export function runDirGrant(runId: string): string[] {
-  return ['--add-dir', `.baiton/runs/${runId}/`];
+  return ['--add-dir', runDirPattern(runId)];
 }

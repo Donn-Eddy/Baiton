@@ -7,6 +7,7 @@ import {
   permissionFlags,
   runDirGrant,
 } from './permissions';
+import { roleProfile } from './roleProfile';
 
 /** The Claude CLI executable name; resolved on the host PATH. */
 const CLAUDE_BIN = 'claude';
@@ -15,9 +16,26 @@ const CLAUDE_BIN = 'claude';
 const PROBE_TIMEOUT_MS = 10_000;
 
 /**
+ * Build the `--append-system-prompt <text>` pair carrying the role profile's
+ * plain-language constraints. The flag is additive: it leaves Claude Code's
+ * own system prompt intact and appends Baiton's policy statement, so the
+ * profile is delivered without replacing anything the CLI relies on.
+ */
+export function claudeSystemPromptFlags(role: Role): string[] {
+  return ['--append-system-prompt', roleProfile(role).systemPrompt];
+}
+
+/**
  * The single first-pass adapter for the Claude Code CLI. It owns exactly three
  * things — the readiness probe, per-role launch argument construction, and the
  * continue flag — and nothing else (Requirement 14.1).
+ *
+ * Permissions are the claude translation of the Baiton role profiles
+ * (`roleProfile.ts`): `permissionFlags` turns the profile's write scope and
+ * shell bit into `--allowedTools`/`--permission-mode`, and
+ * {@link claudeSystemPromptFlags} delivers the same policy in prose via
+ * `--append-system-prompt` so the model is told the rule, not merely blocked
+ * by it.
  */
 export class ClaudeAdapter implements Adapter {
   readonly id = 'claude' as const;
@@ -58,7 +76,8 @@ export class ClaudeAdapter implements Adapter {
    * Build the terminal launch for one stage.
    *
    * Fresh launch: `claude --session-id <id> --model <m> [--effort <e>]
-   * <permission flags> <run-dir grant> -- "<prompt>"` (Requirement 3.1). On
+   * <permission flags> <run-dir grant> --append-system-prompt <profile prompt>
+   * -- "<prompt>"` (Requirement 3.1). On
    * resume, `--resume <resumeSessionId>` leads the arguments when a prior
    * Session_Id is known, falling back to the continue flag `-c` when it is
    * not (Requirements 3.2, 13.2, 13.3, 15.1–15.4). Every role is additionally
@@ -85,6 +104,7 @@ export class ClaudeAdapter implements Adapter {
 
     args.push(...permissionFlags(req.role, this.mode));
     args.push(...runDirGrant(req.runId));
+    args.push(...claudeSystemPromptFlags(req.role));
     // `--add-dir` and `--allowedTools` are variadic; without the `--`
     // end-of-options marker the CLI swallows the prompt as another value and
     // starts with no initial message.
@@ -95,12 +115,14 @@ export class ClaudeAdapter implements Adapter {
 
   /**
    * Build the args to reopen an existing session with no prompt: `claude
-   * --resume <id> <permission flags> <run-dir grant>` (Requirement 3.3, 3.4).
+   * --resume <id> <permission flags> <run-dir grant> --append-system-prompt
+   * <profile prompt>` (Requirement 3.3, 3.4).
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec {
     const args: string[] = ['--resume', req.sessionId];
     args.push(...permissionFlags(req.role, this.mode));
     args.push(...runDirGrant(req.runId));
+    args.push(...claudeSystemPromptFlags(req.role));
 
     return { shellPath: CLAUDE_BIN, shellArgs: args };
   }

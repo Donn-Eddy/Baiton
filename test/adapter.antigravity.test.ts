@@ -3,10 +3,12 @@ import {
   AntigravityAdapter,
   ANTIGRAVITY_PLAN_MODE,
   ANTIGRAVITY_ACCEPT_EDITS_MODE,
+  ANTIGRAVITY_MODELS,
   antigravityModeFlags,
+  antigravityModelFlags,
 } from '../src/adapter/antigravity';
 import type { LaunchRequest } from '../src/adapter/adapter';
-import { AGENT_BINARY } from '../src/adapter/adapter';
+import { AGENT_BINARY, AdapterLaunchError } from '../src/adapter/adapter';
 import { isReadOnlyRole } from '../src/adapter/permissions';
 import { ROLES } from '../src/model/role';
 
@@ -133,7 +135,7 @@ describe('AntigravityAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)'
     assert.deepStrictEqual(fresh.shellArgs, resumed.shellArgs.slice(1));
   });
 
-  it('passes the model through verbatim and appends --effort only when set', () => {
+  it('passes an uncatalogued model through verbatim and appends --effort only when set', () => {
     const withEffort = adapter.launch(req({ effort: 'high' }));
     assert.ok(findPair(withEffort.shellArgs, '--model', 'sonnet') >= 0);
     assert.ok(findPair(withEffort.shellArgs, '--effort', 'high') >= 0);
@@ -143,6 +145,20 @@ describe('AntigravityAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)'
 
     const withEmptyEffort = adapter.launch(req({ effort: '' }));
     assert.ok(!withEmptyEffort.shellArgs.includes('--effort'));
+  });
+
+  it('folds a bare Gemini family plus effort into the suffixed --model id (no --effort flag)', () => {
+    const spec = adapter.launch(req({ model: 'gemini-3.8-flash', effort: 'medium' }));
+    assert.ok(findPair(spec.shellArgs, '--model', 'gemini-3.8-flash-medium') >= 0);
+    assert.ok(!spec.shellArgs.includes('--effort'));
+    assert.ok(!spec.shellArgs.includes('gemini-3.8-flash'));
+  });
+
+  it('refuses a launch agy is known to reject, before building any argv', () => {
+    assert.throws(
+      () => adapter.launch(req({ model: 'gemini-3.1-pro', effort: 'medium' })),
+      AdapterLaunchError,
+    );
   });
 
   it('appends the prompt as the value of a trailing --prompt-interactive flag, with no -- separator', () => {
@@ -244,4 +260,67 @@ describe('AntigravityAdapter role -> --mode permission mapping (Req 15.1-15.3)',
       }
     });
   }
+});
+
+describe('antigravityModelFlags model-aware effort mapping (agy v1.2.2 catalogue)', () => {
+  it('maps every catalogued Gemini family + each offered effort to the suffixed id', () => {
+    for (const [family, efforts] of Object.entries(ANTIGRAVITY_MODELS)) {
+      for (const effort of efforts) {
+        assert.deepStrictEqual(antigravityModelFlags(family, effort), ['--model', `${family}-${effort}`]);
+      }
+    }
+  });
+
+  it('rejects a bare Gemini family with no effort, naming the options', () => {
+    for (const effort of [undefined, '']) {
+      assert.throws(
+        () => antigravityModelFlags('gemini-3.8-flash', effort),
+        (e: unknown) =>
+          e instanceof AdapterLaunchError &&
+          /requires an effort/.test(e.message) &&
+          /low, medium, high/.test(e.message),
+      );
+    }
+  });
+
+  it('rejects an effort the family does not offer (gemini-3.1-pro has no medium)', () => {
+    assert.throws(
+      () => antigravityModelFlags('gemini-3.1-pro', 'medium'),
+      (e: unknown) =>
+        e instanceof AdapterLaunchError && /does not offer effort "medium"/.test(e.message),
+    );
+    assert.deepStrictEqual(antigravityModelFlags('gemini-3.1-pro', 'high'), ['--model', 'gemini-3.1-pro-high']);
+  });
+
+  it('passes an already-suffixed Gemini id through when the effort agrees or is unset', () => {
+    assert.deepStrictEqual(antigravityModelFlags('gemini-3.8-flash-medium', 'medium'), ['--model', 'gemini-3.8-flash-medium']);
+    assert.deepStrictEqual(antigravityModelFlags('gemini-3.8-flash-medium', undefined), ['--model', 'gemini-3.8-flash-medium']);
+    assert.deepStrictEqual(antigravityModelFlags('gemini-3.8-flash-medium', ''), ['--model', 'gemini-3.8-flash-medium']);
+  });
+
+  it('rejects a suffixed Gemini id whose suffix contradicts the configured effort', () => {
+    assert.throws(
+      () => antigravityModelFlags('gemini-3.8-flash-medium', 'high'),
+      (e: unknown) => e instanceof AdapterLaunchError && /conflicts/.test(e.message),
+    );
+  });
+
+  it('drops the effort for fixed ids agy takes no --effort for (Claude, GPT-OSS)', () => {
+    for (const fixed of ['claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']) {
+      assert.deepStrictEqual(antigravityModelFlags(fixed, 'medium'), ['--model', fixed]);
+      assert.deepStrictEqual(antigravityModelFlags(fixed, undefined), ['--model', fixed]);
+    }
+  });
+
+  it('passes an uncatalogued id through verbatim with --effort so a newer agy can validate it', () => {
+    assert.deepStrictEqual(antigravityModelFlags('gemini-4.0-ultra', 'high'), ['--model', 'gemini-4.0-ultra', '--effort', 'high']);
+    assert.deepStrictEqual(antigravityModelFlags('gemini-4.0-ultra', undefined), ['--model', 'gemini-4.0-ultra']);
+  });
+
+  it('never emits --effort for a catalogued model', () => {
+    for (const [family, efforts] of Object.entries(ANTIGRAVITY_MODELS)) {
+      const probe = efforts.length > 0 ? efforts[0] : 'medium';
+      assert.ok(!antigravityModelFlags(family, probe).includes('--effort'));
+    }
+  });
 });

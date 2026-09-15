@@ -28,6 +28,7 @@ import type { Stage } from '../model/stage';
 import type { Role } from '../model/role';
 import { Result, err, ok } from '../model/result';
 import type { Adapter, LaunchSpec } from '../adapter';
+import { AdapterLaunchError } from '../adapter';
 import { writeBrief } from './brief';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
@@ -80,10 +81,13 @@ export interface LaunchStageOutput {
  * mean no terminal was created and the caller must leave the todo unchanged.
  *
  * - `root-resolution` — the workspace root could not be resolved.
+ * - `launch-args`     — the adapter refused the request (e.g. a model/effort
+ *                       pair the CLI rejects); `message` says what to fix.
  * - `brief-write`     — writing `brief.md` failed; `path` names the target.
  */
 export type LaunchError =
   | { kind: 'root-resolution'; message: string }
+  | { kind: 'launch-args'; message: string }
   | { kind: 'brief-write'; path: string; message: string };
 
 /**
@@ -134,7 +138,29 @@ export function launchStage(
   const briefPath = path.join(runDir, BRIEF_FILE_NAME);
   const resultPath = path.join(runDir, RESULT_FILE_NAME);
 
-  // 2. Ensure the run directory exists, then write the Brief (sections in the
+  // 2. Build the launch args. An adapter that cannot express the request in
+  //    the CLI's argv (e.g. an agy model/effort pair agy rejects) halts here,
+  //    before the run directory or Brief exist, with no terminal created.
+  let launchSpec: LaunchSpec;
+  try {
+    launchSpec = deps.adapter.launch({
+      role: input.role,
+      model: input.model,
+      effort: input.effort,
+      prompt: initialPromptFor(briefPath),
+      runId: input.runId,
+      resume: input.resume,
+      sessionId: input.sessionId,
+      resumeSessionId: input.resumeSessionId,
+    });
+  } catch (cause) {
+    if (cause instanceof AdapterLaunchError) {
+      return err({ kind: 'launch-args', message: cause.message });
+    }
+    throw cause;
+  }
+
+  // 3. Ensure the run directory exists, then write the Brief (sections in the
   //    required order, Req 11.3). A mkdir or write failure halts before
   //    launching, with no terminal created (Req 11.5).
   try {
@@ -153,19 +179,8 @@ export function launchStage(
     });
   }
 
-  // 3. Create the terminal with the adapter's launch args and cwd at the
+  // 4. Create the terminal with the adapter's launch args and cwd at the
   //    workspace root, no intervening shell (Req 11.1, 11.2).
-  const launchSpec = deps.adapter.launch({
-    role: input.role,
-    model: input.model,
-    effort: input.effort,
-    prompt: initialPromptFor(briefPath),
-    runId: input.runId,
-    resume: input.resume,
-    sessionId: input.sessionId,
-    resumeSessionId: input.resumeSessionId,
-  });
-
   const terminal = deps.terminalHost.createTerminal({
     name: `Baiton ${input.stage} ${input.runId}`,
     shellPath: launchSpec.shellPath,
@@ -174,7 +189,7 @@ export function launchStage(
     env: launchSpec.env,
   });
 
-  // 4. The one-line initial prompt (Req 11.4) is the CLI's positional
+  // 5. The one-line initial prompt (Req 11.4) is the CLI's positional
   //    argument (see `launchSpec.shellArgs`), which the CLI submits itself on
   //    startup. It is deliberately not also sent via `sendText`: a second copy
   //    arriving during TUI startup is treated as a paste and left unsent in
@@ -188,6 +203,13 @@ export function launchStage(
  * Validate the workspace root: it must be a non-empty absolute path. Returning
  * a Result (rather than throwing) lets the caller surface a root-resolution
  * failure and leave state unchanged (Req 11.5).
+ *
+ * The root is expected to be canonical already — it is symlink-resolved once at
+ * activation ingress (see `canonicalizeRoot` in `src/activation/workspace.ts`) —
+ * so this deliberately validates only shape and does not realpath. Resolving
+ * here instead would make the brief's paths canonical while the run queue and
+ * result validation still compared against the raw root, introducing a second
+ * spelling mismatch inside Baiton itself.
  */
 function resolveRoot(
   workspaceRoot: string,

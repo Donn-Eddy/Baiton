@@ -1,3 +1,6 @@
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
 /**
  * The `.baiton/.gitignore` contents written by the Initialize command
  * (Requirement 1.2).
@@ -31,3 +34,32 @@ export const GITIGNORE_CONTENTS = [
   'specs/*/runs.jsonl',
   '',
 ].join('\n');
+
+/** Outcome of {@link refreshGitignore}. */
+export type GitignoreRefresh = 'unchanged' | 'rewritten';
+
+/**
+ * Bring `.baiton/.gitignore` up to date with {@link GITIGNORE_CONTENTS}.
+ *
+ * The Initialize command writes the file once, but the exclusion list grows
+ * as new Baiton-owned artifacts appear (for example the per-session `chat/`
+ * folders). A workspace initialized by an older build would otherwise keep a
+ * stale ignore list until Initialize is rerun by hand, so activation calls
+ * this to rewrite the file whenever its contents differ from the canonical
+ * text. A missing `.baiton/` directory is not created here: an uninitialized
+ * folder is left alone.
+ */
+export async function refreshGitignore(baitonDir: string): Promise<GitignoreRefresh> {
+  const gitignorePath = path.join(baitonDir, '.gitignore');
+  let current: string | undefined;
+  try {
+    current = await fs.readFile(gitignorePath, 'utf8');
+  } catch {
+    current = undefined;
+  }
+  if (current === GITIGNORE_CONTENTS) {
+    return 'unchanged';
+  }
+  await fs.writeFile(gitignorePath, GITIGNORE_CONTENTS, 'utf8');
+  return 'rewritten';
+}
