@@ -306,6 +306,7 @@
     "@types/vscode": "^1.106.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
+    "@vscode/vsce": "^3.9.2",
     "eslint": "^8.57.1",
     "fast-check": "^3.23.1",
     "mocha": "^10.8.2",
