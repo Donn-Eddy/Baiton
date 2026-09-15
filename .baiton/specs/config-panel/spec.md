@@ -1,12 +1,12 @@
 ---
 version: 1
 name: config-panel
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 9f9f6a4b950e3bcdf6aeb7408ee583c49e3464eb
+branch: baiton/config-panel
+approved_rev: 47354f86bf060eeefc131bb5669e98572cab694305ffdecceb9ad503a87f3cc1
 ---
 
 # OVERVIEW
