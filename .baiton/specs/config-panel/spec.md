@@ -6,7 +6,7 @@ mode: manual
 base: main
 base_commit: 9f9f6a4b950e3bcdf6aeb7408ee583c49e3464eb
 branch: baiton/config-panel
-approved_rev: 47354f86bf060eeefc131bb5669e98572cab694305ffdecceb9ad503a87f3cc1
+approved_rev: 452bc1bd49efab604cda61181c0bb648d93142dd18a8ab2798e4163b84964d9a
 ---
 
 # OVERVIEW
