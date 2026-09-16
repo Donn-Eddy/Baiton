@@ -2,6 +2,11 @@ import * as assert from 'assert';
 import {
   buildSystemPrompt,
   ConversationKind,
+  DRIVE_TEXT,
+  PROHIBITION_LINES,
+  REFUSAL_TEXT,
+  SCOPE_TEXT,
+  phaseFor,
 } from '../src/orchestrator/systemPrompt';
 
 /**
@@ -18,6 +23,11 @@ import {
  * Coverage:
  * - Role text: never edits source, writes only through spec-writing tools,
  *   reads only through read tools — Req 11.1.
+ * - Scope: the two jobs and the work that is not the orchestrator's, present
+ *   in both phases; the refusal rule — Req 11.1.
+ * - Phase split: `phaseFor` over the frontmatter `status`, the drive-phase
+ *   stage table in a driven spec only, the new-spec flow while gathering
+ *   only — Req 11.1.
  * - Ask / propose / `create_spec`-after-agreement flow — Req 11.2.
  * - Todo grammar, eight states, id form, hint groups — Req 11.3.
  * - Frontmatter rules, status/mode enums, extension-written keys — Req 11.4.
@@ -27,6 +37,29 @@ import {
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
 const SPEC: ConversationKind = { kind: 'spec', slug: 'my-spec' };
+
+/** A spec file with the given frontmatter `status`. */
+function specWithStatus(status: string): string {
+  return [
+    '---',
+    'version: 1',
+    'name: my-spec',
+    `status: ${status}`,
+    '---',
+    '',
+    '# OVERVIEW',
+    '',
+    'Something worth doing.',
+    '',
+    '# TODOS',
+    '',
+    '- [pending] T01 Do the first thing',
+    '',
+  ].join('\n');
+}
+
+const DRAFT_SPEC = specWithStatus('draft');
+const APPROVED_SPEC = specWithStatus('approved');
 
 const TODO_STATES = [
   'pending',
@@ -207,6 +240,115 @@ describe('buildSystemPrompt', () => {
       const marker = 'WORKSPACE_SHOULD_NOT_EMBED_THIS';
       const prompt = buildSystemPrompt(WORKSPACE, marker);
       assert.ok(!prompt.includes(marker), 'workspace prompt should not embed spec content');
+    });
+  });
+
+  describe('scope (Req 11.1)', () => {
+    const PROMPTS: Array<[string, string]> = [
+      ['workspace', buildSystemPrompt(WORKSPACE)],
+      ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
+      ['an approved spec', buildSystemPrompt(SPEC, APPROVED_SPEC)],
+      ['a spec with no content', buildSystemPrompt(SPEC)],
+    ];
+
+    for (const [label, prompt] of PROMPTS) {
+      it(`states the two jobs and the prohibitions in ${label}`, () => {
+        assert.ok(prompt.includes(SCOPE_TEXT), 'the scope text is present verbatim');
+        for (const line of PROHIBITION_LINES) {
+          assert.ok(prompt.includes(line), `the prompt states "${line}" verbatim`);
+        }
+      });
+
+      it(`states the refusal rule in ${label}`, () => {
+        assert.ok(prompt.includes(REFUSAL_TEXT), 'the refusal text is present verbatim');
+      });
+    }
+
+    it('names both jobs with the tool that ends each', () => {
+      assert.match(SCOPE_TEXT, /exactly two jobs/i);
+      assert.match(SCOPE_TEXT, /clarifying questions/i);
+      assert.match(SCOPE_TEXT, /agree/i);
+      assert.ok(SCOPE_TEXT.includes('`draft_spec`'), 'job one ends at draft_spec');
+      assert.ok(SCOPE_TEXT.includes('`run`'), 'job two dispatches with run');
+      assert.ok(SCOPE_TEXT.includes('`submit_pr`'), 'job two ends at submit_pr');
+    });
+
+    it('says a configured coding agent does the work it refuses', () => {
+      assert.ok(
+        PROHIBITION_LINES.includes('A configured coding agent does each of those when you dispatch it.'),
+        'the prohibitions say who does the work instead',
+      );
+    });
+
+    it('tells the orchestrator to quote a refusal and stop, not to work around it', () => {
+      assert.match(REFUSAL_TEXT, /quote the refusal/i);
+      assert.match(REFUSAL_TEXT, /stop/i);
+      assert.match(REFUSAL_TEXT, /do not diagnose/i);
+      assert.match(REFUSAL_TEXT, /different stage/i);
+      assert.match(REFUSAL_TEXT, /read files to work around it/i);
+    });
+  });
+
+  describe('phase split (Req 11.1)', () => {
+    it('phaseFor is gather for a workspace conversation', () => {
+      assert.strictEqual(phaseFor(WORKSPACE), 'gather');
+      assert.strictEqual(phaseFor(WORKSPACE, APPROVED_SPEC), 'gather');
+    });
+
+    it('phaseFor is gather for a draft spec and for missing content', () => {
+      assert.strictEqual(phaseFor(SPEC, DRAFT_SPEC), 'gather');
+      assert.strictEqual(phaseFor(SPEC), 'gather');
+      assert.strictEqual(phaseFor(SPEC, ''), 'gather');
+      assert.strictEqual(phaseFor(SPEC, 'not a spec at all'), 'gather');
+      assert.strictEqual(phaseFor(SPEC, '---\nstatus: nonsense\n---\n'), 'gather');
+    });
+
+    it('phaseFor is drive for every status past draft', () => {
+      for (const status of ['approved', 'in-progress', 'review', 'pr', 'done']) {
+        assert.strictEqual(
+          phaseFor(SPEC, specWithStatus(status)),
+          'drive',
+          `status "${status}" is driven`,
+        );
+      }
+    });
+
+    it('includes the drive text only for a spec past draft', () => {
+      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
+      assert.ok(driving.includes(DRIVE_TEXT), 'an approved spec carries the drive text');
+      for (const [label, prompt] of [
+        ['workspace', buildSystemPrompt(WORKSPACE)],
+        ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
+        ['a spec with no content', buildSystemPrompt(SPEC)],
+      ] as Array<[string, string]>) {
+        assert.ok(!prompt.includes(DRIVE_TEXT), `${label} carries no drive text`);
+      }
+    });
+
+    it('includes the new-spec flow only while gathering', () => {
+      const gathering = buildSystemPrompt(SPEC, DRAFT_SPEC);
+      assert.match(gathering, /New spec flow:/);
+      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
+      assert.ok(!driving.includes('New spec flow:'), 'a driven spec is past the new-spec flow');
+    });
+
+    it('gives the next legal stage for each todo state while driving', () => {
+      assert.ok(DRIVE_TEXT.includes('`pending` -> `run` the `plan` stage.'));
+      assert.ok(DRIVE_TEXT.includes('`planned` -> `run` the `execute` stage.'));
+      assert.ok(DRIVE_TEXT.includes('`executed` -> `run` the `review` stage.'));
+      assert.match(DRIVE_TEXT, /review that sends the todo back.*`execute`/);
+    });
+
+    it('states that run blocks and leaves nothing to poll or read', () => {
+      assert.match(DRIVE_TEXT, /`run` blocks until the stage finishes/);
+      assert.match(DRIVE_TEXT, /nothing to poll/i);
+      assert.match(DRIVE_TEXT, /one todo at a time/i);
+      assert.match(DRIVE_TEXT, /`submit_pr`/);
+    });
+
+    it('does not advertise plan-review as a stage to run', () => {
+      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
+      assert.ok(!driving.includes('plan-review'), 'plan-review is not a stage the orchestrator runs');
     });
   });
 });

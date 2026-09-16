@@ -7,7 +7,12 @@ import {
   assembleToolSpecs,
   createToolRegistry,
 } from '../src/orchestrator/registry';
-import { Tool, ToolContext, ToolResult } from '../src/orchestrator/guard';
+import {
+  ORCHESTRATOR_PHASES,
+  Tool,
+  ToolContext,
+  ToolResult,
+} from '../src/orchestrator/guard';
 import { ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
@@ -215,6 +220,66 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
             `"${def.name}" description is long enough (Req 10.2)`,
           );
         }
+      }
+    });
+  });
+
+  describe('per-phase assembly (Req 11.1)', () => {
+    const repos: string[] = [];
+
+    function newRepo(): string {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-assemble-phase-'));
+      repos.push(repo);
+      return repo;
+    }
+
+    afterEach(() => {
+      while (repos.length > 0) {
+        const repo = repos.pop()!;
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('assembles exactly the phase\'s tools, each phase a subset of the whole', () => {
+      const repo = newRepo();
+      const registry = createToolRegistry(makeServices(repo));
+      const allNames = new Set(registry.definitions().map((d) => d.name));
+
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const result = registry.assembleFor(phase);
+        assert.strictEqual(result.ok, true, `the ${phase} phase must assemble`);
+        if (!result.ok) {
+          continue;
+        }
+        const names = result.value.map((s) => s.name);
+        assert.deepStrictEqual(
+          names,
+          registry.definitionsFor(phase).map((d) => d.name),
+          `the ${phase} specs match its definitions, in order`,
+        );
+        for (const name of names) {
+          assert.ok(allNames.has(name), `"${name}" is a registered tool`);
+        }
+        assert.ok(
+          names.length < allNames.size,
+          `the ${phase} phase advertises fewer tools than the whole registry`,
+        );
+      }
+    });
+
+    it('validates only the phase it assembles, so another phase\'s bad description cannot block it', () => {
+      const good: Tool = fakeTool('gather_only', 'a perfectly good description');
+      good.phases = ['gather'];
+      const bad: Tool = fakeTool('drive_only', 'x');
+      bad.phases = ['drive'];
+
+      const gather = assembleToolSpecs([good, bad].filter((t) => t.phases.includes('gather')));
+      const drive = assembleToolSpecs([good, bad].filter((t) => t.phases.includes('drive')));
+
+      assert.strictEqual(gather.ok, true, 'the gather phase assembles on its own');
+      assert.strictEqual(drive.ok, false, 'the drive phase is rejected by its own bad tool');
+      if (!drive.ok) {
+        assert.strictEqual(drive.error.tool, 'drive_only');
       }
     });
   });
