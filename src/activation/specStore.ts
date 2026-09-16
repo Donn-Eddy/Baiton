@@ -26,13 +26,15 @@
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { approvalHash, computeInputRev } from '../model/hash';
-import { parseSpec } from '../model/parser';
+import { parseSpec, type ParsedSpec } from '../model/parser';
 import { isBlocked as deriveBlocked } from '../model/hash';
 import { writeTodoState } from '../model/writer';
 import { isErr } from '../model/result';
 import type { TodoState } from '../model/todoState';
+import type { Stage } from '../model/stage';
 import type { GitService } from '../git';
 import type { SpecStore } from '../engine';
+import { persistencePathForStage, stageArtifactIsNumbered } from '../schema';
 import { parseJournal } from '../journal';
 
 /**
@@ -50,11 +52,11 @@ export function createSpecStore(
     path.join(specsDir, slug, 'spec.md');
   const journalPath = (slug: string): string =>
     path.join(specsDir, slug, 'runs.jsonl');
+  const todoDir = (slug: string, todoId: string): string =>
+    path.join(specsDir, slug, 'todos', todoId);
 
   /** Re-read and parse a spec's `spec.md`, or `undefined` when unreadable. */
-  const readSpec = async (
-    slug: string,
-  ): Promise<ReturnType<typeof parseSpec> | undefined> => {
+  const readSpec = async (slug: string): Promise<ParsedSpec | undefined> => {
     try {
       const raw = await fsp.readFile(specPath(slug), 'utf8');
       return parseSpec(raw);
@@ -67,6 +69,38 @@ export function createSpecStore(
     async currentState(slug, todoId): Promise<TodoState | undefined> {
       const spec = await readSpec(slug);
       return spec?.todos.find((t) => t.id === todoId)?.state;
+    },
+
+    readSpec,
+
+    async readArtifact(slug, todoId, stage): Promise<string | undefined> {
+      const dir = todoDir(slug, todoId);
+      const fileName = stageArtifactIsNumbered(stage)
+        ? await latestNumbered(dir, stage)
+        : baseName(persistencePathForStage(stage, todoId));
+      if (fileName === undefined) {
+        return undefined;
+      }
+      try {
+        return await fsp.readFile(path.join(dir, fileName), 'utf8');
+      } catch {
+        return undefined;
+      }
+    },
+
+    async latestExecuteCommit(slug, todoId): Promise<string | undefined> {
+      let commit: string | undefined;
+      for (const entry of parseJournal(journalPath(slug))) {
+        if (
+          entry.stage === 'execute' &&
+          entry.todoId === todoId &&
+          entry.result === 'completed' &&
+          entry.commit !== undefined
+        ) {
+          commit = entry.commit;
+        }
+      }
+      return commit;
     },
 
     async isApproved(slug): Promise<boolean> {
@@ -134,6 +168,43 @@ export function createSpecStore(
       }
     },
   };
+}
+
+/**
+ * The file name of the highest-numbered artifact a numbered stage wrote into a
+ * todo's artifact folder, or `undefined` when the folder holds none. The
+ * directory — not the journal — is the source of truth: an artifact is on file
+ * exactly when the file exists, whatever the journal recorded (Req 24.3).
+ */
+async function latestNumbered(
+  dir: string,
+  stage: Stage,
+): Promise<string | undefined> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(dir);
+  } catch {
+    return undefined;
+  }
+  const pattern = new RegExp(`^${stage}-(\\d+)\\.md$`);
+  let best: { name: string; n: number } | undefined;
+  for (const name of names) {
+    const match = pattern.exec(name);
+    if (match === null) {
+      continue;
+    }
+    const n = Number(match[1]);
+    if (best === undefined || n > best.n) {
+      best = { name, n };
+    }
+  }
+  return best?.name;
+}
+
+/** The final `/`-separated segment of a spec-relative artifact path. */
+function baseName(relativePath: string): string {
+  const parts = relativePath.split('/');
+  return parts[parts.length - 1];
 }
 
 /**

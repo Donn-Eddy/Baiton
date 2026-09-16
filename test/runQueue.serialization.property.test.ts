@@ -235,6 +235,9 @@ function makeRig(journalPath: string): Rig {
   // `planned`, the spec is approved, unblocked, and the input rev matches.
   const specStore: SpecStore = {
     currentState: async () => 'planned',
+    readSpec: async () => undefined,
+    readArtifact: async () => '# Plan T01\n',
+    latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,

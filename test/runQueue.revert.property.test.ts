@@ -256,6 +256,9 @@ function makeRig(journalPath: string, scenario: Scenario): Rig {
 
   const specStore: SpecStore = {
     currentState: async () => scenario.from,
+    readSpec: async () => undefined,
+    readArtifact: async () => '# Plan T01\n',
+    latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,

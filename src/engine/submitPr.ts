@@ -334,7 +334,7 @@ export function prContext(input: {
 }): string {
   return [
     `The spec is \`${path.join(input.specDir, 'spec.md')}\`; its OVERVIEW and todo list describe the work.`,
-    `The plans (\`plan.md\`) and execution summaries (\`execute-<n>.md\`) for each todo are in \`${input.specDir}\`.`,
+    `Each todo's plan and execution summaries live in its own folder: \`${path.join(input.specDir, 'todos')}/<todo-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
     `The cumulative diff of branch \`${input.branch}\` against base \`${input.base}\` is at \`${input.diffPath}\`.`,
     'Draft the pull request from these; the extension pushes the branch and opens the PR itself.',
   ].join('\n\n');

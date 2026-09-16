@@ -118,6 +118,11 @@ function makeGit(): GitService {
 /** A spec store that keeps every `execute` transition legal, regardless of history. */
 const specStore: SpecStore = {
   currentState: async () => 'planned',
+  // Every todo has a plan on file, so the Execute brief can be assembled; the
+  // spec itself is not needed for what this test observes.
+  readSpec: async () => undefined,
+  readArtifact: async () => '# Plan T01\n',
+  latestExecuteCommit: async () => undefined,
   isApproved: async () => true,
   isBlocked: async () => false,
   inputRevMatches: async () => true,

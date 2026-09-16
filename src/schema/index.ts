@@ -182,32 +182,68 @@ export function stageArtifactIsNumbered(stage: Stage): boolean {
 }
 
 /**
- * The spec-relative persistence path (file name) for a stage's artifact.
+ * The spec-relative persistence path for a stage's artifact.
  *
- * `plan` → `plan.md`; the other stages take the round/attempt index `n`
- * (1-based) and yield `plan-review-<n>.md`, `execute-<n>.md`, `review-<n>.md`
- * (Req 24.3). Passing an index for `plan` is ignored; omitting one for a
- * numbered stage throws, since a numbered artifact has no meaning without it.
+ * The four todo-level stages persist under a per-todo folder so one todo's
+ * artifacts can never overwrite another's: `todos/<todoId>/plan.md`,
+ * `todos/<todoId>/plan-review-<n>.md`, `todos/<todoId>/execute-<n>.md`,
+ * `todos/<todoId>/review-<n>.md` (Req 24.3). The two spec-scoped stages ignore
+ * the todo id and stay at the spec root: `spec-draft` → `spec.md`, `pr` →
+ * `pr.md`.
+ *
+ * Omitting the todo id for a todo-level stage throws, as does omitting the
+ * round/attempt index `n` for a numbered stage: neither artifact has a
+ * well-defined location without it. The separator is always `/`; callers join
+ * the result onto an absolute directory with `path.join`, which normalises it.
  */
-export function persistencePathForStage(stage: Stage, n?: number): string {
+export function persistencePathForStage(
+  stage: Stage,
+  todoId?: string,
+  n?: number,
+): string {
   switch (stage) {
     case 'spec-draft':
       // The spec draft persists once per spec, as the spec file itself.
       return 'spec.md';
     case 'plan':
-      return 'plan.md';
+      return `${todoArtifactDir(stage, todoId)}/plan.md`;
     case 'plan-review':
-      return `plan-review-${requireIndex(stage, n)}.md`;
+      return `${todoArtifactDir(stage, todoId)}/plan-review-${requireIndex(stage, n)}.md`;
     case 'execute':
-      return `execute-${requireIndex(stage, n)}.md`;
+      return `${todoArtifactDir(stage, todoId)}/execute-${requireIndex(stage, n)}.md`;
     case 'review':
-      return `review-${requireIndex(stage, n)}.md`;
+      return `${todoArtifactDir(stage, todoId)}/review-${requireIndex(stage, n)}.md`;
     case 'pr':
-      // The PR draft persists once per spec, like the plan (Req 8 "PR").
+      // The PR draft persists once per spec, at the spec root (Req 8 "PR").
       return 'pr.md';
     default:
       return assertNever(stage);
   }
+}
+
+/**
+ * A todo id is part of a filesystem path, so it must be a single, plain path
+ * segment. Ids come from the spec (`T` plus digits), but the path is built from
+ * file data, so the shape is enforced here rather than assumed.
+ */
+const TODO_ID_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * The spec-relative directory holding one todo's artifacts, validated as a
+ * single path segment so a malformed id can never escape the spec folder.
+ */
+function todoArtifactDir(stage: Stage, todoId: string | undefined): string {
+  if (
+    todoId === undefined ||
+    !TODO_ID_SEGMENT.test(todoId) ||
+    todoId === '.' ||
+    todoId === '..'
+  ) {
+    throw new Error(
+      `stage "${stage}" persists a per-todo artifact and requires a plain todo id, got ${String(todoId)}`,
+    );
+  }
+  return `todos/${todoId}`;
 }
 
 /** Validate and return the 1-based index a numbered stage artifact requires. */

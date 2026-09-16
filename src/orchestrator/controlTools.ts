@@ -416,10 +416,11 @@ function runTool(services: ToolServices): Tool {
 
 /**
  * `read_artifact(slug, todo, name)` — read a persisted stage artifact for a
- * todo. `name` is the artifact file name under the spec (e.g. `plan.md`,
- * `plan-review-1.md`, `execute-1.md`, `review-1.md`). Returns the bounded text
- * (Req 10.6) or a not-found error (Req 10.7). Artifacts live under the spec
- * folder in a per-todo directory.
+ * todo. `name` is the artifact file name (e.g. `plan.md`, `plan-review-1.md`,
+ * `execute-1.md`, `review-1.md`). Returns the bounded text (Req 10.6) or a
+ * not-found error (Req 10.7). Artifacts live in the todo's own folder under the
+ * spec, `specs/<slug>/todos/<todo>/`, so one todo's artifacts never collide
+ * with another's (Req 24.3).
  */
 function readArtifactTool(services: ToolServices): Tool {
   return {
@@ -451,6 +452,7 @@ function readArtifactTool(services: ToolServices): Tool {
         services.baitonDir,
         'specs',
         slug,
+        'todos',
         todo,
         name,
       );

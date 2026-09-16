@@ -246,6 +246,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,
@@ -263,7 +264,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.strictEqual(written.length, 1, 'the artifact was persisted once');
       assert.strictEqual(
         written[0].path,
-        artifactPathFor('/repo', 'my-spec', 'execute', 1),
+        artifactPathFor('/repo', 'my-spec', 'execute', 'T01', 1),
         'artifact persisted at the numbered execute stage path',
       );
       assert.strictEqual(terminal.disposeCount, 1, 'terminal disposed on a valid result');
@@ -282,6 +283,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,
@@ -332,6 +334,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,

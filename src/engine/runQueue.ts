@@ -38,6 +38,7 @@
  */
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
+import type { ParsedSpec } from '../model/parser';
 import type { TodoState } from '../model/todoState';
 import type { GitService } from '../git';
 import type { Adapter } from '../adapter';
@@ -45,6 +46,7 @@ import type { HostTerminal } from './terminalHost';
 import type { TerminalHost } from './terminalHost';
 import type { ResultWatcher } from './resultWatcher';
 import { launchStage, type LaunchStageInput } from './launcher';
+import { buildStageContext, type ContextStage } from './stageContext';
 import { awaitStageResult, type RunOutcome } from './resultFlow';
 import {
   resolveTransition,
@@ -181,6 +183,28 @@ export interface RunQueue {
 export interface SpecStore {
   /** The todo's current lifecycle state, or `undefined` when it cannot be read. */
   currentState(slug: string, todoId: string): Promise<TodoState | undefined>;
+  /**
+   * The spec, freshly re-read and parsed, or `undefined` when it cannot be
+   * read. The queue uses it to assemble each Brief's Context section (Req 18.3).
+   */
+  readSpec(slug: string): Promise<ParsedSpec | undefined>;
+  /**
+   * The text of a todo's persisted artifact for a stage, or `undefined` when
+   * none is on file. For the numbered stages this is the artifact with the
+   * highest `<n>` in `todos/<todoId>/`, found by listing that directory rather
+   * than by trusting the journal (Req 24.3).
+   */
+  readArtifact(
+    slug: string,
+    todoId: string,
+    stage: Stage,
+  ): Promise<string | undefined>;
+  /**
+   * The commit the todo's most recent completed Execute landed in, from the
+   * journal's completion record, or `undefined` when none is recorded. The
+   * reviewer's Brief names it so the reviewer inspects that commit (Req 21.2).
+   */
+  latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined>;
   /**
    * Whether the spec is approved: its `approved_rev` byte-equals the current
    * Approval_Hash and is non-empty (Req 5.3, 5.4).
@@ -575,6 +599,15 @@ class SerialRunQueue implements RunQueue {
     const sessionId = this.newSessionId();
     const { model, effort } = this.deps.modelForRole(req.role);
 
+    // 0. Assemble the Brief's Context section from the spec and the todo's own
+    //    artifacts (Req 18.3). This runs before any state write, so a stage
+    //    that cannot be briefed — Execute or Review with no plan on file —
+    //    refuses with the todo's state untouched, exactly like a guard.
+    const briefContext = await this.buildBriefContext(req, stage);
+    if (!briefContext.ok) {
+      return this.refuse(briefContext.error);
+    }
+
     // 1. Write the running state and commit the metadata before launch (Req
     //    17.1). A serializer abort halts before launching (Req 6.5).
     if (transition.running !== undefined) {
@@ -609,6 +642,9 @@ class SerialRunQueue implements RunQueue {
       sessionId,
       ...(req.resumeSessionId !== undefined
         ? { resumeSessionId: req.resumeSessionId }
+        : {}),
+      ...(briefContext.value !== undefined
+        ? { briefContext: briefContext.value }
         : {}),
     };
     const launched = launchStage(launchInput, {
@@ -664,6 +700,7 @@ class SerialRunQueue implements RunQueue {
           workspaceRoot: this.deps.workspaceRoot,
           slug: req.slug,
           stage,
+          todoId: req.todoId,
           index: req.attempt,
           terminal,
           watcher,
@@ -683,6 +720,128 @@ class SerialRunQueue implements RunQueue {
     }
 
     return this.applyOutcome(req, transition, stage, runId, startHead, startBranch, outcome);
+  }
+
+  /**
+   * Assemble the Brief's Context section for a stage (Req 18.3), reading the
+   * spec and the todo's own artifacts through the {@link SpecStore} seam.
+   *
+   * Each role gets exactly what it needs and nothing else — the planner the
+   * OVERVIEW, its todo line and its dependencies' execution summaries; the
+   * executor its todo line and plan; the reviewer those plus the execution
+   * summary and the commit it landed in — so no sub-agent has to read `spec.md`
+   * or another todo's artifacts.
+   *
+   * Execute and Review consume a plan, so a todo with no `todos/<id>/plan.md`
+   * refuses here rather than launching a sub-agent that would have to guess.
+   * Plan needs no artifact: a dependency with no execution summary simply
+   * contributes nothing. An unreadable spec yields no context rather than a
+   * refusal — the stage still launches with the four required Brief sections.
+   */
+  private async buildBriefContext(
+    req: RunRequest,
+    stage: Stage,
+  ): Promise<{ ok: true; value: string | undefined } | { ok: false; error: DispatchError }> {
+    const store = this.deps.specStore;
+    const contextStage = stage as ContextStage;
+
+    // Execute and Review are briefed from the plan; without one there is
+    // nothing to implement or to review against (see the View plan action).
+    let plan: string | undefined;
+    if (contextStage !== 'plan') {
+      plan = await store.readArtifact(req.slug, req.todoId, 'plan');
+      const missing = plan === undefined || plan.trim() === '';
+      if (missing && (contextStage === 'execute' || contextStage === 'review')) {
+        return {
+          ok: false,
+          error: {
+            kind: 'launch-failed',
+            message: `no plan on file for "${req.todoId}"; run Plan first`,
+          },
+        };
+      }
+    }
+
+    const spec = await store.readSpec(req.slug);
+    if (spec === undefined) {
+      return { ok: true, value: undefined };
+    }
+
+    switch (contextStage) {
+      case 'plan': {
+        // Only the target's own `after` targets are consulted; every other
+        // todo's artifacts are never read, which is the confinement rule.
+        const target = spec.todos.find((t) => t.id === req.todoId);
+        const afterExecutes: Record<string, string> = {};
+        for (const depId of target?.after ?? []) {
+          const summary = await store.readArtifact(req.slug, depId, 'execute');
+          if (summary !== undefined) {
+            afterExecutes[depId] = summary;
+          }
+        }
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'plan',
+            spec,
+            todoId: req.todoId,
+            afterExecutes,
+          }),
+        };
+      }
+      case 'execute': {
+        // A retry or a resumed session carries the latest review so the
+        // executor knows what it has to fix (Req 13.2, 18.13).
+        const retry = req.attempt >= 2 || req.resume;
+        const latestReview = retry
+          ? await store.readArtifact(req.slug, req.todoId, 'review')
+          : undefined;
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'execute',
+            spec,
+            todoId: req.todoId,
+            attempt: req.attempt,
+            resume: req.resume,
+            ...(plan !== undefined ? { plan } : {}),
+            ...(latestReview !== undefined ? { latestReview } : {}),
+          }),
+        };
+      }
+      case 'review': {
+        const latestExecute = await store.readArtifact(
+          req.slug,
+          req.todoId,
+          'execute',
+        );
+        const executeCommit = await store.latestExecuteCommit(
+          req.slug,
+          req.todoId,
+        );
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'review',
+            spec,
+            todoId: req.todoId,
+            ...(plan !== undefined ? { plan } : {}),
+            ...(latestExecute !== undefined ? { latestExecute } : {}),
+            ...(executeCommit !== undefined ? { executeCommit } : {}),
+          }),
+        };
+      }
+      default:
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'plan-review',
+            spec,
+            todoId: req.todoId,
+            ...(plan !== undefined ? { plan } : {}),
+          }),
+        };
+    }
   }
 
   /**

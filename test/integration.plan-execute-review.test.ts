@@ -46,13 +46,13 @@ import {
  * Coverage (mapped to requirements):
  *   1. Approval branch creation from a resolved base_commit + the
  *      `spec(<slug>): approve` commit (Req 16.3, 16.5, 17.1).
- *   2. Plan → planned, `plan.md` persisted, metadata commit between stages
+ *   2. Plan → planned, `todos/<id>/plan.md` persisted, metadata commit between stages
  *      (Req 17.1).
  *   3. Execute requires a clean tree (Req 17.2); a dirty tree outside the spec
- *      folder is refused (Req 17.3). On completion: todo executed, `execute-1.md`
+ *      folder is refused (Req 17.3). On completion: todo executed, `todos/<id>/execute-1.md`
  *      persisted, and one `spec(<slug>): <id> execute attempt 1` commit carrying
  *      a `Run-Id:` trailer (Req 17.4), findable via findCommitByRunId (Req 21.5).
- *   4. Review → done, `review-1.md` persisted; the non-executor post-run reset
+ *   4. Review → done, `todos/<id>/review-1.md` persisted; the non-executor post-run reset
  *      leaves gitignored files untouched (Req 15.5).
  *   5. Crash replay: a result-less journal entry whose Run-Id commit landed is
  *      reconciled by recoverJournal, replaying the lost state write (Req 21.5).
@@ -168,6 +168,65 @@ class FileSpecStore implements SpecStore {
   async currentState(slug: string, todoId: string): Promise<TodoState | undefined> {
     const spec = parseSpec(this.read(slug));
     return spec.todos.find((t) => t.id === todoId)?.state;
+  }
+
+  async readSpec(slug: string): Promise<ReturnType<typeof parseSpec> | undefined> {
+    try {
+      return parseSpec(this.read(slug));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The todo's artifact for a stage, read out of its own `todos/<id>/` folder;
+   * for the numbered stages the highest-numbered file wins (Req 24.3).
+   */
+  async readArtifact(
+    slug: string,
+    todoId: string,
+    stage: Stage,
+  ): Promise<string | undefined> {
+    const dir = path.join(this.repoRoot, '.baiton', 'specs', slug, 'todos', todoId);
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return undefined;
+    }
+    const pattern = new RegExp(`^${stage}-(\\d+)\\.md$`);
+    const name =
+      stage === 'plan'
+        ? 'plan.md'
+        : names
+            .filter((n) => pattern.test(n))
+            .sort((a, b) => Number(pattern.exec(a)?.[1]) - Number(pattern.exec(b)?.[1]))
+            .pop();
+    if (name === undefined) {
+      return undefined;
+    }
+    try {
+      return fs.readFileSync(path.join(dir, name), 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The commit the todo's most recent completed Execute landed in (Req 21.2). */
+  async latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined> {
+    const journal = path.join(this.repoRoot, '.baiton', 'specs', slug, 'runs.jsonl');
+    let commit: string | undefined;
+    for (const entry of parseJournal(journal)) {
+      if (
+        entry.stage === 'execute' &&
+        entry.todoId === todoId &&
+        entry.result === 'completed' &&
+        entry.commit !== undefined
+      ) {
+        commit = entry.commit;
+      }
+    }
+    return commit;
   }
 
   async isApproved(slug: string): Promise<boolean> {
@@ -622,8 +681,10 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.strictEqual(planResult.ok, true, 'plan dispatch succeeded');
     assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned');
     // Artifact persisted at the plan path under the spec.
-    const planArtifact = path.join(h.repo, '.baiton', 'specs', SLUG, 'plan.md');
-    assert.ok(fs.existsSync(planArtifact), 'plan.md persisted under the spec');
+    const planArtifact = path.join(
+      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'plan.md',
+    );
+    assert.ok(fs.existsSync(planArtifact), "plan.md persisted under the todo's folder");
     // Between plan start and finish the queue wrote the running (`planning`) and
     // terminal (`planned`) metadata commits (Req 17.1).
     const headAfterPlan = await h.git.head();
@@ -673,8 +734,13 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     });
     assert.strictEqual(executeResult.ok, true, 'execute dispatch succeeded');
     assert.strictEqual(await stateOf(h), 'executed', 'todo transitioned to executed');
-    const executeArtifact = path.join(h.repo, '.baiton', 'specs', SLUG, 'execute-1.md');
-    assert.ok(fs.existsSync(executeArtifact), 'execute-1.md persisted under the spec');
+    const executeArtifact = path.join(
+      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'execute-1.md',
+    );
+    assert.ok(
+      fs.existsSync(executeArtifact),
+      "execute-1.md persisted under the todo's folder",
+    );
 
     // Exactly one execute commit with the expected message.
     const executeSubject = `spec(${SLUG}): ${TODO_ID} execute attempt 1`;
@@ -713,8 +779,13 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     });
     assert.strictEqual(reviewResult.ok, true, 'review dispatch succeeded');
     assert.strictEqual(await stateOf(h), 'done', 'todo transitioned to done on a pass verdict');
-    const reviewArtifact = path.join(h.repo, '.baiton', 'specs', SLUG, 'review-1.md');
-    assert.ok(fs.existsSync(reviewArtifact), 'review-1.md persisted under the spec');
+    const reviewArtifact = path.join(
+      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'review-1.md',
+    );
+    assert.ok(
+      fs.existsSync(reviewArtifact),
+      "review-1.md persisted under the todo's folder",
+    );
     // The non-executor post-run reset ran but left the gitignored file (Req 15.5).
     assert.ok(fs.existsSync(scratchAbs), 'gitignored scratch file survived the post-run reset');
     assert.strictEqual(fs.readFileSync(scratchAbs, 'utf8'), 'keep me\n', 'its contents are intact');

@@ -12,7 +12,7 @@ export * from './resultWatcher';
 export * from './resultValidation';
 export * from './resultFlow';
 export * from './transitions';
-export * from './plannerContext';
+export * from './stageContext';
 export * from './runQueue';
 export * from './recovery';
 export * from './specDraft';

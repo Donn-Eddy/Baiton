@@ -507,7 +507,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const todo = 'T01';
       writeSpec(repo, slug, draftSpec());
 
-      const artifactDir = path.join(repo, '.baiton', 'specs', slug, todo);
+      const artifactDir = path.join(repo, '.baiton', 'specs', slug, 'todos', todo);
       fs.mkdirSync(artifactDir, { recursive: true });
       const artifactText = '# Plan\n\nDo the thing carefully.\n';
       fs.writeFileSync(path.join(artifactDir, 'plan.md'), artifactText, 'utf8');

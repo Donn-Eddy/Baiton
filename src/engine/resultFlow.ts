@@ -23,11 +23,17 @@
  * parse/validate is the pure {@link parseAndValidateResult}. The activation
  * layer wires a `vscode`-backed watcher and the queue consumes the outcome.
  */
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import type { Stage } from '../model/stage';
 import type { TodoState } from '../model/todoState';
-import type { StageResult } from '../schema';
+import type {
+  ExecuteResult,
+  PlanResult,
+  PlanReviewResult,
+  ReviewResult,
+  StageResult,
+} from '../schema';
 import { persistencePathForStage } from '../schema';
 import type { HostTerminal } from './terminalHost';
 import type { ResultWatcher } from './resultWatcher';
@@ -80,6 +86,12 @@ export interface AwaitStageResultInput {
   /** The stage being awaited; selects the schema and persistence path. */
   stage: Stage;
   /**
+   * The todo whose artifact folder receives the result (`todos/<todoId>/`);
+   * required for the four todo-level stages, ignored by `spec-draft` and `pr`
+   * (Req 24.3).
+   */
+  todoId?: string;
+  /**
    * The 1-based round/attempt index for numbered artifacts (`plan-review-<n>`,
    * `execute-<n>`, `review-<n>`); ignored for `plan` (Req 24.3).
    */
@@ -111,21 +123,159 @@ export function artifactPathFor(
   workspaceRoot: string,
   slug: string,
   stage: Stage,
+  todoId?: string,
   index?: number,
 ): string {
-  const fileName = persistencePathForStage(stage, index);
-  return path.join(workspaceRoot, '.baiton', 'specs', slug, fileName);
+  const relative = persistencePathForStage(stage, todoId, index);
+  return path.join(workspaceRoot, '.baiton', 'specs', slug, relative);
+}
+
+/**
+ * The per-stage Markdown renderers (Req 24.3).
+ *
+ * The persisted `.md` artifact — not the structured JSON — is what later stages
+ * read: a brief carries a plan or an execution summary into the next sub-agent
+ * verbatim, with no parse-back. Each renderer is therefore a pure, exported
+ * function producing prose a sub-agent can act on directly. The structured
+ * result stays in the run directory's `result.json` for the journal and for
+ * anyone who wants the machine-readable form.
+ */
+
+/**
+ * The plan artifact: a heading, the ordered steps (title, detail and the files
+ * each step touches), then the risks and acceptance checks. This is the file the
+ * executor's brief carries verbatim, and the file the user edits before Execute.
+ */
+export function renderPlanArtifact(todoId: string, plan: PlanResult): string {
+  const steps = plan.steps.map((step, i) => {
+    const detail = indentContinuation(step.detail);
+    const files =
+      step.files.length > 0 ? step.files.map((f) => `\`${f}\``).join(', ') : '(none)';
+    return `${i + 1}. ${step.title}\n\n${detail}\n\n   Files: ${files}`;
+  });
+  return [
+    `# Plan ${todoId}`,
+    '## Steps',
+    steps.length > 0 ? steps.join('\n\n') : '(no steps)',
+    '## Risks',
+    bullets(plan.risks),
+    '## Acceptance',
+    bullets(plan.acceptance),
+  ].join('\n\n') + '\n';
+}
+
+/**
+ * The plan-review artifact: the verdict and the findings the plan reviewer
+ * raised, each with its severity.
+ */
+export function renderPlanReviewArtifact(
+  todoId: string,
+  result: PlanReviewResult,
+): string {
+  const findings = result.findings.map((f) => `- **${f.severity}** — ${f.text}`);
+  return [
+    `# Plan review ${todoId}`,
+    `Verdict: **${result.verdict}**`,
+    '## Findings',
+    findings.length > 0 ? findings.join('\n') : '- (none)',
+  ].join('\n\n') + '\n';
+}
+
+/**
+ * The execute artifact: what the executor did, which files it changed, which
+ * commands it ran, and its notes. The reviewer's brief carries this verbatim.
+ */
+export function renderExecuteArtifact(
+  todoId: string,
+  result: ExecuteResult,
+): string {
+  return [
+    `# Execute ${todoId}`,
+    '## Summary',
+    result.summary,
+    '## Files changed',
+    bullets(result.files_changed.map((f) => `\`${f}\``)),
+    '## Commands run',
+    bullets(result.commands_run.map((c) => `\`${c}\``)),
+    '## Notes',
+    bullets(result.notes),
+  ].join('\n\n') + '\n';
+}
+
+/**
+ * The review artifact: the verdict, the located findings, and the test outcome
+ * the reviewer reported.
+ */
+export function renderReviewArtifact(
+  todoId: string,
+  result: ReviewResult,
+): string {
+  const findings = result.findings.map(
+    (f) => `- **${f.severity}** \`${f.file}\`:${f.line} — ${f.text}`,
+  );
+  const tests = result.tests;
+  const testLines = [
+    `- ran: ${String(tests.ran)}`,
+    `- passed: ${String(tests.passed)}`,
+    tests.output_tail.trim().length > 0
+      ? `\n\`\`\`\n${tests.output_tail}\n\`\`\``
+      : '',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+  return [
+    `# Review ${todoId}`,
+    `Verdict: **${result.verdict}**`,
+    '## Findings',
+    findings.length > 0 ? findings.join('\n') : '- (none)',
+    '## Tests',
+    testLines,
+  ].join('\n\n') + '\n';
 }
 
 /**
  * Render a validated stage result as the Markdown artifact persisted under the
- * spec. The artifact is the pretty-printed structured result wrapped so the
- * file is a readable `.md`; the structured JSON is the source of truth the
- * lifecycle consumed.
+ * spec. The four todo-level stages get the per-stage renderers above; the two
+ * spec-scoped stages (`spec-draft`, `pr`) keep the structured JSON, because
+ * their callers render their own file from the structured result and only ever
+ * consume this as a record of what the sub-agent returned.
  */
-export function renderArtifact(stage: Stage, structured: StageResult): string {
-  const json = JSON.stringify(structured, null, 2);
-  return `# ${stage} result\n\n\`\`\`json\n${json}\n\`\`\`\n`;
+export function renderArtifact(
+  stage: Stage,
+  structured: StageResult,
+  todoId?: string,
+): string {
+  const id = todoId ?? '';
+  switch (stage) {
+    case 'plan':
+      return renderPlanArtifact(id, structured as PlanResult);
+    case 'plan-review':
+      return renderPlanReviewArtifact(id, structured as PlanReviewResult);
+    case 'execute':
+      return renderExecuteArtifact(id, structured as ExecuteResult);
+    case 'review':
+      return renderReviewArtifact(id, structured as ReviewResult);
+    default: {
+      const json = JSON.stringify(structured, null, 2);
+      return `# ${stage} result\n\n\`\`\`json\n${json}\n\`\`\`\n`;
+    }
+  }
+}
+
+/** Render a list as Markdown bullets, or a `(none)` bullet when empty. */
+function bullets(items: readonly string[]): string {
+  return items.length > 0 ? items.map((i) => `- ${i}`).join('\n') : '- (none)';
+}
+
+/**
+ * Indent a step's detail so it stays inside its numbered list item, keeping the
+ * rendered plan valid Markdown however many lines the detail runs to.
+ */
+function indentContinuation(detail: string): string {
+  return detail
+    .split('\n')
+    .map((line) => (line.trim() === '' ? '' : `   ${line}`))
+    .join('\n');
 }
 
 /**
@@ -179,9 +329,13 @@ export function awaitStageResult(
         input.workspaceRoot,
         input.slug,
         input.stage,
+        input.todoId,
         input.index,
       );
-      writeArtifact(artifactPath, renderArtifact(input.stage, validated.value));
+      writeArtifact(
+        artifactPath,
+        renderArtifact(input.stage, validated.value, input.todoId),
+      );
       input.terminal.dispose();
       finish({
         kind: 'completed',
@@ -198,7 +352,12 @@ export function awaitStageResult(
   });
 }
 
-/** The default artifact writer: a thin `writeFileSync` shell. */
+/**
+ * The default artifact writer: a thin `writeFileSync` shell that first creates
+ * the artifact's directory, since a todo-level artifact lands in a per-todo
+ * `todos/<todoId>/` folder that may not exist yet (Req 24.3).
+ */
 function defaultWriteArtifact(artifactPath: string, contents: string): void {
+  mkdirSync(path.dirname(artifactPath), { recursive: true });
   writeFileSync(artifactPath, contents, 'utf8');
 }
