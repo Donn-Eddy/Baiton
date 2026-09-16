@@ -28,7 +28,8 @@
  *    `Config` carrying the new values and its notes appear in `saved.notes`;
  *    with no `applyConfig` injected, `saved.notes` is the single activation-values
  *    note; an `applyConfig` that throws still yields `saved` (never `saveFailed`)
- *    with a note and a logged line.
+ *    with a note and a logged line; wiring a real `createConfigRefresh` over a
+ *    fake target updates target.config.roles.<role>.model with no notes.
  * 8. `notifyExternalChange` (T07):
  *    - external edit with different bytes -> exactly one `externalChange` with new token;
  *    - self-write (save or accepted reset) -> no `externalChange` posted;
@@ -48,6 +49,7 @@ import {
   ConfigPanelWebview,
   RESET_CONFIRM_MESSAGE,
 } from '../src/activation/configPanelController';
+import { createConfigRefresh } from '../src/activation/configRefresh';
 import type {
   ConfigPanelHostToWebview,
   ConfigPanelWebviewToHost,
@@ -517,6 +519,53 @@ describe('ConfigPanelController (config-panel T05)', () => {
       assert.ok(saved3.notes[0].includes('hot-reload-explosion'));
     }
     assert.ok(loggedLines.some((l) => l.includes('hot-reload-explosion')));
+
+    // 4. End-to-end with real createConfigRefresh over a fake target
+    const target = {
+      config: defaultConfig(),
+      executables: {
+        get: () => undefined,
+        errorFor: () => undefined,
+        errors: [],
+        agents: [],
+      },
+    };
+    const realRefresh = createConfigRefresh({
+      state: () => target,
+      resolveExecutables: () => target.executables,
+      completeActivation: async () => [],
+      runningSlugs: () => [],
+      log: () => {},
+    });
+
+    const webview4 = new RecordingWebview();
+    const controller4 = new ConfigPanelController({
+      webview: webview4,
+      baitonDir: dir,
+      agentIds: ['claude'],
+      confirmReset: async () => false,
+      applyConfig: realRefresh,
+      log: () => {},
+    });
+    controller4.start();
+    await webview4.send({ type: 'load' });
+    const loaded4 = webview4.messages[0];
+    assert.strictEqual(loaded4.type, 'loaded');
+    if (loaded4.type !== 'loaded') {
+      return;
+    }
+
+    const edit4 = { ...loaded4.form };
+    edit4.roles.executor = { ...edit4.roles.executor, model: 'claude-3-sonnet-custom' };
+    await webview4.send({ type: 'save', form: edit4, token: loaded4.token });
+
+    assert.strictEqual(webview4.messages.length, 2);
+    const saved4 = webview4.messages[1];
+    assert.strictEqual(saved4.type, 'saved');
+    if (saved4.type === 'saved') {
+      assert.strictEqual(saved4.notes, undefined);
+    }
+    assert.strictEqual(target.config.roles.executor.model, 'claude-3-sonnet-custom');
   });
 
   describe('8. notifyExternalChange (T07)', () => {

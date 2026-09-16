@@ -132,7 +132,15 @@ export const COMMANDS = {
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
   workspace: WorkspaceContext<vscode.Uri>;
+  /**
+   * The live configuration. Replaced wholesale on config save; all reads must
+   * go through this object rather than a captured/destructured copy.
+   */
   config: Config;
+  /**
+   * The live agent executables resolution table. Replaced wholesale when
+   * role agents change on config save; all reads must go through this object.
+   */
   executables: AgentExecutables;
 }
 
@@ -143,6 +151,8 @@ export interface CommandActivation {
 export interface CommandSurface {
   /** All registrations, pushed onto `context.subscriptions`. */
   disposables: vscode.Disposable[];
+  /** Slugs with a stage currently in flight, for the in-flight note. */
+  runningSlugs(): readonly string[];
 }
 
 /**
@@ -159,7 +169,12 @@ export function registerCommands(
   surface: Surface,
 ): CommandSurface {
   const disposables: vscode.Disposable[] = [];
-  const { workspace, config } = activation;
+  const { workspace } = activation;
+  /**
+   * Accessor for the live configuration. The config object is replaced wholesale
+   * on save and must be re-read per call, never hoisted.
+   */
+  const cfg = (): Config => activation.config;
   const repoRoot = workspace.root.fsPath;
   const baitonDir = workspace.baitonDir.fsPath;
   const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
@@ -197,8 +212,8 @@ export function registerCommands(
       watcherFactory,
       specStore,
       journalPath,
-      modelForRole: (role) => modelForRole(config, role),
-      adapterForRole: (role) => adapterForRole(config, adapters, role),
+      modelForRole: (role) => modelForRole(cfg(), role),
+      adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
       report: (error) => surface.reportDispatchError(error),
       // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
       isExternallyBusy: () => specDraftRunner.isRunning(),
@@ -215,7 +230,7 @@ export function registerCommands(
     if (prInFlight.has(slug) || queueForSlug(slug).isRunning()) {
       return { ok: false, error: `spec "${slug}" already has a run in progress` };
     }
-    const selection = config.pr?.tool ?? DEFAULT_PR_TOOL;
+    const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
     if (!isPrToolSelection(selection)) {
       return { ok: false, error: `unsupported pr.tool "${selection}" in config.json; use "auto", "gh" or "glab"` };
     }
@@ -246,9 +261,9 @@ export function registerCommands(
         git,
         pr: createPrTool({ kind, executable, repoRoot }),
         remote,
-        verify: config.git.verify,
-        modelForRole: (role) => modelForRole(config, role),
-        adapterForRole: (role) => adapterForRole(config, adapters, role),
+        verify: cfg().git.verify,
+        modelForRole: (role) => modelForRole(cfg(), role),
+        adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -280,8 +295,8 @@ export function registerCommands(
     terminalHost,
     watcherFactory,
     services: draftServices,
-    modelForRole: (role) => modelForRole(config, role),
-    adapterForRole: (role) => adapterForRole(config, adapters, role),
+    modelForRole: (role) => modelForRole(cfg(), role),
+    adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
     isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
@@ -349,7 +364,7 @@ export function registerCommands(
       specsDir,
       repoRoot,
       queueForSlug,
-      (role) => adapterForRole(config, adapters, role),
+      (role) => adapterForRole(cfg(), adapters, role),
       terminalHost,
       surface,
     ),
@@ -506,7 +521,18 @@ export function registerCommands(
     ),
   );
 
-  return { disposables };
+  return {
+    disposables,
+    runningSlugs: () => {
+      const running = [...queues.entries()]
+        .filter(([, q]) => q.isRunning())
+        .map(([slug]) => slug);
+      if (specDraftRunner.isRunning()) {
+        running.push('(spec draft)');
+      }
+      return running;
+    },
+  };
 }
 
 /**
@@ -528,6 +554,15 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
 const subscribedConfigPanels = new Set<ConfigPanelProvider>();
 
 /**
+ * Folder-scoped hot-reload seam for the config panel command (T08).
+ * Closes over the panel's resolved baitonDir before calling the underlying ApplyConfig.
+ */
+export type FolderScopedApplyConfig = (
+  baitonDir: string,
+  config: Config,
+) => Promise<readonly string[]> | readonly string[];
+
+/**
  * Register the `baiton.openConfigPanel` command ahead of the activation gate,
  * so the panel can be opened to inspect errors or reset defaults when
  * workspace resolution or config load fails. Returns the disposable for the
@@ -536,9 +571,10 @@ const subscribedConfigPanels = new Set<ConfigPanelProvider>();
 export function registerConfigPanelCommand(
   context: vscode.ExtensionContext,
   surface: Surface,
+  applyConfig?: FolderScopedApplyConfig,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(COMMANDS.openConfigPanel, () =>
-    runOpenConfigPanel(context, surface),
+    runOpenConfigPanel(context, surface, applyConfig),
   );
 }
 
@@ -583,6 +619,7 @@ async function runInitialize(surface: Surface): Promise<void> {
 function runOpenConfigPanel(
   context: vscode.ExtensionContext,
   surface: Surface,
+  applyConfig?: FolderScopedApplyConfig,
 ): void {
   const folders = vscode.workspace.workspaceFolders ?? [];
   const root = resolveCommandRoot(folders);
@@ -599,6 +636,7 @@ function runOpenConfigPanel(
     baitonDir,
     agentIds: createAdapterRegistry().ids,
     log: (m) => surface.log(m),
+    applyConfig: applyConfig !== undefined ? (cfg) => applyConfig(baitonDir, cfg) : undefined,
   });
 
   if (!subscribedConfigPanels.has(provider)) {
@@ -874,6 +912,7 @@ function ensureCanDispatch(activation: CommandActivation, surface: Surface, role
  * Restricted Mode because it writes nothing (Req 3.3–3.5).
  */
 function ensureExecutable(activation: CommandActivation, surface: Surface, role: Role): boolean {
+  // Reads through live activation object so role-agent changes and re-resolved executables take effect immediately.
   const agent = activation.config.roles[role].agent;
   const failure = activation.executables.errorFor(agent);
   if (failure !== undefined) {

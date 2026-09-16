@@ -43,7 +43,10 @@ import { configFilePath, loadConfig } from '../config/loadConfig';
 export const RESET_CONFIRM_MESSAGE =
   'Reset .baiton/config.json to the Baiton defaults? The current contents, including any keys the panel does not manage, are discarded.';
 
-/** Note returned when hot-reload seam is unset (T05 before T08). */
+/**
+ * Note returned when the hot-reload seam is unset (e.g. in unit tests or callers
+ * that opt out of live reload; kept as a fallback branch).
+ */
 export const ACTIVATION_VALUES_NOTE =
   'New values were written to .baiton/config.json; components that read the configuration at activation keep their current values until the window is reloaded.';
 
