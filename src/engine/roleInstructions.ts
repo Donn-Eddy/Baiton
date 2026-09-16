@@ -8,6 +8,12 @@
  * additionally forbid committing, stashing, or changing branches
  * (Requirement 17.5) — the extension owns all git operations.
  *
+ * The four todo-level roles are briefed with a Context section carrying exactly
+ * their inputs (see `stageContext.ts`, Req 18.3), so each of them is told the
+ * same thing: work from the Context, and do not go looking for `spec.md`, the
+ * `.baiton/specs` tree, or another todo's artifacts. That keeps one todo's run
+ * confined to its own inputs and keeps the Brief small.
+ *
  * Kept as a pure lookup so the brief writer stays testable without a VS Code
  * host.
  */
@@ -50,25 +56,62 @@ export const SPEC_WRITER_INSTRUCTION = [
     'finish line.',
 ].join('\n');
 
+/**
+ * The sentence every todo-level role carries: the Brief's Context section is
+ * the complete input, so the sub-agent must not go hunting through the spec
+ * tree (Req 18.3). Exported so tests and callers can assert it verbatim.
+ */
+export const CONTEXT_IS_COMPLETE_INSTRUCTION =
+  'Everything you need is in the Context section of this brief. Do not read ' +
+  '`spec.md`, anything under `.baiton/specs`, or any other todo\'s artifacts; ' +
+  'the Context is the complete and authoritative statement of your inputs.';
+
 /** The role-specific instruction body that opens the Brief. */
 const ROLE_INSTRUCTIONS: Record<Role, string> = {
   'spec-writer': SPEC_WRITER_INSTRUCTION,
-  planner:
-    'You are the planner. Read the provided OVERVIEW and todo, study the ' +
-    'relevant code read-only, and produce a concrete implementation plan for ' +
-    'this single todo. Do not modify any source files.',
-  'plan-reviewer':
-    'You are the plan reviewer. Read the proposed plan and the relevant code ' +
-    'read-only, and judge whether the plan is complete and correct for this ' +
-    'single todo. Do not modify any source files.',
-  executor:
-    'You are the executor. Implement this single todo by editing the ' +
-    'workspace files to satisfy the plan. Run whatever you need to verify ' +
-    `your work.\n\n${EXECUTOR_NO_GIT_INSTRUCTION}`,
-  reviewer:
-    'You are the reviewer. Read the implementation and the relevant code, run ' +
-    'checks as needed, and judge whether the todo was implemented correctly. ' +
-    'Do not modify any source files outside your run directory.',
+  planner: [
+    'You are the planner. The Context section gives you the spec OVERVIEW, the ' +
+      'one todo you are planning, and the execution summaries of the todos it ' +
+      'depends on. Study the code named there read-only and produce a concrete ' +
+      'implementation plan for this single todo. Do not modify any source files.',
+    '',
+    'Write the plan so an executor can implement it from the plan alone, with ' +
+      'no OVERVIEW and no access to the spec: name the exact files to change, ' +
+      'the concrete edits to make in each, and the checks that decide the todo ' +
+      'is done. Prefer specifics — function and symbol names, the shape of new ' +
+      'code — over restating the goal.',
+    '',
+    CONTEXT_IS_COMPLETE_INSTRUCTION,
+  ].join('\n'),
+  'plan-reviewer': [
+    'You are the plan reviewer. The Context section gives you the spec ' +
+      'OVERVIEW, the todo, and the proposed plan. Read the code the plan names ' +
+      'read-only and judge whether the plan is complete and correct for this ' +
+      'single todo, and whether an executor could implement it from the plan ' +
+      'alone. Do not modify any source files.',
+    '',
+    CONTEXT_IS_COMPLETE_INSTRUCTION,
+  ].join('\n'),
+  executor: [
+    'You are the executor. The Context section gives you the todo and its ' +
+      'plan — and, when this is a retry, the review that sent it back. ' +
+      'Implement this single todo by editing the workspace files to satisfy ' +
+      'the plan. Run whatever you need to verify your work.',
+    '',
+    CONTEXT_IS_COMPLETE_INSTRUCTION,
+    '',
+    EXECUTOR_NO_GIT_INSTRUCTION,
+  ].join('\n'),
+  reviewer: [
+    'You are the reviewer. The Context section gives you the todo, its plan, ' +
+      'the executor\'s summary, and the commit the execution landed in. ' +
+      'Inspect that commit with git — `git show <commit>` — rather than ' +
+      'reading the whole tree, and judge whether the todo was implemented ' +
+      'correctly against its plan. Run checks as needed. Do not modify any ' +
+      'source files outside your run directory.',
+    '',
+    CONTEXT_IS_COMPLETE_INSTRUCTION,
+  ].join('\n'),
   'pr-writer':
     'You are the PR writer. Read the spec, its plans and execution summaries, ' +
     'and the cumulative diff named in the context, then draft a pull request ' +
