@@ -33,6 +33,7 @@ import type {
 } from '../config/configPanel';
 import {
   readConfigDocument,
+  readConfigToken,
   writeConfigDocument,
 } from '../config/configDocument';
 import { defaultConfig } from '../config/defaultConfig';
@@ -85,9 +86,19 @@ export class ConfigPanelController {
   private doc: Record<string, unknown> | undefined;
   private token: string | undefined;
   private options: ConfigFormOptions;
+  private disposed = false;
+  private writing = false;
 
   constructor(private readonly deps: ConfigPanelControllerDeps) {
     this.options = configFormOptions(deps.agentIds);
+  }
+
+  /**
+   * Dispose the controller. After disposal, late-arriving watcher events
+   * or webview messages are silently ignored.
+   */
+  public dispose(): void {
+    this.disposed = true;
   }
 
   /**
@@ -105,7 +116,42 @@ export class ConfigPanelController {
     });
   }
 
+  /**
+   * Called when an external event suggests `.baiton/config.json` may have
+   * changed on disk (T07).
+   *
+   * Suppresses the controller's own writes: while a write is in-flight
+   * (`this.writing`), or when the token on disk equals `this.token`, nothing is
+   * posted. Also swallows byte-identical rewrites and transient read errors.
+   *
+   * When the file was genuinely modified externally, posts `externalChange`
+   * carrying the new token. Note that `this.token` is deliberately NOT updated
+   * here: the webview decides whether to auto-reload (if pristine) or show a
+   * conflict banner (if dirty). If the user keeps editing, the controller
+   * retains its previous token so the next save takes the conflict path.
+   */
+  public async notifyExternalChange(): Promise<void> {
+    if (this.disposed || this.writing) {
+      return;
+    }
+    const current = await readConfigToken(this.deps.baitonDir);
+    if (this.disposed || this.writing) {
+      return;
+    }
+    if (isErr(current)) {
+      this.deps.log(`ConfigPanelController: error reading config token: ${current.error.message}`);
+      return;
+    }
+    if (current.value === this.token) {
+      return;
+    }
+    this.deps.webview.post({ type: 'externalChange', token: current.value });
+  }
+
   private async handle(msg: ConfigPanelWebviewToHost): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     switch (msg.type) {
       case 'ready':
       case 'load':
@@ -161,34 +207,22 @@ export class ConfigPanelController {
     token: string;
     overwrite?: boolean;
   }): Promise<void> {
-    const errors = validateConfigForm(msg.form, { agents: this.options.agents });
-    if (errors.length > 0) {
-      this.deps.webview.post({
-        type: 'saveFailed',
-        reason: 'invalid',
-        message: `${errors.length} field(s) are invalid.`,
-        errors,
-      });
-      return;
-    }
-
-    let base: Record<string, unknown>;
-    if (msg.overwrite === true) {
-      // Overwrite: always re-read first and merge onto disk contents to preserve unknown keys added externally.
-      const reRead = await readConfigDocument(this.deps.baitonDir);
-      if (isErr(reRead)) {
-        if (reRead.error.kind === 'io') {
-          this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: reRead.error.message });
-          return;
-        }
-        base = this.doc ?? {};
-      } else {
-        base = reRead.value.doc;
+    this.writing = true;
+    try {
+      const errors = validateConfigForm(msg.form, { agents: this.options.agents });
+      if (errors.length > 0) {
+        this.deps.webview.post({
+          type: 'saveFailed',
+          reason: 'invalid',
+          message: `${errors.length} field(s) are invalid.`,
+          errors,
+        });
+        return;
       }
-    } else {
-      if (this.doc !== undefined && this.token === msg.token) {
-        base = this.doc;
-      } else {
+
+      let base: Record<string, unknown>;
+      if (msg.overwrite === true) {
+        // Overwrite: always re-read first and merge onto disk contents to preserve unknown keys added externally.
         const reRead = await readConfigDocument(this.deps.baitonDir);
         if (isErr(reRead)) {
           if (reRead.error.kind === 'io') {
@@ -199,34 +233,51 @@ export class ConfigPanelController {
         } else {
           base = reRead.value.doc;
         }
-      }
-    }
-
-    const next = applyFormToDocument(base, msg.form);
-    const written = await writeConfigDocument(
-      this.deps.baitonDir,
-      next,
-      msg.overwrite === true ? undefined : { expectedToken: msg.token },
-    );
-
-    if (isErr(written)) {
-      if (written.error.kind === 'conflict') {
-        this.deps.webview.post({ type: 'saveFailed', reason: 'conflict', message: written.error.message });
       } else {
-        this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: written.error.message });
+        if (this.doc !== undefined && this.token === msg.token) {
+          base = this.doc;
+        } else {
+          const reRead = await readConfigDocument(this.deps.baitonDir);
+          if (isErr(reRead)) {
+            if (reRead.error.kind === 'io') {
+              this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: reRead.error.message });
+              return;
+            }
+            base = this.doc ?? {};
+          } else {
+            base = reRead.value.doc;
+          }
+        }
       }
-      return;
+
+      const next = applyFormToDocument(base, msg.form);
+      const written = await writeConfigDocument(
+        this.deps.baitonDir,
+        next,
+        msg.overwrite === true ? undefined : { expectedToken: msg.token },
+      );
+
+      if (isErr(written)) {
+        if (written.error.kind === 'conflict') {
+          this.deps.webview.post({ type: 'saveFailed', reason: 'conflict', message: written.error.message });
+        } else {
+          this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: written.error.message });
+        }
+        return;
+      }
+
+      this.doc = written.value.doc;
+      this.token = written.value.token;
+
+      const notes = await this.applySaved();
+      this.deps.webview.post({
+        type: 'saved',
+        token: written.value.token,
+        ...(notes.length > 0 ? { notes } : {}),
+      });
+    } finally {
+      this.writing = false;
     }
-
-    this.doc = written.value.doc;
-    this.token = written.value.token;
-
-    const notes = await this.applySaved();
-    this.deps.webview.post({
-      type: 'saved',
-      token: written.value.token,
-      ...(notes.length > 0 ? { notes } : {}),
-    });
   }
 
   private async applySaved(): Promise<string[]> {
@@ -252,34 +303,39 @@ export class ConfigPanelController {
   }
 
   private async reset(): Promise<void> {
-    const ok = await this.deps.confirmReset(RESET_CONFIRM_MESSAGE);
-    if (!ok) {
-      await this.load();
-      return;
-    }
-
-    // writeJsonAtomic writes a sibling temp file and renames; it does not create the directory, so a reset in a workspace with no .baiton/ would fail ENOENT.
-    const configPath = configFilePath(this.deps.baitonDir);
+    this.writing = true;
     try {
-      await mkdir(path.dirname(configPath), { recursive: true });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      this.deps.webview.post({
-        type: 'saveFailed',
-        reason: 'io',
-        message: `Could not create directory: ${message}`,
-      });
-      return;
-    }
+      const ok = await this.deps.confirmReset(RESET_CONFIRM_MESSAGE);
+      if (!ok) {
+        await this.load();
+        return;
+      }
 
-    // No expectedToken: reset is intentionally unconditional.
-    // writeConfigDocument serialises defaultConfig() byte-identical to defaultConfigJson().
-    const written = await writeConfigDocument(this.deps.baitonDir, defaultConfig(), undefined);
-    if (isErr(written)) {
-      this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: written.error.message });
-      return;
-    }
+      // writeJsonAtomic writes a sibling temp file and renames; it does not create the directory, so a reset in a workspace with no .baiton/ would fail ENOENT.
+      const configPath = configFilePath(this.deps.baitonDir);
+      try {
+        await mkdir(path.dirname(configPath), { recursive: true });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        this.deps.webview.post({
+          type: 'saveFailed',
+          reason: 'io',
+          message: `Could not create directory: ${message}`,
+        });
+        return;
+      }
 
-    await this.load();
+      // No expectedToken: reset is intentionally unconditional.
+      // writeConfigDocument serialises defaultConfig() byte-identical to defaultConfigJson().
+      const written = await writeConfigDocument(this.deps.baitonDir, defaultConfig(), undefined);
+      if (isErr(written)) {
+        this.deps.webview.post({ type: 'saveFailed', reason: 'io', message: written.error.message });
+        return;
+      }
+
+      await this.load();
+    } finally {
+      this.writing = false;
+    }
   }
 }

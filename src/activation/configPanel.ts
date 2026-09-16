@@ -46,6 +46,9 @@ export const CONFIG_PANEL_VIEW_TYPE = 'baiton.configPanel';
 /** Static HTML shell filename located under `media/`. */
 const CONFIG_HTML = 'config.html';
 
+/** Coalesce watcher events on .baiton/config.json within this window (T07). */
+export const EXTERNAL_CHANGE_DEBOUNCE_MS = 250;
+
 /**
  * The Config Panel WebviewPanel provider. Implements {@link ConfigPanelWebview}
  * and manages the VS Code WebviewPanel lifecycle.
@@ -54,7 +57,8 @@ export class ConfigPanelProvider implements ConfigPanelWebview, vscode.Disposabl
   private panel: vscode.WebviewPanel | undefined;
   private pending: ConfigPanelHostToWebview[] = [];
   private messageHandler: ((msg: ConfigPanelWebviewToHost) => void | Promise<void>) | undefined;
-  private closeHandler: (() => void) | undefined;
+  private readonly closeHandlers: (() => void)[] = [];
+  private closed = false;
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private readonly extensionUri: vscode.Uri) {}
@@ -78,7 +82,17 @@ export class ConfigPanelProvider implements ConfigPanelWebview, vscode.Disposabl
   }
 
   public onClose(handler: () => void): void {
-    this.closeHandler = handler;
+    this.closeHandlers.push(handler);
+  }
+
+  private notifyClose(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    for (const h of [...this.closeHandlers]) {
+      h();
+    }
   }
 
   // --- Panel lifecycle ----------------------------------------------------
@@ -113,7 +127,7 @@ export class ConfigPanelProvider implements ConfigPanelWebview, vscode.Disposabl
       () => {
         this.panel = undefined;
         this.pending = [];
-        this.closeHandler?.();
+        this.notifyClose();
       },
       undefined,
       this.disposables,
@@ -131,7 +145,7 @@ export class ConfigPanelProvider implements ConfigPanelWebview, vscode.Disposabl
       this.panel.dispose();
       this.panel = undefined;
     }
-    this.closeHandler?.();
+    this.notifyClose();
   }
 
   // --- HTML rendering -----------------------------------------------------
@@ -206,6 +220,39 @@ export function openConfigPanel(deps: OpenConfigPanelDeps): ConfigPanelProvider 
     log: deps.log,
   });
   controller.start();
+
+  const pattern = new vscode.RelativePattern(deps.baitonDir, 'config.json');
+  const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+  let debounceTimer: NodeJS.Timeout | undefined;
+
+  const schedule = () => {
+    if (debounceTimer !== undefined) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      debounceTimer = undefined;
+      void controller.notifyExternalChange();
+    }, EXTERNAL_CHANGE_DEBOUNCE_MS);
+  };
+
+  const watcherSubs = [
+    watcher.onDidCreate(schedule),
+    watcher.onDidChange(schedule),
+    watcher.onDidDelete(schedule),
+  ];
+
+  provider.onClose(() => {
+    if (debounceTimer !== undefined) {
+      clearTimeout(debounceTimer);
+      debounceTimer = undefined;
+    }
+    for (const sub of watcherSubs) {
+      sub.dispose();
+    }
+    watcher.dispose();
+    controller.dispose();
+  });
+
   provider.createOrReveal();
 
   activePanels.set(deps.baitonDir, provider);

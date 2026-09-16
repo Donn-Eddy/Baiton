@@ -29,6 +29,14 @@
  *    with no `applyConfig` injected, `saved.notes` is the single activation-values
  *    note; an `applyConfig` that throws still yields `saved` (never `saveFailed`)
  *    with a note and a logged line.
+ * 8. `notifyExternalChange` (T07):
+ *    - external edit with different bytes -> exactly one `externalChange` with new token;
+ *    - self-write (save or accepted reset) -> no `externalChange` posted;
+ *    - identical rewrite -> no message;
+ *    - deletion -> `externalChange` with `ABSENT_TOKEN` (''), and following `load` yields
+ *      `loadFailed { kind: 'absent', canReset: true }`;
+ *    - stale token after external edit without reload -> `save` yields `saveFailed { reason: 'conflict' }`;
+ *    - after `dispose()`, `notifyExternalChange` posts nothing.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -45,7 +53,7 @@ import type {
   ConfigPanelWebviewToHost,
 } from '../src/config/configPanel';
 import { formFromConfig } from '../src/config/configPanel';
-import { configToken } from '../src/config/configDocument';
+import { ABSENT_TOKEN, configToken } from '../src/config/configDocument';
 import { defaultConfig, defaultConfigJson } from '../src/config/defaultConfig';
 import { configFilePath, loadConfig } from '../src/config/loadConfig';
 import type { Config } from '../src/config/types';
@@ -509,5 +517,239 @@ describe('ConfigPanelController (config-panel T05)', () => {
       assert.ok(saved3.notes[0].includes('hot-reload-explosion'));
     }
     assert.ok(loggedLines.some((l) => l.includes('hot-reload-explosion')));
+  });
+
+  describe('8. notifyExternalChange (T07)', () => {
+    it('external edit with different bytes -> posts externalChange carrying the new token', async () => {
+      const dir = newDir();
+      const text = defaultConfigJson();
+      writeConfigFile(dir, text);
+
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      assert.strictEqual(webview.messages.length, 1);
+      assert.strictEqual(webview.messages[0].type, 'loaded');
+
+      const editedObj = {
+        ...defaultConfig(),
+        limits: { ...defaultConfig().limits, max_turns: 99 },
+      };
+      const editedText = `${JSON.stringify(editedObj, null, 2)}\n`;
+      writeConfigFile(dir, editedText);
+
+      await controller.notifyExternalChange();
+
+      assert.strictEqual(webview.messages.length, 2);
+      const msg = webview.messages[1];
+      assert.strictEqual(msg.type, 'externalChange');
+      if (msg.type === 'externalChange') {
+        assert.strictEqual(msg.token, configToken(editedText));
+      }
+    });
+
+    it('self-write is suppressed: save and accepted reset post no externalChange', async () => {
+      // 1. Save
+      const dir1 = newDir();
+      writeConfigFile(dir1, defaultConfigJson());
+      const webview1 = new RecordingWebview();
+      const controller1 = new ConfigPanelController({
+        webview: webview1,
+        baitonDir: dir1,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller1.start();
+      await webview1.send({ type: 'load' });
+      const loaded1 = webview1.messages[0];
+      assert.strictEqual(loaded1.type, 'loaded');
+      if (loaded1.type !== 'loaded') {
+        return;
+      }
+
+      const edit1 = { ...loaded1.form };
+      edit1.git = { remote: 'upstream', base: 'develop' };
+      await webview1.send({ type: 'save', form: edit1, token: loaded1.token });
+      assert.strictEqual(webview1.messages.length, 2);
+      assert.strictEqual(webview1.messages[1].type, 'saved');
+
+      // notifyExternalChange right after save should be suppressed
+      await controller1.notifyExternalChange();
+      assert.strictEqual(webview1.messages.length, 2);
+
+      // 2. Reset (accepted)
+      const dir2 = newDir();
+      const nonDefaultObj = {
+        ...defaultConfig(),
+        limits: { ...defaultConfig().limits, max_turns: 42 },
+      };
+      writeConfigFile(dir2, `${JSON.stringify(nonDefaultObj, null, 2)}\n`);
+      const webview2 = new RecordingWebview();
+      const controller2 = new ConfigPanelController({
+        webview: webview2,
+        baitonDir: dir2,
+        agentIds: ['claude'],
+        confirmReset: async () => true,
+        log: () => {},
+      });
+      controller2.start();
+      await webview2.send({ type: 'load' });
+      assert.strictEqual(webview2.messages.length, 1);
+
+      await webview2.send({ type: 'reset' });
+      // Reset posts 'loaded' on completion
+      assert.strictEqual(webview2.messages.length, 2);
+      assert.strictEqual(webview2.messages[1].type, 'loaded');
+
+      // notifyExternalChange after reset should be suppressed
+      await controller2.notifyExternalChange();
+      assert.strictEqual(webview2.messages.length, 2);
+    });
+
+    it('identical rewrite is suppressed: no externalChange posted', async () => {
+      const dir = newDir();
+      const text = defaultConfigJson();
+      writeConfigFile(dir, text);
+
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      assert.strictEqual(webview.messages.length, 1);
+
+      // Rewrite with byte-identical content
+      writeConfigFile(dir, text);
+      await controller.notifyExternalChange();
+      assert.strictEqual(webview.messages.length, 1);
+    });
+
+    it('deletion posts ABSENT_TOKEN and following load yields loadFailed { kind: "absent", canReset: true }', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      assert.strictEqual(webview.messages.length, 1);
+
+      // Delete the file
+      fs.rmSync(configFilePath(dir));
+
+      await controller.notifyExternalChange();
+      assert.strictEqual(webview.messages.length, 2);
+      const extMsg = webview.messages[1];
+      assert.strictEqual(extMsg.type, 'externalChange');
+      if (extMsg.type === 'externalChange') {
+        assert.strictEqual(extMsg.token, ABSENT_TOKEN);
+      }
+
+      // Pristine form would now post load
+      await webview.send({ type: 'load' });
+      assert.strictEqual(webview.messages.length, 3);
+      const loadMsg = webview.messages[2];
+      assert.strictEqual(loadMsg.type, 'loadFailed');
+      if (loadMsg.type === 'loadFailed') {
+        assert.strictEqual(loadMsg.kind, 'absent');
+        assert.strictEqual(loadMsg.canReset, true);
+      }
+    });
+
+    it('the stale token still conflicts: Keep editing and save yields saveFailed { reason: "conflict" }', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      const loaded = webview.messages[0];
+      assert.strictEqual(loaded.type, 'loaded');
+      if (loaded.type !== 'loaded') {
+        return;
+      }
+
+      // External edit occurs
+      const externalObj = {
+        ...defaultConfig(),
+        custom_external_key: 'external_value',
+      };
+      const externalText = `${JSON.stringify(externalObj, null, 2)}\n`;
+      writeConfigFile(dir, externalText);
+
+      await controller.notifyExternalChange();
+      assert.strictEqual(webview.messages.length, 2);
+      assert.strictEqual(webview.messages[1].type, 'externalChange');
+
+      // User kept editing, saving with the original stale token
+      const form = { ...loaded.form };
+      form.git = { remote: 'my-remote', base: 'main' };
+      await webview.send({ type: 'save', form, token: loaded.token });
+
+      assert.strictEqual(webview.messages.length, 3);
+      const saveFailedMsg = webview.messages[2];
+      assert.strictEqual(saveFailedMsg.type, 'saveFailed');
+      if (saveFailedMsg.type === 'saveFailed') {
+        assert.strictEqual(saveFailedMsg.reason, 'conflict');
+      }
+
+      // External edit remains intact on disk
+      assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), externalText);
+    });
+
+    it('after dispose() nothing is posted by notifyExternalChange or webview messages', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      assert.strictEqual(webview.messages.length, 1);
+
+      // Modify the file
+      writeConfigFile(dir, `${JSON.stringify({ ...defaultConfig(), limits: { ...defaultConfig().limits, max_turns: 123 } }, null, 2)}\n`);
+
+      controller.dispose();
+      await controller.notifyExternalChange();
+      // Still 1 message: notifyExternalChange posted nothing
+      assert.strictEqual(webview.messages.length, 1);
+
+      // Webview message after dispose is also ignored
+      await webview.send({ type: 'load' });
+      assert.strictEqual(webview.messages.length, 1);
+    });
   });
 });

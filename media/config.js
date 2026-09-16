@@ -154,6 +154,7 @@
     banner: null,
     status: '',
     busy: false,
+    pendingExternal: null,
   };
 
   /** Stable JSON of a form: roles serialized in ROLES order so dirtiness is order-independent. */
@@ -532,6 +533,23 @@
 
   // ----- Host messages -----------------------------------------------------
 
+  function applyExternalChange(token) {
+    if (state.banner && state.banner.kind === 'conflict') {
+      return;
+    }
+    if (!isDirty()) {
+      state.token = token;
+      vscode.postMessage({ type: 'load' });
+    } else {
+      state.banner = {
+        kind: 'external',
+        message: 'The configuration file changed on disk.',
+        primary: 'Reload (discard edits)',
+        secondary: 'Keep editing',
+      };
+    }
+  }
+
   window.addEventListener('message', function (event) {
     var msg = event.data;
     if (!msg || typeof msg.type !== 'string') {
@@ -555,6 +573,7 @@
         state.failure = null;
         state.banner = null;
         state.busy = false;
+        state.pendingExternal = null;
         break;
       }
       case 'loadFailed':
@@ -562,17 +581,21 @@
         state.form = null;
         state.failure = { kind: msg.kind, message: msg.message, canReset: msg.canReset };
         state.busy = false;
+        state.pendingExternal = null;
         break;
       case 'saved':
         state.token = msg.token;
         state.baseline = formJson(state.form);
         state.busy = false;
+        state.pendingExternal = null;
         state.status = 'Saved.' + (msg.notes && msg.notes.length > 0 ? '\n' + msg.notes.join('\n') : '');
         state.banner = null;
         state.errorsFromServer = false;
         break;
-      case 'saveFailed':
+      case 'saveFailed': {
         state.busy = false;
+        var pending = state.pendingExternal;
+        state.pendingExternal = null;
         if (msg.reason === 'invalid') {
           state.errors = msg.errors || [];
           state.errorsFromServer = true;
@@ -582,19 +605,17 @@
         } else {
           state.banner = { kind: 'io', message: msg.message };
         }
-        break;
-      case 'externalChange':
-        if (!isDirty()) {
-          state.token = msg.token;
-          vscode.postMessage({ type: 'load' });
-        } else {
-          state.banner = {
-            kind: 'external',
-            message: 'The configuration file changed on disk.',
-            primary: 'Reload (discard edits)',
-            secondary: 'Keep editing',
-          };
+        if (pending !== null) {
+          applyExternalChange(pending);
         }
+        break;
+      }
+      case 'externalChange':
+        if (state.busy) {
+          state.pendingExternal = msg.token;
+          break;
+        }
+        applyExternalChange(msg.token);
         break;
       default:
         // Unknown message: leave the state unchanged rather than throwing.

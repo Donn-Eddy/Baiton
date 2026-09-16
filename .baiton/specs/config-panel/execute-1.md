@@ -2,31 +2,24 @@
 
 ```json
 {
-  "summary": "Contributed baiton.openConfigPanel command in package.json without commandPalette gating, implemented registerConfigPanelCommand in commands.ts resolving workspace root via resolveCommandRoot and delegating to openConfigPanel while guarding subscriptions, wired the command ahead of the activation gate in extension.ts, and added unit tests in activation.gating.test.ts.",
+  "summary": "Implemented file watching for .baiton/config.json with debounced notifications, write suppression, in-flight save deferral, and stale-token conflict handling in the configuration panel.",
   "files_changed": [
-    "package.json",
-    "src/activation/commands.ts",
-    "src/extension.ts",
-    "test/activation.gating.test.ts"
+    "src/activation/configPanelController.ts",
+    "src/activation/configPanel.ts",
+    "media/config.js",
+    "test/configPanel.controller.test.ts"
   ],
   "commands_run": [
     "npm run compile",
     "npm run lint",
-    "npx mocha -r ts-node/register --grep \"baiton.openConfigPanel\" test/activation.gating.test.ts",
-    "npx mocha --no-config -r ts-node/register test/configPanel.controller.test.ts",
-    "npm test",
-    "npm run copy:media",
-    "npm run package",
-    "git status --porcelain",
-    "git diff"
+    "node --check media/config.js",
+    "npm test"
   ],
   "notes": [
-    "COMMANDS.openConfigPanel added to src/activation/commands.ts and contributed in package.json under contributes.commands with category 'Baiton' and title 'Open Config Panel'.",
-    "No entry added to contributes.menus.commandPalette so the command remains visible when baiton.activated is false, allowing the panel to repair absent or corrupt configs.",
-    "registerConfigPanelCommand is registered in src/extension.ts right after registerInitializeCommand and before workspace resolution and config load.",
-    "resolveInitRoot renamed to resolveCommandRoot and shared between runInitialize and runOpenConfigPanel with identical single-root / one-.baiton-folder resolution semantics.",
-    "ConfigPanelProvider subscriptions are tracked in subscribedConfigPanels Set to avoid duplicate entries on repeated command invocations.",
-    "All tests passing with only the two expected pre-existing failures (keytar native module scan and setApiKey vscode module resolution)."
+    "ConfigPanelController now provides notifyExternalChange() and dispose() methods, suppressing its own in-flight writes and byte-identical rewrites.",
+    "ConfigPanelProvider.onClose is now additive and idempotent, properly cleaning up the file watcher, debounce timer, and controller on panel close.",
+    "media/config.js defers externalChange events while a save is in flight and enforces conflict banner precedence over external changes.",
+    "Added unit tests in test/configPanel.controller.test.ts covering external edits, write suppression on save/reset, identical rewrites, file deletion, stale token conflict refusal, and post-dispose silence."
   ]
 }
 ```
