@@ -136,10 +136,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log: (m) => surface.log(m),
   });
 
-  // Scope the seam to the activated workspace folder: runOpenConfigPanel resolves
-  // its root independently, which in multi-root workspaces could differ from the
-  // activated folder. Comparing baitonDir prevents applying folder A's config to
-  // an extension activated against folder B.
+  // Scope the seam to the activated workspace folder: resolveBaitonDirForCommands
+  // resolves its root independently, which in multi-root workspaces could differ
+  // from the activated folder. Comparing baitonDir prevents applying folder A's
+  // config to an extension activated against folder B.
   const scopedApplyConfig: FolderScopedApplyConfig = async (
     baitonDir: string,
     config: Config,
