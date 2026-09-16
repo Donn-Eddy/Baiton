@@ -50,6 +50,38 @@ The two views:
   collapsed one-line row — the tool name, its first argument and a status dot —
   that you can expand to see the arguments and the result.
 
+### What the orchestrator does
+
+The orchestrator has exactly two jobs:
+
+1. **Create a spec** — ask you clarifying questions until you agree on what the
+   work is, then hand the agreed requirements to the spec writer with
+   `draft_spec`.
+2. **Drive an approved spec** — dispatch each stage with `run` until every todo
+   is done, then `submit_pr`.
+
+It writes no specs, no plans and no code, and it reviews nothing: the agent
+configured for each role does that work when the orchestrator dispatches it.
+When a tool refuses, the orchestrator quotes the refusal to you and stops
+rather than diagnosing it or trying another route.
+
+Its tools follow the job it is doing, so it can only act within it:
+
+| tools | creating a spec | driving a spec |
+|---|---|---|
+| `list_specs`, `read_spec`, `git_status` | yes | yes |
+| `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no |
+| `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes |
+| `draft_spec` | yes | no |
+| `approve_spec` | yes | yes (re-approve) |
+| `run`, `submit_pr` | no | yes |
+
+A spec conversation counts as "creating" while its frontmatter `status` is
+`draft`, and as "driving" from `approved` onwards. There is no tool for reading
+a stage's artifacts: the plan and the review write-ups are for you, through
+**View plan** and the todo's folder under `.baiton/specs/<slug>/todos/<id>/`,
+not for the orchestrator to second-guess.
+
 ### Chat sessions
 
 The top of the Chat view lists the saved chat sessions of the selected
@@ -101,6 +133,17 @@ at the same time. A `spec-writer` entry missing from an existing
 `.baiton/config.json` is filled in from the `planner` entry. After the draft
 lands you can refine it in chat with `update_overview`, `add_todo`, `edit_todo`
 and `remove_todo`.
+
+### Driving a spec
+
+Once a spec is approved, its chat conversation drives it one todo at a time.
+The orchestrator dispatches the next legal stage for the todo's current state —
+`pending` → `plan`, `planned` → `execute`, `executed` → `review`, and `execute`
+again when a review sends the todo back — and each `run` blocks until that
+stage reaches a terminal outcome, so there is nothing to poll. `plan-review` is
+not a stage it can trigger: it runs inside the plan stage's own review rounds.
+When every todo is `done`, the orchestrator offers `submit_pr`. You can still
+run any stage yourself from the Spec Explorer.
 
 ## Commands
 
