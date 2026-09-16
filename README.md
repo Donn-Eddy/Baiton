@@ -30,10 +30,13 @@ The two views:
   with its reason and 1-based line number. Each todo node carries inline
   actions for whichever of **Plan**, **Execute**, **Review**, **Re-plan** and
   **Stop** are legal for its current state, plus **View** when the todo is
-  running or has a recorded sub-agent session; the CodeLens over the todo in
-  `spec.md` shows the same state-gated set. **View** reveals the running
-  stage's terminal, or, once it has finished, opens a new terminal resuming
-  its sub-agent session. **Stop** cancels a running stage or, on a todo that
+  running or has a recorded sub-agent session and **View plan** once it has
+  been planned; the CodeLens over the todo in `spec.md` shows the same
+  state-gated set. **View** reveals the running stage's terminal, or, once it
+  has finished, opens a new terminal resuming its sub-agent session. **View
+  plan** opens the todo's plan (`.baiton/specs/<slug>/todos/<id>/plan.md`),
+  which you can edit before running Execute — the executor is briefed from the
+  file as it stands at launch. **Stop** cancels a running stage or, on a todo that
   is not running, reverts it from `planning`, `executing` or `reviewing` back
   to the state its current stage started from. Each spec root carries an
   **Approve** action. These actions are hidden while the workspace is in

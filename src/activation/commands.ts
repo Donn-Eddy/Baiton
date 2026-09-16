@@ -18,6 +18,8 @@
  *     `approve_spec` control tool (Req 5.3, 10.3).
  *   - `baiton.submitPr` / `baiton.showPr` — open a pull request for a spec, and
  *     re-open the URL a completed submit already recorded in its frontmatter.
+ *   - `baiton.viewPlan` — open a todo's persisted plan (`todos/<id>/plan.md`)
+ *     so the user can read it, and edit it before Execute.
  *   - `baiton.openChat` / `baiton.chat` — reveal and focus the Chat_View, whose
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
@@ -97,6 +99,7 @@ import type { OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
+import { planPath } from './specLister';
 import { setOrchestratorApiKey } from './setApiKey';
 import { openConfigPanel, type ConfigPanelProvider } from './configPanel';
 
@@ -118,6 +121,7 @@ export const COMMANDS = {
   approve: 'baiton.approve',
   submitPr: 'baiton.submitPr',
   showPr: 'baiton.showPr',
+  viewPlan: 'baiton.viewPlan',
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
@@ -366,6 +370,20 @@ export function registerCommands(
     vscode.commands.registerCommand(
       COMMANDS.showPr,
       (arg?: TreeNode | string) => runShowPr(specsDir, surface, slugArg(arg)),
+    ),
+  );
+
+  // --- view plan ----------------------------------------------------------
+  // Opens the todo's persisted plan for reading or editing. Like Show PR it
+  // only opens something already on disk, so it is not gated on Restricted
+  // Mode or on a role executable.
+  disposables.push(
+    vscode.commands.registerCommand(
+      COMMANDS.viewPlan,
+      async (a?: TreeNode | string, b?: string) => {
+        const { slug, todoId } = todoArgs(a, b);
+        await runViewPlan(specsDir, surface, slug, todoId);
+      },
     ),
   );
 
@@ -989,6 +1007,82 @@ async function runShowPr(
   void vscode.env.openExternal(vscode.Uri.parse(url));
 }
 
+// --- view plan -------------------------------------------------------------
+
+/**
+ * Open a todo's persisted plan (`todos/<id>/plan.md`) in an editor, from the
+ * tree's View plan inline action, the CodeLens, or the palette. The palette
+ * path picks a spec and then one of its planned todos. A todo with no plan on
+ * file is a warning, not an error: the user has simply not planned it yet.
+ *
+ * The plan is opened as an ordinary editable document on purpose — edits the
+ * user makes before Execute are picked up by the executor's brief, and land in
+ * the `executing` state commit (which stages the whole spec folder).
+ */
+async function runViewPlan(
+  specsDir: string,
+  surface: Surface,
+  slugArg: string | undefined,
+  todoArg: string | undefined,
+): Promise<void> {
+  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  if (slug === undefined) {
+    surface.warn('Baiton: no spec selected.');
+    return;
+  }
+  const todoId = todoArg ?? (await pickPlannedTodoId(specsDir, slug, surface));
+  if (todoId === undefined || todoId.trim().length === 0) {
+    surface.warn('Baiton: no todo selected.');
+    return;
+  }
+  const file = planPath(specsDir, slug, todoId);
+  if (!fs.existsSync(file)) {
+    surface.warn(
+      `Baiton: no plan on file for "${todoId}" in spec "${slug}"; run Plan first.`,
+    );
+    return;
+  }
+  try {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(doc);
+  } catch (e) {
+    surface.error(
+      `Baiton: could not open the plan for "${todoId}": ${e instanceof Error ? e.message : String(e)}.`,
+    );
+  }
+}
+
+/**
+ * Present the todos of a spec that have a plan on file, for the palette path of
+ * View plan. A spec with no planned todo warns and selects nothing.
+ */
+async function pickPlannedTodoId(
+  specsDir: string,
+  slug: string,
+  surface: Surface,
+): Promise<string | undefined> {
+  const ids = plannedTodoIds(specsDir, slug);
+  if (ids.length === 0) {
+    surface.warn(`Baiton: spec "${slug}" has no plan on file; run Plan first.`);
+    return undefined;
+  }
+  return vscode.window.showQuickPick(ids, { placeHolder: 'Select a todo' });
+}
+
+/** The ids, in directory order, of a spec's todos that have a `plan.md`. */
+function plannedTodoIds(specsDir: string, slug: string): string[] {
+  let entries: string[];
+  try {
+    entries = fs
+      .readdirSync(path.join(specsDir, slug, 'todos'), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  return entries.filter((id) => fs.existsSync(planPath(specsDir, slug, id))).sort();
+}
+
 /** Render a Submit PR halt for the user, including verify output. */
 function describeSubmitPrError(error: SubmitPrError): string {
   if (error.kind === 'verify-failed') {
@@ -1008,6 +1102,7 @@ const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
   replan: { title: 'Re-plan', command: COMMANDS.replan },
   stop: { title: 'Stop', command: COMMANDS.stop },
   view: { title: 'View', command: COMMANDS.view },
+  viewPlan: { title: 'View plan', command: COMMANDS.viewPlan },
 };
 
 /**
@@ -1033,7 +1128,8 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
     for (const todo of spec.todos) {
       const line = document.lineAt(todo.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
-      for (const action of legalActions(todo.state, sessions.has(todo.id))) {
+      const hasPlan = fs.existsSync(planPath(this.specsDir, slug, todo.id));
+      for (const action of legalActions(todo.state, sessions.has(todo.id), hasPlan)) {
         const { title, command } = ACTION_LENS[action];
         lenses.push(lens(range, title, command, slug, todo.id));
       }

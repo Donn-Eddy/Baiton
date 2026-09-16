@@ -6,6 +6,8 @@
  * returns one {@link ListedSpec} per spec in ascending slug order. The
  * host-free tree model (`buildSpecTree`) turns these listed specs plus each
  * spec's approval fact from the `SpecStore` into the nodes the tree renders.
+ * {@link planPath} and {@link listTodoPlans} locate the per-todo plan artifacts
+ * beside them, which is what gates the View plan action.
  *
  * Tolerance: a spec whose `spec.md` cannot be read is returned with `readError`
  * set and `raw` left undefined rather than throwing, so one unreadable spec
@@ -94,4 +96,46 @@ function describeError(err: unknown): string {
     return err.message;
   }
   return 'spec.md could not be read';
+}
+
+/**
+ * The absolute path of a todo's persisted plan: `todos/<todoId>/plan.md` inside
+ * the spec folder (Req 24.3). Pure path arithmetic, so the tree, the CodeLens
+ * provider and the View plan command all name the same file.
+ */
+export function planPath(
+  specsDir: string,
+  slug: string,
+  todoId: string,
+): string {
+  return path.join(specsDir, slug, 'todos', todoId, 'plan.md');
+}
+
+/**
+ * The ids of a spec's todos whose plan is on file. A spec with no `todos/`
+ * directory yields an empty set rather than an error — no todo has been planned
+ * under the per-todo layout yet.
+ */
+export async function listTodoPlans(
+  specsDir: string,
+  slug: string,
+): Promise<Set<string>> {
+  const plans = new Set<string>();
+  let entries: string[];
+  try {
+    entries = await fs.readdir(path.join(specsDir, slug, 'todos'));
+  } catch {
+    return plans;
+  }
+  await Promise.all(
+    entries.map(async (todoId) => {
+      try {
+        await fs.access(planPath(specsDir, slug, todoId));
+        plans.add(todoId);
+      } catch {
+        // No plan for that todo; leave it out of the set.
+      }
+    }),
+  );
+  return plans;
 }

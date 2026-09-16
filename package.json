@@ -121,6 +121,11 @@
         "command": "baiton.showPr",
         "title": "Show PR",
         "category": "Baiton"
+      },
+      {
+        "command": "baiton.viewPlan",
+        "title": "View Plan",
+        "category": "Baiton"
       }
     ],
     "menus": {
@@ -159,6 +164,10 @@
         },
         {
           "command": "baiton.showPr",
+          "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.viewPlan",
           "when": "baiton.activated"
         },
         {
@@ -219,6 +228,11 @@
           "command": "baiton.showPr",
           "when": "view == baiton.specExplorer && viewItem =~ /\\bshowPr\\b/ && baiton.activated",
           "group": "inline@1"
+        },
+        {
+          "command": "baiton.viewPlan",
+          "when": "view == baiton.specExplorer && viewItem =~ /\\bviewPlan\\b/ && baiton.activated",
+          "group": "inline@6"
         }
       ]
     },
