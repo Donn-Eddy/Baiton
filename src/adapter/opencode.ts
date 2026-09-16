@@ -30,7 +30,7 @@ export const OPENCODE_MODELS: readonly string[] = [];
 export const OPENCODE_EFFORTS: readonly string[] = [];
 
 /** Documentation URL for opencode model selection rendered inline in the config panel. */
-export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/models/';
+export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
 
 /** Build the `--agent <name>` flag pair for a role. */
 export function opencodeAgentFlags(role: Role): string[] {
