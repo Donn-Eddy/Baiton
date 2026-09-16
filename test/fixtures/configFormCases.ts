@@ -1,13 +1,23 @@
-import { ConfigForm, formFromConfig } from '../../src/config/configPanel';
+import {
+  AgentFormCapability,
+  ConfigForm,
+  formFromConfig,
+} from '../../src/config/configPanel';
 import { defaultConfig } from '../../src/config/defaultConfig';
-import { createAdapterRegistry } from '../../src/adapter';
+import { agentCapabilities, createAdapterRegistry } from '../../src/adapter';
 import { LIMIT_BOUNDS, Limits } from '../../src/config/types';
 
 /** The installed agent ids from the adapter registry, shared as the default option set. */
 export const AGENT_IDS: readonly string[] = createAdapterRegistry().ids;
 
-/** Default validation options using the installed agent ids. */
-export const DEFAULT_OPTIONS: { agents: readonly string[] } = { agents: AGENT_IDS };
+/** Default validation options using the installed agent ids and capabilities. */
+export const DEFAULT_OPTIONS: {
+  agents: readonly string[];
+  byAgent: Readonly<Record<string, AgentFormCapability>>;
+} = {
+  agents: AGENT_IDS,
+  byAgent: agentCapabilities(),
+};
 
 /** A fresh valid ConfigForm built from the default configuration. */
 export function validForm(): ConfigForm {
@@ -25,7 +35,10 @@ export function withEdits(base: ConfigForm, mutator: (draft: ConfigForm) => void
 export interface ConfigFormCase {
   name: string;
   form: ConfigForm;
-  options: { agents: readonly string[] };
+  options: {
+    agents: readonly string[];
+    byAgent: Readonly<Record<string, AgentFormCapability>>;
+  };
   expectedPaths: readonly string[];
 }
 
@@ -73,7 +86,13 @@ cases.push({
   form: withEdits(validForm(), (f) => {
     f.roles.planner.agent = 'custom-agent';
   }),
-  options: { agents: [...AGENT_IDS, 'custom-agent'] },
+  options: {
+    agents: [...AGENT_IDS, 'custom-agent'],
+    byAgent: {
+      ...DEFAULT_OPTIONS.byAgent,
+      'custom-agent': { models: [], efforts: [] },
+    },
+  },
   expectedPaths: [],
 });
 
@@ -95,7 +114,7 @@ cases.push({
   expectedPaths: ['roles.spec-writer.model'],
 });
 
-// (6) Effort: whitespace vs unset '' vs out-of-set
+// (6) Effort: whitespace vs unset '' vs closed/open catalogue rules
 cases.push({
   name: 'whitespace-only non-empty effort on executor role',
   form: withEdits(validForm(), (f) => {
@@ -112,10 +131,50 @@ cases.push({
   options: DEFAULT_OPTIONS,
   expectedPaths: [],
 });
+// (a) a closed-set agent with an out-of-table effort — one roles.<role>.effort error
 cases.push({
-  name: 'out-of-set effort ("xhigh") on executor role is valid',
+  name: 'closed-set agent with an out-of-table effort',
   form: withEdits(validForm(), (f) => {
-    f.roles.executor.effort = 'xhigh';
+    f.roles.executor.effort = 'unsupported-effort';
+  }),
+  options: DEFAULT_OPTIONS,
+  expectedPaths: ['roles.executor.effort'],
+});
+// (b) the same case with that effort injected into byAgent — valid, the round-trip rule
+cases.push({
+  name: 'closed-set agent with out-of-table effort injected into byAgent is valid (round-trip rule)',
+  form: withEdits(validForm(), (f) => {
+    f.roles.executor.effort = 'unsupported-effort';
+  }),
+  options: {
+    agents: DEFAULT_OPTIONS.agents,
+    byAgent: {
+      ...DEFAULT_OPTIONS.byAgent,
+      claude: {
+        ...DEFAULT_OPTIONS.byAgent.claude,
+        efforts: [...DEFAULT_OPTIONS.byAgent.claude.efforts, 'unsupported-effort'],
+      },
+    },
+  },
+  expectedPaths: [],
+});
+// (c) opencode with a provider/model model and a hand-typed variant — valid
+cases.push({
+  name: 'opencode with a provider/model model and a hand-typed variant is valid',
+  form: withEdits(validForm(), (f) => {
+    f.roles.executor.agent = 'opencode';
+    f.roles.executor.model = 'anthropic/claude-sonnet-5';
+    f.roles.executor.effort = 'custom-variant';
+  }),
+  options: DEFAULT_OPTIONS,
+  expectedPaths: [],
+});
+// (d) an out-of-table model on a closed-set agent — valid, pinning the deliberate absence of a model rule
+cases.push({
+  name: 'out-of-table model on a closed-set agent is valid (advisory dropdown)',
+  form: withEdits(validForm(), (f) => {
+    f.roles.executor.agent = 'claude';
+    f.roles.executor.model = 'brand-new-claude-model-xyz';
   }),
   options: DEFAULT_OPTIONS,
   expectedPaths: [],

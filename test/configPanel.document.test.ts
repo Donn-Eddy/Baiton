@@ -14,7 +14,7 @@ import { defaultConfigJson } from '../src/config/defaultConfig';
 import { LIMIT_BOUNDS } from '../src/config/types';
 import { isErr, isOk } from '../src/model/result';
 import { applyFormToDocument, formFromDocument, validateConfigForm } from '../src/config/configPanel';
-import { createAdapterRegistry } from '../src/adapter';
+import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
 
 /**
  * Unit tests for the Config Panel document I/O (spec "Config Panel",
@@ -309,7 +309,7 @@ describe('config panel document I/O (config-panel T03)', () => {
       form.roles.executor.model = 'new-model';
       form.limits.exec_attempts = '5';
 
-      const options = { agents: createAdapterRegistry().ids };
+      const options = { agents: createAdapterRegistry().ids, byAgent: agentCapabilities() };
       assert.deepStrictEqual(validateConfigForm(form, options), []);
 
       const next = applyFormToDocument(loaded.value.doc, form);
@@ -347,7 +347,7 @@ describe('config panel document I/O (config-panel T03)', () => {
       const form = formFromDocument(loaded.value.doc);
       form.limits.exec_attempts = String(LIMIT_BOUNDS.exec_attempts.max + 1);
 
-      const options = { agents: createAdapterRegistry().ids };
+      const options = { agents: createAdapterRegistry().ids, byAgent: agentCapabilities() };
       const errors = validateConfigForm(form, options);
       assert.ok(errors.length > 0);
 

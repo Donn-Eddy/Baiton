@@ -19,6 +19,8 @@ import * as path from 'path';
 import { mkdir } from 'fs/promises';
 import { isErr } from '../model/result';
 import type { Config } from '../config/types';
+import { agentCapabilities } from '../adapter';
+import type { AgentCapabilities } from '../adapter';
 import {
   applyFormToDocument,
   configFormOptions,
@@ -74,6 +76,7 @@ export interface ConfigPanelControllerDeps {
   webview: ConfigPanelWebview;
   baitonDir: string;
   agentIds: readonly string[];
+  capabilities?: Readonly<Record<string, AgentCapabilities>>;
   confirmReset(message: string): Promise<boolean>;
   applyConfig?: ApplyConfig;
   log(message: string): void;
@@ -89,11 +92,13 @@ export class ConfigPanelController {
   private doc: Record<string, unknown> | undefined;
   private token: string | undefined;
   private options: ConfigFormOptions;
+  private readonly capabilities: Readonly<Record<string, AgentCapabilities>>;
   private disposed = false;
   private writing = false;
 
   constructor(private readonly deps: ConfigPanelControllerDeps) {
-    this.options = configFormOptions(deps.agentIds);
+    this.capabilities = deps.capabilities ?? agentCapabilities();
+    this.options = configFormOptions(deps.agentIds, this.capabilities);
   }
 
   /**
@@ -196,7 +201,7 @@ export class ConfigPanelController {
     const form = formFromDocument(read.value.doc);
     this.doc = read.value.doc;
     this.token = read.value.token;
-    this.options = configFormOptions(this.deps.agentIds, form);
+    this.options = configFormOptions(this.deps.agentIds, this.capabilities, form);
     this.deps.webview.post({
       type: 'loaded',
       form,
@@ -212,7 +217,7 @@ export class ConfigPanelController {
   }): Promise<void> {
     this.writing = true;
     try {
-      const errors = validateConfigForm(msg.form, { agents: this.options.agents });
+      const errors = validateConfigForm(msg.form, this.options);
       if (errors.length > 0) {
         this.deps.webview.post({
           type: 'saveFailed',

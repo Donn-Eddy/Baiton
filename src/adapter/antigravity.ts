@@ -7,6 +7,24 @@ import { isReadOnlyRole, runDirGrant } from './permissions';
 /** The antigravity CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const ANTIGRAVITY_BIN = AGENT_BINARY.antigravity;
 
+/**
+ * Curated Antigravity (`agy`) models exposed in the config panel dropdown.
+ * Deliberately advisory: the "Other…" escape allows typing any unlisted model.
+ */
+export const ANTIGRAVITY_MODELS: readonly string[] = [
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'gemini-3.7-flash-high',
+  'gemini-3.7-flash-medium',
+  'gemini-3.7-flash-low',
+  'gemini-3.1-pro-high',
+  'claude-sonnet-4-6',
+] as const;
+
+/** Reasoning effort levels supported by `agy --effort` (Requirement 14.1). */
+export const ANTIGRAVITY_EFFORTS = ['low', 'medium', 'high'] as const;
+
 /** How long to wait for `agy --version` before giving up (ms). */
 const PROBE_TIMEOUT_MS = 10_000;
 

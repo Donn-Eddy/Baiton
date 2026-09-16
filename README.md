@@ -151,18 +151,23 @@ The config panel opens `.baiton/config.json` as an interactive editor form:
 
 - **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
-  populated from installed adapters, a model text input, and an effort level
-  (`low`, `medium`, `high`, or `(default)` when unset); the three numeric limits
-  with their bounds (`plan_review_rounds` 0–10, `exec_attempts` 1–10,
-  `stall_notice_minutes` 1–1440); and `git.remote` and `git.base`.
+  populated from installed adapters, a per-agent model dropdown with curated
+  suggestions and an "Other…" free-form escape hatch (along with documentation
+  links for open-ended ecosystems like OpenCode), a per-agent effort dropdown
+  (`(default)` when unset, curated supported levels, or free-form entry where
+  open); the three numeric limits with their bounds (`plan_review_rounds` 0–10,
+  `exec_attempts` 1–10, `stall_notice_minutes` 1–1440); and `git.remote` and
+  `git.base`.
 - **Preservation of unmanaged keys** — every key outside the form's managed set
   (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
-  agent or effort values) is preserved on save. Written JSON is formatted with
-  two-space indentation and a trailing newline.
+  agent, model, or effort values) is preserved on save. Written JSON is formatted
+  with two-space indentation and a trailing newline.
 - **Inline and host-side validation** — fields validate as you type with inline
   error indicators, and the host re-validates the submitted form before writing,
   guaranteeing the webview cannot write a configuration that the extension
-  loader would reject.
+  loader would reject. Effort validates against each agent's closed set of supported
+  levels when applicable; models remain open and advisory with full support for
+  custom variants via "Other…".
 - **The reset path** — **Baiton: Open Config Panel** is registered before the
   extension's configuration-loading gate, so the command works even when
   `.baiton/config.json` is absent or unparseable. In that state the panel
@@ -182,6 +187,23 @@ The config panel opens `.baiton/config.json` as an interactive editor form:
   (new settings apply to the next run), missing agent CLI binaries are flagged,
   and saving in a window opened for a different folder than the activated
   workspace folder writes the file without updating the running session.
+
+#### Agent Model & Effort Discovery (CLI Probing & Architecture)
+
+Baiton uses curated static capability catalogues in each adapter module rather than invoking agent CLI processes on the fly when opening the configuration panel:
+
+- **CLI capabilities investigation**:
+  - `claude` (Anthropic Claude Code): Does not provide a `models` subcommand; non-flag arguments launch an interactive prompt session. System health and auth can be probed via `claude doctor`. Supported effort levels (`low`, `medium`, `high`) are passed via `--effort`.
+  - `antigravity` (`agy`): Provides a dedicated `agy models` subcommand that queries available Gemini and Claude models from the API. Supports `--effort (low|medium|high)`.
+  - `codex` (OpenAI Codex CLI): Does not provide a `models` subcommand; positional arguments launch interactive sessions. System status is available via `codex doctor`. Reasoning effort is passed via `--config model_reasoning_effort=<effort>`.
+  - `opencode`: Provides a dedicated `opencode models` command listing provider-prefixed model identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Due to its pluggable multi-provider nature, any provider/model string is accepted, and effort is open-ended.
+- **Why static capability catalogues**:
+  - *Zero latency*: The config panel renders instantly without spawning subprocesses or waiting on network API round-trips.
+  - *Offline and air-gapped reliability*: The configuration panel is fully operable when disconnected from the network or prior to agent CLI authentication.
+  - *Host-free purity*: Keeps the config panel core completely free of Node `child_process` dependencies, preserving unit testability and browser-mirror parity.
+  - *Robust fallback*: The "Other…" input option guarantees users are never blocked from specifying newly-released models or custom deployments.
+- **Roadmap for dynamic discovery**:
+  - Future iterations may introduce background caching or an asynchronous "Refresh models from CLI" button for CLIs that support dynamic querying (`agy models`, `opencode models`), caching results in workspace storage while retaining static defaults as resilient fallbacks.
 
 ## Commands
 

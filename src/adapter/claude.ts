@@ -11,6 +11,20 @@ import {
 /** The Claude CLI executable name; resolved on the host PATH. */
 const CLAUDE_BIN = 'claude';
 
+/**
+ * Curated Claude models exposed in the config panel dropdown.
+ * Deliberately advisory: the "Other…" escape allows typing any unlisted model.
+ * MUST include 'claude-sonnet-5' (the defaultConfig() default).
+ */
+export const CLAUDE_MODELS: readonly string[] = [
+  'claude-sonnet-5',
+  'claude-opus-5',
+  'claude-haiku-5',
+] as const;
+
+/** Reasoning effort levels supported by `claude --effort` (Requirement 14.1). */
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high'] as const;
+
 /** How long to wait for `claude --version` before giving up (ms). */
 const PROBE_TIMEOUT_MS = 10_000;
 

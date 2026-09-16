@@ -1,6 +1,6 @@
 /**
  * Config panel message protocol and form model (host-free core) — spec
- * "Configuration Panel" (config-panel).
+ * "Configuration Panel" (config-panel), todos T01, T10.
  *
  * The Config_Panel webview is driven by a typed message union, in the same
  * shape as {@link "../orchestrator/webviewProtocol"}: the host sends
@@ -18,8 +18,16 @@
 import { Role, ROLES } from '../model';
 import { Config, LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from './types';
 
-/** The reasoning-effort choices offered by the form's effort dropdown. */
-export const EFFORT_OPTIONS = ['low', 'medium', 'high'] as const;
+/**
+ * Per-agent capability descriptor as held by the config panel (T10).
+ * Structurally identical to `AgentCapabilities` from `src/adapter/adapter`
+ * but declared locally to keep this module import-free of adapter dependencies.
+ */
+export interface AgentFormCapability {
+  readonly models: readonly string[];
+  readonly efforts: readonly string[];
+  readonly modelLink?: string;
+}
 
 /** One role's form entry: raw, possibly-invalid input text for each field. */
 export interface RoleFormEntry {
@@ -45,8 +53,8 @@ export interface ConfigForm {
 
 /** The dropdown option sets the webview renders alongside the form. */
 export interface ConfigFormOptions {
-  agents: readonly string[];
-  efforts: readonly string[];
+  readonly agents: readonly string[];
+  readonly byAgent: Readonly<Record<string, AgentFormCapability>>;
 }
 
 /** One field-level validation error, keyed by a dotted path into {@link ConfigForm}. */
@@ -83,13 +91,30 @@ export type ConfigPanelWebviewToHost =
 /**
  * The dropdown option sets for the form: the installed agent ids plus any
  * agent value already present in the form that is not an installed id, and
- * {@link EFFORT_OPTIONS} plus any out-of-set effort present in the form —
- * each appended once, in a stable order, so a config saved with a value
- * outside the common set still round-trips through the dropdown.
+ * a copy of the capability catalogue with out-of-table models and efforts
+ * appended for agents with closed sets (T10 round-trip rule).
  */
-export function configFormOptions(agentIds: readonly string[], form?: ConfigForm): ConfigFormOptions {
+export function configFormOptions(
+  agentIds: readonly string[],
+  capabilities?: Readonly<Record<string, AgentFormCapability>>,
+  form?: ConfigForm,
+): ConfigFormOptions {
   const agents = [...agentIds];
-  const efforts: string[] = [...EFFORT_OPTIONS];
+  const byAgent: Record<string, { models: string[]; efforts: string[]; modelLink?: string }> = {};
+
+  if (capabilities) {
+    for (const [agent, cap] of Object.entries(capabilities)) {
+      byAgent[agent] = {
+        models: [...cap.models],
+        efforts: [...cap.efforts],
+        ...(cap.modelLink !== undefined ? { modelLink: cap.modelLink } : {}),
+      };
+    }
+  } else {
+    for (const agent of agentIds) {
+      byAgent[agent] = { models: [], efforts: [] };
+    }
+  }
 
   if (form !== undefined) {
     for (const role of ROLES) {
@@ -100,13 +125,25 @@ export function configFormOptions(agentIds: readonly string[], form?: ConfigForm
       if (entry.agent !== '' && !agents.includes(entry.agent)) {
         agents.push(entry.agent);
       }
-      if (entry.effort !== '' && !efforts.includes(entry.effort)) {
-        efforts.push(entry.effort);
+      const trimmedAgent = entry.agent.trim();
+      if (trimmedAgent !== '') {
+        if (!byAgent[trimmedAgent]) {
+          byAgent[trimmedAgent] = { models: [], efforts: [] };
+        }
+        const cap = byAgent[trimmedAgent];
+        const trimmedModel = entry.model.trim();
+        if (cap.models.length > 0 && trimmedModel !== '' && !cap.models.includes(trimmedModel)) {
+          cap.models.push(trimmedModel);
+        }
+        const trimmedEffort = entry.effort.trim();
+        if (cap.efforts.length > 0 && trimmedEffort !== '' && !cap.efforts.includes(trimmedEffort)) {
+          cap.efforts.push(trimmedEffort);
+        }
       }
     }
   }
 
-  return { agents, efforts };
+  return { agents, byAgent };
 }
 
 /**
@@ -193,7 +230,10 @@ function asFormNumber(value: unknown): string {
  */
 export function validateConfigForm(
   form: ConfigForm,
-  options: { agents: readonly string[] },
+  options: {
+    agents: readonly string[];
+    byAgent: Readonly<Record<string, AgentFormCapability>>;
+  },
 ): ConfigFieldError[] {
   const errors: ConfigFieldError[] = [];
 
@@ -208,11 +248,27 @@ export function validateConfigForm(
         message: `"${agent}" is not an installed agent (installed: ${options.agents.join(', ')}).`,
       });
     }
+
+    // Model: blank/whitespace is the only model check. Deliberately no membership check
+    // against byAgent so a brand-new model works without an extension update and hand-typed
+    // opencode models are never rejected (the "Other…" escape makes model dropdowns advisory).
     if (entry.model.trim().length === 0) {
       errors.push({ path: `roles.${role}.model`, message: `"${role}" is missing a model.` });
     }
+
+    // Effort: blank check first, then closed-set check only where the catalogue is closed.
+    // Emit at most one effort error per role (blank OR unsupported, never both).
     if (entry.effort !== '' && entry.effort.trim().length === 0) {
       errors.push({ path: `roles.${role}.effort`, message: `"${role}" effort must not be blank.` });
+    } else if (entry.effort.trim().length > 0) {
+      const effort = entry.effort.trim();
+      const cap = options.byAgent[agent];
+      if (cap && cap.efforts.length > 0 && !cap.efforts.includes(effort)) {
+        errors.push({
+          path: `roles.${role}.effort`,
+          message: `"${role}" effort "${effort}" is not supported by ${agent} (supported: ${cap.efforts.join(', ')}).`,
+        });
+      }
     }
   }
 

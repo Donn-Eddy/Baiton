@@ -2,29 +2,58 @@
 
 ```json
 {
-  "summary": "Implemented parity testing between the TypeScript config panel core and the browser script mirror, established shared validation fixtures and fast-check properties, cross-referenced the implementations, and documented the Open Config Panel command in README.md.",
+  "summary": "Implemented config-panel T10: dynamic per-agent model and effort dropdowns with 'Other…' free-form fallback, open-ended provider doc link, static adapter capability catalogue, bidirectional form-options round-trip preservation, and full TypeScript-to-Webview mirror parity. Completed CLI model-listing investigation and documented findings in README.md.",
   "files_changed": [
-    "test/fixtures/configFormCases.ts",
-    "test/configPanel.mirror.test.ts",
-    "test/configPanel.mirror.property.test.ts",
+    "README.md",
+    "media/config.html",
     "media/config.js",
+    "src/activation/commands.ts",
+    "src/activation/configPanel.ts",
+    "src/activation/configPanelController.ts",
+    "src/adapter/adapter.ts",
+    "src/adapter/antigravity.ts",
+    "src/adapter/claude.ts",
+    "src/adapter/codex.ts",
+    "src/adapter/index.ts",
+    "src/adapter/opencode.ts",
     "src/config/configPanel.ts",
-    "README.md"
+    "test/adapter.index.test.ts",
+    "test/configPanel.document.test.ts",
+    "test/configPanel.form.property.test.ts",
+    "test/configPanel.mirror.property.test.ts",
+    "test/configPanel.mirror.test.ts",
+    "test/configPanel.test.ts",
+    "test/fixtures/configFormCases.ts"
   ],
   "commands_run": [
+    "claude --version",
+    "claude --help",
+    "claude doctor",
+    "agy --version",
+    "agy --help",
+    "agy models",
+    "codex --version",
+    "codex --help",
+    "codex doctor",
+    "opencode --version",
+    "opencode --help",
+    "opencode models",
+    "node --check media/config.js",
+    "npx mocha --no-config --require ts-node/register test/adapter.index.test.ts",
+    "npx mocha --no-config --require ts-node/register test/adapter.index.test.ts test/configPanel.test.ts test/configPanel.mirror.test.ts test/configPanel.mirror.property.test.ts test/configPanel.form.property.test.ts test/configPanel.document.test.ts test/configPanel.controller.test.ts",
     "npm run compile",
     "npm run lint",
-    "node --check media/config.js",
-    "npx mocha --no-config --require ts-node/register test/configPanel.mirror.test.ts test/configPanel.mirror.property.test.ts",
-    "npm test"
+    "npm run test:unit"
   ],
   "notes": [
-    "Created test/fixtures/configFormCases.ts exporting AGENT_IDS, validForm, withEdits, and CONFIG_FORM_CASES with 45 test fixtures pinning expectedPaths across role, limits, and git validation rules.",
-    "Created test/configPanel.mirror.test.ts loading media/config.js in a clean node:vm context and asserting exact parity with TS validateConfigForm, ROLES, EFFORT_OPTIONS, and LIMIT_BOUNDS (including explicit key order), full verbatim message comparison, and validator purity.",
-    "Created test/configPanel.mirror.property.test.ts running fast-check properties over generated ConfigForm instances with varying agent lists to guard against divergence beyond hand-crafted fixtures.",
-    "Verified failure on deliberate divergence by temporarily modifying plan_review_rounds max bound in media/config.js, observing 4 failing tests in test/configPanel.mirror.test.ts, and reverting the edit cleanly.",
-    "Updated header comments in media/config.js and src/config/configPanel.ts to cross-reference each other and test/configPanel.mirror.test.ts.",
-    "Documented the Open Config Panel command, editable fields, unmanaged key preservation, reset path, external change/conflict detection, and hot-reload behavior in README.md."
+    "Defined curated AgentCapabilities constants across claude, antigravity, codex, and opencode adapters, exported via agentCapabilities() from src/adapter/index.ts.",
+    "Kept src/config/configPanel.ts import-light using structural AgentFormCapability interface to avoid bringing child_process into browser-mirrored core.",
+    "Updated ConfigFormOptions and configFormOptions to copy adapter catalogues and append out-of-table values for closed sets in ROLES order, while leaving open sets intact.",
+    "Implemented closed-set validation for effort while keeping models open and advisory (no membership check).",
+    "Updated media/config.html and media/config.js with select-input-groups using '\\u0000other' sentinel, inline error handling, documentation link for OpenCode, and verbatim mirrored validation logic.",
+    "Verified mirror parity between media/config.js and src/config/configPanel.ts via fixture cases, fast-check property tests, and intentional single-character mutation testing.",
+    "Documented CLI model-listing probe findings and architectural rationale in README.md.",
+    "Strictly followed scope discipline: no T11 (WebviewView) changes made; working tree preserved without git commits, stashing, or branch changes."
   ]
 }
 ```

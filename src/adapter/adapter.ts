@@ -20,6 +20,20 @@ export const AGENT_BINARY: Record<AgentId, string> = {
   codex: 'codex',
 };
 
+/**
+ * Capability descriptor for an agent CLI in the configuration panel (T10).
+ *
+ * An empty list means free text (no dropdown, no membership check).
+ * A non-empty list means an enumerated set rendered as a dropdown plus an
+ * always-present "Other…" free-text entry.
+ * `modelLink` is an optional documentation URL rendered next to a free-text model field.
+ */
+export interface AgentCapabilities {
+  readonly models: readonly string[];
+  readonly efforts: readonly string[];
+  readonly modelLink?: string;
+}
+
 export interface Adapter {
   /** Stable adapter identifier. */
   readonly id: AgentId;

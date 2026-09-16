@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fc from 'fast-check';
 import {
   ConfigForm,
+  ConfigFormOptions,
   RoleFormEntry,
   validateConfigForm,
 } from '../src/config/configPanel';
@@ -54,18 +55,27 @@ describe('config panel mirror properties (config-panel T09)', () => {
     git: gitArb,
   });
 
-  const agentsOptionsArb: fc.Arbitrary<{ agents: readonly string[] }> = fc
-    .subarray([...AGENT_IDS], { minLength: 0 })
-    .chain((subset) =>
-      fc.boolean().map((extra) => ({
-        agents: extra ? [...subset, 'extra-agent'] : subset,
-      })),
-    );
+  const byAgentEntryArb = fc.record({
+    models: fc.array(fc.string({ minLength: 1, maxLength: 20 }), { maxLength: 3 }),
+    efforts: fc.array(fc.constantFrom('low', 'medium', 'high', 'custom'), { maxLength: 3 }),
+  });
+
+  const optionsArb: fc.Arbitrary<ConfigFormOptions> = fc.record({
+    agents: fc
+      .subarray([...AGENT_IDS], { minLength: 0 })
+      .chain((subset) =>
+        fc.boolean().map((extra) => (extra ? [...subset, 'extra-agent'] : subset)),
+      ),
+    byAgent: fc.oneof(
+      fc.constant({}),
+      fc.dictionary(fc.constantFrom(...AGENT_IDS, 'extra-agent', 'other'), byAgentEntryArb),
+    ),
+  });
 
   // Feature: config-panel, Property: the browser mirror validates identically to the TS core
   it('the browser mirror validateConfigForm returns verbatim identical errors to TypeScript core', () => {
     fc.assert(
-      fc.property(formArb, agentsOptionsArb, (form, options) => {
+      fc.property(formArb, optionsArb, (form, options) => {
         const tsErrors = validateConfigForm(form, options);
         const jsErrors = mirror.validateConfigForm(form, options);
         assert.deepStrictEqual(jsErrors, tsErrors);

@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import {
   ConfigFieldError,
   ConfigForm,
-  EFFORT_OPTIONS,
+  ConfigFormOptions,
   applyFormToDocument,
   configFormOptions,
   formFromConfig,
@@ -12,7 +12,7 @@ import {
 import { defaultConfig, defaultConfigJson } from '../src/config/defaultConfig';
 import { LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from '../src/config/types';
 import { ROLES } from '../src/model';
-import { createAdapterRegistry } from '../src/adapter';
+import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
 
 /**
  * Unit tests for the Config Panel host-free core (spec "Config Panel",
@@ -27,7 +27,8 @@ import { createAdapterRegistry } from '../src/adapter';
 
 describe('config panel core (config-panel T03)', () => {
   const AGENTS = createAdapterRegistry().ids;
-  const OPTIONS = { agents: AGENTS };
+  const CAPABILITIES = agentCapabilities();
+  const OPTIONS: ConfigFormOptions = { agents: AGENTS, byAgent: CAPABILITIES };
 
   /** A fresh valid form built from the default config. */
   function validForm(): ConfigForm {
@@ -175,12 +176,7 @@ describe('config panel core (config-panel T03)', () => {
       }
     });
 
-    it('effort: "" is valid (unset), whitespace-only is an error, out-of-set is valid', () => {
-      // Deliberate: effort has no closed set at the form/validator boundary.
-      // "" means "not set" and is fine; a non-blank value is passed through
-      // even when it falls outside EFFORT_OPTIONS, so a config saved with a
-      // future effort level still round-trips through the panel instead of
-      // being rejected by an older build's validator.
+    it('effort: "" is valid (unset) and whitespace-only is an error', () => {
       const unset = validForm();
       unset.roles.reviewer.effort = '';
       assert.deepStrictEqual(validateConfigForm(unset, OPTIONS), []);
@@ -188,10 +184,42 @@ describe('config panel core (config-panel T03)', () => {
       const blank = validForm();
       blank.roles.reviewer.effort = '   ';
       assert.deepStrictEqual(paths(validateConfigForm(blank, OPTIONS)), ['roles.reviewer.effort']);
+    });
 
-      const outOfSet = validForm();
-      outOfSet.roles.reviewer.effort = 'xhigh';
-      assert.deepStrictEqual(validateConfigForm(outOfSet, OPTIONS), []);
+    it('effort: flags error if agent has a closed effort set and value is not in set', () => {
+      const form = validForm();
+      form.roles.planner.agent = 'claude';
+      form.roles.planner.effort = 'unsupported';
+      const errors = validateConfigForm(form, OPTIONS);
+      assert.deepStrictEqual(errors, [
+        {
+          path: 'roles.planner.effort',
+          message: '"planner" effort "unsupported" is not supported by claude (supported: low, medium, high).',
+        },
+      ]);
+    });
+
+    it('effort: accepts any non-blank value when agent has an open effort set or unknown agent', () => {
+      // opencode has efforts: [] (open set)
+      const opencodeForm = validForm();
+      opencodeForm.roles.planner.agent = 'opencode';
+      opencodeForm.roles.planner.effort = 'custom';
+      assert.deepStrictEqual(validateConfigForm(opencodeForm, OPTIONS), []);
+
+      // unknown agent has no capability entry
+      const unknownForm = validForm();
+      unknownForm.roles.planner.agent = 'unknown';
+      unknownForm.roles.planner.effort = 'custom';
+      // Will flag agent unknown, but should NOT flag effort
+      const errors = validateConfigForm(unknownForm, OPTIONS);
+      assert.deepStrictEqual(paths(errors), ['roles.planner.agent']);
+    });
+
+    it('model: accepts any non-blank string without membership check', () => {
+      const form = validForm();
+      form.roles.planner.agent = 'claude';
+      form.roles.planner.model = 'custom-model-not-in-catalogue';
+      assert.deepStrictEqual(validateConfigForm(form, OPTIONS), []);
     });
 
     it('limits: boundaries validate clean, one-past-bounds fails with both bounds and the value named', () => {
@@ -270,37 +298,85 @@ describe('config panel core (config-panel T03)', () => {
   });
 
   describe('configFormOptions', () => {
-    it('with no form, returns the installed agents and EFFORT_OPTIONS as copies', () => {
+    it('with no form, returns installed agents and clones capabilities into byAgent', () => {
       const before = createAdapterRegistry().ids;
-      const result = configFormOptions(AGENTS);
-      assert.deepStrictEqual(result, { agents: [...AGENTS], efforts: [...EFFORT_OPTIONS] });
+      const result = configFormOptions(AGENTS, CAPABILITIES);
 
-      // Mutating the result must not disturb the registry.
+      assert.deepStrictEqual(result.agents, [...AGENTS]);
+      assert.ok(result.byAgent);
+      for (const agent of AGENTS) {
+        assert.deepStrictEqual(result.byAgent[agent], {
+          models: [...CAPABILITIES[agent].models],
+          efforts: [...CAPABILITIES[agent].efforts],
+          ...(CAPABILITIES[agent].modelLink !== undefined
+            ? { modelLink: CAPABILITIES[agent].modelLink }
+            : {}),
+        });
+      }
+
+      // Mutating the result must not disturb the registry or catalogue.
       (result.agents as string[]).push('mutated');
-      (result.efforts as string[]).push('mutated');
+      (result.byAgent.claude.efforts as string[]).push('mutated');
       assert.deepStrictEqual(createAdapterRegistry().ids, before);
+      assert.strictEqual(CAPABILITIES.claude.efforts.includes('mutated'), false);
     });
 
-    it('appends an unknown agent and effort once each, after the known values, in ROLES order', () => {
+    it('with no capabilities provided, initializes empty byAgent for installed agents', () => {
+      const result = configFormOptions(AGENTS);
+      assert.deepStrictEqual(result.agents, [...AGENTS]);
+      assert.ok(result.byAgent);
+      for (const agent of AGENTS) {
+        assert.deepStrictEqual(result.byAgent[agent], { models: [], efforts: [] });
+      }
+    });
+
+    it('appends an unknown agent to agents and creates empty byAgent entry for it', () => {
       const form = validForm();
       form.roles.planner.agent = 'unknown-agent';
-      form.roles.executor.effort = 'unknown-effort';
-      // Duplicate the unknown agent in a later role to prove it is only appended once.
+      // Duplicate in later role
       form.roles.reviewer.agent = 'unknown-agent';
-      form.roles['plan-reviewer'].effort = 'unknown-effort';
 
-      const options = configFormOptions(AGENTS, form);
-
+      const options = configFormOptions(AGENTS, CAPABILITIES, form);
       assert.deepStrictEqual(options.agents, [...AGENTS, 'unknown-agent']);
-      assert.deepStrictEqual(options.efforts, [...EFFORT_OPTIONS, 'unknown-effort']);
+      assert.deepStrictEqual(options.byAgent?.['unknown-agent'], { models: [], efforts: [] });
     });
 
-    it('never duplicates installed ids / in-set efforts and ignores ""', () => {
+    it('appends out-of-table values for closed-set agent capabilities', () => {
       const form = validForm();
+      form.roles.planner.agent = 'claude';
+      form.roles.planner.model = 'custom-claude-model';
+      form.roles.planner.effort = 'custom-claude-effort';
+      // Duplicate in another claude role
+      form.roles.executor.agent = 'claude';
+      form.roles.executor.model = 'custom-claude-model';
+      form.roles.executor.effort = 'custom-claude-effort';
+
+      const options = configFormOptions(AGENTS, CAPABILITIES, form);
+      assert.ok(options.byAgent?.claude);
+      assert.deepStrictEqual(options.byAgent.claude.models, [...CAPABILITIES.claude.models, 'custom-claude-model']);
+      assert.deepStrictEqual(options.byAgent.claude.efforts, [...CAPABILITIES.claude.efforts, 'custom-claude-effort']);
+    });
+
+    it('does NOT append out-of-table values for open-set agent capabilities (efforts: [])', () => {
+      const form = validForm();
+      form.roles.planner.agent = 'opencode';
+      form.roles.planner.effort = 'custom-effort';
+
+      const options = configFormOptions(AGENTS, CAPABILITIES, form);
+      assert.ok(options.byAgent?.opencode);
+      // opencode effort set is open (length 0), so custom-effort is not appended to efforts dropdown
+      assert.deepStrictEqual(options.byAgent.opencode.efforts, []);
+    });
+
+    it('never duplicates installed ids / in-set values and ignores ""', () => {
+      const form = validForm();
+      form.roles.planner.agent = 'claude';
+      form.roles.planner.model = CAPABILITIES.claude.models[0];
       form.roles.planner.effort = '';
-      const options = configFormOptions(AGENTS, form);
+      const options = configFormOptions(AGENTS, CAPABILITIES, form);
       assert.deepStrictEqual(options.agents, [...AGENTS]);
-      assert.deepStrictEqual(options.efforts, [...EFFORT_OPTIONS]);
+      assert.deepStrictEqual(options.byAgent?.claude.models, [...CAPABILITIES.claude.models]);
+      assert.deepStrictEqual(options.byAgent?.claude.efforts, [...CAPABILITIES.claude.efforts]);
     });
   });
 

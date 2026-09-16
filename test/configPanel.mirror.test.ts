@@ -5,7 +5,7 @@ import * as vm from 'vm';
 import {
   ConfigFieldError,
   ConfigForm,
-  EFFORT_OPTIONS,
+  ConfigFormOptions,
   validateConfigForm,
 } from '../src/config/configPanel';
 import { LIMIT_BOUNDS } from '../src/config/types';
@@ -25,11 +25,10 @@ import { CONFIG_FORM_CASES } from './fixtures/configFormCases';
 
 export interface ConfigMirror {
   ROLES: readonly string[];
-  EFFORT_OPTIONS: readonly string[];
   LIMIT_BOUNDS: Record<string, { min: number; max: number }>;
   validateConfigForm(
     form: ConfigForm,
-    options: { agents: readonly string[] },
+    options: ConfigFormOptions,
   ): ConfigFieldError[];
 }
 
@@ -42,7 +41,6 @@ export function loadConfigMirror(): ConfigMirror {
   assert.ok(raw, 'window.baitonConfigForm was not exported by media/config.js');
   return {
     ROLES: Array.from(raw.ROLES),
-    EFFORT_OPTIONS: Array.from(raw.EFFORT_OPTIONS),
     LIMIT_BOUNDS: JSON.parse(JSON.stringify(raw.LIMIT_BOUNDS)),
     validateConfigForm(form, options) {
       const errors = raw.validateConfigForm(form, options);
@@ -65,10 +63,6 @@ describe('config panel browser mirror (config-panel T09)', () => {
 
   it('mirrors ROLES with identical element order', () => {
     assert.deepStrictEqual(mirror.ROLES, ROLES);
-  });
-
-  it('mirrors EFFORT_OPTIONS with identical element order', () => {
-    assert.deepStrictEqual(mirror.EFFORT_OPTIONS, [...EFFORT_OPTIONS]);
   });
 
   it('mirrors LIMIT_BOUNDS values and explicit key order', () => {

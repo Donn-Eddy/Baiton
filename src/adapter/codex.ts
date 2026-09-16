@@ -32,6 +32,24 @@ export function codexPermissionFlags(role: Role): string[] {
 /** The config key codex's generic `--config` override uses to set reasoning effort. */
 export const CODEX_EFFORT_CONFIG_KEY = 'model_reasoning_effort';
 
+/**
+ * Curated OpenAI Codex models exposed in the config panel dropdown.
+ * Deliberately advisory: the "Other…" escape allows typing any unlisted model.
+ */
+export const CODEX_MODELS: readonly string[] = [
+  'gpt-6-astra',
+  'gpt-5-codex',
+  'o3',
+  'o3-mini',
+  'o1',
+] as const;
+
+/**
+ * Reasoning effort levels codex accepts for `--config model_reasoning_effort=<e>`.
+ * Lists every documented level to avoid falsely rejecting valid user configurations.
+ */
+export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+
 /** Build the `--config model_reasoning_effort=<effort>` flag pair, or `[]` when effort is unset. */
 export function codexEffortFlags(effort: string | undefined): string[] {
   if (effort === undefined || effort.length === 0) {

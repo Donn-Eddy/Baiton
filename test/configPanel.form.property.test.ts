@@ -4,7 +4,7 @@ import { applyFormToDocument, formFromConfig, formFromDocument, validateConfigFo
 import { defaultConfig, defaultConfigJson } from '../src/config/defaultConfig';
 import { LIMIT_BOUNDS, Limits } from '../src/config/types';
 import { ROLES } from '../src/model';
-import { createAdapterRegistry } from '../src/adapter';
+import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
 
 /**
  * Feature: config-panel, Property: form-side limits accept exactly their ranges
@@ -39,6 +39,7 @@ function limitArb(field: keyof Limits): fc.Arbitrary<number> {
 
 describe('config panel form properties (config-panel T03)', () => {
   const AGENTS = createAdapterRegistry().ids;
+  const OPTIONS = { agents: AGENTS, byAgent: agentCapabilities() };
 
   // Feature: config-panel, Property: form-side limits accept exactly their ranges
   it('validateConfigForm accepts the limits iff each integer is within its closed range', () => {
@@ -53,7 +54,7 @@ describe('config panel form properties (config-panel T03)', () => {
           form.limits.exec_attempts = String(execAttempts);
           form.limits.stall_notice_minutes = String(stallNoticeMinutes);
 
-          const errors = validateConfigForm(form, { agents: AGENTS });
+          const errors = validateConfigForm(form, OPTIONS);
 
           const outOfRange: (keyof Limits)[] = [];
           if (!inRange('plan_review_rounds', planReviewRounds)) {

@@ -34,6 +34,7 @@ import type {
   ConfigPanelHostToWebview,
   ConfigPanelWebviewToHost,
 } from '../config/configPanel';
+import type { AgentCapabilities } from '../adapter';
 import {
   ApplyConfig,
   ConfigPanelController,
@@ -190,6 +191,7 @@ export interface OpenConfigPanelDeps {
   extensionUri: vscode.Uri;
   baitonDir: string;
   agentIds: readonly string[];
+  capabilities?: Readonly<Record<string, AgentCapabilities>>;
   log(message: string): void;
   applyConfig?: ApplyConfig;
 }
@@ -212,6 +214,7 @@ export function openConfigPanel(deps: OpenConfigPanelDeps): ConfigPanelProvider 
     webview: provider,
     baitonDir: deps.baitonDir,
     agentIds: deps.agentIds,
+    capabilities: deps.capabilities,
     confirmReset: async (message: string) => {
       const choice = await vscode.window.showWarningMessage(message, { modal: true }, 'Reset');
       return choice === 'Reset';

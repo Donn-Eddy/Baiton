@@ -81,7 +81,7 @@ import type {
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { createAdapterRegistry } from '../adapter';
+import { agentCapabilities, createAdapterRegistry } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
@@ -635,6 +635,7 @@ function runOpenConfigPanel(
     extensionUri: context.extensionUri,
     baitonDir,
     agentIds: createAdapterRegistry().ids,
+    capabilities: agentCapabilities(),
     log: (m) => surface.log(m),
     applyConfig: applyConfig !== undefined ? (cfg) => applyConfig(baitonDir, cfg) : undefined,
   });

@@ -16,6 +16,22 @@ export const OPENCODE_PLAN_AGENT = 'plan';
 /** The opencode `--agent` profile used for write-capable roles. */
 export const OPENCODE_BUILD_AGENT = 'build';
 
+/**
+ * Opencode model list: empty by design because opencode models are arbitrary
+ * `provider/model` identifiers configured by the user or provider.
+ * An empty list signals free-text rendering in the config panel.
+ */
+export const OPENCODE_MODELS: readonly string[] = [];
+
+/**
+ * Opencode effort list: empty by design because effort maps to user-configured
+ * `--variant` values. An empty list signals free-text rendering in the config panel.
+ */
+export const OPENCODE_EFFORTS: readonly string[] = [];
+
+/** Documentation URL for opencode model selection rendered inline in the config panel. */
+export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/models/';
+
 /** Build the `--agent <name>` flag pair for a role. */
 export function opencodeAgentFlags(role: Role): string[] {
   return ['--agent', isReadOnlyRole(role) ? OPENCODE_PLAN_AGENT : OPENCODE_BUILD_AGENT];
