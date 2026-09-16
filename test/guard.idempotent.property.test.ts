@@ -76,6 +76,7 @@ function makeCountingTool(statePath: string): {
     name: 'fake_mutating',
     description: 'fake mutating tool for the idempotency harness',
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {},
     async run(args: unknown, _tc: ToolContext): Promise<ToolResult> {
       runs += 1;

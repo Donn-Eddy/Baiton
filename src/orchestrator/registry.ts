@@ -13,10 +13,18 @@
  * registry, regardless of which tool it targeted (Req 8.5). The registry
  * imports no `vscode` API; the activation layer builds the services and passes
  * a {@link GuardContext} per call.
+ *
+ * Every tool also declares the orchestrator phases it belongs to (Req 11.1).
+ * The phase is enforced twice: {@link ToolRegistry.definitionsFor} and
+ * {@link ToolRegistry.assembleFor} advertise only the current phase's tools,
+ * and {@link ToolRegistry.call} refuses an out-of-phase tool before its `run`
+ * is reached, so a tool the model should not have cannot act even if it is
+ * named anyway.
  */
 import {
   GuardContext,
   IdempotencyStore,
+  OrchestratorPhase,
   Tool,
   ToolContext,
   ToolResult,
@@ -97,6 +105,14 @@ export class ToolRegistry {
   }
 
   /**
+   * The raw {@link Tool} definitions advertised in `phase` (Req 11.1): the
+   * subset of {@link definitions} whose `phases` include it.
+   */
+  public definitionsFor(phase: OrchestratorPhase): Tool[] {
+    return this.definitions().filter((t) => t.phases.includes(phase));
+  }
+
+  /**
    * The validated {@link ToolSpec}s to send to the model, or a rejection naming
    * the first tool whose description is invalid (Req 10.3–10.5). Delegates to
    * the free {@link assembleToolSpecs} over this registry's definitions.
@@ -106,19 +122,39 @@ export class ToolRegistry {
   }
 
   /**
+   * The validated {@link ToolSpec}s to advertise while in `phase` (Req 11.1),
+   * validating only that phase's descriptions (Req 10.3–10.5).
+   */
+  public assembleFor(phase: OrchestratorPhase): Result<ToolSpec[], ToolDescriptionError> {
+    return assembleToolSpecs(this.definitionsFor(phase));
+  }
+
+  /**
    * Invoke a tool by name through the guard. `callId` is the model's tool-call
    * id, used as the idempotency key for mutating tools (Req 8.3). An unknown
    * tool name returns an error result rather than throwing.
+   *
+   * `phase` is the orchestrator phase the conversation is in (Req 11.1). A tool
+   * that does not belong to that phase is refused here, before the guard and
+   * before the tool's own `run`, so an out-of-phase call reads nothing and
+   * writes nothing.
    */
   public async call(
     name: string,
     args: unknown,
     callId: string | undefined,
     ctx: GuardContext,
+    phase: OrchestratorPhase,
   ): Promise<ToolResult> {
     const entry = this.registered.get(name);
     if (entry === undefined) {
       return { ok: false, error: `unknown tool: ${name}` };
+    }
+    if (!entry.tool.phases.includes(phase)) {
+      return {
+        ok: false,
+        error: `tool "${name}" is not available while ${phase}`,
+      };
     }
     return entry.guardedRun(args, { callId, ctx });
   }

@@ -21,6 +21,9 @@
  *    ascending slug order) and active-spec tracking that follows explorer
  *    selection and the active editor when it is a `spec.md`, reflecting the
  *    active spec in the selector (Req 7.1–7.7);
+ *  - on send, derive the conversation's orchestrator phase from `spec.md` and
+ *    advertise only that phase's tools, passing the phase into every registry
+ *    call so an out-of-phase tool cannot run (Req 11.1);
  *  - on send, re-read `spec.md` each round and build the fresh system prompt
  *    (Req 11.6), enforce the non-whitespace / ≤100,000-character send guard
  *    (Req 14.4, 14.5) and send/stop enablement (Req 14.2, 14.3), and run the
@@ -42,6 +45,7 @@ import {
   MissingConfigError,
   UnreachableEndpointError,
   buildSystemPrompt,
+  phaseFor,
   readTranscript,
   pendingToolRecord,
   SessionStore,
@@ -61,6 +65,7 @@ import type {
   FixAction,
   HostToWebview,
   ModelClient,
+  OrchestratorPhase,
   RenderRecord,
   ToolResult,
   ToolSpec,
@@ -118,8 +123,13 @@ export interface ChatControllerDeps {
   client: ModelClient;
   /** The reused, guard-wrapped tool registry. */
   registry: ToolRegistry;
-  /** The assembled tool definitions to advertise to the model (Req 10.3). */
-  tools: ToolSpec[];
+  /**
+   * The assembled tool definitions to advertise to the model for one
+   * orchestrator phase (Req 10.3, 11.1). The controller derives the phase from
+   * the conversation on every send, so a conversation gathering requirements
+   * and one driving an approved spec see different tools.
+   */
+  toolsFor(phase: OrchestratorPhase): ToolSpec[];
   /** Builds the guard context for a tool call (repo/specs/restricted). */
   guardContext(): GuardContext;
   /** The reused approval modal, presented when the approve tool is called (Req 15). */
@@ -394,6 +404,11 @@ export class ChatController {
 
     const slug = this.activeSpec;
     const scope = this.activeScope();
+    // The phase is fixed for this send: it decides both the tools advertised to
+    // the model and the tools the registry will actually run (Req 11.1). The
+    // prompt re-reads `spec.md` every round (Req 11.6), so a status that
+    // changes mid-run is picked up by the next send, not mid-loop.
+    const phase = await this.phaseForConversation(slug);
     // A fresh chat has no id until its first message: allocate one now so the
     // transcript file is created by this very append (Req 9.9).
     const sessionId =
@@ -418,8 +433,9 @@ export class ChatController {
     try {
       await runToolLoop(history, {
         client: this.deps.client,
-        tools: this.deps.tools,
-        call: (name, args, callId, signal) => this.callTool(name, args, callId, signal, slug),
+        tools: this.deps.toolsFor(phase),
+        call: (name, args, callId, signal) =>
+          this.callTool(name, args, callId, signal, slug, phase),
         systemPrompt: () => this.buildPrompt(slug),
         append: async (m) => {
           await this.append(transcript, m);
@@ -457,6 +473,7 @@ export class ChatController {
     callId: string,
     signal: AbortSignal,
     slug: string | undefined,
+    phase: OrchestratorPhase,
   ): Promise<ToolResult> {
     if (signal.aborted) {
       return { ok: false, error: 'the run was stopped before the tool call' };
@@ -474,7 +491,7 @@ export class ChatController {
       }
     }
     const parsed = parseArgs(args);
-    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext());
+    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), phase);
   }
 
   /**
@@ -490,6 +507,19 @@ export class ChatController {
     }
     const specContent = await this.readSpec(slug);
     return buildSystemPrompt(kind, specContent);
+  }
+
+  /**
+   * The orchestrator phase of the conversation being sent to (Req 11.1),
+   * derived from the same `spec.md` the prompt is built from: a workspace
+   * conversation, or a spec that is missing, unreadable or still `draft`, is
+   * `gather`; an approved spec is `drive`.
+   */
+  private async phaseForConversation(slug: string | undefined): Promise<OrchestratorPhase> {
+    if (slug === undefined) {
+      return phaseFor({ kind: 'workspace' });
+    }
+    return phaseFor({ kind: 'spec', slug }, await this.readSpec(slug));
   }
 
   // --- transcript / rendering ----------------------------------------------

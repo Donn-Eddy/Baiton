@@ -75,6 +75,7 @@ import {
 } from '../orchestrator';
 import type {
   ConfirmSeam,
+  OrchestratorPhase,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
@@ -321,6 +322,18 @@ export function registerCommands(
     tools = assembled.value;
   }
 
+  // The orchestrator has two jobs, and each advertises its own tool surface
+  // (Req 11.1): gathering requirements for a new or draft spec, or driving an
+  // approved one. Validation above ran once over the whole registry, so these
+  // only select from the specs it already accepted; a rejected assembly leaves
+  // both phases empty. The controller picks one per send, and the registry
+  // refuses an out-of-phase call even if the model names it anyway.
+  const specsByName = new Map(tools.map((spec) => [spec.name, spec]));
+  const toolsByPhase = new Map<OrchestratorPhase, ToolSpec[]>([
+    ['gather', specsForPhase(registry, specsByName, 'gather')],
+    ['drive', specsForPhase(registry, specsByName, 'drive')],
+  ]);
+
   // `baiton.initialize` is registered separately (and unconditionally) so it
   // works before `.baiton/` exists; see {@link registerInitializeCommand}.
 
@@ -397,7 +410,7 @@ export function registerCommands(
     webview: chatWebview,
     client: modelClient,
     registry,
-    tools,
+    toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
     confirm,
     baitonDir,
@@ -916,12 +929,35 @@ async function runApprove(
   }
   const ctx = guardContextFor(workspace);
   const callId = `approve-${slug}-${Date.now()}`;
-  const result = await registry.call('approve_spec', { slug }, callId, ctx);
+  // `approve_spec` belongs to both orchestrator phases; a spec approved from
+  // the UI is by definition still being gathered rather than driven (Req 11.1).
+  const result = await registry.call('approve_spec', { slug }, callId, ctx, 'gather');
   if (result.ok) {
     surface.info(`Baiton: approved spec "${slug}".`);
   } else {
     surface.warn(`Baiton: ${result.error}`);
   }
+}
+
+/**
+ * The validated {@link ToolSpec}s to advertise in one orchestrator phase
+ * (Req 11.1): the already-validated specs of the tools the registry lists for
+ * that phase, in registry order. Selecting from `validated` keeps description
+ * validation a single pass over the whole registry (Req 10.3–10.5).
+ */
+function specsForPhase(
+  registry: ToolRegistry,
+  validated: Map<string, ToolSpec>,
+  phase: OrchestratorPhase,
+): ToolSpec[] {
+  const specs: ToolSpec[] = [];
+  for (const tool of registry.definitionsFor(phase)) {
+    const spec = validated.get(tool.name);
+    if (spec !== undefined) {
+      specs.push(spec);
+    }
+  }
+  return specs;
 }
 
 // --- submit PR -------------------------------------------------------------

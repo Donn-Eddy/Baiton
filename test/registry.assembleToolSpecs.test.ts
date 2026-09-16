@@ -33,6 +33,7 @@ function fakeTool(name: string, description: string): Tool {
     name,
     description,
     mutating: false,
+    phases: ['gather', 'drive'],
     schema: { type: 'object' },
     // Assembly never runs the tool; this stub is only here to satisfy the type.
     run: async (_args: unknown, _tc: ToolContext): Promise<ToolResult> => ({

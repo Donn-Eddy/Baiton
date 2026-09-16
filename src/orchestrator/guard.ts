@@ -74,6 +74,26 @@ export interface ToolContext {
 }
 
 /**
+ * Which of the orchestrator's two jobs a conversation is doing right now
+ * (Req 11.1).
+ *
+ * - `gather` — a Workspace conversation, or a spec still in `draft`: ask
+ *              clarifying questions until the requirements are agreed, then
+ *              hand them to the spec writer through `draft_spec`.
+ * - `drive`  — an approved spec being driven to completion: dispatch the next
+ *              legal stage through `run` until every todo is done, then
+ *              `submit_pr`.
+ *
+ * Each tool declares the phases it belongs to, so the tool surface advertised
+ * to the model — and the surface the registry will actually run — is exactly
+ * the set the current job needs.
+ */
+export type OrchestratorPhase = 'gather' | 'drive';
+
+/** Both orchestrator phases, for iteration in assembly and tests. */
+export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive'] as const;
+
+/**
  * A single orchestrator tool (design "Orchestrator: tool registry and guard").
  *
  * - `mutating` — whether the tool changes files. Mutating tools require an
@@ -81,6 +101,8 @@ export interface ToolContext {
  * - `dispatch` — whether the tool dispatches a stage (e.g. `run`). Dispatch is
  *                disabled under Restricted Mode (Req 22.2) even though the
  *                dispatch tool writes no spec file itself.
+ * - `phases`   — the orchestrator phases this tool is part of (Req 11.1). A
+ *                tool is neither advertised nor runnable outside them.
  * - `schema`   — JSON Schema for the tool's arguments (validated elsewhere in
  *                the registry; carried here to match the design interface).
  */
@@ -96,6 +118,12 @@ export interface Tool {
   description: string;
   mutating: boolean;
   dispatch?: boolean;
+  /**
+   * The orchestrator phases in which this tool is advertised and may run
+   * (Req 11.1). The registry refuses a call whose phase is not listed here
+   * before the tool's `run` is reached.
+   */
+  phases: readonly OrchestratorPhase[];
   schema: object;
   run(args: unknown, tc: ToolContext): Promise<ToolResult>;
 }

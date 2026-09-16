@@ -23,8 +23,11 @@ import {
  *  - `approve_spec` confirmation and decline: the tool asks the confirm seam
  *    first (Req 10.1) and, on a decline, leaves the spec byte-for-byte
  *    unchanged and returns an error while touching no git (Req 10.2).
- *  - `read_artifact` found/not-found: it returns the artifact text when the
- *    file exists (Req 10.6) and a not-found error when it does not (Req 10.7).
+ *  - Phase scoping: each tool is advertised in exactly the orchestrator phases
+ *    the design assigns it, and a call made in the wrong phase is refused
+ *    before the tool runs, changing nothing (Req 11.1).
+ *  - `run` stage rejection: the tool itself rejects `plan-review` (and the
+ *    spec-scoped `pr`) before the run-queue seam is reached (Req 11.1).
  *
  * Every test builds the registry against a temp repo with a stub git and a
  * stub confirm seam, provides a valid idempotency `callId` for the one mutating
@@ -48,11 +51,10 @@ const EXPECTED_TOOLS = [
   'add_todo',
   'edit_todo',
   'remove_todo',
-  // Control tools (Req 10.1, 10.3, 10.6)
+  // Control tools (Req 10.1, 10.3)
   'draft_spec',
   'approve_spec',
   'run',
-  'read_artifact',
   'submit_pr',
 ];
 
@@ -264,7 +266,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
-      const result = await registry.call('no_such_tool', {}, 'call-x', makeGuard(repo));
+      const result = await registry.call('no_such_tool', {}, 'call-x', makeGuard(repo), 'gather');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /unknown tool/i);
@@ -288,6 +290,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-1',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, true);
@@ -318,6 +321,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-2',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -348,6 +352,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug, requirements: REQUIREMENTS },
         'call-draft-3',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -370,6 +375,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-4',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -394,6 +400,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-5',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -414,12 +421,14 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: '   ' },
         'call-draft-6',
         makeGuard(repo),
+        'gather',
       );
       const bad = await registry.call(
         'draft_spec',
         { slug: '../escape', requirements: REQUIREMENTS },
         'call-draft-7',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(empty.ok, false);
@@ -438,6 +447,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-8',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -465,6 +475,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug },
         'call-approve-1',
         makeGuard(repo),
+        'gather',
       );
 
       // Req 10.1: the confirmation was requested before any change.
@@ -489,7 +500,13 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const confirm = recordingConfirm(true);
       const registry = createToolRegistry(makeServices(repo, throwingGit(), confirm));
 
-      const result = await registry.call('approve_spec', { slug }, undefined, makeGuard(repo));
+      const result = await registry.call(
+        'approve_spec',
+        { slug },
+        undefined,
+        makeGuard(repo),
+        'gather',
+      );
 
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
@@ -497,71 +514,6 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       }
       // Rejected before any confirmation prompt or git call.
       assert.strictEqual(confirm.calls.length, 0, 'no confirm on a keyless mutating call');
-    });
-  });
-
-  describe('read_artifact found / not-found (Req 10.6, 10.7)', () => {
-    it('returns the artifact text when the file exists (Req 10.6)', async () => {
-      const repo = newRepo();
-      const slug = 'sample';
-      const todo = 'T01';
-      writeSpec(repo, slug, draftSpec());
-
-      const artifactDir = path.join(repo, '.baiton', 'specs', slug, 'todos', todo);
-      fs.mkdirSync(artifactDir, { recursive: true });
-      const artifactText = '# Plan\n\nDo the thing carefully.\n';
-      fs.writeFileSync(path.join(artifactDir, 'plan.md'), artifactText, 'utf8');
-
-      const registry = createToolRegistry(
-        makeServices(repo, benignGit(), recordingConfirm(true)),
-      );
-
-      const result = await registry.call(
-        'read_artifact',
-        { slug, todo, name: 'plan.md' },
-        undefined,
-        makeGuard(repo),
-      );
-
-      assert.strictEqual(result.ok, true, 'reading an existing artifact succeeds');
-      if (result.ok) {
-        const data = result.data as {
-          slug: string;
-          todo: string;
-          name: string;
-          text: string;
-          truncated: boolean;
-        };
-        assert.strictEqual(data.slug, slug);
-        assert.strictEqual(data.todo, todo);
-        assert.strictEqual(data.name, 'plan.md');
-        assert.strictEqual(data.text, artifactText, 'returns the artifact contents verbatim');
-        assert.strictEqual(data.truncated, false, 'a small artifact is not truncated');
-      }
-    });
-
-    it('returns a not-found error when the artifact does not exist (Req 10.7)', async () => {
-      const repo = newRepo();
-      const slug = 'sample';
-      const todo = 'T01';
-      writeSpec(repo, slug, draftSpec());
-
-      const registry = createToolRegistry(
-        makeServices(repo, benignGit(), recordingConfirm(true)),
-      );
-
-      const result = await registry.call(
-        'read_artifact',
-        { slug, todo, name: 'review-1.md' },
-        undefined,
-        makeGuard(repo),
-      );
-
-      assert.strictEqual(result.ok, false, 'a missing artifact returns an error');
-      if (!result.ok) {
-        assert.match(result.error, /not found/i, 'error indicates the artifact was not found');
-        assert.match(result.error, /review-1\.md/, 'error names the requested artifact');
-      }
     });
   });
 });

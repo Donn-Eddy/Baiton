@@ -18,10 +18,17 @@
  *   the requirements through the confirm seam first; a decline drafts nothing.
  *   Returns as soon as the sub-agent is running, carrying its run id.
  * - `run(slug, todo, stage)` (dispatch) — dispatch exactly one legal stage
- *   transition through the run-queue seam; refuse when a stage is already
- *   running (Req 10.4) or the transition is illegal (Req 10.5).
- * - `read_artifact(slug, todo, name)` (read) — return a persisted plan / plan-
- *   review / execute / review artifact, or a not-found error (Req 10.6, 10.7).
+ *   transition (`plan`, `execute` or `review`) through the run-queue seam and
+ *   block until it reaches a terminal outcome; refuse when a stage is already
+ *   running (Req 10.4) or the transition is illegal (Req 10.5). `plan-review`
+ *   is not a standalone trigger — it runs inside the Plan action's review
+ *   rounds — so the tool does not offer it and rejects it outright.
+ * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every todo
+ *   is done.
+ *
+ * Each tool declares the orchestrator phases it belongs to (Req 11.1):
+ * `draft_spec` only while gathering requirements, `run` and `submit_pr` only
+ * while driving an approved spec, `approve_spec` in both.
  *
  * Every extension write under the spec folder is committed on the spec branch
  * as `spec(<slug>): <id> <what>` before any subsequent stage (Req 17.1); the
@@ -33,7 +40,7 @@ import * as path from 'path';
 import { approvalHash } from '../model/hash';
 import { parseSpec } from '../model/parser';
 import { validateSpec } from '../model/validator';
-import { isStage } from '../model/stage';
+import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { ToolServices } from './toolServices';
@@ -44,7 +51,6 @@ export function createControlTools(services: ToolServices): Tool[] {
     draftSpecTool(services),
     approveSpecTool(services),
     runTool(services),
-    readArtifactTool(services),
     submitPrTool(services),
   ];
 }
@@ -65,6 +71,7 @@ function draftSpecTool(services: ToolServices): Tool {
     description:
       'Hand an agreed requirements document to the spec-writer agent, which studies the repository and drafts the spec (overview and todos) for a new slug.',
     mutating: false,
+    phases: ['gather'],
     dispatch: true,
     schema: {
       type: 'object',
@@ -165,6 +172,7 @@ function approveSpecTool(services: ToolServices): Tool {
     name: 'approve_spec',
     description: 'Approve or re-approve a spec: create its branch and record the approval hash.',
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -329,18 +337,26 @@ async function reapprove(
 
 /**
  * `run(slug, todo, stage)` — dispatch one legal stage transition through the
- * run-queue seam. Not a file mutation, but a dispatch, so the guard disables it
- * under Restricted Mode (Req 22.2). Before dispatching any stage it validates
- * the spec and refuses every stage while the spec is invalid, surfacing the
- * current validation errors until the spec parses without error (Req 4.9).
- * Refuses when a stage is already running (Req 10.4) or the transition is
- * illegal (Req 10.5).
+ * run-queue seam and resolve with its terminal outcome. Not a file mutation,
+ * but a dispatch, so the guard disables it under Restricted Mode (Req 22.2).
+ * Before dispatching any stage it validates the spec and refuses every stage
+ * while the spec is invalid, surfacing the current validation errors until the
+ * spec parses without error (Req 4.9). Refuses when a stage is already running
+ * (Req 10.4) or the transition is illegal (Req 10.5).
+ *
+ * The stage enum is exactly `plan | execute | review` (Req 11.1). `plan-review`
+ * runs inside the Plan action's own review rounds and `pr` is spec-scoped
+ * (`submit_pr` runs it), so neither is a value this tool accepts: both are
+ * rejected here with a message naming the three legal stages, before the queue
+ * seam is reached.
  */
 function runTool(services: ToolServices): Tool {
   return {
     name: 'run',
-    description: 'Dispatch one legal stage transition (plan, plan-review, execute, review) for a todo.',
+    description:
+      'Dispatch one stage for one todo (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
     mutating: false,
+    phases: ['drive'],
     dispatch: true,
     schema: {
       type: 'object',
@@ -349,7 +365,7 @@ function runTool(services: ToolServices): Tool {
         todo: { type: 'string' },
         stage: {
           type: 'string',
-          enum: ['plan', 'plan-review', 'execute', 'review'],
+          enum: ['plan', 'execute', 'review'],
         },
       },
       required: ['slug', 'todo', 'stage'],
@@ -362,9 +378,17 @@ function runTool(services: ToolServices): Tool {
       if (slug === undefined || todo === undefined || stage === undefined) {
         return { ok: false, error: 'run requires a string "slug", "todo", and "stage"' };
       }
-      if (!isStage(stage) || stage === 'pr') {
-        // The PR stage is per spec, not per todo: `submit_pr` runs it.
-        return { ok: false, error: `run "stage" must be one of plan, plan-review, execute, review: ${stage}` };
+      if (!isRunnableStage(stage)) {
+        // `plan-review` runs inside the Plan action's review rounds and is not
+        // a standalone trigger; `pr` is per spec, not per todo (`submit_pr`
+        // runs it); `spec-draft` belongs to `draft_spec`. None of them reach
+        // the queue from here.
+        return {
+          ok: false,
+          error:
+            `run "stage" must be one of plan, execute, review: ${stage}. ` +
+            'plan-review runs inside the plan stage, and the PR stage is run by submit_pr.',
+        };
       }
       if (!isSlug(slug)) {
         return { ok: false, error: `invalid slug: ${slug}` };
@@ -415,70 +439,6 @@ function runTool(services: ToolServices): Tool {
 }
 
 /**
- * `read_artifact(slug, todo, name)` — read a persisted stage artifact for a
- * todo. `name` is the artifact file name (e.g. `plan.md`, `plan-review-1.md`,
- * `execute-1.md`, `review-1.md`). Returns the bounded text (Req 10.6) or a
- * not-found error (Req 10.7). Artifacts live in the todo's own folder under the
- * spec, `specs/<slug>/todos/<todo>/`, so one todo's artifacts never collide
- * with another's (Req 24.3).
- */
-function readArtifactTool(services: ToolServices): Tool {
-  return {
-    name: 'read_artifact',
-    description: "Read a persisted stage artifact (plan, plan-review, execute or review) for a todo.",
-    mutating: false,
-    schema: {
-      type: 'object',
-      properties: {
-        slug: { type: 'string' },
-        todo: { type: 'string' },
-        name: { type: 'string' },
-      },
-      required: ['slug', 'todo', 'name'],
-      additionalProperties: false,
-    },
-    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
-      const slug = readString(args, 'slug');
-      const todo = readString(args, 'todo');
-      const name = readString(args, 'name');
-      if (slug === undefined || todo === undefined || name === undefined) {
-        return { ok: false, error: 'read_artifact requires a string "slug", "todo", and "name"' };
-      }
-      if (!isSlug(slug) || !isSlug(todo) || !isArtifactName(name)) {
-        return { ok: false, error: 'read_artifact arguments contain an invalid slug, todo id, or artifact name' };
-      }
-
-      const artifactFile = path.join(
-        services.baitonDir,
-        'specs',
-        slug,
-        'todos',
-        todo,
-        name,
-      );
-      const resolved = await tc.ctx.resolveReadPath(artifactFile);
-      if (!resolved.ok) {
-        return { ok: false, error: resolved.error.message };
-      }
-      let text: string;
-      try {
-        text = await fs.readFile(resolved.resolved, 'utf8');
-      } catch {
-        return {
-          ok: false,
-          error: `artifact "${name}" for todo "${todo}" in spec "${slug}" was not found`,
-        };
-      }
-      const bounded = tc.ctx.boundRead(text);
-      return {
-        ok: true,
-        data: { slug, todo, name, text: bounded.text, truncated: bounded.truncated },
-      };
-    },
-  };
-}
-
-/**
  * Set a managed frontmatter key, inserting it into the `---` block when the key
  * is absent so approval can record keys a user-authored spec omitted. When the
  * key already exists, {@link writeFrontmatterKey} rewrites only its value; the
@@ -495,6 +455,7 @@ function submitPrTool(services: ToolServices): Tool {
     description:
       'Submit the pull request for a spec whose todos are all done: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
     mutating: true,
+    phases: ['drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -535,14 +496,21 @@ function specPath(services: ToolServices, slug: string): string {
   return path.join(services.baitonDir, 'specs', slug, 'spec.md');
 }
 
+/**
+ * The three todo-scoped stages the `run` tool dispatches (Req 11.1). Every
+ * other {@link Stage} — `plan-review`, `pr`, `spec-draft` — is owned by some
+ * other trigger, so `run` rejects it before the queue seam.
+ */
+const RUNNABLE_STAGES: readonly Stage[] = ['plan', 'execute', 'review'] as const;
+
+/** Whether `value` is a stage the `run` tool may dispatch. */
+function isRunnableStage(value: string): value is Stage {
+  return isStage(value) && RUNNABLE_STAGES.includes(value);
+}
+
 /** A slug/todo id is a simple directory-safe name (no separators/traversal). */
 function isSlug(slug: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(slug) && slug !== '.' && slug !== '..';
-}
-
-/** An artifact name is a simple markdown file name with no path separators. */
-function isArtifactName(name: string): boolean {
-  return /^[A-Za-z0-9._-]+\.md$/.test(name) && !name.includes('..');
 }
 
 /** Read a required string field from an args object, or undefined. */

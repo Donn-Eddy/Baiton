@@ -46,6 +46,7 @@ function listSpecsTool(services: ToolServices): Tool {
     name: 'list_specs',
     description: 'List the slugs of every spec under .baiton/specs/ that contains a spec.md.',
     mutating: false,
+    phases: ['gather', 'drive'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
       const specsDir = path.join(services.baitonDir, SPECS_SUBDIR);
@@ -81,6 +82,7 @@ function readSpecTool(services: ToolServices): Tool {
     name: 'read_spec',
     description: "Read the raw spec.md text for a given spec slug, bounded to the read cap.",
     mutating: false,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -123,6 +125,7 @@ function listFilesTool(services: ToolServices): Tool {
     name: 'list_files',
     description: 'List repository-relative file paths matching the given glob pattern.',
     mutating: false,
+    phases: ['gather'],
     schema: {
       type: 'object',
       properties: { glob: { type: 'string' } },
@@ -153,6 +156,7 @@ function readFileTool(_services: ToolServices): Tool {
     name: 'read_file',
     description: "Read a file's text, or an optional 1-based inclusive line range of it.",
     mutating: false,
+    phases: ['gather'],
     schema: {
       type: 'object',
       properties: {
@@ -212,6 +216,7 @@ function searchTool(services: ToolServices): Tool {
     name: 'search',
     description: 'Search repository file contents for lines matching a regular expression.',
     mutating: false,
+    phases: ['gather'],
     schema: {
       type: 'object',
       properties: {
@@ -278,6 +283,7 @@ function gitStatusTool(services: ToolServices): Tool {
     name: 'git_status',
     description: 'Report the working-tree status: whether it is clean and any pending changes.',
     mutating: false,
+    phases: ['gather', 'drive'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
       try {
@@ -303,6 +309,7 @@ function gitDiffTool(services: ToolServices): Tool {
     name: 'git_diff',
     description: 'Show the diff between the working tree and an optional ref (defaults to HEAD).',
     mutating: false,
+    phases: ['gather'],
     schema: {
       type: 'object',
       properties: { ref: { type: 'string' } },
@@ -332,6 +339,7 @@ function gitLogTool(services: ToolServices): Tool {
     name: 'git_log',
     description: 'List the most recent commits as "<sha> <subject>" lines, bounded to the read cap.',
     mutating: false,
+    phases: ['gather'],
     schema: {
       type: 'object',
       properties: { n: { type: 'integer', minimum: 1 } },
