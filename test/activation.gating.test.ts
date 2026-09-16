@@ -384,19 +384,40 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer to the activity bar and the Chat to the secondary side bar', () => {
+  it('contributes the Spec Explorer and bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+    interface ViewContrib {
+      id: string;
+      name?: string;
+      type?: string;
+      visibility?: string;
+    }
     const contributes = pkg.contributes as
-      | { viewsContainers?: Record<string, { id: string }[]>; views?: Record<string, { id: string }[]> }
+      | {
+          viewsContainers?: {
+            activitybar?: { id: string }[];
+            secondarySidebar?: { id: string }[];
+          };
+          views?: {
+            baiton?: ViewContrib[];
+            'baiton-chat'?: ViewContrib[];
+          };
+        }
       | undefined;
     const containers = contributes?.viewsContainers;
     assert.ok(containers, 'viewsContainers must be present');
-    assert.deepStrictEqual(containers.activitybar.map((c) => c.id), ['baiton']);
-    assert.deepStrictEqual(containers.secondarySidebar.map((c) => c.id), ['baiton-chat']);
+    assert.deepStrictEqual(containers.activitybar?.map((c) => c.id), ['baiton']);
+    assert.deepStrictEqual(containers.secondarySidebar?.map((c) => c.id), ['baiton-chat']);
 
     const views = contributes?.views;
     assert.ok(views, 'views must be present');
-    assert.deepStrictEqual(views.baiton.map((v) => v.id), ['baiton.specExplorer']);
-    assert.deepStrictEqual(views['baiton-chat'].map((v) => v.id), ['baiton.chatView']);
+    assert.deepStrictEqual(
+      views.baiton?.map((v) => v.id),
+      ['baiton.specExplorer', 'baiton.configPanel'],
+    );
+    const configView = views.baiton?.[1];
+    assert.strictEqual(configView?.type, 'webview');
+    assert.strictEqual(configView?.visibility, 'collapsed');
+    assert.deepStrictEqual(views['baiton-chat']?.map((v) => v.id), ['baiton.chatView']);
   });
 
   it('declares the MIT license in package.json (Req 23.4)', () => {

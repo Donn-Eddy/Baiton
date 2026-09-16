@@ -143,6 +143,7 @@ describe('setOrchestratorApiKey (Task 13.3)', () => {
       join(root, 'test', 'fixtures', 'vscodeLoader.mjs'),
     ).href;
     register(loaderUrl, pathToFileURL(join(root, '/')).href);
+    await import('./fixtures/vscodeLoader.mjs');
 
     const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
     setOrchestratorApiKey = mod.setOrchestratorApiKey;

@@ -28,9 +28,12 @@ import {
   registerCommands,
   registerInitializeCommand,
   registerConfigPanelCommand,
+  resolveBaitonDirForCommands,
   type CommandSurface,
   type FolderScopedApplyConfig,
 } from './activation/commands';
+import { registerConfigPanel } from './activation/configPanel';
+import { agentCapabilities, createAdapterRegistry } from './adapter';
 import {
   createConfigRefresh,
   FOLDER_MISMATCH_NOTE,
@@ -153,11 +156,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return notes;
   };
 
-  // Register `Baiton: Open Config Panel` ahead of the gate as well. `activate`
-  // returns early on a workspace-resolution or config-load failure, and the
-  // panel's error state plus Reset to defaults is exactly what repairs an
-  // absent or unparseable `.baiton/config.json`.
-  context.subscriptions.push(registerConfigPanelCommand(context, surface, scopedApplyConfig));
+  // Register the Config Panel WebviewView provider and the reveal command
+  // ahead of the gate as well. `activate` returns early on a workspace-resolution
+  // or config-load failure, and the view's error state plus Reset to defaults
+  // is exactly what repairs an absent or unparseable `.baiton/config.json`.
+  context.subscriptions.push(
+    registerConfigPanel({
+      extensionUri: context.extensionUri,
+      resolveBaitonDir: resolveBaitonDirForCommands,
+      agentIds: createAdapterRegistry().ids,
+      capabilities: agentCapabilities(),
+      log: (m) => surface.log(m),
+      applyConfig: scopedApplyConfig,
+    }),
+  );
+  context.subscriptions.push(registerConfigPanelCommand());
 
   // Run the gated half of activation. Failures at initial activation keep using showErrorMessage.
   void completeActivation(context, surface);

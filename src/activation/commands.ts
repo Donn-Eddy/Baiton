@@ -81,7 +81,7 @@ import type {
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { agentCapabilities, createAdapterRegistry } from '../adapter';
+import { createAdapterRegistry } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
@@ -102,7 +102,7 @@ import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
 import { planPath } from './specLister';
 import { setOrchestratorApiKey } from './setApiKey';
-import { openConfigPanel, type ConfigPanelProvider } from './configPanel';
+import { revealConfigPanel } from './openConfigPanelView';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
@@ -548,12 +548,6 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
 }
 
 /**
- * Track the providers registered with context.subscriptions so repeated
- * invocations of `baiton.openConfigPanel` do not accumulate duplicate subscriptions.
- */
-const subscribedConfigPanels = new Set<ConfigPanelProvider>();
-
-/**
  * Folder-scoped hot-reload seam for the config panel command (T08).
  * Closes over the panel's resolved baitonDir before calling the underlying ApplyConfig.
  */
@@ -563,18 +557,12 @@ export type FolderScopedApplyConfig = (
 ) => Promise<readonly string[]> | readonly string[];
 
 /**
- * Register the `baiton.openConfigPanel` command ahead of the activation gate,
- * so the panel can be opened to inspect errors or reset defaults when
- * workspace resolution or config load fails. Returns the disposable for the
- * caller to own.
+ * Register the `baiton.openConfigPanel` command ahead of the activation gate.
+ * Reveals and focuses the Configuration webview view in the Baiton container (T11).
  */
-export function registerConfigPanelCommand(
-  context: vscode.ExtensionContext,
-  surface: Surface,
-  applyConfig?: FolderScopedApplyConfig,
-): vscode.Disposable {
+export function registerConfigPanelCommand(): vscode.Disposable {
   return vscode.commands.registerCommand(COMMANDS.openConfigPanel, () =>
-    runOpenConfigPanel(context, surface, applyConfig),
+    revealConfigPanel(),
   );
 }
 
@@ -609,41 +597,18 @@ async function runInitialize(surface: Surface): Promise<void> {
   surface.info(`Baiton: Initialize ${detail}.`);
 }
 
-// --- Config Panel ---------------------------------------------------------
-
 /**
- * Run the Open Config Panel command. Resolves the workspace root independently
- * of the full activation gate with the same rule as Initialize. Refuses on zero
- * or ambiguous roots.
+ * Resolve the `.baiton` directory for commands using the same rule as Initialize:
+ * the single workspace folder, or the one multi-root folder with a `.baiton/` directory.
+ * Returns `undefined` if there are 0 or ambiguous workspace folders.
  */
-function runOpenConfigPanel(
-  context: vscode.ExtensionContext,
-  surface: Surface,
-  applyConfig?: FolderScopedApplyConfig,
-): void {
+export function resolveBaitonDirForCommands(): string | undefined {
   const folders = vscode.workspace.workspaceFolders ?? [];
   const root = resolveCommandRoot(folders);
   if (root === undefined) {
-    surface.error(
-      'Baiton: Open Config Panel requires exactly one workspace folder (or one multi-root folder with a .baiton/ directory).',
-    );
-    return;
+    return undefined;
   }
-
-  const baitonDir = vscode.Uri.joinPath(root, '.baiton').fsPath;
-  const provider = openConfigPanel({
-    extensionUri: context.extensionUri,
-    baitonDir,
-    agentIds: createAdapterRegistry().ids,
-    capabilities: agentCapabilities(),
-    log: (m) => surface.log(m),
-    applyConfig: applyConfig !== undefined ? (cfg) => applyConfig(baitonDir, cfg) : undefined,
-  });
-
-  if (!subscribedConfigPanels.has(provider)) {
-    subscribedConfigPanels.add(provider);
-    context.subscriptions.push(provider);
-  }
+  return vscode.Uri.joinPath(root, '.baiton').fsPath;
 }
 
 /**
@@ -652,7 +617,7 @@ function runOpenConfigPanel(
  * when several are open (Req 22.3, 22.4). Returns `undefined` on zero folders or
  * an ambiguous multi-root (Req 1.4, 22.5).
  */
-function resolveCommandRoot(
+export function resolveCommandRoot(
   folders: readonly vscode.WorkspaceFolder[],
 ): vscode.Uri | undefined {
   if (folders.length === 0) {

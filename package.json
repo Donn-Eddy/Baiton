@@ -41,6 +41,12 @@
           "id": "baiton.specExplorer",
           "name": "Spec Explorer",
           "type": "tree"
+        },
+        {
+          "id": "baiton.configPanel",
+          "name": "Configuration",
+          "type": "webview",
+          "visibility": "collapsed"
         }
       ],
       "baiton-chat": [

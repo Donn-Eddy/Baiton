@@ -147,7 +147,7 @@ run any stage yourself from the Spec Explorer.
 
 ### The config panel
 
-The config panel opens `.baiton/config.json` as an interactive editor form:
+The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
 
 - **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
@@ -168,9 +168,9 @@ The config panel opens `.baiton/config.json` as an interactive editor form:
   loader would reject. Effort validates against each agent's closed set of supported
   levels when applicable; models remain open and advisory with full support for
   custom variants via "Other…".
-- **The reset path** — **Baiton: Open Config Panel** is registered before the
-  extension's configuration-loading gate, so the command works even when
-  `.baiton/config.json` is absent or unparseable. In that state the panel
+- **The reset path** — the Configuration view and **Baiton: Open Config Panel** are registered before the
+  extension's configuration-loading gate, so the view works even when
+  `.baiton/config.json` is absent or unparseable. In that state the view
   displays the error and offers **Reset to defaults**, which confirms with a
   modal prompt and writes the default configuration, discarding any unparseable
   contents.
@@ -209,8 +209,8 @@ Baiton uses curated static capability catalogues in each adapter module rather t
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and
   moves keyboard focus to the Chat view.
-- **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — opens
-  `.baiton/config.json` as a form.
+- **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
+  container and moves keyboard focus to the Configuration view.
 - **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — prompts
   for the orchestrator API key with a masked input and stores it securely in VS
   Code SecretStorage.

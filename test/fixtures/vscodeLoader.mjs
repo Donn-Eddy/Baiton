@@ -12,10 +12,27 @@
  */
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
 
-const fakeUrl = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'vscodeFake.mjs'),
-).href;
+const fakePath = join(dirname(fileURLToPath(import.meta.url)), 'vscodeFake.mjs');
+const fakeUrl = pathToFileURL(fakePath).href;
+
+// Hook CJS require so tests running under CommonJS ts-node can also resolve 'vscode'.
+const require = createRequire(import.meta.url);
+try {
+  const Module = require('module');
+  if (Module && Module._resolveFilename) {
+    const origResolve = Module._resolveFilename;
+    Module._resolveFilename = function (request, parent, isMain, options) {
+      if (request === 'vscode') {
+        return fakePath;
+      }
+      return origResolve.call(this, request, parent, isMain, options);
+    };
+  }
+} catch {
+  // Ignored in environments where module._resolveFilename is unavailable
+}
 
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === 'vscode') {

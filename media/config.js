@@ -1,6 +1,6 @@
 // @ts-check
 /*
- * Config_Panel entry script — spec "Configuration Panel" (config-panel), todos T04, T10.
+ * Config_Panel entry script — spec "Configuration Panel" (config-panel), todos T04, T10, T11.
  *
  * **src/config/configPanel.ts is the source of truth.** This file is its
  * plain-script mirror, exactly as media/protocol.js mirrors
@@ -221,7 +221,7 @@
     return s;
   }
 
-  /** Runs once per option-set change or role agent change: builds the six role rows from ROLES. */
+  /** Runs once per option-set change or role agent change: builds the six role stacked blocks from ROLES (T11). */
   function buildRoleRows() {
     var signature = JSON.stringify(state.options) + '|' + roleAgentsSignature();
     if (signature === renderedOptionsSignature) {
@@ -232,15 +232,22 @@
 
     for (var i = 0; i < ROLES.length; i++) {
       var role = ROLES[i];
-      var row = document.createElement('tr');
-      row.dataset.role = role;
+      var group = document.createElement('fieldset');
+      group.className = 'role-group';
+      group.dataset.role = role;
 
-      var th = document.createElement('th');
-      th.setAttribute('scope', 'row');
-      th.textContent = role;
-      row.appendChild(th);
+      var legend = document.createElement('legend');
+      legend.textContent = role;
+      group.appendChild(legend);
 
-      var agentCell = document.createElement('td');
+      // Agent row
+      var agentRow = document.createElement('div');
+      agentRow.className = 'field-row';
+      var agentLabel = document.createElement('label');
+      agentLabel.htmlFor = 'role-' + role + '-agent';
+      agentLabel.textContent = 'Agent';
+      agentRow.appendChild(agentLabel);
+
       var agentSelect = document.createElement('select');
       agentSelect.id = 'role-' + role + '-agent';
       agentSelect.dataset.path = 'roles.' + role + '.agent';
@@ -253,21 +260,28 @@
       });
       var agentErrorId = 'error-roles-' + role + '-agent';
       agentSelect.setAttribute('aria-describedby', agentErrorId);
-      agentCell.appendChild(agentSelect);
+      agentRow.appendChild(agentSelect);
+
       var agentError = document.createElement('div');
       agentError.className = 'field-error';
       agentError.id = agentErrorId;
       agentError.dataset.errorFor = 'roles.' + role + '.agent';
-      agentCell.appendChild(agentError);
-      row.appendChild(agentCell);
+      agentRow.appendChild(agentError);
+      group.appendChild(agentRow);
 
       var currentAgent = (state.form && state.form.roles[role] && state.form.roles[role].agent) || (state.options.agents[0] || '');
       var cap = (state.options.byAgent && state.options.byAgent[currentAgent]) || { models: [], efforts: [] };
       var models = cap.models || [];
       var efforts = cap.efforts || [];
 
-      // Model cell
-      var modelCell = document.createElement('td');
+      // Model row
+      var modelRow = document.createElement('div');
+      modelRow.className = 'field-row';
+      var modelLabel = document.createElement('label');
+      modelLabel.htmlFor = 'role-' + role + '-model-select';
+      modelLabel.textContent = 'Model';
+      modelRow.appendChild(modelLabel);
+
       var modelGroup = document.createElement('div');
       modelGroup.className = 'select-input-group';
 
@@ -308,16 +322,23 @@
         modelGroup.appendChild(modelLink);
       }
 
-      modelCell.appendChild(modelGroup);
+      modelRow.appendChild(modelGroup);
+
       var modelError = document.createElement('div');
       modelError.className = 'field-error';
       modelError.id = modelErrorId;
       modelError.dataset.errorFor = 'roles.' + role + '.model';
-      modelCell.appendChild(modelError);
-      row.appendChild(modelCell);
+      modelRow.appendChild(modelError);
+      group.appendChild(modelRow);
 
-      // Effort cell
-      var effortCell = document.createElement('td');
+      // Effort row
+      var effortRow = document.createElement('div');
+      effortRow.className = 'field-row';
+      var effortLabel = document.createElement('label');
+      effortLabel.htmlFor = 'role-' + role + '-effort-select';
+      effortLabel.textContent = 'Effort';
+      effortRow.appendChild(effortLabel);
+
       var effortGroup = document.createElement('div');
       effortGroup.className = 'select-input-group';
 
@@ -353,15 +374,16 @@
       effortGroup.appendChild(effortSelect);
       effortGroup.appendChild(effortInput);
 
-      effortCell.appendChild(effortGroup);
+      effortRow.appendChild(effortGroup);
+
       var effortError = document.createElement('div');
       effortError.className = 'field-error';
       effortError.id = effortErrorId;
       effortError.dataset.errorFor = 'roles.' + role + '.effort';
-      effortCell.appendChild(effortError);
-      row.appendChild(effortCell);
+      effortRow.appendChild(effortError);
+      group.appendChild(effortRow);
 
-      rolesBody.appendChild(row);
+      rolesBody.appendChild(group);
     }
   }
 
