@@ -12,7 +12,8 @@
  *
  * This module carries no `vscode` import and no Node built-in import, so the
  * protocol, the form mapping and validation are unit-testable without a
- * running VS Code host.
+ * running VS Code host. `media/config.js` is its plain-script mirror and
+ * `test/configPanel.mirror.test.ts` guards against divergence.
  */
 import { Role, ROLES } from '../model';
 import { Config, LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from './types';

@@ -2,28 +2,29 @@
 
 ```json
 {
-  "summary": "Implemented live configuration hot-reload on save: whole-object config replacement, lazy command reads, dynamic agent executable re-resolution with dispatch-gate flipping, re-runnable late activation, folder-scoped seam, and non-reloadable factor reporting.",
+  "summary": "Implemented parity testing between the TypeScript config panel core and the browser script mirror, established shared validation fixtures and fast-check properties, cross-referenced the implementations, and documented the Open Config Panel command in README.md.",
   "files_changed": [
-    "src/activation/configRefresh.ts",
-    "src/activation/commands.ts",
-    "src/activation/configPanelController.ts",
-    "src/extension.ts",
-    "test/configRefresh.test.ts",
-    "test/configPanel.controller.test.ts"
+    "test/fixtures/configFormCases.ts",
+    "test/configPanel.mirror.test.ts",
+    "test/configPanel.mirror.property.test.ts",
+    "media/config.js",
+    "src/config/configPanel.ts",
+    "README.md"
   ],
   "commands_run": [
     "npm run compile",
     "npm run lint",
     "node --check media/config.js",
+    "npx mocha --no-config --require ts-node/register test/configPanel.mirror.test.ts test/configPanel.mirror.property.test.ts",
     "npm test"
   ],
   "notes": [
-    "Created host-free src/activation/configRefresh.ts providing createConfigRefresh, replacing the config wholesale without merging, re-resolving agent executables from updated roles, and reporting in-flight runs and missing binaries as notes.",
-    "Made all config reads inside registerCommands lazy via cfg() closures and added runningSlugs to CommandSurface to report active spec queues and spec drafting.",
-    "Extracted completeActivation in src/extension.ts guarded by a wired flag so late activation after repairing an absent/corrupt config activates commands, tree view, and context keys without window reload or duplicate command registration.",
-    "Scoped applyConfig to the activated workspace folder in src/extension.ts via FolderScopedApplyConfig, returning FOLDER_MISMATCH_NOTE if the panel was opened against a different workspace folder.",
-    "Added unit tests in test/configRefresh.test.ts covering whole-object replacement, executable re-resolution, in-flight notes, clean refresh, unactivated delegation, and blocked late activation.",
-    "Extended test/configPanel.controller.test.ts with an end-to-end test case proving a save reaches a live refresh target without requiring a window reload."
+    "Created test/fixtures/configFormCases.ts exporting AGENT_IDS, validForm, withEdits, and CONFIG_FORM_CASES with 45 test fixtures pinning expectedPaths across role, limits, and git validation rules.",
+    "Created test/configPanel.mirror.test.ts loading media/config.js in a clean node:vm context and asserting exact parity with TS validateConfigForm, ROLES, EFFORT_OPTIONS, and LIMIT_BOUNDS (including explicit key order), full verbatim message comparison, and validator purity.",
+    "Created test/configPanel.mirror.property.test.ts running fast-check properties over generated ConfigForm instances with varying agent lists to guard against divergence beyond hand-crafted fixtures.",
+    "Verified failure on deliberate divergence by temporarily modifying plan_review_rounds max bound in media/config.js, observing 4 failing tests in test/configPanel.mirror.test.ts, and reverting the edit cleanly.",
+    "Updated header comments in media/config.js and src/config/configPanel.ts to cross-reference each other and test/configPanel.mirror.test.ts.",
+    "Documented the Open Config Panel command, editable fields, unmanaged key preservation, reset path, external change/conflict detection, and hot-reload behavior in README.md."
   ]
 }
 ```

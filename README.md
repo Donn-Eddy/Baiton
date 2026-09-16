@@ -145,10 +145,50 @@ not a stage it can trigger: it runs inside the plan stage's own review rounds.
 When every todo is `done`, the orchestrator offers `submit_pr`. You can still
 run any stage yourself from the Spec Explorer.
 
+### The config panel
+
+The config panel opens `.baiton/config.json` as an interactive editor form:
+
+- **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
+  `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
+  populated from installed adapters, a model text input, and an effort level
+  (`low`, `medium`, `high`, or `(default)` when unset); the three numeric limits
+  with their bounds (`plan_review_rounds` 0–10, `exec_attempts` 1–10,
+  `stall_notice_minutes` 1–1440); and `git.remote` and `git.base`.
+- **Preservation of unmanaged keys** — every key outside the form's managed set
+  (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
+  agent or effort values) is preserved on save. Written JSON is formatted with
+  two-space indentation and a trailing newline.
+- **Inline and host-side validation** — fields validate as you type with inline
+  error indicators, and the host re-validates the submitted form before writing,
+  guaranteeing the webview cannot write a configuration that the extension
+  loader would reject.
+- **The reset path** — **Baiton: Open Config Panel** is registered before the
+  extension's configuration-loading gate, so the command works even when
+  `.baiton/config.json` is absent or unparseable. In that state the panel
+  displays the error and offers **Reset to defaults**, which confirms with a
+  modal prompt and writes the default configuration, discarding any unparseable
+  contents.
+- **External changes and conflict handling** — the panel watches
+  `.baiton/config.json` while open. If the file changes on disk, a pristine form
+  reloads automatically; a form with unsaved edits displays a conflict banner
+  offering to reload and discard edits or keep editing. Saving against a file
+  modified since it was loaded is refused with conflict options to reload or
+  overwrite.
+- **Live configuration hot-reload** — saving applies the updated configuration
+  to the running extension in place without requiring a window reload. Any
+  factor that cannot take effect immediately is reported in the save outcome:
+  stages already running keep the model, effort, and agent they launched with
+  (new settings apply to the next run), missing agent CLI binaries are flagged,
+  and saving in a window opened for a different folder than the activated
+  workspace folder writes the file without updating the running session.
+
 ## Commands
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and
   moves keyboard focus to the Chat view.
+- **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — opens
+  `.baiton/config.json` as a form.
 - **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — prompts
   for the orchestrator API key with a masked input and stores it securely in VS
   Code SecretStorage.

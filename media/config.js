@@ -4,9 +4,11 @@
  *
  * **src/config/configPanel.ts is the source of truth.** This file is its
  * plain-script mirror, exactly as media/protocol.js mirrors
- * src/orchestrator/webviewProtocol.ts. Todo T09 adds a fixture test that runs
+ * src/orchestrator/webviewProtocol.ts. `test/configPanel.mirror.test.ts` runs
  * the same forms through both and fails if they diverge, so any edit to the
- * mirror block below must be made in both places.
+ * mirror block below must be made in both places. Keep the mirror block
+ * self-contained above the `acquireVsCodeApi` guard so the test loader can
+ * evaluate it outside a webview.
  *
  * The view is a pure projection of one state object, exactly like chat.js:
  * host→webview messages replace pieces of `state`, then `render()` redraws
