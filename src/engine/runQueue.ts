@@ -57,6 +57,7 @@ import {
 import { appendCompletion, appendStart, latestStart, parseJournal } from '../journal';
 import type { RunResultKind } from '../journal';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
 
 /**
  * A single dispatch request (design "Stage engine", `RunRequest`).
@@ -719,7 +720,16 @@ class SerialRunQueue implements RunQueue {
       outcome = { kind: 'cancelled' };
     }
 
-    return this.applyOutcome(req, transition, stage, runId, startHead, startBranch, outcome);
+    return this.applyOutcome(
+      req,
+      transition,
+      stage,
+      runId,
+      startHead,
+      startBranch,
+      outcome,
+      resultPath,
+    );
   }
 
   /**
@@ -850,6 +860,10 @@ class SerialRunQueue implements RunQueue {
    * (Execute) after a drift check, applies the terminal state, runs the
    * post-run reset for non-executor stages, and journals completion. Any other
    * outcome halts, leaves state, and journals the non-completing kind.
+   *
+   * `resultPath` is the run's `result.json`; a `closed` outcome whose result
+   * file never appeared gets {@link MISSING_RESULT_HINT} appended to the
+   * refusal so a mis-permissioned sub-agent profile is diagnosable.
    */
   private async applyOutcome(
     req: RunRequest,
@@ -859,6 +873,7 @@ class SerialRunQueue implements RunQueue {
     startHead: string,
     startBranch: string,
     outcome: RunOutcome,
+    resultPath: string,
   ): Promise<DispatchResult> {
     if (outcome.kind !== 'completed') {
       // Halt and journal the non-completing kind (Req 12.6, 14.7). A `closed`
@@ -890,10 +905,20 @@ class SerialRunQueue implements RunQueue {
           outcome.kind === 'closed' && outcome.exitCode !== undefined
             ? ` (exit ${outcome.exitCode})`
             : '';
+        // A `closed` outcome with no result file on disk is almost always a
+        // permission problem: the sub-agent's CLI profile would not let it
+        // write `.baiton/runs/<run-id>/result.json`, so it answered in the
+        // terminal and exited cleanly. Name that cause rather than leaving the
+        // user with a bare "closed (exit 0)" (see the opencode adapter's
+        // `OPENCODE_CONFIG_CONTENT` grant and the antigravity plan-mode note).
+        const hint =
+          outcome.kind === 'closed' && !resultFileExists(resultPath)
+            ? MISSING_RESULT_HINT
+            : '';
         return this.refuse({
           kind: 'outcome',
           outcome,
-          message: `stage ${outcome.kind}${detail}; "${req.todoId}" reverted to "${transition.from}"`,
+          message: `stage ${outcome.kind}${detail}; "${req.todoId}" reverted to "${transition.from}"${hint}`,
         });
       }
 
@@ -1049,6 +1074,23 @@ function readVerdict(structured: unknown): 'pass' | 'findings' {
 /** The note recorded on a revert for a `closed` outcome (Req 1.1). */
 function closedNote(exitCode: number | undefined): string {
   return exitCode !== undefined ? `closed (exit ${exitCode})` : 'closed (no exit code)';
+}
+
+/**
+ * Appended to a `closed` refusal when the run wrote no `result.json`: the
+ * common cause is a sub-agent launched under a CLI permission profile that
+ * forbids writing the run directory (the opencode `--agent plan` bug).
+ */
+export const MISSING_RESULT_HINT =
+  '; the agent exited without writing result.json — check that its permission profile allows writes to the run directory';
+
+/** Whether the run's `result.json` exists on disk; any fs error reads as absent. */
+function resultFileExists(resultPath: string): boolean {
+  try {
+    return fs.existsSync(resultPath);
+  } catch {
+    return false;
+  }
 }
 
 /** Best-effort resolution of a terminal's process id for the journal (Req 21.1). */
