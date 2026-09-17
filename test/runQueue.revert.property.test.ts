@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   createRunQueue,
+  MISSING_RESULT_HINT,
   type RunQueueDeps,
   type RunRequest,
   type SpecStore,
@@ -409,5 +410,79 @@ describe('run queue revert on non-completion (property harness)', () => {
       ),
       { numRuns: 150 },
     );
+  });
+});
+
+/**
+ * A `closed` outcome is the shape a sub-agent takes when its CLI permission
+ * profile forbids writing `.baiton/runs/<run-id>/result.json`: it answers in
+ * the terminal and exits 0 (exactly the opencode `--agent plan` bug). The
+ * refusal therefore names that cause whenever no result file landed, while
+ * keeping its existing prefix intact.
+ */
+describe('run queue closed-without-result hint', () => {
+  const scenario = SCENARIOS[0];
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-runqueue-hint-'));
+    fs.mkdirSync(path.join(tmpDir, '.baiton', 'specs', SLUG), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Dispatch one stage, close its terminal with exit 0, and return the refusal message. */
+  async function closedMessage(writeResultFirst: boolean): Promise<string> {
+    const journalPath = path.join(tmpDir, 'runs.jsonl');
+    const rig = makeRig(journalPath, scenario);
+    const queue = createRunQueue(rig.deps);
+
+    const resultPromise = queue.dispatch({
+      slug: SLUG,
+      todoId: TODO_ID,
+      action: scenario.action,
+      role: scenario.role,
+      attempt: 1,
+      resume: false,
+    });
+    await flush();
+
+    const drive = rig.drive();
+    assert.ok(drive !== undefined, 'the stage should have launched');
+    if (writeResultFirst) {
+      const runDir = path.join(tmpDir, '.baiton', 'runs', drive!.runId);
+      fs.mkdirSync(runDir, { recursive: true });
+      fs.writeFileSync(path.join(runDir, 'result.json'), scenario.resultJson, 'utf8');
+    }
+    drive!.closeWithExit(0);
+
+    await flush();
+    await flush();
+    await flush();
+
+    const result = (await resultPromise) as { ok: boolean; error?: { message: string } };
+    assert.strictEqual(result.ok, false, 'a closed outcome is refused');
+    return result.error?.message ?? '';
+  }
+
+  it('appends the permission hint when the run wrote no result.json', async () => {
+    const message = await closedMessage(false);
+    assert.ok(
+      message.startsWith(`stage closed (exit 0); "${TODO_ID}" reverted to "${scenario.from}"`),
+      `the existing refusal prefix must survive: ${message}`,
+    );
+    assert.ok(message.endsWith(MISSING_RESULT_HINT), `expected the hint: ${message}`);
+    assert.ok(message.includes('result.json'));
+  });
+
+  it('omits the hint when the result file is on disk', async () => {
+    const message = await closedMessage(true);
+    assert.ok(
+      message.startsWith(`stage closed (exit 0); "${TODO_ID}" reverted to "${scenario.from}"`),
+      `the existing refusal prefix must survive: ${message}`,
+    );
+    assert.ok(!message.includes(MISSING_RESULT_HINT), `did not expect the hint: ${message}`);
   });
 });
