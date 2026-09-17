@@ -299,6 +299,7 @@ class FileSpecStore implements SpecStore {
 /** A stub adapter: probe always ok, launch is inert (no real CLI). */
 class StubAdapter implements Adapter {
   readonly id = 'claude' as const;
+  readonly acceptsSessionId = true;
   async probe(): Promise<ProbeResult> {
     return { version: '0.0.0-stub', ok: true };
   }

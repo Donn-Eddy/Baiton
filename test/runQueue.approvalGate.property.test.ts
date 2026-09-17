@@ -127,6 +127,7 @@ function makeCompletingWatcherFactory(): ResultWatcherFactory {
 /** An adapter double whose probe always succeeds and whose launch is inert. */
 const okAdapter: Adapter = {
   id: 'claude',
+  acceptsSessionId: true,
   probe: async () => ({ version: '1.0.0', ok: true }),
   launch: () => ({ shellPath: 'claude', shellArgs: [] }),
   attach: () => ({ shellPath: 'claude', shellArgs: [] }),

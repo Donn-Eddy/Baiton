@@ -45,6 +45,11 @@ export interface CompletionInput {
   commit?: string;
   /** PR-run only; unused in the first pass. */
   pr?: PrCompletion;
+  /**
+   * The session id the CLI minted for this run, recovered by the adapter after
+   * the run settled (Req 3.2); omitted from the line when undefined.
+   */
+  discoveredSessionId?: string;
 }
 
 /**
@@ -81,6 +86,9 @@ export function appendCompletion(path: string, input: CompletionInput): void {
     result: input.result,
     ...(input.commit !== undefined ? { commit: input.commit } : {}),
     ...(input.pr !== undefined ? { pr: input.pr } : {}),
+    ...(input.discoveredSessionId !== undefined
+      ? { discoveredSessionId: input.discoveredSessionId }
+      : {}),
   };
   appendRecord(path, record);
 }
@@ -151,6 +159,29 @@ export function latestStart(
   return latest;
 }
 
+/**
+ * The session id that can actually be resumed for a journal entry (Req 3.2).
+ *
+ * A CLI that minted its own id has it recorded as `discoveredSessionId` and
+ * that id is always the right one to resume. Baiton's pre-assigned `sessionId`
+ * is resumable only for a CLI that honoured it on launch — the caller passes
+ * its adapter's `acceptsSessionId`. Everything else yields `undefined`, which
+ * means "launch fresh"/"nothing to attach to" rather than resuming with an id
+ * the CLI never knew.
+ */
+export function resumableSessionId(
+  entry: JournalEntry | undefined,
+  acceptsSessionId: boolean,
+): string | undefined {
+  if (entry === undefined) {
+    return undefined;
+  }
+  if (entry.discoveredSessionId !== undefined && entry.discoveredSessionId.length > 0) {
+    return entry.discoveredSessionId;
+  }
+  return acceptsSessionId ? entry.sessionId : undefined;
+}
+
 /** Serializes a record as a single JSON line and appends it to the file. */
 function appendRecord(path: string, record: JournalRecord): void {
   appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
@@ -186,6 +217,9 @@ function applyCompletion(entry: JournalEntry, record: CompletionRecord): void {
   }
   if (record.pr !== undefined) {
     entry.pr = record.pr;
+  }
+  if (record.discoveredSessionId !== undefined) {
+    entry.discoveredSessionId = record.discoveredSessionId;
   }
 }
 
@@ -270,6 +304,9 @@ function toCompletionRecord(
   const pr = toPrCompletion(obj.pr);
   if (pr !== undefined) {
     record.pr = pr;
+  }
+  if (typeof obj.discoveredSessionId === 'string') {
+    record.discoveredSessionId = obj.discoveredSessionId;
   }
   return record;
 }

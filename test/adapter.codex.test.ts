@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   CodexAdapter,
   CODEX_READ_ONLY_SANDBOX,
@@ -302,4 +305,159 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
       }
     });
   }
+});
+
+/**
+ * `discoverSessionId` recovers the session id codex minted for a run, which is
+ * the only id `codex resume <id>` accepts (Baiton's pre-assigned one is ignored
+ * on a fresh launch — degrade 1 in the adapter's doc comment).
+ *
+ * The fixture is a temp `$CODEX_HOME` holding a rollout transcript in codex's
+ * real layout: `sessions/<YYYY>/<MM>/<DD>/rollout-<ISO time>-<uuid>.jsonl`,
+ * whose first line is the `session_meta` record (`payload.id`, `payload.cwd`)
+ * and whose following lines carry the initial prompt naming the run's brief.
+ * A file counts only when it was modified at/after the launch, its `cwd` is the
+ * workspace, and its opening lines mention the run id.
+ */
+describe('CodexAdapter.discoverSessionId (Req 3.2)', () => {
+  const SESSION_ID = '01a0add4-6a1c-7151-82ba-d01d7f8ff33d';
+  const RUN_ID = 'demo-T11-execute-2-1758061574000';
+
+  let codexHome: string;
+  let workspace: string;
+  let savedCodexHome: string | undefined;
+  let launchedAt: number;
+
+  beforeEach(() => {
+    savedCodexHome = process.env.CODEX_HOME;
+    codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-codex-home-'));
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-codex-ws-'));
+    process.env.CODEX_HOME = codexHome;
+    launchedAt = Date.now();
+  });
+
+  afterEach(() => {
+    if (savedCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = savedCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  /** The `sessions/YYYY/MM/DD` directory codex would file a run launched at `at` under. */
+  function dayDir(at: number): string {
+    const day = new Date(at);
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    return path.join(
+      codexHome,
+      'sessions',
+      String(day.getFullYear()),
+      pad(day.getMonth() + 1),
+      pad(day.getDate()),
+    );
+  }
+
+  /** Write one rollout transcript; returns its path. */
+  function writeRollout(options: {
+    id?: string;
+    cwd?: string;
+    runId?: string;
+    firstLine?: string;
+    mtime?: number;
+    at?: number;
+  }): string {
+    const at = options.at ?? launchedAt;
+    const dir = dayDir(at);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `rollout-2026-09-16T22-26-14-${options.id ?? SESSION_ID}.jsonl`);
+    const meta =
+      options.firstLine ??
+      JSON.stringify({
+        type: 'session_meta',
+        payload: { id: options.id ?? SESSION_ID, cwd: options.cwd ?? workspace },
+      });
+    const briefPath = path.join(
+      options.cwd ?? workspace,
+      '.baiton',
+      'runs',
+      options.runId ?? RUN_ID,
+      'brief.md',
+    );
+    const turn = JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `Read ${briefPath} and do what it says.` }],
+      },
+    });
+    fs.writeFileSync(file, `${meta}\n${turn}\n`, 'utf8');
+    const mtime = (options.mtime ?? at) / 1000;
+    fs.utimesSync(file, mtime, mtime);
+    return file;
+  }
+
+  /** Run discovery against the fixture for the run under test. */
+  function discover(overrides: Partial<{ runId: string; workspaceRoot: string }> = {}): Promise<string | undefined> {
+    return new CodexAdapter().discoverSessionId({
+      runId: overrides.runId ?? RUN_ID,
+      workspaceRoot: overrides.workspaceRoot ?? workspace,
+      launchedAt,
+    });
+  }
+
+  it('returns the session id of the rollout whose cwd and run id match', async () => {
+    writeRollout({});
+    assert.strictEqual(await discover(), SESSION_ID);
+  });
+
+  it('tolerates a non-canonical workspace path (compares resolved paths)', async () => {
+    writeRollout({});
+    assert.strictEqual(
+      await discover({ workspaceRoot: path.join(workspace, 'sub', '..') }),
+      SESSION_ID,
+    );
+  });
+
+  it('ignores a session recorded for another cwd', async () => {
+    const otherCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-codex-other-'));
+    try {
+      writeRollout({ cwd: otherCwd });
+      assert.strictEqual(await discover(), undefined);
+    } finally {
+      fs.rmSync(otherCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a session whose file predates the launch', async () => {
+    // Two days back: outside both the mtime window and the scanned date dirs.
+    const old = launchedAt - 2 * 24 * 60 * 60 * 1000;
+    writeRollout({ at: old, mtime: old });
+    assert.strictEqual(await discover(), undefined);
+  });
+
+  it('ignores a session whose mtime is before the launch window', async () => {
+    writeRollout({ mtime: launchedAt - 10 * 60 * 1000 });
+    assert.strictEqual(await discover(), undefined);
+  });
+
+  it('ignores a rollout whose first line is malformed or not a session_meta', async () => {
+    writeRollout({ firstLine: '{not json' });
+    assert.strictEqual(await discover(), undefined);
+
+    fs.rmSync(path.join(codexHome, 'sessions'), { recursive: true, force: true });
+    writeRollout({ firstLine: JSON.stringify({ type: 'turn_context', payload: { id: SESSION_ID } }) });
+    assert.strictEqual(await discover(), undefined);
+  });
+
+  it('ignores a session for a different run in the same workspace', async () => {
+    writeRollout({ runId: 'demo-T11-execute-1-1758000000000' });
+    assert.strictEqual(await discover(), undefined);
+  });
+
+  it('returns undefined when CODEX_HOME holds no sessions at all', async () => {
+    assert.strictEqual(await discover(), undefined);
+  });
 });
