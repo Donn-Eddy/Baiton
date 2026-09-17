@@ -65,7 +65,7 @@ import type {
   SubmitPrError,
   TerminalHost,
 } from '../engine';
-import { latestStart, parseJournal } from '../journal';
+import { latestStart, parseJournal, resumableSessionId } from '../journal';
 import {
   GuardContext,
   OpenAiModelClient,
@@ -93,6 +93,7 @@ import {
   createRunQueueSeam,
   dispatchTrigger,
   STAGE_ROLE,
+  type AdapterForRole,
   type EngineTrigger,
 } from './engineFacade';
 import { ChatController } from './chatController';
@@ -185,6 +186,10 @@ export function registerCommands(
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
   const adapters = createAdapterRegistry();
+  // One live role → adapter resolver, shared by the queue, the facade (which
+  // needs each role's `acceptsSessionId` to decide whether a journaled session
+  // is resumable), the View command and the spec-draft runner.
+  const adapterFor = (role: Role): Adapter | undefined => adapterForRole(cfg(), adapters, role);
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
@@ -213,7 +218,7 @@ export function registerCommands(
       specStore,
       journalPath,
       modelForRole: (role) => modelForRole(cfg(), role),
-      adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
+      adapterForRole: adapterFor,
       report: (error) => surface.reportDispatchError(error),
       // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
       isExternallyBusy: () => specDraftRunner.isRunning(),
@@ -263,7 +268,7 @@ export function registerCommands(
         remote,
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
-        adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
+        adapterForRole: adapterFor,
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -287,6 +292,7 @@ export function registerCommands(
     git,
     queueForSlug,
     specsDir,
+    adapterFor,
     submitPrForSlug,
   );
   const specDraftRunner = createSpecDraftRunner({
@@ -296,7 +302,7 @@ export function registerCommands(
     watcherFactory,
     services: draftServices,
     modelForRole: (role) => modelForRole(cfg(), role),
-    adapterForRole: (role) => adapterForRole(cfg(), adapters, role),
+    adapterForRole: adapterFor,
     isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
@@ -305,7 +311,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, submitPrForSlug),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -354,17 +360,17 @@ export function registerCommands(
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueForSlug, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueForSlug, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, adapterFor, surface),
     registerViewCommand(
       activation,
       specsDir,
       repoRoot,
       queueForSlug,
-      (role) => adapterForRole(cfg(), adapters, role),
+      adapterFor,
       terminalHost,
       surface,
     ),
@@ -653,13 +659,14 @@ function registerStageCommand(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     commandId,
     (a?: TreeNode | string, b?: string) => {
       const { slug, todoId } = todoArgs(a, b);
-      return runStage(activation, specsDir, queueForSlug, surface, stage, slug, todoId);
+      return runStage(activation, specsDir, queueForSlug, adapterForRole, surface, stage, slug, todoId);
     },
   );
 }
@@ -671,6 +678,7 @@ function registerActionCommand(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
@@ -707,7 +715,7 @@ function registerActionCommand(
           todoId: target.todoId,
           action: 'stop',
         };
-        const result = await dispatchAndReport(queue, specsDir, trigger, surface);
+        const result = await dispatchAndReport(queue, specsDir, trigger, adapterForRole, surface);
         if (!result.ok && result.error.kind === 'illegal-transition') {
           // The queue's reporter already surfaced the generic transition-table
           // message; this friendlier wording is the one Req 2.3 asks for.
@@ -721,7 +729,7 @@ function registerActionCommand(
         todoId: target.todoId,
         action,
       };
-      await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, surface);
+      await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
     },
   );
 }
@@ -737,7 +745,7 @@ function registerViewCommand(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapterForRole: (role: Role) => Adapter | undefined,
+  adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): vscode.Disposable {
@@ -775,7 +783,7 @@ function runView(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapterForRole: (role: Role) => Adapter | undefined,
+  adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): void {
@@ -787,7 +795,7 @@ function runView(
 
   const journalPath = path.join(specsDir, slug, 'runs.jsonl');
   const entry = latestStart(parseJournal(journalPath), todoId);
-  if (entry?.sessionId === undefined) {
+  if (entry === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
     return;
   }
@@ -802,10 +810,19 @@ function runView(
     return;
   }
 
+  // Which id can be attached to depends on the CLI: claude honoured the id
+  // Baiton pre-assigned, while codex/opencode/antigravity minted their own —
+  // for those only an id discovered after the run can be reopened (Req 3.2).
+  const sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
+  if (sessionId === undefined) {
+    surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
+    return;
+  }
+
   const spec = adapter.attach({
     role,
     runId: entry.runId,
-    sessionId: entry.sessionId,
+    sessionId,
   });
   const terminal = terminalHost.createTerminal({
     name: `Baiton view ${slug}/${todoId}`,
@@ -822,6 +839,7 @@ async function runStage(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
   stage: Stage,
   slugArg: string | undefined,
@@ -840,7 +858,7 @@ async function runStage(
     todoId: target.todoId,
     stage,
   };
-  await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, surface);
+  await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
 }
 
 /**
@@ -897,9 +915,10 @@ async function dispatchAndReport(
   queue: RunQueue,
   specsDir: string,
   trigger: EngineTrigger,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): Promise<DispatchResult> {
-  const result = await dispatchTrigger(queue, specsDir, trigger);
+  const result = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
   if (result.ok) {
     surface.log(
       `Baiton: ${describeTrigger(trigger)} → ${result.outcome.kind}`,
@@ -1278,6 +1297,7 @@ function buildToolServices(
   git: ReturnType<typeof createGitService>,
   queueForSlug: QueueForSlug,
   specsDir: string,
+  adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
 ): ToolServices {
   return {
@@ -1285,7 +1305,7 @@ function buildToolServices(
     baitonDir,
     git,
     confirm: buildConfirmSeam(),
-    runQueue: createRunQueueSeam(queueForSlug, specsDir),
+    runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),

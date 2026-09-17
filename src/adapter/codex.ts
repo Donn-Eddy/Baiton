@@ -1,5 +1,14 @@
 import { execFile } from 'child_process';
-import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from './adapter';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type {
+  Adapter,
+  DiscoverSessionInput,
+  LaunchRequest,
+  LaunchSpec,
+  ProbeResult,
+} from './adapter';
 import { AGENT_BINARY } from './adapter';
 import type { Role } from '../model/role';
 import { isReadOnlyRole, runDirGrant } from './permissions';
@@ -28,6 +37,26 @@ export function codexPermissionFlags(role: Role): string[] {
     CODEX_ASK_FOR_APPROVAL,
   ];
 }
+
+/**
+ * Where codex keeps its rollout transcripts: `$CODEX_HOME/sessions/YYYY/MM/DD/`
+ * (default `~/.codex`), one `rollout-<ISO time>-<uuid>.jsonl` per session whose
+ * first line is `{"type":"session_meta","payload":{"id","cwd",...}}`.
+ */
+const CODEX_SESSIONS_DIR = 'sessions';
+
+/**
+ * Tolerance subtracted from a run's launch time when filtering rollout files by
+ * mtime. Covers clock skew and the gap between Baiton's `launchedAt` and the
+ * moment codex creates the file.
+ */
+const DISCOVERY_MTIME_SLACK_MS = 120_000;
+
+/** How much of a rollout file is read while looking for the run's brief path. */
+const DISCOVERY_MAX_BYTES = 256 * 1024;
+
+/** How many leading lines of a rollout file may mention the run id. */
+const DISCOVERY_MAX_LINES = 50;
 
 /** The config key codex's generic `--config` override uses to set reasoning effort. */
 export const CODEX_EFFORT_CONFIG_KEY = 'model_reasoning_effort';
@@ -96,6 +125,15 @@ export function codexEffortFlags(effort: string | undefined): string[] {
  */
 export class CodexAdapter implements Adapter {
   readonly id = 'codex' as const;
+
+  /**
+   * codex mints its own session UUID on a fresh run (degrade 1 above), so
+   * Baiton's journal `sessionId` names no session it knows: `codex resume
+   * <that uuid>` prints "No saved session found with ID ..." and exits 1
+   * before a session exists. The real id is recovered after the fact by
+   * {@link CodexAdapter.discoverSessionId}.
+   */
+  readonly acceptsSessionId = false;
 
   /**
    * Run `codex --version` and report readiness (Requirements 14.2–14.4). A
@@ -176,6 +214,43 @@ export class CodexAdapter implements Adapter {
     return { shellPath: CODEX_BIN, shellArgs: args };
   }
 
+  /**
+   * Recover the session id codex actually minted for a run (degrade 1 above),
+   * so a later Execute can `codex resume <real id>` instead of the journal's
+   * unusable pre-assigned UUID.
+   *
+   * codex writes one rollout transcript per session at
+   * `$CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<ISO time>-<uuid>.jsonl`
+   * (`$CODEX_HOME` defaults to `~/.codex`). Line 1 is a `session_meta` record
+   * carrying the session `id` and the `cwd` it ran in; the first user turn
+   * carries Baiton's initial prompt, which names the run's `brief.md` and so
+   * contains the run id. A file therefore identifies this run when its `cwd`
+   * is the workspace root and its opening lines mention the run id.
+   *
+   * The scan is bounded: only the launch day's and the next day's date
+   * directories, only files modified at/after the launch (minus a slack), and
+   * only the first {@link DISCOVERY_MAX_BYTES} bytes /
+   * {@link DISCOVERY_MAX_LINES} lines of each. Newest candidates are examined
+   * first. Never throws: any error resolves `undefined`.
+   */
+  async discoverSessionId(input: DiscoverSessionInput): Promise<string | undefined> {
+    try {
+      const root = path.join(codexHome(), CODEX_SESSIONS_DIR);
+      const since = input.launchedAt - DISCOVERY_MTIME_SLACK_MS;
+      const workspace = path.resolve(input.workspaceRoot);
+
+      for (const file of candidateRollouts(root, input.launchedAt, since)) {
+        const id = sessionIdIfMatches(file, workspace, input.runId);
+        if (id !== undefined) {
+          return id;
+        }
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Execute `codex --version`, resolving stdout or rejecting on failure. */
   private runVersion(): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -204,4 +279,151 @@ function describeProbeError(e: unknown): string {
     return `${CODEX_BIN} --version failed: ${e.message}`;
   }
   return `${CODEX_BIN} --version failed`;
+}
+
+/** `$CODEX_HOME` when set and non-empty, else `~/.codex`. */
+function codexHome(): string {
+  const env = process.env.CODEX_HOME;
+  return env !== undefined && env.length > 0 ? env : path.join(os.homedir(), '.codex');
+}
+
+/**
+ * The rollout files that could belong to a run launched at `launchedAt`,
+ * newest first: the launch day's and the following day's date directories
+ * (a run can cross midnight), filtered to files modified at/after `since`.
+ */
+function candidateRollouts(
+  sessionsRoot: string,
+  launchedAt: number,
+  since: number,
+): string[] {
+  const found: Array<{ file: string; mtimeMs: number }> = [];
+  for (const dir of dayDirectories(sessionsRoot, launchedAt)) {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.startsWith('rollout-') || !name.endsWith('.jsonl')) {
+        continue;
+      }
+      const file = path.join(dir, name);
+      try {
+        const stat = fs.statSync(file);
+        if (stat.isFile() && stat.mtimeMs >= since) {
+          found.push({ file, mtimeMs: stat.mtimeMs });
+        }
+      } catch {
+        // An unreadable entry is simply not a candidate.
+      }
+    }
+  }
+  return found.sort((a, b) => b.mtimeMs - a.mtimeMs).map((entry) => entry.file);
+}
+
+/** The `<root>/YYYY/MM/DD` directories for the launch day and the next day. */
+function dayDirectories(sessionsRoot: string, launchedAt: number): string[] {
+  const dirs: string[] = [];
+  for (const offset of [0, 24 * 60 * 60 * 1000]) {
+    const day = new Date(launchedAt + offset);
+    if (Number.isNaN(day.getTime())) {
+      continue;
+    }
+    dirs.push(
+      path.join(
+        sessionsRoot,
+        String(day.getFullYear()),
+        pad2(day.getMonth() + 1),
+        pad2(day.getDate()),
+      ),
+    );
+  }
+  return dirs;
+}
+
+/** Zero-pad a month/day number to codex's two-digit directory names. */
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/**
+ * The session id of a rollout file when it belongs to this run: its first line
+ * is a `session_meta` whose `cwd` resolves to `workspace`, and the run id
+ * appears in its opening lines. `undefined` otherwise, including on any read or
+ * parse failure.
+ */
+function sessionIdIfMatches(
+  file: string,
+  workspace: string,
+  runId: string,
+): string | undefined {
+  const head = readHead(file);
+  if (head === undefined) {
+    return undefined;
+  }
+  const lines = head.split('\n', DISCOVERY_MAX_LINES);
+  const meta = parseSessionMeta(lines[0] ?? '');
+  if (meta === undefined) {
+    return undefined;
+  }
+  if (path.resolve(meta.cwd) !== workspace) {
+    return undefined;
+  }
+  // The initial prompt names `<workspace>/.baiton/runs/<run id>/brief.md`, so
+  // the run id identifies the run inside the first few turns.
+  return lines.some((line) => line.includes(runId)) ? meta.id : undefined;
+}
+
+/** Read at most {@link DISCOVERY_MAX_BYTES} bytes from the head of a file. */
+function readHead(file: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(DISCOVERY_MAX_BYTES);
+    const read = fs.readSync(fd, buffer, 0, DISCOVERY_MAX_BYTES, 0);
+    return buffer.subarray(0, read).toString('utf8');
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Closing a file we only read from cannot invalidate the result.
+      }
+    }
+  }
+}
+
+/** The `{id, cwd}` of a `session_meta` line, or `undefined` when it is not one. */
+function parseSessionMeta(line: string): { id: string; cwd: string } | undefined {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return undefined;
+  }
+  const obj = parsed as { type?: unknown; payload?: unknown };
+  if (obj.type !== 'session_meta' || typeof obj.payload !== 'object' || obj.payload === null) {
+    return undefined;
+  }
+  const payload = obj.payload as { id?: unknown; cwd?: unknown };
+  if (
+    typeof payload.id !== 'string' ||
+    payload.id.length === 0 ||
+    typeof payload.cwd !== 'string' ||
+    payload.cwd.length === 0
+  ) {
+    return undefined;
+  }
+  return { id: payload.id, cwd: payload.cwd };
 }

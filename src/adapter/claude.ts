@@ -37,6 +37,13 @@ export class ClaudeAdapter implements Adapter {
   readonly id = 'claude' as const;
 
   /**
+   * claude is the only CLI that honours Baiton's pre-assigned session id:
+   * `--session-id <uuid>` on a fresh launch makes the journal's `sessionId`
+   * the session's real id, so `--resume <id>` finds it later.
+   */
+  readonly acceptsSessionId = true;
+
+  /**
    * @param mode the permission mode; the read-only `acceptEdits` fallback is a
    *   config flip here (Requirement 15.7) and changes no other plumbing.
    */

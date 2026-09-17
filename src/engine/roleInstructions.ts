@@ -25,6 +25,19 @@ import type { Role } from '../model/role';
  * (Requirement 17.5). Exported so tests and callers can assert its presence
  * verbatim.
  */
+/**
+ * The executor's finish line, stated in the Role section at the very top of the
+ * Brief rather than only in the "Result file"/"When you are done" sections at
+ * the bottom. A long plan pushes those sections hundreds of lines down, and an
+ * executor that has finished the code but never wrote `result.json` is recorded
+ * as `closed` and reverted — the work is kept, but the attempt is thrown away.
+ * Exported so tests and callers can assert its presence verbatim.
+ */
+export const EXECUTOR_RESULT_FILE_INSTRUCTION =
+  'The todo is not complete until the result file named in the "Result file" ' +
+  'section of this brief exists: writing that file is the last step of the ' +
+  'work, not an optional report about it.';
+
 export const EXECUTOR_NO_GIT_INSTRUCTION =
   'Do not commit, stash, or change branches. The extension manages all git ' +
   'operations; leave your changes in the working tree.';
@@ -97,6 +110,8 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
       'plan — and, when this is a retry, the review that sent it back. ' +
       'Implement this single todo by editing the workspace files to satisfy ' +
       'the plan. Run whatever you need to verify your work.',
+    '',
+    EXECUTOR_RESULT_FILE_INSTRUCTION,
     '',
     CONTEXT_IS_COMPLETE_INSTRUCTION,
     '',

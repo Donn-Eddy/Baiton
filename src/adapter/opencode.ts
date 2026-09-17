@@ -133,6 +133,13 @@ export class OpencodeAdapter implements Adapter {
   readonly id = 'opencode' as const;
 
   /**
+   * opencode mints its own session id and has no flag to pre-assign one, so
+   * Baiton's journal `sessionId` names no session it knows and `run -s <id>`
+   * would target a session that does not exist.
+   */
+  readonly acceptsSessionId = false;
+
+  /**
    * Run `opencode --version` and report readiness (Requirements 14.2–14.4). A
    * clean exit with a version string is `ok: true`; any failure is `ok: false`
    * with a non-empty reason.

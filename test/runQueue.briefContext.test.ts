@@ -147,6 +147,7 @@ function makeRig(
 
   const adapter: Adapter = {
     id: 'claude',
+    acceptsSessionId: true,
     probe: async () => ({ version: 'test', ok: true }),
     launch: () => ({ shellPath: 'claude', shellArgs: [] }),
     attach: () => ({ shellPath: 'claude', shellArgs: [] }),

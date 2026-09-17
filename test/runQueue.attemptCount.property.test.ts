@@ -180,6 +180,7 @@ function makeRig(journalPath: string): Rig {
 
   const adapter = {
     id: 'claude' as const,
+    acceptsSessionId: true,
     probe: async () => ({ version: 'test', ok: true }),
     launch: () => ({ shellPath: 'claude', shellArgs: [] as string[] }),
     attach: () => ({ shellPath: 'claude', shellArgs: [] as string[] }),

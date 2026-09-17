@@ -39,6 +39,19 @@ export interface Adapter {
   readonly id: AgentId;
 
   /**
+   * Whether the CLI honours Baiton's pre-assigned session id on a fresh
+   * launch, so a journal `sessionId` can be resumed.
+   *
+   * Only claude accepts one (`--session-id <uuid>`). codex, opencode and
+   * antigravity mint their own id and ignore the one Baiton generated, so the
+   * `sessionId` their journal start records carry names no session that CLI
+   * knows: resuming with it fails (`codex resume <uuid>` exits 1 with "No
+   * saved session found"). The engine facade therefore launches those agents
+   * fresh unless a real id was recovered by {@link Adapter.discoverSessionId}.
+   */
+  readonly acceptsSessionId: boolean;
+
+  /**
    * Check that the underlying CLI is present and usable. Runs before every
    * stage because CLIs self-update (Requirement 14.2). When `ok` is false the
    * `reason` is a non-empty explanation the extension surfaces to the user
@@ -60,6 +73,29 @@ export interface Adapter {
    * after its terminal is gone.
    */
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec;
+
+  /**
+   * Best-effort recovery of the session id the CLI actually minted for a run,
+   * for adapters whose `acceptsSessionId` is false. Called by the run queue
+   * once a run has settled (whatever its outcome), and the id it returns is
+   * journaled as the run's `discoveredSessionId` so a later Execute can resume
+   * that session.
+   *
+   * Implementations read the CLI's own session storage and must never throw:
+   * any failure — missing directory, unreadable file, malformed content —
+   * resolves `undefined`, which simply means "no resumable session known".
+   */
+  discoverSessionId?(input: DiscoverSessionInput): Promise<string | undefined>;
+}
+
+/** What an adapter needs to locate the session a specific run created. */
+export interface DiscoverSessionInput {
+  /** The run id; its brief path appears in the session's first user turn. */
+  runId: string;
+  /** Absolute workspace root the CLI ran in; the session's recorded `cwd`. */
+  workspaceRoot: string;
+  /** Epoch milliseconds when the run was launched; bounds the search. */
+  launchedAt: number;
 }
 
 /** The result of an adapter probe (Requirements 14.3, 14.4). */

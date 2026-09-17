@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -36,7 +36,13 @@ import { TODO_STATES, TodoState } from '../src/model/todoState';
  * (the generator above sometimes omits either or both), and are absent from
  * the reconstructed entry precisely when they were not written.
  *
- * Validates: Requirements 1.2
+ * Feature: baiton-codex-resume-session — the same round trip for
+ * `discoveredSessionId` on a completion record (the session id a CLI minted
+ * for itself, recovered after the run settled): it survives append/parse and is
+ * absent from the reconstructed entry precisely when it was not written, so
+ * journals written before the field existed parse exactly as they did.
+ *
+ * Validates: Requirements 1.2, 3.2
  */
 
 // --- Generators ------------------------------------------------------------
@@ -73,6 +79,7 @@ const completionInputArb = (runId: string): fc.Arbitrary<CompletionInput> =>
       'cancelled',
     ),
     commit: fc.option(textArb, { nil: undefined }),
+    discoveredSessionId: fc.option(fc.uuid(), { nil: undefined }),
     pr: fc.option(
       fc.record({
         push: fc.boolean(),
@@ -135,6 +142,9 @@ function expectedEntry(
     }
     if (completion.pr !== undefined) {
       entry.pr = completion.pr;
+    }
+    if (completion.discoveredSessionId !== undefined) {
+      entry.discoveredSessionId = completion.discoveredSessionId;
     }
   }
   return entry;
@@ -207,5 +217,81 @@ describe('run journal round trip (property)', () => {
       }),
       { numRuns: 100 },
     );
+  });
+
+  it('discoveredSessionId survives append/parse and is absent when not written', () => {
+    fc.assert(
+      fc.property(runsArb, (runs) => {
+        const dir = mkdtempSync(join(tmpdir(), 'baiton-journal-'));
+        const path = join(dir, 'runs.jsonl');
+        try {
+          for (const { start } of runs) {
+            appendStart(path, start);
+          }
+          for (const { completion } of runs) {
+            if (completion !== undefined) {
+              appendCompletion(path, completion);
+            }
+          }
+          const parsed = parseJournal(path);
+          assert.strictEqual(parsed.length, runs.length);
+          for (let i = 0; i < runs.length; i++) {
+            const { completion } = runs[i];
+            const entry = parsed[i];
+            const written = completion?.discoveredSessionId;
+            if (written !== undefined) {
+              assert.strictEqual(entry.discoveredSessionId, written);
+            } else {
+              assert.strictEqual('discoveredSessionId' in entry, false);
+            }
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('parses a journal written before discoveredSessionId existed, unchanged', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'baiton-journal-legacy-'));
+    const path = join(dir, 'runs.jsonl');
+    try {
+      // Hand-written legacy lines: a start and a completion with none of the
+      // later fields. Backward compatibility is the whole point of extending
+      // the completion record rather than changing its shape.
+      writeFileSync(
+        path,
+        [
+          JSON.stringify({
+            type: 'start',
+            runId: 'r1',
+            todoId: 'T01',
+            stage: 'execute',
+            attempt: 1,
+            startHead: 'head',
+            inputRev: 'rev',
+          }),
+          JSON.stringify({ type: 'completion', runId: 'r1', result: 'completed', commit: 'sha' }),
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      assert.deepStrictEqual(parseJournal(path), [
+        {
+          runId: 'r1',
+          todoId: 'T01',
+          stage: 'execute',
+          attempt: 1,
+          startHead: 'head',
+          inputRev: 'rev',
+          result: 'completed',
+          commit: 'sha',
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
