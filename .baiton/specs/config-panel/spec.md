@@ -1,12 +1,13 @@
 ---
 version: 1
 name: config-panel
-status: approved
+status: pr
 mode: manual
 base: main
 base_commit: 9f9f6a4b950e3bcdf6aeb7408ee583c49e3464eb
 branch: baiton/config-panel
 approved_rev: 452bc1bd49efab604cda61181c0bb648d93142dd18a8ab2798e4163b84964d9a
+pr: https://github.com/Donn-Eddy/Baiton/pull/3
 ---
 
 # OVERVIEW
