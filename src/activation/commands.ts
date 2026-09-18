@@ -83,6 +83,7 @@ import type {
 } from '../orchestrator';
 import { createAdapterRegistry } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
+import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
@@ -604,9 +605,14 @@ async function runInitialize(surface: Surface): Promise<void> {
 }
 
 /**
- * Resolve the `.baiton` directory for commands using the same rule as Initialize:
- * the single workspace folder, or the one multi-root folder with a `.baiton/` directory.
- * Returns `undefined` if there are 0 or ambiguous workspace folders.
+ * Resolve the folder to initialize: the single folder when there is exactly
+ * one, or the one multi-root folder that already contains a `.baiton/` when
+ * several are open (Req 22.3, 22.4). Returns `undefined` on zero folders or an
+ * ambiguous multi-root (Req 1.4, 22.5).
+ *
+ * The chosen root is canonicalized ({@link canonicalUri}) so the `.baiton/`
+ * Initialize creates — and the message naming it — use the same spelling
+ * activation will later resolve to. Same physical directory either way.
  */
 export function resolveBaitonDirForCommands(): string | undefined {
   const folders = vscode.workspace.workspaceFolders ?? [];
@@ -630,12 +636,21 @@ export function resolveCommandRoot(
     return undefined;
   }
   if (folders.length === 1) {
-    return folders[0].uri;
+    return canonicalUri(folders[0].uri);
   }
   const withBaiton = folders.filter((f) =>
     directoryExists(vscode.Uri.joinPath(f.uri, '.baiton').fsPath),
   );
-  return withBaiton.length === 1 ? withBaiton[0].uri : undefined;
+  return withBaiton.length === 1 ? canonicalUri(withBaiton[0].uri) : undefined;
+}
+
+/**
+ * Symlink-resolve a file-scheme uri, mirroring the canonicalization activation
+ * applies at its own workspace-folder ingress (see {@link canonicalizeRoot}).
+ * Non-file schemes pass through untouched.
+ */
+function canonicalUri(uri: vscode.Uri): vscode.Uri {
+  return uri.scheme === 'file' ? vscode.Uri.file(canonicalizeRoot(uri.fsPath)) : uri;
 }
 
 /** Whether an absolute path exists and is a directory. */
@@ -757,7 +772,7 @@ function registerViewCommand(
       if (target === undefined) {
         return;
       }
-      runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
+      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -776,7 +791,7 @@ function registerViewCommand(
  * that created the session if the config changed since (a known limitation of
  * mixed-agent configs).
  */
-function runView(
+async function runView(
   activation: CommandActivation,
   slug: string,
   todoId: string,
@@ -786,7 +801,7 @@ function runView(
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
-): void {
+): Promise<void> {
   const live = queueForSlug(slug).currentRun();
   if (live?.todoId === todoId) {
     live.terminal.show();
@@ -811,12 +826,24 @@ function runView(
   }
 
   // Which id can be attached to depends on the CLI: claude honoured the id
-  // Baiton pre-assigned, while codex/opencode/antigravity minted their own —
-  // for those only an id discovered after the run can be reopened (Req 3.2).
-  const sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
+  // Baiton pre-assigned, opencode tagged its own session with it (resolved
+  // below), while codex/antigravity minted their own — for those only an id
+  // discovered after the run can be reopened (Req 3.2).
+  let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
   if (sessionId === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
     return;
+  }
+  // CLIs that mint their own session ids (opencode) map the journaled Baiton
+  // Session_Id to theirs first; when nothing carries that id the adapter
+  // reopens its most recent session instead, and the user is told so.
+  if (adapter.resolveSessionId !== undefined) {
+    const resolved = await adapter.resolveSessionId(sessionId, repoRoot);
+    if (resolved === undefined) {
+      surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${todoId}; opening its most recent session instead`);
+    } else {
+      sessionId = resolved;
+    }
   }
 
   const spec = adapter.attach({

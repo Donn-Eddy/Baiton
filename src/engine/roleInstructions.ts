@@ -1,6 +1,14 @@
 /**
  * Per-role instruction text that leads the Brief (Requirement 11.3).
  *
+ * These say what work to do, not what the role is allowed to touch: the
+ * permission constraints are stated once, per role, in
+ * `src/adapter/roleProfile.ts`, and each adapter delivers them to its CLI as a
+ * system prompt (claude `--append-system-prompt`, opencode's custom agent
+ * `prompt`, codex `developer_instructions`). The duplicate "Do not modify any
+ * source files" sentences that used to live here were removed so there is one
+ * statement of the policy rather than two that can drift.
+ *
  * The Brief opens with the role instructions for the stage, telling the
  * Sub_Agent what work to perform. These are plain prose (Markdown) composed by
  * {@link buildBrief} ahead of the absolute `result.json` path, the stage JSON
@@ -24,6 +32,11 @@ import type { Role } from '../model/role';
  * git, so the executor must never commit, stash, or switch branches
  * (Requirement 17.5). Exported so tests and callers can assert its presence
  * verbatim.
+ *
+ * Deliberately NOT trimmed alongside the other prohibitions even though the
+ * executor role profile repeats it: the antigravity adapter delivers no
+ * profile prompt at all (see degrade 5 in `src/adapter/antigravity.ts`), so
+ * for an agy executor the brief is the only place this rule is ever stated.
  */
 /**
  * The executor's finish line, stated in the Role section at the very top of the
@@ -53,8 +66,7 @@ export const SPEC_WRITER_INSTRUCTION = [
   'You are the spec writer. Read the requirements in the context below, study ' +
     'the repository read-only to understand how the work fits the existing ' +
     'code, and turn the requirements into a spec: one OVERVIEW and a ' +
-    'dependency-ordered list of todos. Do not modify any source files; the ' +
-    'only file you write is your result file.',
+    'dependency-ordered list of todos.',
   '',
   'Todo rules:',
   '- A todo carries a title only. Never write a lifecycle state, and never ' +
@@ -131,7 +143,7 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
     'You are the PR writer. Read the spec, its plans and execution summaries, ' +
     'and the cumulative diff named in the context, then draft a pull request ' +
     'title (one line, imperative) and body (markdown: what changed, why, how ' +
-    'it was verified). Do not modify any source files.',
+    'it was verified).',
 };
 
 /** The instruction body for a role (the opening section of the Brief). */

@@ -131,11 +131,12 @@ export function dispatchTrigger(
   // execute start's session (Req 3.2). Whether that is possible at all depends
   // on the executor's CLI: claude accepts the id Baiton pre-assigned, so its
   // journal `sessionId` is resumable (and `-c` is a safe fallback when an old
-  // start recorded none). codex/opencode/antigravity mint their own id, so the
-  // journal's `sessionId` names nothing — resuming with it fails before a
-  // session exists — and the only resumable id is one discovered after a prior
-  // run. With none, launch fresh: the retry brief still carries the latest
-  // review (see `stageContext.ts`).
+  // start recorded none); opencode tags its session with that id and the run
+  // queue resolves it to opencode's own before launch. codex/antigravity mint
+  // their own id, so the journal's `sessionId` names nothing — resuming with
+  // it fails before a session exists — and the only resumable id is one
+  // discovered after a prior run. With none, launch fresh: the retry brief
+  // still carries the latest review (see `stageContext.ts`).
   const accepts = adapterForRole(role)?.acceptsSessionId === true;
   const priorExecute =
     trigger.stage === 'execute'

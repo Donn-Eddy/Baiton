@@ -23,6 +23,7 @@
  * The `Uri` type is a generic parameter so the pure core carries no dependency
  * on `vscode`; the shell instantiates it with `vscode.Uri`.
  */
+import * as fs from 'fs';
 import { Result, ok, err } from '../model/result';
 
 /**
@@ -136,4 +137,37 @@ function context<TUri>(
     baitonDir: makeBaitonDir(root),
     restricted: !trusted,
   };
+}
+
+/** Seam over `fs.realpathSync.native` so tests can inject a fake realpath. */
+export type RealpathFn = (p: string) => string;
+
+/**
+ * Canonicalize a workspace root by resolving symlinks in it, so Baiton spells
+ * every derived path (terminal cwd, brief, result, journal, guard, PR diff) the
+ * way a CLI launched with that cwd will spell its own.
+ *
+ * Motivating failure: on ostree-style hosts `/home` is a symlink to `/var/home`,
+ * so VS Code reports the folder as `/home/<user>/<repo>` while opencode resolves
+ * its project directory to `/var/home/<user>/<repo>`. opencode's
+ * external-directory check is `path.relative(projectDir, file)` starting with
+ * `..`, so the brief path Baiton puts in the initial prompt looks external and
+ * triggers the `external_directory` permission ask; `opencode run` is
+ * non-interactive, so the ask is auto-rejected and the stage fails before the
+ * brief is ever read.
+ *
+ * Canonicalizing once at ingress (the shell's workspace-folder read) keeps
+ * `WorkspaceContext.root`, `baitonDir`, and every consumer on a single
+ * spelling. Falls back to the input when realpath throws (path missing,
+ * permission error).
+ */
+export function canonicalizeRoot(
+  fsPath: string,
+  realpath: RealpathFn = fs.realpathSync.native,
+): string {
+  try {
+    return realpath(fsPath);
+  } catch {
+    return fsPath;
+  }
 }

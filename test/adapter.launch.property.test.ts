@@ -1,6 +1,10 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import { ClaudeAdapter } from '../src/adapter/claude';
+import { OpencodeAdapter, OPENCODE_CONFIG_ENV } from '../src/adapter/opencode';
+import { CodexAdapter } from '../src/adapter/codex';
+import { AntigravityAdapter } from '../src/adapter/antigravity';
+import { RESULT_FILE_SENTENCE, roleProfile } from '../src/adapter/roleProfile';
 import {
   DEFAULT_PERMISSION_MODE,
   PermissionMode,
@@ -206,6 +210,96 @@ describe('Claude adapter per-role launch arguments (property harness)', () => {
             prompt,
             `prompt must be the final argument: ${JSON.stringify(args)}`,
           );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+});
+
+/**
+ * Feature: baiton-role-profiles, Property: every adapter's launch is pure and
+ * role-consistent, including the role-profile outputs it now carries.
+ *
+ * The role profile (`src/adapter/roleProfile.ts`) is translated by four
+ * different adapters into three different mechanisms — claude's
+ * `--append-system-prompt`, opencode's `OPENCODE_CONFIG_CONTENT` custom agent,
+ * codex's `-c developer_instructions=` — and antigravity deliberately carries
+ * none (Decision 3). This property pins that each translation is a pure
+ * function of (role, runId) and that it never disagrees with the table it is
+ * derived from.
+ */
+describe('Every adapter delivers the role profile purely and consistently (property harness)', () => {
+  it('is pure and profile-consistent for any role, run id and request', () => {
+    fc.assert(
+      fc.property(
+        roleArb,
+        modelArb,
+        effortArb,
+        runIdArb,
+        promptArb,
+        sessionIdArb,
+        (role, model, effort, runId, prompt, sessionId) => {
+          const request = { role, model, effort, prompt, runId, resume: false, sessionId };
+          const profile = roleProfile(role);
+
+          for (const adapter of [
+            new ClaudeAdapter(),
+            new OpencodeAdapter(),
+            new CodexAdapter(),
+            new AntigravityAdapter(),
+          ]) {
+            // Purity: launch is a function of its request alone.
+            assert.deepStrictEqual(
+              adapter.launch(request),
+              adapter.launch(request),
+              `${adapter.id}.launch is not pure`,
+            );
+          }
+
+          // claude: the profile prompt rides --append-system-prompt verbatim.
+          const claudeArgs = new ClaudeAdapter().launch(request).shellArgs;
+          assert.ok(
+            findPair(claudeArgs, '--append-system-prompt', profile.systemPrompt) >= 0,
+            `claude dropped ${role}'s profile prompt`,
+          );
+
+          // codex: the same text, TOML-quoted behind -c developer_instructions.
+          const codexArgs = new CodexAdapter().launch(request).shellArgs;
+          const codexValue = codexArgs[codexArgs.indexOf('-c') + 1];
+          assert.strictEqual(
+            JSON.parse(codexValue.slice('developer_instructions='.length)),
+            profile.systemPrompt,
+            `codex mangled ${role}'s profile prompt`,
+          );
+
+          // opencode: one custom agent keyed by the profile's agent name,
+          // carrying the prompt and the write/shell rules from the table.
+          const env = new OpencodeAdapter().launch(request).env as Record<string, string>;
+          const parsed = JSON.parse(env[OPENCODE_CONFIG_ENV]) as {
+            agent: Record<string, { prompt: string; permission: { edit: Record<string, string>; bash?: Record<string, string> } }>;
+          };
+          assert.deepStrictEqual(Object.keys(parsed.agent), [profile.agentName]);
+          const agent = parsed.agent[profile.agentName];
+          assert.strictEqual(agent.prompt, profile.systemPrompt);
+          assert.strictEqual(
+            agent.permission.edit['*'],
+            profile.write === 'workspace' ? 'allow' : 'deny',
+            `opencode edit rule disagrees with ${role}'s write scope`,
+          );
+          if (profile.write === 'run-dir') {
+            assert.strictEqual(agent.permission.edit[`.baiton/runs/${runId}/*`], 'allow');
+          }
+          assert.strictEqual(
+            agent.permission.bash === undefined,
+            profile.shell,
+            `opencode bash rule disagrees with ${role}'s shell bit`,
+          );
+
+          // antigravity: no profile prompt anywhere on argv (Decision 3).
+          const agyArgs = new AntigravityAdapter().launch(request).shellArgs;
+          assert.ok(!agyArgs.includes('--append-system-prompt'));
+          assert.ok(!agyArgs.some((a) => a.includes(RESULT_FILE_SENTENCE)));
         },
       ),
       { numRuns: 200 },

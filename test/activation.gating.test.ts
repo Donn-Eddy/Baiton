@@ -1,8 +1,10 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   resolveWorkspace,
+  canonicalizeRoot,
   WorkspaceFolder,
 } from '../src/activation/workspace';
 import {
@@ -33,6 +35,11 @@ import { AGENT_BINARY } from '../src/adapter/adapter';
  * - resolveWorkspace: single-folder (Req 22.3); multi-root one .baiton root
  *   (Req 22.4); zero folders / zero .baiton roots / >1 .baiton roots refuse
  *   (Req 22.5); restricted = !trusted (Req 22.5-22.8, 22.1-22.2).
+ * - canonicalizeRoot: a symlinked root resolves to the real directory; a
+ *   missing path falls back to the input; the injected realpath seam is honoured
+ *   (including a throwing one); and the regression the helper exists for — a
+ *   run-dir path under a symlinked root is contained in the realpath'd root by
+ *   the same `path.relative` rule opencode's external-directory check uses.
  * - engineVersionAtLeast: below / at / above 1.96.0, suffix build, unparseable
  *   (Req 23.2, 23.3).
  * - resolveExecutable: PATH hit, override precedence, stale override, no-path
@@ -496,6 +503,92 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       initPalette,
       undefined,
       'baiton.initialize must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
+  });
+});
+
+/**
+ * The containment rule opencode applies before reading a file: a target is
+ * inside the project directory iff `path.relative(projectDir, target)` is
+ * non-empty, does not start with `..`, and is not absolute. Re-derived here
+ * rather than imported so the test pins the external contract Baiton relies on.
+ */
+function containedUnder(parent: string, target: string): boolean {
+  const rel = path.relative(parent, target);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+describe('canonicalizeRoot', () => {
+  // `os.tmpdir()` can itself be a symlink (it is on macOS), so every expectation
+  // is written against realpath'd values rather than the raw temp path.
+  let base: string | undefined;
+  let realRoot: string | undefined;
+  let linkRoot: string | undefined;
+
+  before(() => {
+    base = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-canonroot-'));
+    const realDir = path.join(base, 'real');
+    fs.mkdirSync(realDir, { recursive: true });
+    const link = path.join(base, 'link');
+    try {
+      fs.symlinkSync(realDir, link, 'dir');
+    } catch {
+      // Symlink creation can be refused (Windows without developer mode); the
+      // symlink-dependent cases skip rather than fail.
+      return;
+    }
+    realRoot = fs.realpathSync.native(realDir);
+    linkRoot = link;
+  });
+
+  after(() => {
+    if (base !== undefined) {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a symlinked root to the real directory', function () {
+    if (linkRoot === undefined || realRoot === undefined) {
+      this.skip();
+      return;
+    }
+    assert.strictEqual(canonicalizeRoot(linkRoot), realRoot);
+  });
+
+  it('falls back to the input when the path does not exist', () => {
+    const missing = path.join(os.tmpdir(), 'baiton-definitely-not-here', 'repo');
+    assert.strictEqual(canonicalizeRoot(missing), missing);
+  });
+
+  it('uses the injected realpath seam', () => {
+    assert.strictEqual(canonicalizeRoot('/ws/root', () => '/canonical/root'), '/canonical/root');
+  });
+
+  it('falls back to the input when the injected realpath throws', () => {
+    const throwing = (): string => {
+      throw new Error('ENOENT');
+    };
+    assert.strictEqual(canonicalizeRoot('/ws/root', throwing), '/ws/root');
+  });
+
+  it('makes a run-dir path under a symlinked root contained in the real root (regression)', function () {
+    if (linkRoot === undefined || realRoot === undefined) {
+      this.skip();
+      return;
+    }
+    const tail = ['.baiton', 'runs', 'r1', 'brief.md'];
+    const canonicalBrief = path.join(canonicalizeRoot(linkRoot), ...tail);
+    assert.strictEqual(
+      containedUnder(realRoot, canonicalBrief),
+      true,
+      'a brief path under the canonicalized root must be inside the realpath\'d root',
+    );
+
+    const rawBrief = path.join(linkRoot, ...tail);
+    assert.strictEqual(
+      containedUnder(realRoot, rawBrief),
+      false,
+      'the un-canonicalized brief path must look external, which is the bug this helper fixes',
     );
   });
 });

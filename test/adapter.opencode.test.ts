@@ -1,16 +1,15 @@
 import * as assert from 'assert';
 import {
   OpencodeAdapter,
-  OPENCODE_CONFIG_ENV_VAR,
-  OPENCODE_READONLY_AGENT,
-  OPENCODE_REVIEWER_AGENT,
-  OPENCODE_EXECUTOR_AGENT,
-  opencodeAgentName,
-  opencodeConfigContent,
+  OPENCODE_CONFIG_ENV,
+  isOpencodeSessionId,
+  opencodeAgentFlags,
+  opencodeConfigEnv,
 } from '../src/adapter/opencode';
+import type { OpencodeAgentDefinition } from '../src/adapter/opencode';
 import type { LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
-import { isReadOnlyRole } from '../src/adapter/permissions';
+import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 
 /**
@@ -21,11 +20,14 @@ import { ROLES } from '../src/model/role';
  * - the fresh-vs-resume `-s`/`-c` branches behind the leading `run` subcommand
  *   (Req 13.2, 13.3);
  * - attach()'s no-prompt reopen (Req 3.3, 3.4);
- * - the Baiton-owned `--agent` names and the `OPENCODE_CONFIG_CONTENT` config
- *   document that carries their per-role permission rows, including the
- *   per-run write grant `.baiton/runs/<run-id>/**` (Req 15.1-15.4);
- * - one documented degrade from the claude adapter: `req.sessionId` being
- *   ignored on a fresh launch.
+ * - the whole per-role policy (Req 15.1-15.4), which opencode gets as an
+ *   inline `OPENCODE_CONFIG_CONTENT` env layer defining one Baiton-owned
+ *   custom agent rather than as command-line flags;
+ * - the session-id mapping: opencode mints its own `ses_…` ids, so a fresh
+ *   launch tags the session with Baiton's Session_Id via `--title`,
+ *   `resolveSessionId()` maps that title back to the minted id, and `-s` is
+ *   never given an unresolved Baiton id (opencode exits 1 with "Session not
+ *   found" on one, which is what broke every execute retry).
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -98,20 +100,36 @@ describe('OpencodeAdapter probe shape (Req 14.2, 14.3, 14.4)', () => {
 describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('fresh launch leads with run, has no -s/-c, and drops req.sessionId (Req 3.1)', () => {
+  it('fresh launch leads with run, has no -s/-c, and carries req.sessionId as --title (Req 3.1)', () => {
     const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
     assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
     assert.strictEqual(spec.shellArgs[0], 'run');
     assert.ok(!spec.shellArgs.includes('-s'));
     assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('session-xyz'));
     assert.ok(!spec.shellArgs.includes('--session-id'));
+    assert.ok(findPair(spec.shellArgs, '--title', 'session-xyz') >= 0);
+    assert.strictEqual(spec.shellArgs.filter((a) => a === '--title').length, 1);
   });
 
-  it('resume with a prior Session_Id leads run -s <id> (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 3), ['run', '-s', 'prior-session']);
+  it('fresh launch with an empty sessionId emits no --title', () => {
+    const spec = adapter.launch(req({ resume: false, sessionId: '' }));
+    assert.ok(!spec.shellArgs.includes('--title'));
+  });
+
+  it('resume with a resolved opencode id leads run -s <id> and no --title (Req 3.2)', () => {
+    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'ses_prior' }));
+    assert.deepStrictEqual(spec.shellArgs.slice(0, 3), ['run', '-s', 'ses_prior']);
     assert.ok(!spec.shellArgs.includes('-c'));
+    assert.ok(!spec.shellArgs.includes('--title'));
+  });
+
+  it('resume with an unresolved Baiton Session_Id falls back to run -c, never -s', () => {
+    const spec = adapter.launch(
+      req({ resume: true, resumeSessionId: 'd7dbb6f8-9168-4620-9e59-ddaa5bb15bd4' }),
+    );
+    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['run', '-c']);
+    assert.ok(!spec.shellArgs.includes('-s'));
+    assert.ok(!spec.shellArgs.includes('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
   });
 
   it('resume with no prior Session_Id falls back to run -c (Req 3.2, 13.2)', () => {
@@ -129,7 +147,8 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
   it('keeps the fresh and no-session-id-resume branches otherwise identical', () => {
     const fresh = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
     const resumed = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.deepStrictEqual(fresh.shellArgs.slice(1), resumed.shellArgs.slice(2));
+    // fresh: run --title <id> ...; resumed: run -c ...
+    assert.deepStrictEqual(fresh.shellArgs.slice(3), resumed.shellArgs.slice(2));
   });
 
   it('passes the model through verbatim and appends --variant only when effort is set', () => {
@@ -154,17 +173,10 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
 describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('builds run -s <id> --agent <baiton agent> -i with no prompt, model, or run id', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+  it('builds run -s <id> --agent baiton-<role> -i with no prompt, model, or run id', () => {
+    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'ses_42' });
 
-    assert.deepStrictEqual(spec.shellArgs, [
-      'run',
-      '-s',
-      'session-42',
-      '--agent',
-      OPENCODE_EXECUTOR_AGENT,
-      '-i',
-    ]);
+    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'ses_42', '--agent', 'baiton-executor', '-i']);
     assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
 
     assert.strictEqual(spec.shellArgs.length, 6);
@@ -174,59 +186,83 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
     assert.ok(!spec.shellArgs.includes('--add-dir'));
   });
 
-  it('uses the read-only agent for a read-only role', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--agent', OPENCODE_READONLY_AGENT) >= 0);
+  it('uses the role-specific Baiton agent for a read-only role', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'ses_1' });
+    assert.ok(findPair(spec.shellArgs, '--agent', 'baiton-planner') >= 0);
+  });
+
+  it('degrades an unresolved Baiton Session_Id to -c rather than emitting -s', () => {
+    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    assert.deepStrictEqual(spec.shellArgs, ['run', '-c', '--agent', 'baiton-executor', '-i']);
   });
 });
 
-/** The `--agent` name a role is expected to launch under. */
-function expectedAgent(role: (typeof ROLES)[number]): string {
-  if (role === 'executor') {
-    return OPENCODE_EXECUTOR_AGENT;
-  }
-  return isReadOnlyRole(role) ? OPENCODE_READONLY_AGENT : OPENCODE_REVIEWER_AGENT;
-}
+describe('OpencodeAdapter resolveSessionId() (Baiton Session_Id -> opencode ses_ id)', () => {
+  const rows = [
+    { id: 'ses_aaa', title: 'Reading and executing brief.md instructions' },
+    { id: 'ses_bbb', title: 'd7dbb6f8-9168-4620-9e59-ddaa5bb15bd4' },
+  ];
 
-/** The `--agent <name>` value carried by a spec, or undefined when absent. */
-function agentArg(args: string[]): string | undefined {
-  const i = args.indexOf('--agent');
-  return i >= 0 ? args[i + 1] : undefined;
-}
+  it('recognises opencode ids by their ses_ prefix', () => {
+    assert.ok(isOpencodeSessionId('ses_f5fb5e0c5ffezf0xx6jW6VMFSr'));
+    assert.ok(!isOpencodeSessionId('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
+    assert.ok(!isOpencodeSessionId(undefined));
+    assert.ok(!isOpencodeSessionId(''));
+  });
 
-/** Parse a spec's `OPENCODE_CONFIG_CONTENT` and return the named agent's definition. */
-function agentDefinition(spec: { shellArgs: string[]; env?: Record<string, string> }): {
-  description?: unknown;
-  mode?: unknown;
-  permission?: { edit?: unknown; bash?: unknown };
-} {
-  const raw = spec.env?.[OPENCODE_CONFIG_ENV_VAR];
-  assert.strictEqual(typeof raw, 'string', `expected ${OPENCODE_CONFIG_ENV_VAR} in the launch env`);
-  assert.ok((raw as string).length > 0, `${OPENCODE_CONFIG_ENV_VAR} must be non-empty`);
+  it('maps a Baiton Session_Id to the id of the session titled with it, listing in the given cwd', async () => {
+    const seen: string[] = [];
+    const adapter = new OpencodeAdapter(async (cwd) => {
+      seen.push(cwd);
+      return rows;
+    });
+    const id = await adapter.resolveSessionId('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4', '/ws');
+    assert.strictEqual(id, 'ses_bbb');
+    assert.deepStrictEqual(seen, ['/ws']);
+  });
 
-  const parsed = JSON.parse(raw as string) as { agent?: Record<string, never> };
-  const name = agentArg(spec.shellArgs);
-  assert.strictEqual(typeof name, 'string', '--agent must be present');
-  assert.ok(parsed.agent !== undefined, 'the config must define an `agent` map');
-  const def = parsed.agent[name as string];
-  assert.ok(def !== undefined, `the config must define the agent named by --agent (${String(name)})`);
-  return def;
-}
+  it('resolves undefined when no session carries the id', async () => {
+    const adapter = new OpencodeAdapter(async () => rows);
+    assert.strictEqual(await adapter.resolveSessionId('unknown-id', '/ws'), undefined);
+  });
 
-describe('OpencodeAdapter role -> Baiton agent mapping', () => {
+  it('returns an opencode id unchanged without listing', async () => {
+    const adapter = new OpencodeAdapter(async () => {
+      throw new Error('must not list');
+    });
+    assert.strictEqual(await adapter.resolveSessionId('ses_zzz', '/ws'), 'ses_zzz');
+  });
+
+  it('resolves undefined instead of throwing when the listing fails', async () => {
+    const adapter = new OpencodeAdapter(async () => {
+      throw new Error('opencode not found');
+    });
+    assert.strictEqual(await adapter.resolveSessionId('some-id', '/ws'), undefined);
+  });
+});
+
+describe('OpencodeAdapter role -> --agent baiton-<role> mapping (Decision 4)', () => {
   const adapter = new OpencodeAdapter();
 
-  it('pins the Baiton-owned agent names', () => {
-    assert.strictEqual(OPENCODE_READONLY_AGENT, 'baiton-readonly');
-    assert.strictEqual(OPENCODE_REVIEWER_AGENT, 'baiton-reviewer');
-    assert.strictEqual(OPENCODE_EXECUTOR_AGENT, 'baiton-executor');
-    assert.strictEqual(OPENCODE_CONFIG_ENV_VAR, 'OPENCODE_CONFIG_CONTENT');
+  // opencode's built-in `plan` agent is never used: `plan` is a NAME its
+  // SessionReminders keys on to inject an unconditional read-only reminder
+  // (v1.18.30 session/reminders.ts, `agent.name === "plan"`), which overrode
+  // the run-dir write grant and stopped the planner writing result.json. Every
+  // Baiton agent name is prefixed so it can never match that condition.
+  it('never names opencode built-in profiles', () => {
+    for (const role of ROLES) {
+      const flags = opencodeAgentFlags(role);
+      assert.strictEqual(flags[0], '--agent');
+      assert.notStrictEqual(flags[1], 'plan');
+      assert.notStrictEqual(flags[1], 'build');
+      assert.ok(flags[1].startsWith('baiton-'), `agent name must be Baiton-owned: ${flags[1]}`);
+    }
   });
 
   for (const role of ROLES) {
-    it(`maps role ${role} to the expected --agent name for launch and attach`, () => {
-      const expected = expectedAgent(role);
-      assert.strictEqual(opencodeAgentName(role), expected);
+    it(`maps role ${role} to --agent ${roleProfile(role).agentName} on launch and attach`, () => {
+      const expected = roleProfile(role).agentName;
+      assert.deepStrictEqual(opencodeAgentFlags(role), ['--agent', expected]);
 
       const launchSpec = adapter.launch(req({ role }));
       assert.ok(findPair(launchSpec.shellArgs, '--agent', expected) >= 0);
@@ -234,74 +270,120 @@ describe('OpencodeAdapter role -> Baiton agent mapping', () => {
 
       const attachSpec = adapter.attach({ role, runId: 'run-1', sessionId: 's-1' });
       assert.ok(findPair(attachSpec.shellArgs, '--agent', expected) >= 0);
+      assert.strictEqual(attachSpec.shellArgs.filter((a) => a === '--agent').length, 1);
     });
   }
 });
 
-// Requirement 15.1-15.4 is enforced for opencode through a Baiton-owned agent
-// definition supplied in OPENCODE_CONFIG_CONTENT, not through CLI flags. This
-// block pins that document's shape: it must define the very agent `--agent`
-// selects, scope edits to the request's own run directory for every role but
-// the executor, and deny bash to the read-only roles.
-describe('OpencodeAdapter OPENCODE_CONFIG_CONTENT permission grant (Req 15.1-15.4)', () => {
+/** Parse the single custom agent out of a spec's `OPENCODE_CONFIG_CONTENT`. */
+function agentDefinition(
+  env: Record<string, string> | undefined,
+  agentName: string,
+): OpencodeAgentDefinition {
+  assert.ok(env !== undefined, 'expected an env on the LaunchSpec');
+  const parsed = JSON.parse((env as Record<string, string>)[OPENCODE_CONFIG_ENV]) as {
+    agent: Record<string, OpencodeAgentDefinition>;
+  };
+  assert.deepStrictEqual(
+    Object.keys(parsed.agent),
+    [agentName],
+    'exactly one agent must be defined, keyed by the profile agent name',
+  );
+  return parsed.agent[agentName];
+}
+
+describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 15.1-15.4)', () => {
   const adapter = new OpencodeAdapter();
-  const RUN_ID = 'run-777';
 
   for (const role of ROLES) {
-    for (const how of ['launch', 'attach'] as const) {
-      it(`${how} emits a parseable config defining the ${role} agent`, () => {
-        const spec =
-          how === 'launch'
-            ? adapter.launch(req({ role, runId: RUN_ID }))
-            : adapter.attach({ role, runId: RUN_ID, sessionId: 's-1' });
+    it(`launch() for role ${role} defines one agent carrying the profile prompt and description`, () => {
+      const profile = roleProfile(role);
+      const spec = adapter.launch(req({ role, runId: 'run-777' }));
 
-        const def = agentDefinition(spec);
-        assert.strictEqual(def.mode, 'primary');
-        assert.strictEqual(typeof def.description, 'string');
-        assert.ok((def.description as string).length > 0);
+      assert.ok(spec.env !== undefined);
+      assert.deepStrictEqual(Object.keys(spec.env as Record<string, string>), [OPENCODE_CONFIG_ENV]);
 
-        const permission = def.permission ?? {};
-        if (role === 'executor') {
-          // The executor edits the worktree freely: no deny rule at all.
-          assert.strictEqual(permission.edit, 'allow');
-          assert.ok(
-            !JSON.stringify(permission.edit).includes('deny'),
-            `the executor must carry no edit deny rule: ${JSON.stringify(permission.edit)}`,
-          );
-          assert.strictEqual(permission.bash, 'allow');
-        } else {
-          assert.deepStrictEqual(permission.edit, {
-            '*': 'deny',
-            [`.baiton/runs/${RUN_ID}/**`]: 'allow',
-          });
-          assert.strictEqual(permission.bash, role === 'reviewer' ? 'allow' : 'deny');
-        }
-      });
-    }
+      const agent = agentDefinition(spec.env, profile.agentName);
+      assert.strictEqual(agent.prompt, profile.systemPrompt);
+      assert.strictEqual(agent.description, profile.description);
+      assert.strictEqual(agent.mode, 'primary');
+    });
+
+    it(`launch() for role ${role} translates the profile's edit and bash rules`, () => {
+      const profile = roleProfile(role);
+      const spec = adapter.launch(req({ role, runId: 'run-777' }));
+      const agent = agentDefinition(spec.env, profile.agentName);
+
+      if (profile.write === 'workspace') {
+        assert.deepStrictEqual(agent.permission.edit, { '*': 'allow' });
+      } else {
+        // Deny everything, then re-allow the run dir; the more specific glob wins.
+        assert.deepStrictEqual(agent.permission.edit, {
+          '*': 'deny',
+          '.baiton/runs/run-777/*': 'allow',
+        });
+      }
+
+      if (profile.shell) {
+        // No bash block at all: opencode's own default (allow) applies.
+        assert.strictEqual(agent.permission.bash, undefined, `role ${role} must not pin bash`);
+      } else {
+        assert.deepStrictEqual(agent.permission.bash, { '*': 'deny' });
+      }
+    });
   }
 
-  it('scopes the write grant to the request run id, not a fixed one', () => {
-    const spec = adapter.launch(req({ role: 'planner', runId: 'another-run' }));
-    const edit = agentDefinition(spec).permission?.edit as Record<string, string>;
-    assert.deepStrictEqual(edit, { '*': 'deny', '.baiton/runs/another-run/**': 'allow' });
+  it('attach() emits exactly the same config as launch() for the same role and run', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 's-1' });
+    assert.deepStrictEqual(spec.env, adapter.launch(req({ role: 'planner', runId: 'run-777' })).env);
   });
 
-  it('opencodeConfigContent is JSON and matches what launch() emits', () => {
-    const request = req({ role: 'reviewer', runId: RUN_ID });
-    const spec = adapter.launch(request);
-    const direct = opencodeConfigContent('reviewer', RUN_ID);
+  it('uses a workspace-relative run-dir pattern containing the run id verbatim', () => {
+    const agent = agentDefinition(opencodeConfigEnv('planner', 'run-abc'), 'baiton-planner');
+    const pattern = Object.keys(agent.permission.edit).filter((k) => k !== '*')[0];
+    assert.ok(!pattern.startsWith('/'), `expected a relative pattern, got ${pattern}`);
+    assert.ok(pattern.includes('run-abc'));
+    assert.strictEqual(pattern, '.baiton/runs/run-abc/*');
+  });
 
-    assert.strictEqual(spec.env?.[OPENCODE_CONFIG_ENV_VAR], direct);
-    assert.deepStrictEqual(JSON.parse(direct), JSON.parse(spec.env?.[OPENCODE_CONFIG_ENV_VAR] as string));
+  it('pins the env var name and the full config shape for the planner', () => {
+    assert.strictEqual(OPENCODE_CONFIG_ENV, 'OPENCODE_CONFIG_CONTENT');
+    assert.deepStrictEqual(JSON.parse(opencodeConfigEnv('planner', 'r1')[OPENCODE_CONFIG_ENV]), {
+      agent: {
+        'baiton-planner': {
+          description: roleProfile('planner').description,
+          mode: 'primary',
+          prompt: roleProfile('planner').systemPrompt,
+          permission: {
+            edit: { '*': 'deny', '.baiton/runs/r1/*': 'allow' },
+            bash: { '*': 'deny' },
+          },
+        },
+      },
+    });
+  });
+
+  it('is pure: same inputs deep-equal, different run ids differ', () => {
+    assert.deepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-1'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-2'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('executor', 'run-1'));
   });
 });
 
-// opencode has no `--add-dir` flag and no claude-style allow-list flags: the
-// per-role grant travels entirely in OPENCODE_CONFIG_CONTENT (asserted above).
-// This block keeps the flag surface honest.
-describe('OpencodeAdapter omits claude-only permission flags', () => {
+// The per-role policy reaches opencode through the environment (see the block
+// above), never through claude's command-line permission flags. This block
+// asserts that the argv stays free of those flags and of `--auto`, which would
+// auto-approve everything rather than scope to the run dir.
+describe('OpencodeAdapter documented degrades (no claude permission flags, no --auto)', () => {
   const adapter = new OpencodeAdapter();
-  const forbidden = ['--add-dir', '.baiton/runs/run-777/', '--allowedTools', '--permission-mode', '--auto'];
+  const forbidden = [
+    '--add-dir',
+    '.baiton/runs/run-777/',
+    '--allowedTools',
+    '--permission-mode',
+    '--append-system-prompt',
+    '--auto',
+  ];
 
   for (const role of ROLES) {
     it(`omits claude-only permission flags for role ${role} on launch`, () => {

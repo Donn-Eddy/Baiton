@@ -1,10 +1,12 @@
 /**
- * The adapter boundary, the shared permission helpers, and the four per-CLI
+ * The adapter boundary, the Baiton role profiles, the shared permission
+ * helpers, and the four per-CLI
  * adapters (claude, opencode, antigravity/agy, codex), plus the agent-id
  * keyed registry. An adapter owns only launch args, the probe and the
  * continue flag — nothing else (Requirement 14.1).
  */
 export * from './adapter';
+export * from './roleProfile';
 export * from './permissions';
 export * from './claude';
 export * from './opencode';
@@ -93,7 +95,7 @@ export function agentCapabilities(): Record<AgentId, AgentCapabilities> {
       modelLink: OPENCODE_MODEL_DOC_URL,
     },
     antigravity: {
-      models: [...ANTIGRAVITY_MODELS],
+      models: Object.keys(ANTIGRAVITY_MODELS),
       efforts: [...ANTIGRAVITY_EFFORTS],
     },
     codex: {

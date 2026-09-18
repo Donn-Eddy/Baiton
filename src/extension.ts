@@ -7,6 +7,7 @@ import {
   engineVersionAtLeast,
   unsupportedEngineMessage,
   resolveWorkspace,
+  canonicalizeRoot,
   resolveAgentExecutables,
   type WorkspaceContext,
   type WorkspaceFolder,
@@ -15,7 +16,7 @@ import {
   type AgentExecutables,
 } from './activation';
 import { isErr } from './model/result';
-import { loadConfig } from './config';
+import { loadConfig, refreshGitignore } from './config';
 import type { Config } from './config';
 import { createGitService } from './git';
 import type { GitService } from './git';
@@ -234,6 +235,18 @@ async function completeActivation(
     await runCrashRecovery(workspace, surface);
   }
 
+  // Keep `.baiton/.gitignore` current with the canonical exclusion list so a
+  // workspace initialized by an older build does not start tracking newer
+  // Baiton-owned artifacts (e.g. per-session chat transcripts). Skipped under
+  // Restricted Mode, which forbids workspace writes (Req 22.1).
+  if (!workspace.restricted) {
+    try {
+      await refreshGitignore(workspace.baitonDir.fsPath);
+    } catch (e) {
+      surface.warn(`Baiton could not refresh .baiton/.gitignore: ${describe(e)}.`);
+    }
+  }
+
   const state: ActivationState = { workspace, config, executables };
   activationState = state;
 
@@ -278,13 +291,23 @@ export function deactivate(): void {
  * `.baiton/` directory (the multi-root disambiguator, Req 22.4). The presence
  * check is a synchronous filesystem probe on the host, which is where the
  * `extensionKind: "workspace"` extension runs (Req 22.6).
+ *
+ * This is Baiton's single ingress for the workspace path, so it is also where
+ * the root is canonicalized ({@link canonicalizeRoot}): file-scheme uris are
+ * replaced by their symlink-resolved spelling before the `.baiton/` probe, so
+ * `WorkspaceContext.root`, `baitonDir`, and every downstream path agree with
+ * the cwd a launched CLI will realpath for itself. Non-file schemes pass
+ * through untouched.
  */
 function readWorkspaceFolders(): WorkspaceFolder<vscode.Uri>[] {
   const folders = vscode.workspace.workspaceFolders ?? [];
-  return folders.map((folder) => ({
-    uri: folder.uri,
-    hasBaitonDir: hasBaitonDir(folder.uri),
-  }));
+  return folders.map((folder) => {
+    const uri =
+      folder.uri.scheme === 'file'
+        ? vscode.Uri.file(canonicalizeRoot(folder.uri.fsPath))
+        : folder.uri;
+    return { uri, hasBaitonDir: hasBaitonDir(uri) };
+  });
 }
 
 /** Whether `<folder>/.baiton` exists and is a directory. */

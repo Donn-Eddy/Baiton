@@ -34,6 +34,19 @@ export interface AgentCapabilities {
   readonly modelLink?: string;
 }
 
+/**
+ * Thrown by an adapter's `launch()` when the request cannot be expressed in
+ * the CLI's argv at all (for example a model/effort pair the CLI is known to
+ * reject). The launcher turns it into a `launch-args` refusal before any
+ * terminal is created; the `message` is user-facing and must say what to fix.
+ */
+export class AdapterLaunchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdapterLaunchError';
+  }
+}
+
 export interface Adapter {
   /** Stable adapter identifier. */
   readonly id: AgentId;
@@ -42,12 +55,15 @@ export interface Adapter {
    * Whether the CLI honours Baiton's pre-assigned session id on a fresh
    * launch, so a journal `sessionId` can be resumed.
    *
-   * Only claude accepts one (`--session-id <uuid>`). codex, opencode and
-   * antigravity mint their own id and ignore the one Baiton generated, so the
-   * `sessionId` their journal start records carry names no session that CLI
-   * knows: resuming with it fails (`codex resume <uuid>` exits 1 with "No
-   * saved session found"). The engine facade therefore launches those agents
-   * fresh unless a real id was recovered by {@link Adapter.discoverSessionId}.
+   * claude accepts one directly (`--session-id <uuid>`). opencode cannot
+   * pre-assign an id but tags the session with Baiton's, and
+   * {@link Adapter.resolveSessionId} maps it back before a resume, so its
+   * journal `sessionId` counts as resumable too. codex and antigravity mint
+   * their own id and ignore the one Baiton generated, so the `sessionId` their
+   * journal start records carry names no session that CLI knows: resuming with
+   * it fails (`codex resume <uuid>` exits 1 with "No saved session found"). The
+   * engine facade therefore launches those agents fresh unless a real id was
+   * recovered by {@link Adapter.discoverSessionId}.
    */
   readonly acceptsSessionId: boolean;
 
@@ -62,7 +78,9 @@ export interface Adapter {
   /**
    * Build the launch arguments for one stage. Pure: it computes `shellPath`,
    * `shellArgs` and an optional `env` from the request and does not touch the
-   * filesystem, terminal or journal.
+   * filesystem, terminal or journal. Throws {@link AdapterLaunchError} when
+   * the request cannot be expressed in the CLI's argv; any other throw is a
+   * bug.
    */
   launch(req: LaunchRequest): LaunchSpec;
 
@@ -86,6 +104,18 @@ export interface Adapter {
    * resolves `undefined`, which simply means "no resumable session known".
    */
   discoverSessionId?(input: DiscoverSessionInput): Promise<string | undefined>;
+
+  /**
+   * Map a Baiton Session_Id (the UUID the Run_Queue mints and journals) to the
+   * identifier the CLI itself needs on resume/attach. Only adapters whose CLI
+   * mints its own session ids and offers no way to pre-assign one implement
+   * this; for them `launch()` tags the fresh session with the Baiton id, and
+   * this method looks the CLI's id back up before a `launch({resume: true})`
+   * or `attach()`. Resolves `undefined` when no session carries that tag (the
+   * caller then resumes without a specific id and the adapter falls back to
+   * its "most recent session" flag). Must never throw.
+   */
+  resolveSessionId?(sessionId: string, cwd: string): Promise<string | undefined>;
 }
 
 /** What an adapter needs to locate the session a specific run created. */
