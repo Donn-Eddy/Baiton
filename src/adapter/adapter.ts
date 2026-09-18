@@ -21,6 +21,20 @@ export const AGENT_BINARY: Record<AgentId, string> = {
 };
 
 /**
+ * Capability descriptor for an agent CLI in the configuration panel (T10).
+ *
+ * An empty list means free text (no dropdown, no membership check).
+ * A non-empty list means an enumerated set rendered as a dropdown plus an
+ * always-present "Other…" free-text entry.
+ * `modelLink` is an optional documentation URL rendered next to a free-text model field.
+ */
+export interface AgentCapabilities {
+  readonly models: readonly string[];
+  readonly efforts: readonly string[];
+  readonly modelLink?: string;
+}
+
+/**
  * Thrown by an adapter's `launch()` when the request cannot be expressed in
  * the CLI's argv at all (for example a model/effort pair the CLI is known to
  * reject). The launcher turns it into a `launch-args` refusal before any
@@ -36,6 +50,22 @@ export class AdapterLaunchError extends Error {
 export interface Adapter {
   /** Stable adapter identifier. */
   readonly id: AgentId;
+
+  /**
+   * Whether the CLI honours Baiton's pre-assigned session id on a fresh
+   * launch, so a journal `sessionId` can be resumed.
+   *
+   * claude accepts one directly (`--session-id <uuid>`). opencode cannot
+   * pre-assign an id but tags the session with Baiton's, and
+   * {@link Adapter.resolveSessionId} maps it back before a resume, so its
+   * journal `sessionId` counts as resumable too. codex and antigravity mint
+   * their own id and ignore the one Baiton generated, so the `sessionId` their
+   * journal start records carry names no session that CLI knows: resuming with
+   * it fails (`codex resume <uuid>` exits 1 with "No saved session found"). The
+   * engine facade therefore launches those agents fresh unless a real id was
+   * recovered by {@link Adapter.discoverSessionId}.
+   */
+  readonly acceptsSessionId: boolean;
 
   /**
    * Check that the underlying CLI is present and usable. Runs before every
@@ -63,6 +93,19 @@ export interface Adapter {
   attach(req: { role: Role; runId: string; sessionId: string }): LaunchSpec;
 
   /**
+   * Best-effort recovery of the session id the CLI actually minted for a run,
+   * for adapters whose `acceptsSessionId` is false. Called by the run queue
+   * once a run has settled (whatever its outcome), and the id it returns is
+   * journaled as the run's `discoveredSessionId` so a later Execute can resume
+   * that session.
+   *
+   * Implementations read the CLI's own session storage and must never throw:
+   * any failure — missing directory, unreadable file, malformed content —
+   * resolves `undefined`, which simply means "no resumable session known".
+   */
+  discoverSessionId?(input: DiscoverSessionInput): Promise<string | undefined>;
+
+  /**
    * Map a Baiton Session_Id (the UUID the Run_Queue mints and journals) to the
    * identifier the CLI itself needs on resume/attach. Only adapters whose CLI
    * mints its own session ids and offers no way to pre-assign one implement
@@ -73,6 +116,16 @@ export interface Adapter {
    * its "most recent session" flag). Must never throw.
    */
   resolveSessionId?(sessionId: string, cwd: string): Promise<string | undefined>;
+}
+
+/** What an adapter needs to locate the session a specific run created. */
+export interface DiscoverSessionInput {
+  /** The run id; its brief path appears in the session's first user turn. */
+  runId: string;
+  /** Absolute workspace root the CLI ran in; the session's recorded `cwd`. */
+  workspaceRoot: string;
+  /** Epoch milliseconds when the run was launched; bounds the search. */
+  launchedAt: number;
 }
 
 /** The result of an adapter probe (Requirements 14.3, 14.4). */

@@ -64,6 +64,7 @@ function updateOverviewTool(services: ToolServices): Tool {
     name: 'update_overview',
     description: "Rewrite a spec's OVERVIEW section, leaving frontmatter and todos untouched.",
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' }, text: { type: 'string' } },
@@ -103,6 +104,7 @@ function addTodoTool(services: ToolServices): Tool {
     name: 'add_todo',
     description: 'Append a new pending todo line to a spec with an id, title and optional hints.',
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: {
@@ -156,6 +158,7 @@ function editTodoTool(services: ToolServices): Tool {
     name: 'edit_todo',
     description: "Rewrite a todo's title and hints, preserving its state; refuses protected states.",
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: {
@@ -214,6 +217,7 @@ function removeTodoTool(services: ToolServices): Tool {
     name: 'remove_todo',
     description: 'Delete a todo line from a spec; refuses when the todo is in a protected state.',
     mutating: true,
+    phases: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' }, id: { type: 'string' } },

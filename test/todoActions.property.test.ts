@@ -20,29 +20,52 @@ const TRANSITION_ACTIONS: readonly TransitionAction[] = [
 
 const RUNNING_STATES: readonly TodoState[] = ['planning', 'executing', 'reviewing'];
 
+/** The states from which a plan on file can be opened (`planned` and later). */
+const PLANNED_OR_LATER: readonly TodoState[] = [
+  'planned',
+  'executing',
+  'executed',
+  'reviewing',
+  'done',
+  'failed',
+];
+
 describe('todoActions (property)', () => {
-  it('legalActions equals isLegalTransition set plus view iff running or has session', () => {
+  it('legalActions equals isLegalTransition set plus view/viewPlan on their own facts', () => {
     fc.assert(
       fc.property(
         fc.constantFrom(...TODO_STATES),
         fc.boolean(),
-        (state, hasSession) => {
-          const actions = legalActions(state, hasSession);
+        fc.boolean(),
+        (state, hasSession, hasPlan) => {
+          const actions = legalActions(state, hasSession, hasPlan);
 
           const expectedTransitionActions = TRANSITION_ACTIONS.filter((a) =>
             isLegalTransition(state, a),
           );
           const expectedView = RUNNING_STATES.includes(state) || hasSession;
+          // View plan needs both a plan on file and a state at `planned` or
+          // later; neither fact alone offers it.
+          const expectedViewPlan = hasPlan && PLANNED_OR_LATER.includes(state);
 
           const actualTransitionActions = actions.filter(
-            (a): a is TransitionAction => a !== 'view',
+            (a): a is TransitionAction => a !== 'view' && a !== 'viewPlan',
           );
           assert.deepStrictEqual(actualTransitionActions, expectedTransitionActions);
           assert.strictEqual(actions.includes('view'), expectedView);
+          assert.strictEqual(actions.includes('viewPlan'), expectedViewPlan);
 
           // No duplicates and deterministic ordering: plan, execute, review,
-          // replan, stop, view.
-          const order: TodoAction[] = ['plan', 'execute', 'review', 'replan', 'stop', 'view'];
+          // replan, stop, view, viewPlan.
+          const order: TodoAction[] = [
+            'plan',
+            'execute',
+            'review',
+            'replan',
+            'stop',
+            'view',
+            'viewPlan',
+          ];
           const orderedIndices = actions.map((a) => order.indexOf(a));
           const sorted = [...orderedIndices].sort((a, b) => a - b);
           assert.deepStrictEqual(orderedIndices, sorted);
@@ -61,14 +84,16 @@ describe('todoActions (property)', () => {
       'replan',
       'stop',
       'view',
+      'viewPlan',
     ];
 
     fc.assert(
       fc.property(
         fc.constantFrom(...TODO_STATES),
         fc.boolean(),
-        (state, hasSession) => {
-          const actions = legalActions(state, hasSession);
+        fc.boolean(),
+        (state, hasSession, hasPlan) => {
+          const actions = legalActions(state, hasSession, hasPlan);
           const contextValue = todoContextValue(actions);
 
           // Begins with the fixed prefix.

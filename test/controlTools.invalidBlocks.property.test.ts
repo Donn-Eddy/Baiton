@@ -20,7 +20,7 @@ import { Stage } from '../src/model/stage';
  * For any spec the validator reports invalid, the extension refuses to dispatch
  * ANY stage for that spec: the `run` control tool returns an error, surfaces the
  * validation problem, and never reaches the run queue — for every stage the
- * tool accepts (plan, plan-review, execute, review) and every todo (Req 4.9).
+ * tool accepts (plan, execute, review) and every todo (Req 4.9).
  * As a positive control, a clean spec free of every malformed construct and of
  * dependency cycles is allowed to dispatch.
  *
@@ -257,7 +257,7 @@ function writeSpec(repoRoot: string, slug: string, content: string): void {
 }
 
 /** Every stage the `run` tool accepts. */
-const STAGES: Stage[] = ['plan', 'plan-review', 'execute', 'review'];
+const STAGES: Stage[] = ['plan', 'execute', 'review'];
 
 describe('invalid specs block every stage (property, Task 11.8)', () => {
   const repos: string[] = [];
@@ -302,6 +302,7 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
             { slug, todo, stage },
             undefined,
             makeGuard(repo),
+            'drive',
           );
 
           // The dispatch is refused with an error (Req 4.9)...
@@ -357,6 +358,7 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
             { slug, todo, stage },
             undefined,
             makeGuard(repo),
+            'drive',
           );
 
           // A valid spec reaches the queue and the dispatch succeeds.

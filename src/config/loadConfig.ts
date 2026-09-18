@@ -57,6 +57,15 @@ function toDir(baitonDir: DirLike): string {
 }
 
 /**
+ * The single place that spells the `config.json` filename: resolves a
+ * {@link DirLike} `.baiton/` directory to the absolute path of the config file
+ * it contains.
+ */
+export function configFilePath(baitonDir: DirLike): string {
+  return path.join(toDir(baitonDir), 'config.json');
+}
+
+/**
  * Loads and validates `<baitonDir>/config.json`, migrating and persisting an
  * older version first. Returns a validated {@link Config} or a
  * {@link ConfigError} describing why loading was refused. Never throws for an
@@ -66,7 +75,7 @@ function toDir(baitonDir: DirLike): string {
 export async function loadConfig(
   baitonDir: DirLike,
 ): Promise<Result<Config, ConfigError>> {
-  const configPath = path.join(toDir(baitonDir), 'config.json');
+  const configPath = configFilePath(baitonDir);
 
   // Read the file. A missing file is `absent`; any other read error is treated
   // as unparseable/unreadable (Req 2.7).
@@ -424,8 +433,12 @@ function describe(e: unknown): string {
  * Writes JSON to `filePath` by writing a sibling temp file and renaming it over
  * the target, so a partial write never leaves a corrupt or truncated config in
  * place (supports the "leave the original unchanged on failure" guarantee).
+ * Serializes with `JSON.stringify(value, null, 2) + '\n'`, matching
+ * {@link defaultConfigJson} exactly. Also the Config Panel's write path
+ * (`src/config/configDocument.ts`); its signature and behaviour must not
+ * change, since {@link migrateAndPersist} depends on both unchanged.
  */
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+export async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
   const dir = path.dirname(filePath);
   const tmp = path.join(dir, `.config.json.${process.pid}.${Date.now()}.tmp`);
   const text = JSON.stringify(value, null, 2) + '\n';

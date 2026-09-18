@@ -63,7 +63,7 @@ export function buildBrief(input: BriefInput): string {
     // 3. Stage JSON schema (second to last).
     `# Result schema\n\nThe result JSON must conform to this JSON Schema:\n\n\`\`\`json\n${schemaJson}\n\`\`\``,
     // 4. Write-and-stop instruction (last).
-    `# When you are done\n\nWrite the result file at the absolute path above, then stop. Do not take any further action after writing the result file.`,
+    `# When you are done\n\nYour work is not complete until the result file exists. Write it as JSON at the absolute path above — even if you have already described what you did in the terminal — then stop. Do not take any further action after writing the result file.`,
   ];
 
   return sections.join('\n\n') + '\n';

@@ -18,6 +18,8 @@
  *     `approve_spec` control tool (Req 5.3, 10.3).
  *   - `baiton.submitPr` / `baiton.showPr` — open a pull request for a spec, and
  *     re-open the URL a completed submit already recorded in its frontmatter.
+ *   - `baiton.viewPlan` — open a todo's persisted plan (`todos/<id>/plan.md`)
+ *     so the user can read it, and edit it before Execute.
  *   - `baiton.openChat` / `baiton.chat` — reveal and focus the Chat_View, whose
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
@@ -63,7 +65,7 @@ import type {
   SubmitPrError,
   TerminalHost,
 } from '../engine';
-import { latestStart, parseJournal } from '../journal';
+import { latestStart, parseJournal, resumableSessionId } from '../journal';
 import {
   GuardContext,
   OpenAiModelClient,
@@ -73,6 +75,7 @@ import {
 } from '../orchestrator';
 import type {
   ConfirmSeam,
+  OrchestratorPhase,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
@@ -91,6 +94,7 @@ import {
   createRunQueueSeam,
   dispatchTrigger,
   STAGE_ROLE,
+  type AdapterForRole,
   type EngineTrigger,
 } from './engineFacade';
 import { ChatController } from './chatController';
@@ -98,7 +102,9 @@ import type { OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
+import { planPath } from './specLister';
 import { setOrchestratorApiKey } from './setApiKey';
+import { revealConfigPanel } from './openConfigPanelView';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
@@ -118,15 +124,25 @@ export const COMMANDS = {
   approve: 'baiton.approve',
   submitPr: 'baiton.submitPr',
   showPr: 'baiton.showPr',
+  viewPlan: 'baiton.viewPlan',
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
+  openConfigPanel: 'baiton.openConfigPanel',
 } as const;
 
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
   workspace: WorkspaceContext<vscode.Uri>;
+  /**
+   * The live configuration. Replaced wholesale on config save; all reads must
+   * go through this object rather than a captured/destructured copy.
+   */
   config: Config;
+  /**
+   * The live agent executables resolution table. Replaced wholesale when
+   * role agents change on config save; all reads must go through this object.
+   */
   executables: AgentExecutables;
 }
 
@@ -137,6 +153,8 @@ export interface CommandActivation {
 export interface CommandSurface {
   /** All registrations, pushed onto `context.subscriptions`. */
   disposables: vscode.Disposable[];
+  /** Slugs with a stage currently in flight, for the in-flight note. */
+  runningSlugs(): readonly string[];
 }
 
 /**
@@ -153,7 +171,12 @@ export function registerCommands(
   surface: Surface,
 ): CommandSurface {
   const disposables: vscode.Disposable[] = [];
-  const { workspace, config } = activation;
+  const { workspace } = activation;
+  /**
+   * Accessor for the live configuration. The config object is replaced wholesale
+   * on save and must be re-read per call, never hoisted.
+   */
+  const cfg = (): Config => activation.config;
   const repoRoot = workspace.root.fsPath;
   const baitonDir = workspace.baitonDir.fsPath;
   const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
@@ -164,6 +187,10 @@ export function registerCommands(
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
   const adapters = createAdapterRegistry();
+  // One live role → adapter resolver, shared by the queue, the facade (which
+  // needs each role's `acceptsSessionId` to decide whether a journaled session
+  // is resumable), the View command and the spec-draft runner.
+  const adapterFor = (role: Role): Adapter | undefined => adapterForRole(cfg(), adapters, role);
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
@@ -191,8 +218,8 @@ export function registerCommands(
       watcherFactory,
       specStore,
       journalPath,
-      modelForRole: (role) => modelForRole(config, role),
-      adapterForRole: (role) => adapterForRole(config, adapters, role),
+      modelForRole: (role) => modelForRole(cfg(), role),
+      adapterForRole: adapterFor,
       report: (error) => surface.reportDispatchError(error),
       // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
       isExternallyBusy: () => specDraftRunner.isRunning(),
@@ -209,7 +236,7 @@ export function registerCommands(
     if (prInFlight.has(slug) || queueForSlug(slug).isRunning()) {
       return { ok: false, error: `spec "${slug}" already has a run in progress` };
     }
-    const selection = config.pr?.tool ?? DEFAULT_PR_TOOL;
+    const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
     if (!isPrToolSelection(selection)) {
       return { ok: false, error: `unsupported pr.tool "${selection}" in config.json; use "auto", "gh" or "glab"` };
     }
@@ -240,9 +267,9 @@ export function registerCommands(
         git,
         pr: createPrTool({ kind, executable, repoRoot }),
         remote,
-        verify: config.git.verify,
-        modelForRole: (role) => modelForRole(config, role),
-        adapterForRole: (role) => adapterForRole(config, adapters, role),
+        verify: cfg().git.verify,
+        modelForRole: (role) => modelForRole(cfg(), role),
+        adapterForRole: adapterFor,
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -266,6 +293,7 @@ export function registerCommands(
     git,
     queueForSlug,
     specsDir,
+    adapterFor,
     submitPrForSlug,
   );
   const specDraftRunner = createSpecDraftRunner({
@@ -274,8 +302,8 @@ export function registerCommands(
     terminalHost,
     watcherFactory,
     services: draftServices,
-    modelForRole: (role) => modelForRole(config, role),
-    adapterForRole: (role) => adapterForRole(config, adapters, role),
+    modelForRole: (role) => modelForRole(cfg(), role),
+    adapterForRole: adapterFor,
     isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
@@ -284,7 +312,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, submitPrForSlug),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -316,22 +344,34 @@ export function registerCommands(
     tools = assembled.value;
   }
 
+  // The orchestrator has two jobs, and each advertises its own tool surface
+  // (Req 11.1): gathering requirements for a new or draft spec, or driving an
+  // approved one. Validation above ran once over the whole registry, so these
+  // only select from the specs it already accepted; a rejected assembly leaves
+  // both phases empty. The controller picks one per send, and the registry
+  // refuses an out-of-phase call even if the model names it anyway.
+  const specsByName = new Map(tools.map((spec) => [spec.name, spec]));
+  const toolsByPhase = new Map<OrchestratorPhase, ToolSpec[]>([
+    ['gather', specsForPhase(registry, specsByName, 'gather')],
+    ['drive', specsForPhase(registry, specsByName, 'drive')],
+  ]);
+
   // `baiton.initialize` is registered separately (and unconditionally) so it
   // works before `.baiton/` exists; see {@link registerInitializeCommand}.
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueForSlug, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueForSlug, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, adapterFor, surface),
     registerViewCommand(
       activation,
       specsDir,
       repoRoot,
       queueForSlug,
-      (role) => adapterForRole(config, adapters, role),
+      adapterFor,
       terminalHost,
       surface,
     ),
@@ -368,6 +408,20 @@ export function registerCommands(
     ),
   );
 
+  // --- view plan ----------------------------------------------------------
+  // Opens the todo's persisted plan for reading or editing. Like Show PR it
+  // only opens something already on disk, so it is not gated on Restricted
+  // Mode or on a role executable.
+  disposables.push(
+    vscode.commands.registerCommand(
+      COMMANDS.viewPlan,
+      async (a?: TreeNode | string, b?: string) => {
+        const { slug, todoId } = todoArgs(a, b);
+        await runViewPlan(specsDir, surface, slug, todoId);
+      },
+    ),
+  );
+
   // --- chat: tool loop, webview and controller (Req 1.3, 9.1, 13, 18.3) ---
   // The Chat_View webview provider owns the browser context; the ChatController
   // binds it to the tool loop, per-conversation transcripts, and the reused
@@ -378,7 +432,7 @@ export function registerCommands(
     webview: chatWebview,
     client: modelClient,
     registry,
-    tools,
+    toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
     confirm,
     baitonDir,
@@ -474,7 +528,18 @@ export function registerCommands(
     ),
   );
 
-  return { disposables };
+  return {
+    disposables,
+    runningSlugs: () => {
+      const running = [...queues.entries()]
+        .filter(([, q]) => q.isRunning())
+        .map(([slug]) => slug);
+      if (specDraftRunner.isRunning()) {
+        running.push('(spec draft)');
+      }
+      return running;
+    },
+  };
 }
 
 /**
@@ -489,6 +554,25 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
   );
 }
 
+/**
+ * Folder-scoped hot-reload seam for the config panel command (T08).
+ * Closes over the panel's resolved baitonDir before calling the underlying ApplyConfig.
+ */
+export type FolderScopedApplyConfig = (
+  baitonDir: string,
+  config: Config,
+) => Promise<readonly string[]> | readonly string[];
+
+/**
+ * Register the `baiton.openConfigPanel` command ahead of the activation gate.
+ * Reveals and focuses the Configuration webview view in the Baiton container (T11).
+ */
+export function registerConfigPanelCommand(): vscode.Disposable {
+  return vscode.commands.registerCommand(COMMANDS.openConfigPanel, () =>
+    revealConfigPanel(),
+  );
+}
+
 // --- Initialize -----------------------------------------------------------
 
 /**
@@ -500,7 +584,7 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
  */
 async function runInitialize(surface: Surface): Promise<void> {
   const folders = vscode.workspace.workspaceFolders ?? [];
-  const root = resolveInitRoot(folders);
+  const root = resolveCommandRoot(folders);
   if (root === undefined) {
     surface.error(
       'Baiton: Initialize requires exactly one workspace folder (or one multi-root folder with a .baiton/ directory).',
@@ -530,7 +614,22 @@ async function runInitialize(surface: Surface): Promise<void> {
  * Initialize creates — and the message naming it — use the same spelling
  * activation will later resolve to. Same physical directory either way.
  */
-function resolveInitRoot(
+export function resolveBaitonDirForCommands(): string | undefined {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const root = resolveCommandRoot(folders);
+  if (root === undefined) {
+    return undefined;
+  }
+  return vscode.Uri.joinPath(root, '.baiton').fsPath;
+}
+
+/**
+ * Resolve the folder to initialize or configure: the single folder when there
+ * is exactly one, or the one multi-root folder that already contains a `.baiton/`
+ * when several are open (Req 22.3, 22.4). Returns `undefined` on zero folders or
+ * an ambiguous multi-root (Req 1.4, 22.5).
+ */
+export function resolveCommandRoot(
   folders: readonly vscode.WorkspaceFolder[],
 ): vscode.Uri | undefined {
   if (folders.length === 0) {
@@ -575,13 +674,14 @@ function registerStageCommand(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     commandId,
     (a?: TreeNode | string, b?: string) => {
       const { slug, todoId } = todoArgs(a, b);
-      return runStage(activation, specsDir, queueForSlug, surface, stage, slug, todoId);
+      return runStage(activation, specsDir, queueForSlug, adapterForRole, surface, stage, slug, todoId);
     },
   );
 }
@@ -593,6 +693,7 @@ function registerActionCommand(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
@@ -629,7 +730,7 @@ function registerActionCommand(
           todoId: target.todoId,
           action: 'stop',
         };
-        const result = await dispatchAndReport(queue, specsDir, trigger, surface);
+        const result = await dispatchAndReport(queue, specsDir, trigger, adapterForRole, surface);
         if (!result.ok && result.error.kind === 'illegal-transition') {
           // The queue's reporter already surfaced the generic transition-table
           // message; this friendlier wording is the one Req 2.3 asks for.
@@ -643,7 +744,7 @@ function registerActionCommand(
         todoId: target.todoId,
         action,
       };
-      await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, surface);
+      await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
     },
   );
 }
@@ -659,7 +760,7 @@ function registerViewCommand(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapterForRole: (role: Role) => Adapter | undefined,
+  adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): vscode.Disposable {
@@ -697,7 +798,7 @@ async function runView(
   specsDir: string,
   repoRoot: string,
   queueForSlug: QueueForSlug,
-  adapterForRole: (role: Role) => Adapter | undefined,
+  adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): Promise<void> {
@@ -709,7 +810,7 @@ async function runView(
 
   const journalPath = path.join(specsDir, slug, 'runs.jsonl');
   const entry = latestStart(parseJournal(journalPath), todoId);
-  if (entry?.sessionId === undefined) {
+  if (entry === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
     return;
   }
@@ -724,12 +825,20 @@ async function runView(
     return;
   }
 
+  // Which id can be attached to depends on the CLI: claude honoured the id
+  // Baiton pre-assigned, opencode tagged its own session with it (resolved
+  // below), while codex/antigravity minted their own — for those only an id
+  // discovered after the run can be reopened (Req 3.2).
+  let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
+  if (sessionId === undefined) {
+    surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
+    return;
+  }
   // CLIs that mint their own session ids (opencode) map the journaled Baiton
   // Session_Id to theirs first; when nothing carries that id the adapter
   // reopens its most recent session instead, and the user is told so.
-  let sessionId: string = entry.sessionId;
   if (adapter.resolveSessionId !== undefined) {
-    const resolved = await adapter.resolveSessionId(entry.sessionId, repoRoot);
+    const resolved = await adapter.resolveSessionId(sessionId, repoRoot);
     if (resolved === undefined) {
       surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${todoId}; opening its most recent session instead`);
     } else {
@@ -757,6 +866,7 @@ async function runStage(
   activation: CommandActivation,
   specsDir: string,
   queueForSlug: QueueForSlug,
+  adapterForRole: AdapterForRole,
   surface: Surface,
   stage: Stage,
   slugArg: string | undefined,
@@ -775,7 +885,7 @@ async function runStage(
     todoId: target.todoId,
     stage,
   };
-  await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, surface);
+  await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
 }
 
 /**
@@ -813,6 +923,7 @@ function ensureCanDispatch(activation: CommandActivation, surface: Surface, role
  * Restricted Mode because it writes nothing (Req 3.3–3.5).
  */
 function ensureExecutable(activation: CommandActivation, surface: Surface, role: Role): boolean {
+  // Reads through live activation object so role-agent changes and re-resolved executables take effect immediately.
   const agent = activation.config.roles[role].agent;
   const failure = activation.executables.errorFor(agent);
   if (failure !== undefined) {
@@ -831,9 +942,10 @@ async function dispatchAndReport(
   queue: RunQueue,
   specsDir: string,
   trigger: EngineTrigger,
+  adapterForRole: AdapterForRole,
   surface: Surface,
 ): Promise<DispatchResult> {
-  const result = await dispatchTrigger(queue, specsDir, trigger);
+  const result = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
   if (result.ok) {
     surface.log(
       `Baiton: ${describeTrigger(trigger)} → ${result.outcome.kind}`,
@@ -868,12 +980,35 @@ async function runApprove(
   }
   const ctx = guardContextFor(workspace);
   const callId = `approve-${slug}-${Date.now()}`;
-  const result = await registry.call('approve_spec', { slug }, callId, ctx);
+  // `approve_spec` belongs to both orchestrator phases; a spec approved from
+  // the UI is by definition still being gathered rather than driven (Req 11.1).
+  const result = await registry.call('approve_spec', { slug }, callId, ctx, 'gather');
   if (result.ok) {
     surface.info(`Baiton: approved spec "${slug}".`);
   } else {
     surface.warn(`Baiton: ${result.error}`);
   }
+}
+
+/**
+ * The validated {@link ToolSpec}s to advertise in one orchestrator phase
+ * (Req 11.1): the already-validated specs of the tools the registry lists for
+ * that phase, in registry order. Selecting from `validated` keeps description
+ * validation a single pass over the whole registry (Req 10.3–10.5).
+ */
+function specsForPhase(
+  registry: ToolRegistry,
+  validated: Map<string, ToolSpec>,
+  phase: OrchestratorPhase,
+): ToolSpec[] {
+  const specs: ToolSpec[] = [];
+  for (const tool of registry.definitionsFor(phase)) {
+    const spec = validated.get(tool.name);
+    if (spec !== undefined) {
+      specs.push(spec);
+    }
+  }
+  return specs;
 }
 
 // --- submit PR -------------------------------------------------------------
@@ -959,6 +1094,82 @@ async function runShowPr(
   void vscode.env.openExternal(vscode.Uri.parse(url));
 }
 
+// --- view plan -------------------------------------------------------------
+
+/**
+ * Open a todo's persisted plan (`todos/<id>/plan.md`) in an editor, from the
+ * tree's View plan inline action, the CodeLens, or the palette. The palette
+ * path picks a spec and then one of its planned todos. A todo with no plan on
+ * file is a warning, not an error: the user has simply not planned it yet.
+ *
+ * The plan is opened as an ordinary editable document on purpose — edits the
+ * user makes before Execute are picked up by the executor's brief, and land in
+ * the `executing` state commit (which stages the whole spec folder).
+ */
+async function runViewPlan(
+  specsDir: string,
+  surface: Surface,
+  slugArg: string | undefined,
+  todoArg: string | undefined,
+): Promise<void> {
+  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  if (slug === undefined) {
+    surface.warn('Baiton: no spec selected.');
+    return;
+  }
+  const todoId = todoArg ?? (await pickPlannedTodoId(specsDir, slug, surface));
+  if (todoId === undefined || todoId.trim().length === 0) {
+    surface.warn('Baiton: no todo selected.');
+    return;
+  }
+  const file = planPath(specsDir, slug, todoId);
+  if (!fs.existsSync(file)) {
+    surface.warn(
+      `Baiton: no plan on file for "${todoId}" in spec "${slug}"; run Plan first.`,
+    );
+    return;
+  }
+  try {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(doc);
+  } catch (e) {
+    surface.error(
+      `Baiton: could not open the plan for "${todoId}": ${e instanceof Error ? e.message : String(e)}.`,
+    );
+  }
+}
+
+/**
+ * Present the todos of a spec that have a plan on file, for the palette path of
+ * View plan. A spec with no planned todo warns and selects nothing.
+ */
+async function pickPlannedTodoId(
+  specsDir: string,
+  slug: string,
+  surface: Surface,
+): Promise<string | undefined> {
+  const ids = plannedTodoIds(specsDir, slug);
+  if (ids.length === 0) {
+    surface.warn(`Baiton: spec "${slug}" has no plan on file; run Plan first.`);
+    return undefined;
+  }
+  return vscode.window.showQuickPick(ids, { placeHolder: 'Select a todo' });
+}
+
+/** The ids, in directory order, of a spec's todos that have a `plan.md`. */
+function plannedTodoIds(specsDir: string, slug: string): string[] {
+  let entries: string[];
+  try {
+    entries = fs
+      .readdirSync(path.join(specsDir, slug, 'todos'), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  return entries.filter((id) => fs.existsSync(planPath(specsDir, slug, id))).sort();
+}
+
 /** Render a Submit PR halt for the user, including verify output. */
 function describeSubmitPrError(error: SubmitPrError): string {
   if (error.kind === 'verify-failed') {
@@ -978,6 +1189,7 @@ const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
   replan: { title: 'Re-plan', command: COMMANDS.replan },
   stop: { title: 'Stop', command: COMMANDS.stop },
   view: { title: 'View', command: COMMANDS.view },
+  viewPlan: { title: 'View plan', command: COMMANDS.viewPlan },
 };
 
 /**
@@ -1003,7 +1215,8 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
     for (const todo of spec.todos) {
       const line = document.lineAt(todo.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
-      for (const action of legalActions(todo.state, sessions.has(todo.id))) {
+      const hasPlan = fs.existsSync(planPath(this.specsDir, slug, todo.id));
+      for (const action of legalActions(todo.state, sessions.has(todo.id), hasPlan)) {
         const { title, command } = ACTION_LENS[action];
         lenses.push(lens(range, title, command, slug, todo.id));
       }
@@ -1111,6 +1324,7 @@ function buildToolServices(
   git: ReturnType<typeof createGitService>,
   queueForSlug: QueueForSlug,
   specsDir: string,
+  adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
 ): ToolServices {
   return {
@@ -1118,7 +1332,7 @@ function buildToolServices(
     baitonDir,
     git,
     confirm: buildConfirmSeam(),
-    runQueue: createRunQueueSeam(queueForSlug, specsDir),
+    runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),

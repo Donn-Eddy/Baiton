@@ -180,6 +180,7 @@ function makeRig(journalPath: string): Rig {
 
   const adapter = {
     id: 'claude' as const,
+    acceptsSessionId: true,
     probe: async () => ({ version: 'test', ok: true }),
     launch: () => ({ shellPath: 'claude', shellArgs: [] as string[] }),
     attach: () => ({ shellPath: 'claude', shellArgs: [] as string[] }),
@@ -214,6 +215,9 @@ function makeRig(journalPath: string): Rig {
   // write is the lifecycle-advance observable that only a completed run drives.
   const specStore: SpecStore = {
     currentState: async () => 'planned',
+    readSpec: async () => undefined,
+    readArtifact: async () => '# Plan T01\n',
+    latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,

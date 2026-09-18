@@ -213,7 +213,13 @@ describe('tree model (property)', () => {
         fc.pre(validateSpec(parsed, raw).length === 0);
 
         const nodes = buildSpecTree([
-          { slug: 'demo', raw, approved: false, sessions: new Set<string>() },
+          {
+            slug: 'demo',
+            raw,
+            approved: false,
+            sessions: new Set<string>(),
+            plans: new Set<string>(),
+          },
         ]);
         assert.strictEqual(nodes.length, 1);
         const node = nodes[0];
@@ -254,7 +260,13 @@ describe('tree model (property)', () => {
 
         const approved = specSpec.approved;
         const nodes = buildSpecTree([
-          { slug: 'demo', raw, approved, sessions: new Set<string>() },
+          {
+            slug: 'demo',
+            raw,
+            approved,
+            sessions: new Set<string>(),
+            plans: new Set<string>(),
+          },
         ]);
         const node = nodes[0];
 

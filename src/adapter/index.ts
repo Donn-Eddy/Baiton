@@ -14,13 +14,13 @@ export * from './antigravity';
 export * from './codex';
 
 import { AGENT_BINARY } from './adapter';
-import type { Adapter, AgentId } from './adapter';
+import type { Adapter, AgentCapabilities, AgentId } from './adapter';
 import { DEFAULT_PERMISSION_MODE } from './permissions';
 import type { PermissionMode } from './permissions';
-import { ClaudeAdapter } from './claude';
-import { OpencodeAdapter } from './opencode';
-import { AntigravityAdapter } from './antigravity';
-import { CodexAdapter } from './codex';
+import { ClaudeAdapter, CLAUDE_MODELS, CLAUDE_EFFORTS } from './claude';
+import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS, OPENCODE_MODEL_DOC_URL } from './opencode';
+import { AntigravityAdapter, ANTIGRAVITY_MODELS, ANTIGRAVITY_EFFORTS } from './antigravity';
+import { CodexAdapter, CODEX_MODELS, CODEX_EFFORTS } from './codex';
 
 /** Whether `value` is one of the known agent ids, derived from `AGENT_BINARY`'s keys. */
 export function isAgentId(value: string): value is AgentId {
@@ -69,5 +69,38 @@ export function createAdapterRegistry(mode: PermissionMode = DEFAULT_PERMISSION_
       return instances[agent];
     },
     ids,
+  };
+}
+
+/**
+ * Assembles the single source of truth for model and reasoning effort options across
+ * the extension and the config panel.
+ *
+ * For claude, antigravity, and codex, models and efforts are enumerated starting
+ * sets rendered as dropdowns with an always-present "Other…" escape.
+ * For opencode, both lists are empty (free text) with a link to model documentation.
+ *
+ * Returns a fresh object with newly copied arrays on every call, matching defaultConfig()'s
+ * factory convention so mutation or appending in a consumer does not leak across calls.
+ */
+export function agentCapabilities(): Record<AgentId, AgentCapabilities> {
+  return {
+    claude: {
+      models: [...CLAUDE_MODELS],
+      efforts: [...CLAUDE_EFFORTS],
+    },
+    opencode: {
+      models: [...OPENCODE_MODELS],
+      efforts: [...OPENCODE_EFFORTS],
+      modelLink: OPENCODE_MODEL_DOC_URL,
+    },
+    antigravity: {
+      models: Object.keys(ANTIGRAVITY_MODELS),
+      efforts: [...ANTIGRAVITY_EFFORTS],
+    },
+    codex: {
+      models: [...CODEX_MODELS],
+      efforts: [...CODEX_EFFORTS],
+    },
   };
 }

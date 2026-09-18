@@ -13,8 +13,13 @@
  * the executor continue flag are consistent across triggers:
  *   - plan → attempt 1 (a single plan artifact, `plan.md`).
  *   - execute → one past the count of prior execute starts for the todo, and
- *     `resume` is set when a prior execute start exists so the executor CLI
- *     continues its session across rounds (Req 13.2).
+ *     `resume` is set when a prior execute start exists *and* that start left a
+ *     session the executor's CLI can actually resume, so the executor CLI
+ *     continues its session across rounds (Req 13.2). Only claude honours
+ *     Baiton's pre-assigned session id (`Adapter.acceptsSessionId`); codex,
+ *     opencode and antigravity mint their own, so for them a resume is only
+ *     offered once a real id has been discovered and journaled — otherwise the
+ *     attempt launches fresh, carrying the latest review in its retry brief.
  *   - review → one past the count of prior review starts for the todo.
  *   - replan / stop → control actions with no stage; attempt is unused.
  *
@@ -30,7 +35,16 @@ import type {
   TransitionAction,
 } from '../engine';
 import type { RunDispatchOutcome, RunDispatchRequest, RunQueueSeam } from '../orchestrator';
-import { latestStart, parseJournal, JournalEntry } from '../journal';
+import type { Adapter } from '../adapter';
+import { latestStart, parseJournal, resumableSessionId, JournalEntry } from '../journal';
+
+/**
+ * Resolves the adapter a role's configured agent maps to — the same lookup the
+ * run queue uses (`RunQueueDeps.adapterForRole`). The facade needs it to know
+ * whether a journaled session id is resumable at all; `undefined` (an
+ * unsupported agent id) is left for the queue to refuse with `unknown-agent`.
+ */
+export type AdapterForRole = (role: Role) => Adapter | undefined;
 
 /** A trigger the facade can dispatch: a stage run or a control action. */
 export type EngineTrigger =
@@ -80,6 +94,7 @@ export function dispatchTrigger(
   queue: RunQueue,
   specsDir: string,
   trigger: EngineTrigger,
+  adapterForRole: AdapterForRole,
 ): Promise<DispatchResult> {
   if (trigger.kind === 'action') {
     // Control actions launch no sub-agent; role/attempt/resume are unused.
@@ -110,21 +125,38 @@ export function dispatchTrigger(
   const entries = parseJournal(journalPath);
   const priorStarts = countStageStarts(entries, trigger.todoId, trigger.stage);
   const attempt = priorStarts + 1;
-  const resume = trigger.stage === 'execute' && priorStarts > 0;
+  const role = STAGE_ROLE[trigger.stage];
+
   // Resume by Session_Id: the executor continues the todo's most recent
-  // execute start's session, falling back to `-c` when it has none (Req 3.2).
-  const resumeSessionId = resume
-    ? latestStart(entries, trigger.todoId, 'execute')?.sessionId
-    : undefined;
+  // execute start's session (Req 3.2). Whether that is possible at all depends
+  // on the executor's CLI: claude accepts the id Baiton pre-assigned, so its
+  // journal `sessionId` is resumable (and `-c` is a safe fallback when an old
+  // start recorded none); opencode tags its session with that id and the run
+  // queue resolves it to opencode's own before launch. codex/antigravity mint
+  // their own id, so the journal's `sessionId` names nothing — resuming with
+  // it fails before a session exists — and the only resumable id is one
+  // discovered after a prior run. With none, launch fresh: the retry brief
+  // still carries the latest review (see `stageContext.ts`).
+  const accepts = adapterForRole(role)?.acceptsSessionId === true;
+  const priorExecute =
+    trigger.stage === 'execute'
+      ? latestStart(entries, trigger.todoId, 'execute')
+      : undefined;
+  const priorSessionId = resumableSessionId(priorExecute, accepts);
+  const resume =
+    trigger.stage === 'execute' &&
+    priorStarts > 0 &&
+    (accepts || priorSessionId !== undefined);
+  const resumeSessionId = resume ? priorSessionId : undefined;
 
   return queue.dispatch({
     slug: trigger.slug,
     todoId: trigger.todoId,
     action,
-    role: STAGE_ROLE[trigger.stage],
+    role,
     attempt,
     resume,
-    resumeSessionId,
+    ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
   });
 }
 
@@ -139,15 +171,21 @@ export function dispatchTrigger(
 export function createRunQueueSeam(
   queueForSlug: (slug: string) => RunQueue,
   specsDir: string,
+  adapterForRole: AdapterForRole,
 ): RunQueueSeam {
   return {
     async dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome> {
-      const result = await dispatchTrigger(queueForSlug(req.slug), specsDir, {
-        kind: 'stage',
-        slug: req.slug,
-        todoId: req.todoId,
-        stage: req.stage,
-      });
+      const result = await dispatchTrigger(
+        queueForSlug(req.slug),
+        specsDir,
+        {
+          kind: 'stage',
+          slug: req.slug,
+          todoId: req.todoId,
+          stage: req.stage,
+        },
+        adapterForRole,
+      );
       if (result.ok) {
         return { kind: 'dispatched', runId: outcomeRunId(result) };
       }

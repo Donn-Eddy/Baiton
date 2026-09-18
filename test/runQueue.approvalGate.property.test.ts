@@ -127,6 +127,7 @@ function makeCompletingWatcherFactory(): ResultWatcherFactory {
 /** An adapter double whose probe always succeeds and whose launch is inert. */
 const okAdapter: Adapter = {
   id: 'claude',
+  acceptsSessionId: true,
   probe: async () => ({ version: '1.0.0', ok: true }),
   launch: () => ({ shellPath: 'claude', shellArgs: [] }),
   attach: () => ({ shellPath: 'claude', shellArgs: [] }),
@@ -167,6 +168,11 @@ function makeSpecStore(opts: {
   return {
     writes,
     currentState: async () => opts.state,
+    // A plan is always on file, so the approval gate is the only thing that can
+    // refuse an Execute dispatch here.
+    readSpec: async () => undefined,
+    readArtifact: async () => '# Plan T01\n',
+    latestExecuteCommit: async () => undefined,
     isApproved: async () => opts.approved,
     isBlocked: async () => false,
     inputRevMatches: async () => true,

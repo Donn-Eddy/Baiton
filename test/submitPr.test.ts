@@ -119,6 +119,7 @@ function makeRepo(states: string[], withRemote = true): Repo {
 
 class StubAdapter implements Adapter {
   readonly id = 'claude' as const;
+  readonly acceptsSessionId = true;
   public launches: LaunchRequest[] = [];
   public probeCount = 0;
   async probe(): Promise<ProbeResult> {

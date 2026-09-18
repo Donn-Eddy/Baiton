@@ -45,7 +45,12 @@ export interface TodoNode {
   blocked: boolean;
   /** Whether the journal records a Session_Id for this todo (Req 4.4). */
   hasSession: boolean;
-  /** The legal actions for this todo; equals `legalActions(state, hasSession)` (Req 4.3, 4.4). */
+  /** Whether the todo's plan (`todos/<id>/plan.md`) is on file. */
+  hasPlan: boolean;
+  /**
+   * The legal actions for this todo; equals
+   * `legalActions(state, hasSession, hasPlan)` (Req 4.3, 4.4).
+   */
   actions: TodoAction[];
 }
 
@@ -106,6 +111,8 @@ export interface SpecInput {
   approved: boolean;
   /** Todo ids with a recorded Session_Id, from the spec's journal (Req 4.4). */
   sessions: ReadonlySet<string>;
+  /** Todo ids whose plan is on file at `todos/<id>/plan.md` in the spec folder. */
+  plans: ReadonlySet<string>;
 }
 
 /**
@@ -174,7 +181,7 @@ function buildSpecNode(input: SpecInput): SpecNode {
   // A valid spec yields todo children in file order, each carrying its derived
   // blocked flag (Req 4.1, 4.2, 4.3, 4.4, 4.5).
   const todos = parsed.todos.map((todo) =>
-    buildTodoNode(input.slug, todo, parsed.todos, input.sessions),
+    buildTodoNode(input.slug, todo, parsed.todos, input.sessions, input.plans),
   );
   return {
     slug: input.slug,
@@ -198,8 +205,10 @@ function buildTodoNode(
   todo: Todo,
   all: Todo[],
   sessions: ReadonlySet<string>,
+  plans: ReadonlySet<string>,
 ): TodoNode {
   const hasSession = sessions.has(todo.id);
+  const hasPlan = plans.has(todo.id);
   return {
     slug,
     id: todo.id,
@@ -207,7 +216,8 @@ function buildTodoNode(
     state: todo.state,
     blocked: isBlocked(todo, all),
     hasSession,
-    actions: legalActions(todo.state, hasSession),
+    hasPlan,
+    actions: legalActions(todo.state, hasSession, hasPlan),
   };
 }
 

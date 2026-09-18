@@ -116,6 +116,22 @@ export function opencodeConfigEnv(role: Role, runId: string): Record<string, str
 }
 
 /**
+ * Opencode model list: empty by design because opencode models are arbitrary
+ * `provider/model` identifiers configured by the user or provider.
+ * An empty list signals free-text rendering in the config panel.
+ */
+export const OPENCODE_MODELS: readonly string[] = [];
+
+/**
+ * Opencode effort list: empty by design because effort maps to user-configured
+ * `--variant` values. An empty list signals free-text rendering in the config panel.
+ */
+export const OPENCODE_EFFORTS: readonly string[] = [];
+
+/** Documentation URL for opencode model selection rendered inline in the config panel. */
+export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
+
+/**
  * The opencode CLI adapter (Requirement 14.1).
  *
  * How this adapter differs from the Claude adapter, documented here rather
@@ -161,6 +177,15 @@ export class OpencodeAdapter implements Adapter {
   readonly id = 'opencode' as const;
 
   constructor(private readonly listSessions: ListSessionsFn = defaultListSessions) {}
+
+  /**
+   * opencode mints its own session id and has no flag to pre-assign one, but
+   * `launch()` tags the fresh session with Baiton's id as its `--title`, so the
+   * journal `sessionId` is resumable once {@link resolveSessionId} has mapped
+   * it back to the minted `ses_…` id. Callers therefore treat the journaled id
+   * as resumable and run it through `resolveSessionId` before `-s`.
+   */
+  readonly acceptsSessionId = true;
 
   /**
    * Run `opencode --version` and report readiness (Requirements 14.2–14.4). A

@@ -3,7 +3,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createToolRegistry } from '../src/orchestrator/registry';
-import { GuardContext } from '../src/orchestrator/guard';
+import {
+  GuardContext,
+  ORCHESTRATOR_PHASES,
+  OrchestratorPhase,
+} from '../src/orchestrator/guard';
 import { ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
@@ -23,8 +27,11 @@ import {
  *  - `approve_spec` confirmation and decline: the tool asks the confirm seam
  *    first (Req 10.1) and, on a decline, leaves the spec byte-for-byte
  *    unchanged and returns an error while touching no git (Req 10.2).
- *  - `read_artifact` found/not-found: it returns the artifact text when the
- *    file exists (Req 10.6) and a not-found error when it does not (Req 10.7).
+ *  - Phase scoping: each tool is advertised in exactly the orchestrator phases
+ *    the design assigns it, and a call made in the wrong phase is refused
+ *    before the tool runs, changing nothing (Req 11.1).
+ *  - `run` stage rejection: the tool itself rejects `plan-review` (and the
+ *    spec-scoped `pr`) before the run-queue seam is reached (Req 11.1).
  *
  * Every test builds the registry against a temp repo with a stub git and a
  * stub confirm seam, provides a valid idempotency `callId` for the one mutating
@@ -48,11 +55,10 @@ const EXPECTED_TOOLS = [
   'add_todo',
   'edit_todo',
   'remove_todo',
-  // Control tools (Req 10.1, 10.3, 10.6)
+  // Control tools (Req 10.1, 10.3)
   'draft_spec',
   'approve_spec',
   'run',
-  'read_artifact',
   'submit_pr',
 ];
 
@@ -145,13 +151,17 @@ function makeServices(
   git: GitService,
   confirm: { confirm: (message: string) => Promise<boolean> },
   draftSpec?: { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome> },
+  runQueue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> } = noRunQueue,
 ): ToolServices {
   return {
     repoRoot,
     baitonDir: path.join(repoRoot, '.baiton'),
     git,
     confirm,
-    runQueue: noRunQueue,
+    runQueue,
+    submitPr: async (): Promise<never> => {
+      throw new Error('submit_pr must not reach the PR flow on this path');
+    },
     ...(draftSpec !== undefined ? { draftSpec } : {}),
     clock: { now: () => '2024-01-01T00:00:00.000Z' },
     ids: { next: () => 'id-1' },
@@ -264,7 +274,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
-      const result = await registry.call('no_such_tool', {}, 'call-x', makeGuard(repo));
+      const result = await registry.call('no_such_tool', {}, 'call-x', makeGuard(repo), 'gather');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /unknown tool/i);
@@ -288,6 +298,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-1',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, true);
@@ -318,6 +329,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-2',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -348,6 +360,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug, requirements: REQUIREMENTS },
         'call-draft-3',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -370,6 +383,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-4',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -394,6 +408,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-5',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -414,12 +429,14 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: '   ' },
         'call-draft-6',
         makeGuard(repo),
+        'gather',
       );
       const bad = await registry.call(
         'draft_spec',
         { slug: '../escape', requirements: REQUIREMENTS },
         'call-draft-7',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(empty.ok, false);
@@ -438,6 +455,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug: 'greeting', requirements: REQUIREMENTS },
         'call-draft-8',
         makeGuard(repo),
+        'gather',
       );
 
       assert.strictEqual(result.ok, false);
@@ -465,6 +483,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         { slug },
         'call-approve-1',
         makeGuard(repo),
+        'gather',
       );
 
       // Req 10.1: the confirmation was requested before any change.
@@ -489,7 +508,13 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const confirm = recordingConfirm(true);
       const registry = createToolRegistry(makeServices(repo, throwingGit(), confirm));
 
-      const result = await registry.call('approve_spec', { slug }, undefined, makeGuard(repo));
+      const result = await registry.call(
+        'approve_spec',
+        { slug },
+        undefined,
+        makeGuard(repo),
+        'gather',
+      );
 
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
@@ -500,68 +525,281 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
   });
 
-  describe('read_artifact found / not-found (Req 10.6, 10.7)', () => {
-    it('returns the artifact text when the file exists (Req 10.6)', async () => {
+  describe('phase scoping (Req 11.1)', () => {
+    /**
+     * The tool surface of each orchestrator phase. `gather` asks clarifying
+     * questions and hands the agreed requirements to the spec writer; `drive`
+     * dispatches stages for an approved spec. The repository read tools and
+     * `draft_spec` belong to the first, `run` and `submit_pr` to the second,
+     * and the spec-write tools plus the cheap orientation reads to both.
+     */
+    const EXPECTED_PHASE_TOOLS: Record<OrchestratorPhase, string[]> = {
+      gather: [
+        'list_specs',
+        'read_spec',
+        'list_files',
+        'read_file',
+        'search',
+        'git_status',
+        'git_diff',
+        'git_log',
+        'update_overview',
+        'add_todo',
+        'edit_todo',
+        'remove_todo',
+        'draft_spec',
+        'approve_spec',
+      ],
+      drive: [
+        'list_specs',
+        'read_spec',
+        'git_status',
+        'update_overview',
+        'add_todo',
+        'edit_todo',
+        'remove_todo',
+        'approve_spec',
+        'run',
+        'submit_pr',
+      ],
+    };
+
+    it('advertises exactly the tools of each phase', () => {
       const repo = newRepo();
-      const slug = 'sample';
-      const todo = 'T01';
-      writeSpec(repo, slug, draftSpec());
-
-      const artifactDir = path.join(repo, '.baiton', 'specs', slug, todo);
-      fs.mkdirSync(artifactDir, { recursive: true });
-      const artifactText = '# Plan\n\nDo the thing carefully.\n';
-      fs.writeFileSync(path.join(artifactDir, 'plan.md'), artifactText, 'utf8');
-
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
 
-      const result = await registry.call(
-        'read_artifact',
-        { slug, todo, name: 'plan.md' },
-        undefined,
-        makeGuard(repo),
-      );
-
-      assert.strictEqual(result.ok, true, 'reading an existing artifact succeeds');
-      if (result.ok) {
-        const data = result.data as {
-          slug: string;
-          todo: string;
-          name: string;
-          text: string;
-          truncated: boolean;
-        };
-        assert.strictEqual(data.slug, slug);
-        assert.strictEqual(data.todo, todo);
-        assert.strictEqual(data.name, 'plan.md');
-        assert.strictEqual(data.text, artifactText, 'returns the artifact contents verbatim');
-        assert.strictEqual(data.truncated, false, 'a small artifact is not truncated');
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const names = registry.definitionsFor(phase).map((d) => d.name).sort();
+        assert.deepStrictEqual(
+          names,
+          [...EXPECTED_PHASE_TOOLS[phase]].sort(),
+          `the ${phase} phase advertises exactly its own tools`,
+        );
       }
     });
 
-    it('returns a not-found error when the artifact does not exist (Req 10.7)', async () => {
+    it('every registered tool belongs to at least one phase', () => {
+      const repo = newRepo();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true)),
+      );
+      for (const tool of registry.definitions()) {
+        assert.ok(
+          tool.phases.length > 0,
+          `"${tool.name}" would be dead weight: it belongs to no phase`,
+        );
+      }
+    });
+
+    it('refuses a drive-only tool while gathering, before it can write anything', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      const todo = 'T01';
-      writeSpec(repo, slug, draftSpec());
+      const specFile = writeSpec(repo, slug, draftSpec());
+      const before = fs.readFileSync(specFile, 'utf8');
 
+      // `submit_pr` is mutating and drive-only: a throwing git and a throwing
+      // submit-PR seam prove the refusal happened before any of it ran.
+      const confirm = recordingConfirm(true);
+      const registry = createToolRegistry(makeServices(repo, throwingGit(), confirm));
+
+      const result = await registry.call(
+        'submit_pr',
+        { slug },
+        'call-phase-1',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, false, 'an out-of-phase tool must refuse');
+      if (!result.ok) {
+        assert.match(result.error, /submit_pr/, 'the refusal names the tool');
+        assert.match(result.error, /gather/, 'the refusal names the phase');
+      }
+      assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
+      assert.strictEqual(
+        fs.readFileSync(specFile, 'utf8'),
+        before,
+        'an out-of-phase mutating call leaves the spec byte-for-byte unchanged',
+      );
+    });
+
+    it('refuses a gather-only tool while driving, without dispatching it', async () => {
+      const repo = newRepo();
+      const draft = recordingDraft();
+      const confirm = recordingConfirm(true);
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), confirm, draft),
+      );
+
+      const result = await registry.call(
+        'draft_spec',
+        { slug: 'greeting', requirements: 'Goal: add a greeting module.' },
+        'call-phase-2',
+        makeGuard(repo),
+        'drive',
+      );
+
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /draft_spec/);
+        assert.match(result.error, /drive/);
+      }
+      assert.strictEqual(draft.calls.length, 0, 'the spec writer was never dispatched');
+      assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
+    });
+
+    it('refuses a repository read tool while driving, returning no file content', async () => {
+      const repo = newRepo();
+      fs.writeFileSync(path.join(repo, 'secret.ts'), 'export const answer = 42;\n', 'utf8');
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
 
       const result = await registry.call(
-        'read_artifact',
-        { slug, todo, name: 'review-1.md' },
+        'read_file',
+        { path: 'secret.ts' },
         undefined,
         makeGuard(repo),
+        'drive',
       );
 
-      assert.strictEqual(result.ok, false, 'a missing artifact returns an error');
+      assert.strictEqual(result.ok, false, 'read_file is not part of the drive phase');
       if (!result.ok) {
-        assert.match(result.error, /not found/i, 'error indicates the artifact was not found');
-        assert.match(result.error, /review-1\.md/, 'error names the requested artifact');
+        assert.match(result.error, /read_file/);
+        assert.match(result.error, /drive/);
       }
+    });
+
+    it('runs the same tool when it is called in a phase it belongs to', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      writeSpec(repo, slug, draftSpec());
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true)),
+      );
+
+      // `read_spec` is in both phases: the refusals above are about the phase,
+      // not a blanket block.
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const result = await registry.call(
+          'read_spec',
+          { slug },
+          undefined,
+          makeGuard(repo),
+          phase,
+        );
+        assert.strictEqual(result.ok, true, `read_spec runs while ${phase}`);
+      }
+    });
+  });
+
+  describe('run stage rejection (Req 11.1)', () => {
+    /** A run-queue seam that records every dispatch it is asked for. */
+    function spyingQueue(): {
+      dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome>;
+      calls: RunDispatchRequest[];
+    } {
+      const calls: RunDispatchRequest[] = [];
+      return {
+        calls,
+        dispatch: async (req: RunDispatchRequest): Promise<RunDispatchOutcome> => {
+          calls.push(req);
+          return { kind: 'dispatched', runId: 'run-1' };
+        },
+      };
+    }
+
+    it('rejects plan-review itself, never reaching the run queue', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      writeSpec(repo, slug, draftSpec());
+      const queue = spyingQueue();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
+      );
+
+      const result = await registry.call(
+        'run',
+        { slug, todo: 'T01', stage: 'plan-review' },
+        undefined,
+        makeGuard(repo),
+        'drive',
+      );
+
+      assert.strictEqual(result.ok, false, 'plan-review is not a stage `run` accepts');
+      if (!result.ok) {
+        assert.match(result.error, /plan, execute, review/, 'the refusal names the legal stages');
+        assert.match(
+          result.error,
+          /plan-review runs inside the plan stage/,
+          'the refusal says who owns plan-review, so it is not read as a closed route',
+        );
+      }
+      assert.strictEqual(queue.calls.length, 0, 'the queue was never reached');
+    });
+
+    it('rejects the spec-scoped pr stage and points at submit_pr', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      writeSpec(repo, slug, draftSpec());
+      const queue = spyingQueue();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
+      );
+
+      const result = await registry.call(
+        'run',
+        { slug, todo: 'T01', stage: 'pr' },
+        undefined,
+        makeGuard(repo),
+        'drive',
+      );
+
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /submit_pr/);
+      }
+      assert.strictEqual(queue.calls.length, 0);
+    });
+
+    it("advertises exactly plan, execute and review in the tool's own schema", () => {
+      const repo = newRepo();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true)),
+      );
+      const run = registry.definitions().find((d) => d.name === 'run');
+      assert.ok(run, 'the run tool is registered');
+      const schema = run!.schema as {
+        properties: { stage: { enum: string[] } };
+      };
+      assert.deepStrictEqual(schema.properties.stage.enum, ['plan', 'execute', 'review']);
+      assert.ok(
+        !run!.description.includes('plan-review'),
+        'the description must not advertise a stage the tool rejects',
+      );
+    });
+
+    it('dispatches a legal stage through to the queue (positive control)', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      writeSpec(repo, slug, draftSpec());
+      const queue = spyingQueue();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
+      );
+
+      const result = await registry.call(
+        'run',
+        { slug, todo: 'T01', stage: 'plan' },
+        undefined,
+        makeGuard(repo),
+        'drive',
+      );
+
+      assert.strictEqual(result.ok, true, 'a legal stage still dispatches');
+      assert.deepStrictEqual(queue.calls, [{ slug, todoId: 'T01', stage: 'plan' }]);
     });
   });
 });

@@ -29,6 +29,10 @@
  *      post-run reset for non-executor stages (Req 15.5, 15.6), and appends a
  *      journal completion record (Req 21.2). A non-`completed` outcome halts the
  *      stage and leaves state unchanged (Req 12.6, 14.7).
+ *   7. Whatever the outcome, asks the adapter to discover the session id its CLI
+ *      minted for the run (for CLIs that ignore Baiton's pre-assigned one) and
+ *      journals it on the completion record, so a later Execute can resume that
+ *      session (Req 3.2).
  *
  * Everything host-specific is injected — the per-role adapter lookup, git
  * service, terminal host, result-watcher factory, journal path, the
@@ -38,6 +42,7 @@
  */
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
+import type { ParsedSpec } from '../model/parser';
 import type { TodoState } from '../model/todoState';
 import type { GitService } from '../git';
 import type { Adapter } from '../adapter';
@@ -45,6 +50,7 @@ import type { HostTerminal } from './terminalHost';
 import type { TerminalHost } from './terminalHost';
 import type { ResultWatcher } from './resultWatcher';
 import { launchStage, type LaunchStageInput } from './launcher';
+import { buildStageContext, type ContextStage } from './stageContext';
 import { awaitStageResult, type RunOutcome } from './resultFlow';
 import {
   resolveTransition,
@@ -55,6 +61,7 @@ import {
 import { appendCompletion, appendStart, latestStart, parseJournal } from '../journal';
 import type { RunResultKind } from '../journal';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
 
 /**
  * A single dispatch request (design "Stage engine", `RunRequest`).
@@ -78,9 +85,11 @@ export interface RunRequest {
   /** True to resume a prior executor session across rounds (Req 13.2). */
   resume: boolean;
   /**
-   * The Session_Id to resume when `resume` is true (Req 3.2). The engine
-   * facade supplies the executor's most recent journaled Session_Id; absent
-   * when none is recorded, in which case the adapter falls back to `-c`.
+   * The Session_Id to resume when `resume` is true (Req 3.2). The engine facade
+   * supplies the executor's most recent *resumable* Session_Id — the id its CLI
+   * actually knows: the pre-assigned one for an adapter that accepts it, else
+   * one discovered after a prior run. Absent when none is recorded, in which
+   * case the adapter falls back to `-c`/`--last`.
    */
   resumeSessionId?: string;
 }
@@ -181,6 +190,28 @@ export interface RunQueue {
 export interface SpecStore {
   /** The todo's current lifecycle state, or `undefined` when it cannot be read. */
   currentState(slug: string, todoId: string): Promise<TodoState | undefined>;
+  /**
+   * The spec, freshly re-read and parsed, or `undefined` when it cannot be
+   * read. The queue uses it to assemble each Brief's Context section (Req 18.3).
+   */
+  readSpec(slug: string): Promise<ParsedSpec | undefined>;
+  /**
+   * The text of a todo's persisted artifact for a stage, or `undefined` when
+   * none is on file. For the numbered stages this is the artifact with the
+   * highest `<n>` in `todos/<todoId>/`, found by listing that directory rather
+   * than by trusting the journal (Req 24.3).
+   */
+  readArtifact(
+    slug: string,
+    todoId: string,
+    stage: Stage,
+  ): Promise<string | undefined>;
+  /**
+   * The commit the todo's most recent completed Execute landed in, from the
+   * journal's completion record, or `undefined` when none is recorded. The
+   * reviewer's Brief names it so the reviewer inspects that commit (Req 21.2).
+   */
+  latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined>;
   /**
    * Whether the spec is approved: its `approved_rev` byte-equals the current
    * Approval_Hash and is non-empty (Req 5.3, 5.4).
@@ -575,6 +606,15 @@ class SerialRunQueue implements RunQueue {
     const sessionId = this.newSessionId();
     const { model, effort } = this.deps.modelForRole(req.role);
 
+    // 0. Assemble the Brief's Context section from the spec and the todo's own
+    //    artifacts (Req 18.3). This runs before any state write, so a stage
+    //    that cannot be briefed — Execute or Review with no plan on file —
+    //    refuses with the todo's state untouched, exactly like a guard.
+    const briefContext = await this.buildBriefContext(req, stage);
+    if (!briefContext.ok) {
+      return this.refuse(briefContext.error);
+    }
+
     // 1. Write the running state and commit the metadata before launch (Req
     //    17.1). A serializer abort halts before launching (Req 6.5).
     if (transition.running !== undefined) {
@@ -592,7 +632,9 @@ class SerialRunQueue implements RunQueue {
     }
 
     // 2. Record the starting HEAD for the drift check and the journal (Req
-    //    17.2, 21.1).
+    //    17.2, 21.1) and the launch time, which bounds the adapter's search for
+    //    the session the CLI mints for itself (Req 3.2).
+    const launchedAt = this.clock();
     const startHead = await this.safeHead();
     const startBranch = await this.safeBranch();
     const inputRev = await this.deps.specStore.inputRev(req.slug, req.todoId);
@@ -617,6 +659,9 @@ class SerialRunQueue implements RunQueue {
       resume: req.resume,
       sessionId,
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+      ...(briefContext.value !== undefined
+        ? { briefContext: briefContext.value }
+        : {}),
     };
     const launched = launchStage(launchInput, {
       adapter,
@@ -671,6 +716,7 @@ class SerialRunQueue implements RunQueue {
           workspaceRoot: this.deps.workspaceRoot,
           slug: req.slug,
           stage,
+          todoId: req.todoId,
           index: req.attempt,
           terminal,
           watcher,
@@ -689,7 +735,145 @@ class SerialRunQueue implements RunQueue {
       outcome = { kind: 'cancelled' };
     }
 
-    return this.applyOutcome(req, transition, stage, runId, startHead, startBranch, outcome);
+    // Recover the session id the CLI actually minted, for adapters that ignore
+    // the one Baiton pre-assigned (Req 3.2). This runs for every outcome kind,
+    // not just `completed`: a run that closed without a result is exactly the
+    // one a user wants to resume, and its session exists all the same.
+    const discoveredSessionId = await this.discoverSessionId(adapter, runId, launchedAt);
+
+    return this.applyOutcome(
+      req,
+      transition,
+      stage,
+      runId,
+      startHead,
+      startBranch,
+      outcome,
+      resultPath,
+      discoveredSessionId,
+    );
+  }
+
+  /**
+   * Assemble the Brief's Context section for a stage (Req 18.3), reading the
+   * spec and the todo's own artifacts through the {@link SpecStore} seam.
+   *
+   * Each role gets exactly what it needs and nothing else — the planner the
+   * OVERVIEW, its todo line and its dependencies' execution summaries; the
+   * executor its todo line and plan; the reviewer those plus the execution
+   * summary and the commit it landed in — so no sub-agent has to read `spec.md`
+   * or another todo's artifacts.
+   *
+   * Execute and Review consume a plan, so a todo with no `todos/<id>/plan.md`
+   * refuses here rather than launching a sub-agent that would have to guess.
+   * Plan needs no artifact: a dependency with no execution summary simply
+   * contributes nothing. An unreadable spec yields no context rather than a
+   * refusal — the stage still launches with the four required Brief sections.
+   */
+  private async buildBriefContext(
+    req: RunRequest,
+    stage: Stage,
+  ): Promise<{ ok: true; value: string | undefined } | { ok: false; error: DispatchError }> {
+    const store = this.deps.specStore;
+    const contextStage = stage as ContextStage;
+
+    // Execute and Review are briefed from the plan; without one there is
+    // nothing to implement or to review against (see the View plan action).
+    let plan: string | undefined;
+    if (contextStage !== 'plan') {
+      plan = await store.readArtifact(req.slug, req.todoId, 'plan');
+      const missing = plan === undefined || plan.trim() === '';
+      if (missing && (contextStage === 'execute' || contextStage === 'review')) {
+        return {
+          ok: false,
+          error: {
+            kind: 'launch-failed',
+            message: `no plan on file for "${req.todoId}"; run Plan first`,
+          },
+        };
+      }
+    }
+
+    const spec = await store.readSpec(req.slug);
+    if (spec === undefined) {
+      return { ok: true, value: undefined };
+    }
+
+    switch (contextStage) {
+      case 'plan': {
+        // Only the target's own `after` targets are consulted; every other
+        // todo's artifacts are never read, which is the confinement rule.
+        const target = spec.todos.find((t) => t.id === req.todoId);
+        const afterExecutes: Record<string, string> = {};
+        for (const depId of target?.after ?? []) {
+          const summary = await store.readArtifact(req.slug, depId, 'execute');
+          if (summary !== undefined) {
+            afterExecutes[depId] = summary;
+          }
+        }
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'plan',
+            spec,
+            todoId: req.todoId,
+            afterExecutes,
+          }),
+        };
+      }
+      case 'execute': {
+        // A retry or a resumed session carries the latest review so the
+        // executor knows what it has to fix (Req 13.2, 18.13).
+        const retry = req.attempt >= 2 || req.resume;
+        const latestReview = retry
+          ? await store.readArtifact(req.slug, req.todoId, 'review')
+          : undefined;
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'execute',
+            spec,
+            todoId: req.todoId,
+            attempt: req.attempt,
+            resume: req.resume,
+            ...(plan !== undefined ? { plan } : {}),
+            ...(latestReview !== undefined ? { latestReview } : {}),
+          }),
+        };
+      }
+      case 'review': {
+        const latestExecute = await store.readArtifact(
+          req.slug,
+          req.todoId,
+          'execute',
+        );
+        const executeCommit = await store.latestExecuteCommit(
+          req.slug,
+          req.todoId,
+        );
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'review',
+            spec,
+            todoId: req.todoId,
+            ...(plan !== undefined ? { plan } : {}),
+            ...(latestExecute !== undefined ? { latestExecute } : {}),
+            ...(executeCommit !== undefined ? { executeCommit } : {}),
+          }),
+        };
+      }
+      default:
+        return {
+          ok: true,
+          value: buildStageContext({
+            stage: 'plan-review',
+            spec,
+            todoId: req.todoId,
+            ...(plan !== undefined ? { plan } : {}),
+          }),
+        };
+    }
   }
 
   /**
@@ -698,6 +882,16 @@ class SerialRunQueue implements RunQueue {
    * (Execute) after a drift check, applies the terminal state, runs the
    * post-run reset for non-executor stages, and journals completion. Any other
    * outcome halts, leaves state, and journals the non-completing kind.
+   *
+   * `resultPath` is the run's `result.json`; a `closed` outcome whose result
+   * file never appeared gets {@link MISSING_RESULT_HINT} appended to the
+   * refusal so a mis-permissioned sub-agent profile is diagnosable — unless it
+   * was an Execute that left work in the tree, which gets
+   * {@link PRESERVED_CHANGES_HINT} instead (see below).
+   *
+   * `discoveredSessionId` is the id the CLI minted for this run, when the
+   * adapter could recover one; it is journaled with the completion record so a
+   * later Execute can resume that session (Req 3.2).
    */
   private async applyOutcome(
     req: RunRequest,
@@ -707,14 +901,27 @@ class SerialRunQueue implements RunQueue {
     startHead: string,
     startBranch: string,
     outcome: RunOutcome,
+    resultPath: string,
+    discoveredSessionId?: string,
   ): Promise<DispatchResult> {
+    // Every completion record for this run carries the discovered session id,
+    // whatever the outcome kind.
+    const journalDone = (result: RunResultKind, commit?: string): void => {
+      appendCompletion(this.deps.journalPath, {
+        runId,
+        result,
+        ...(commit !== undefined ? { commit } : {}),
+        ...(discoveredSessionId !== undefined ? { discoveredSessionId } : {}),
+      });
+    };
+
     if (outcome.kind !== 'completed') {
       // Halt and journal the non-completing kind (Req 12.6, 14.7). A `closed`
       // or `cancelled` outcome additionally reverts the todo to the state the
       // stage launched from (Req 1.1, 1.4); `invalid_output` leaves state
       // unchanged (unreachable today — the flow keeps waiting for a valid
       // result — but kept as the conservative default).
-      appendCompletion(this.deps.journalPath, { runId, result: outcome.kind as RunResultKind });
+      journalDone(outcome.kind as RunResultKind);
 
       if (
         transition.running !== undefined &&
@@ -738,10 +945,31 @@ class SerialRunQueue implements RunQueue {
           outcome.kind === 'closed' && outcome.exitCode !== undefined
             ? ` (exit ${outcome.exitCode})`
             : '';
+        // A `closed` outcome with no result file on disk is almost always a
+        // permission problem: the sub-agent's CLI profile would not let it
+        // write `.baiton/runs/<run-id>/result.json`, so it answered in the
+        // terminal and exited cleanly. Name that cause rather than leaving the
+        // user with a bare "closed (exit 0)" (see the opencode adapter's
+        // `OPENCODE_CONFIG_CONTENT` grant and the antigravity plan-mode note).
+        //
+        // An Execute that closed without a result but DID change the tree is a
+        // different animal: the executor plainly did the work and simply never
+        // wrote the result file. Its changes are never reset or discarded here
+        // — the post-run reset runs only for non-executor stages on a
+        // `completed` outcome — so say so, and point at the re-run, instead of
+        // blaming permissions.
+        const missingResult = outcome.kind === 'closed' && !resultFileExists(resultPath);
+        const preservedChanges =
+          missingResult && stage === 'execute' && (await this.workingTreeChanged(startHead));
+        const hint = preservedChanges
+          ? PRESERVED_CHANGES_HINT
+          : missingResult
+            ? MISSING_RESULT_HINT
+            : '';
         return this.refuse({
           kind: 'outcome',
           outcome,
-          message: `stage ${outcome.kind}${detail}; "${req.todoId}" reverted to "${transition.from}"`,
+          message: `stage ${outcome.kind}${detail}; "${req.todoId}" reverted to "${transition.from}"${hint}`,
         });
       }
 
@@ -759,7 +987,7 @@ class SerialRunQueue implements RunQueue {
     if (stage === 'execute') {
       const drifted = await this.headOrBranchDrifted(startHead, startBranch);
       if (drifted) {
-        appendCompletion(this.deps.journalPath, { runId, result: 'completed' });
+        journalDone('completed');
         return this.refuse({
           kind: 'git-state-changed',
           message: 'HEAD or branch changed during execute; stage halted (git_state_changed)',
@@ -775,11 +1003,7 @@ class SerialRunQueue implements RunQueue {
     if (terminalState !== undefined) {
       const wrote = await this.deps.specStore.writeState(req.slug, req.todoId, terminalState);
       if (!wrote) {
-        appendCompletion(this.deps.journalPath, {
-          runId,
-          result: 'completed',
-          ...(commit !== undefined ? { commit } : {}),
-        });
+        journalDone('completed', commit);
         return this.refuse({
           kind: 'spec-write-failed',
           message: `could not write "${terminalState}" for "${req.todoId}"`,
@@ -793,11 +1017,7 @@ class SerialRunQueue implements RunQueue {
     if (stage !== 'execute') {
       const reset = await this.deps.git.resetWorkingTree();
       if (!reset.ok) {
-        appendCompletion(this.deps.journalPath, {
-          runId,
-          result: 'completed',
-          ...(commit !== undefined ? { commit } : {}),
-        });
+        journalDone('completed', commit);
         return this.refuse({
           kind: 'reset-failed',
           message: `working tree was not restored: ${reset.error.command} exited ${String(reset.error.exitCode)}`,
@@ -806,11 +1026,7 @@ class SerialRunQueue implements RunQueue {
     }
 
     // Journal the completion with the resulting commit (Req 21.2).
-    appendCompletion(this.deps.journalPath, {
-      runId,
-      result: 'completed',
-      ...(commit !== undefined ? { commit } : {}),
-    });
+    journalDone('completed', commit);
 
     return { ok: true, outcome };
   }
@@ -831,6 +1047,51 @@ class SerialRunQueue implements RunQueue {
       return verdict === 'pass' ? transition.onSuccess : transition.onFindings;
     }
     return transition.onSuccess;
+  }
+
+  /**
+   * The session id the CLI minted for a run, via the adapter's optional
+   * discovery hook (Req 3.2). Adapters whose CLI honours Baiton's pre-assigned
+   * id implement no hook, and a hook that cannot find the session answers
+   * `undefined`; either way the run is journaled without a discovered id.
+   * Never throws — discovery is best effort and must not affect the outcome.
+   */
+  private async discoverSessionId(
+    adapter: Adapter,
+    runId: string,
+    launchedAt: number,
+  ): Promise<string | undefined> {
+    if (adapter.discoverSessionId === undefined) {
+      return undefined;
+    }
+    try {
+      const id = await adapter.discoverSessionId({
+        runId,
+        workspaceRoot: this.deps.workspaceRoot,
+        launchedAt,
+      });
+      return id !== undefined && id.length > 0 ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Whether the working tree differs from the run's starting commit — the
+   * evidence that a stage which wrote no result still did work. Uses the same
+   * git seam as the drift check; a git failure reads as "no changes", the
+   * conservative answer (it only suppresses a hint).
+   */
+  private async workingTreeChanged(startHead: string): Promise<boolean> {
+    if (startHead.length === 0) {
+      return false;
+    }
+    try {
+      const diff = await this.deps.git.diffAgainstWorkingTree(startHead);
+      return diff.trim().length > 0;
+    } catch {
+      return false;
+    }
   }
 
   /** Whether HEAD or the current branch drifted from the recorded start (Req 17.6). */
@@ -897,6 +1158,34 @@ function readVerdict(structured: unknown): 'pass' | 'findings' {
 /** The note recorded on a revert for a `closed` outcome (Req 1.1). */
 function closedNote(exitCode: number | undefined): string {
   return exitCode !== undefined ? `closed (exit ${exitCode})` : 'closed (no exit code)';
+}
+
+/**
+ * Appended to a `closed` refusal when the run wrote no `result.json`: the
+ * common cause is a sub-agent launched under a CLI permission profile that
+ * forbids writing the run directory (the opencode `--agent plan` bug).
+ */
+export const MISSING_RESULT_HINT =
+  '; the agent exited without writing result.json — check that its permission profile allows writes to the run directory';
+
+/**
+ * Appended instead of {@link MISSING_RESULT_HINT} when an Execute closed with
+ * no `result.json` but left changes against the run's starting commit: the
+ * executor did the work and only missed the last step, so the refusal says the
+ * changes were kept (nothing is reset or discarded on this path) and that
+ * re-running Execute picks up where it left off — resuming the CLI session when
+ * one was discovered for the run (Req 3.2).
+ */
+export const PRESERVED_CHANGES_HINT =
+  '; the executor exited without writing result.json but left changes in the working tree — those changes were preserved (nothing was reset or discarded). Re-run Execute to finish the todo; it resumes the executor\'s session when one was discovered.';
+
+/** Whether the run's `result.json` exists on disk; any fs error reads as absent. */
+function resultFileExists(resultPath: string): boolean {
+  try {
+    return fs.existsSync(resultPath);
+  } catch {
+    return false;
+  }
 }
 
 /** Best-effort resolution of a terminal's process id for the journal (Req 21.1). */

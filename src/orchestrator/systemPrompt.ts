@@ -7,14 +7,27 @@
  * orchestrator). It carries no `vscode` import so it is directly unit-testable
  * without a host.
  *
- * The prompt always states the orchestrator's role (never edits source, writes
- * only through the spec-writing tools, reads only through the read tools;
- * Req 11.1), the ask-then-propose-then-`create_spec`-after-agreement flow
- * (Req 11.2), the section-5 todo grammar (Req 11.3) and the section-5
- * frontmatter rules (Req 11.4). For a spec conversation it appends the current
- * `spec.md` content when supplied (Req 11.5) and builds without it, without
- * error, when absent (Req 11.7).
+ * The prompt always states the orchestrator's role and scope — its two jobs,
+ * what it never does itself, and how to treat a tool refusal (Req 11.1) — the
+ * section-5 todo grammar (Req 11.3) and the section-5 frontmatter rules
+ * (Req 11.4). The rest depends on the conversation's {@link OrchestratorPhase}
+ * (Req 11.1):
+ *
+ * - **gather** — a Workspace conversation, or a spec still in `draft`: the
+ *   ask-then-agree-then-`draft_spec` flow (Req 11.2).
+ * - **drive** — a spec whose `status` has moved past `draft`: the next-legal-
+ *   stage table, one todo at a time, and `submit_pr` when every todo is done.
+ *
+ * The phase is derived from the spec content itself through {@link phaseFor},
+ * which the activation layer also calls to pick the tool surface it advertises,
+ * so the prompt and the tools it may use always describe the same job.
+ *
+ * For a spec conversation the prompt appends the current `spec.md` content when
+ * supplied (Req 11.5) and builds without it, without error, when absent
+ * (Req 11.7).
  */
+import { parseSpec } from '../model/parser';
+import { OrchestratorPhase } from './guard';
 
 /** Which conversation the prompt is being built for. */
 export type ConversationKind =
@@ -42,11 +55,97 @@ const MODE_VALUES = ['manual', 'auto'] as const;
 /** The frontmatter keys the extension owns and writes, per tech-sheet section 5. */
 const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr'] as const;
 
+/**
+ * The frontmatter `status` values that mean the spec is being driven rather
+ * than still being written (Req 11.1). A spec with any of these is in the
+ * `drive` phase; `draft`, an unknown value, or no status at all is `gather`.
+ */
+const DRIVE_STATUSES: readonly string[] = [
+  'approved',
+  'in-progress',
+  'review',
+  'pr',
+  'done',
+] as const;
+
+/**
+ * The phase a conversation is in (Req 11.1). A workspace conversation is always
+ * `gather`. A spec conversation is `drive` only when its frontmatter `status`
+ * parses to one of {@link DRIVE_STATUSES}; missing, unparseable or `draft`
+ * content is `gather`, so the orchestrator falls back to the phase that can
+ * still write the spec rather than to the one that dispatches stages.
+ */
+export function phaseFor(kind: ConversationKind, specContent?: string): OrchestratorPhase {
+  if (kind.kind !== 'spec' || specContent === undefined) {
+    return 'gather';
+  }
+  const status = (parseSpec(specContent).frontmatter.get('status') ?? '').trim();
+  return DRIVE_STATUSES.includes(status) ? 'drive' : 'gather';
+}
+
+/**
+ * The things the orchestrator never does itself (Req 11.1). Exported so the
+ * prohibitions can be asserted verbatim: each is a separate sentence because
+ * the failure they exist to prevent is the orchestrator deciding that one
+ * particular job ("just this once, review the plan myself") is its own.
+ */
+export const PROHIBITION_LINES: readonly string[] = [
+  'You do not write specs.',
+  'You do not write plans.',
+  'You do not review plans.',
+  'You do not execute plans.',
+  'You do not review executions.',
+  'A configured coding agent does each of those when you dispatch it.',
+] as const;
+
+/**
+ * The scope text: the orchestrator's two jobs, in plain words, followed by the
+ * work that is not its own (Req 11.1). Present in every phase.
+ */
+export const SCOPE_TEXT = [
+  'You have exactly two jobs.',
+  '1. Help the user create a spec. Ask clarifying questions until you and the user agree on what the work is, then hand the agreed requirements to the spec writer with `draft_spec`.',
+  '2. Drive an approved spec to completion. Dispatch each stage with `run` until every todo is done, then finish with `submit_pr`.',
+  'That is the whole job. Everything else belongs to someone else:',
+  ...PROHIBITION_LINES,
+].join('\n');
+
+/**
+ * How to treat a refusal from any tool (Req 11.1). A refusal is an answer for
+ * the user, not a puzzle to route around: the orchestrator quotes it and stops
+ * rather than diagnosing it, trying a different stage, or reading source files
+ * to work out what happened.
+ */
+export const REFUSAL_TEXT = [
+  'When a tool refuses:',
+  '- Quote the refusal to the user and stop.',
+  '- Do not diagnose it. Do not try a different stage. Do not read files to work around it.',
+  '- The user decides what happens next.',
+].join('\n');
+
+/**
+ * The drive-phase text: the next legal stage for each todo state, that `run`
+ * blocks until its stage finishes, that only one todo is driven at a time, and
+ * what to offer once every todo is done (Req 11.1).
+ */
+export const DRIVE_TEXT = [
+  'This spec is approved. Your job here is to drive it to completion, one todo at a time.',
+  'The next legal stage follows the todo\'s current state:',
+  '- `pending` -> `run` the `plan` stage.',
+  '- `planned` -> `run` the `execute` stage.',
+  '- `executed` -> `run` the `review` stage.',
+  '- A review that sends the todo back -> `run` the `execute` stage again.',
+  '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the spec file already reflects it.',
+  'Drive one todo at a time. Take the next todo only when the one before it is `done`.',
+  'You do not read the plan, the diff, or any source file to check the work. The plan reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
+  'When every todo is `done`, tell the user and offer to `submit_pr`.',
+].join('\n');
+
 /** The section-7 role text: what the orchestrator is and is not allowed to do (Req 11.1). */
 const ROLE_TEXT = [
-  'You are the Baiton chat orchestrator. You author and drive spec files for spec-driven development.',
+  'You are the Baiton chat orchestrator. You help the user create spec files and you drive approved specs to completion.',
   'You never edit source code. Your only writes go through the spec-writing tools, which touch `.baiton/specs/**` and nothing else.',
-  'You inspect the repository only through the read tools (for example `list_specs`, `read_spec`, `list_files`, `read_file`, `search`, `git_status`, `git_diff`, `git_log`); you never modify files directly.',
+  'You inspect the repository only through the read tools you have been given for this conversation, and never through any other means; you never modify files directly.',
 ].join('\n');
 
 /**
@@ -102,12 +201,19 @@ const FRONTMATTER_TEXT = [
  *
  * @param kind The conversation this prompt is for (workspace or a spec).
  * @param specContent The current `spec.md` content for a spec conversation, when
- *   available. Ignored for a workspace conversation. When absent for a spec
- *   conversation the prompt is built without it and no error is raised (Req 11.7).
+ *   available. Ignored for a workspace conversation. It also decides the phase
+ *   (Req 11.1). When absent for a spec conversation the prompt is built without
+ *   it, in the `gather` phase, and no error is raised (Req 11.7).
  * @returns The assembled system-prompt text.
  */
 export function buildSystemPrompt(kind: ConversationKind, specContent?: string): string {
-  const sections: string[] = [ROLE_TEXT, FLOW_TEXT, STYLE_TEXT, TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT];
+  const phase = phaseFor(kind, specContent);
+  const sections: string[] = [ROLE_TEXT, SCOPE_TEXT, REFUSAL_TEXT];
+
+  // The phase decides which job the prompt describes: gathering requirements
+  // for a new (or still draft) spec, or driving an approved one (Req 11.1).
+  sections.push(phase === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
+  sections.push(STYLE_TEXT, TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT);
 
   if (kind.kind === 'spec' && specContent !== undefined) {
     sections.push(['Current spec file content:', '', specContent].join('\n'));

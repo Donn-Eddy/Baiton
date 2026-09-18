@@ -30,10 +30,13 @@ The two views:
   with its reason and 1-based line number. Each todo node carries inline
   actions for whichever of **Plan**, **Execute**, **Review**, **Re-plan** and
   **Stop** are legal for its current state, plus **View** when the todo is
-  running or has a recorded sub-agent session; the CodeLens over the todo in
-  `spec.md` shows the same state-gated set. **View** reveals the running
-  stage's terminal, or, once it has finished, opens a new terminal resuming
-  its sub-agent session. **Stop** cancels a running stage or, on a todo that
+  running or has a recorded sub-agent session and **View plan** once it has
+  been planned; the CodeLens over the todo in `spec.md` shows the same
+  state-gated set. **View** reveals the running stage's terminal, or, once it
+  has finished, opens a new terminal resuming its sub-agent session. **View
+  plan** opens the todo's plan (`.baiton/specs/<slug>/todos/<id>/plan.md`),
+  which you can edit before running Execute — the executor is briefed from the
+  file as it stands at launch. **Stop** cancels a running stage or, on a todo that
   is not running, reverts it from `planning`, `executing` or `reviewing` back
   to the state its current stage started from. Each spec root carries an
   **Approve** action. These actions are hidden while the workspace is in
@@ -46,6 +49,38 @@ The two views:
   that spec's conversation. Each tool the orchestrator calls appears as a
   collapsed one-line row — the tool name, its first argument and a status dot —
   that you can expand to see the arguments and the result.
+
+### What the orchestrator does
+
+The orchestrator has exactly two jobs:
+
+1. **Create a spec** — ask you clarifying questions until you agree on what the
+   work is, then hand the agreed requirements to the spec writer with
+   `draft_spec`.
+2. **Drive an approved spec** — dispatch each stage with `run` until every todo
+   is done, then `submit_pr`.
+
+It writes no specs, no plans and no code, and it reviews nothing: the agent
+configured for each role does that work when the orchestrator dispatches it.
+When a tool refuses, the orchestrator quotes the refusal to you and stops
+rather than diagnosing it or trying another route.
+
+Its tools follow the job it is doing, so it can only act within it:
+
+| tools | creating a spec | driving a spec |
+|---|---|---|
+| `list_specs`, `read_spec`, `git_status` | yes | yes |
+| `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no |
+| `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes |
+| `draft_spec` | yes | no |
+| `approve_spec` | yes | yes (re-approve) |
+| `run`, `submit_pr` | no | yes |
+
+A spec conversation counts as "creating" while its frontmatter `status` is
+`draft`, and as "driving" from `approved` onwards. There is no tool for reading
+a stage's artifacts: the plan and the review write-ups are for you, through
+**View plan** and the todo's folder under `.baiton/specs/<slug>/todos/<id>/`,
+not for the orchestrator to second-guess.
 
 ### Chat sessions
 
@@ -99,10 +134,83 @@ at the same time. A `spec-writer` entry missing from an existing
 lands you can refine it in chat with `update_overview`, `add_todo`, `edit_todo`
 and `remove_todo`.
 
+### Driving a spec
+
+Once a spec is approved, its chat conversation drives it one todo at a time.
+The orchestrator dispatches the next legal stage for the todo's current state —
+`pending` → `plan`, `planned` → `execute`, `executed` → `review`, and `execute`
+again when a review sends the todo back — and each `run` blocks until that
+stage reaches a terminal outcome, so there is nothing to poll. `plan-review` is
+not a stage it can trigger: it runs inside the plan stage's own review rounds.
+When every todo is `done`, the orchestrator offers `submit_pr`. You can still
+run any stage yourself from the Spec Explorer.
+
+### The config panel
+
+The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
+
+- **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
+  `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
+  populated from installed adapters, a per-agent model dropdown with curated
+  suggestions and an "Other…" free-form escape hatch (along with documentation
+  links for open-ended ecosystems like OpenCode), a per-agent effort dropdown
+  (`(default)` when unset, curated supported levels, or free-form entry where
+  open); the three numeric limits with their bounds (`plan_review_rounds` 0–10,
+  `exec_attempts` 1–10, `stall_notice_minutes` 1–1440); and `git.remote` and
+  `git.base`.
+- **Preservation of unmanaged keys** — every key outside the form's managed set
+  (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
+  agent, model, or effort values) is preserved on save. Written JSON is formatted
+  with two-space indentation and a trailing newline.
+- **Inline and host-side validation** — fields validate as you type with inline
+  error indicators, and the host re-validates the submitted form before writing,
+  guaranteeing the webview cannot write a configuration that the extension
+  loader would reject. Effort validates against each agent's closed set of supported
+  levels when applicable; models remain open and advisory with full support for
+  custom variants via "Other…".
+- **The reset path** — the Configuration view and **Baiton: Open Config Panel** are registered before the
+  extension's configuration-loading gate, so the view works even when
+  `.baiton/config.json` is absent or unparseable. In that state the view
+  displays the error and offers **Reset to defaults**, which confirms with a
+  modal prompt and writes the default configuration, discarding any unparseable
+  contents.
+- **External changes and conflict handling** — the panel watches
+  `.baiton/config.json` while open. If the file changes on disk, a pristine form
+  reloads automatically; a form with unsaved edits displays a conflict banner
+  offering to reload and discard edits or keep editing. Saving against a file
+  modified since it was loaded is refused with conflict options to reload or
+  overwrite.
+- **Live configuration hot-reload** — saving applies the updated configuration
+  to the running extension in place without requiring a window reload. Any
+  factor that cannot take effect immediately is reported in the save outcome:
+  stages already running keep the model, effort, and agent they launched with
+  (new settings apply to the next run), missing agent CLI binaries are flagged,
+  and saving in a window opened for a different folder than the activated
+  workspace folder writes the file without updating the running session.
+
+#### Agent Model & Effort Discovery (CLI Probing & Architecture)
+
+Baiton uses curated static capability catalogues in each adapter module rather than invoking agent CLI processes on the fly when opening the configuration panel:
+
+- **CLI capabilities investigation**:
+  - `claude` (Anthropic Claude Code): Does not provide a `models` subcommand; non-flag arguments launch an interactive prompt session. System health and auth can be probed via `claude doctor`. Supported effort levels (`low`, `medium`, `high`) are passed via `--effort`.
+  - `antigravity` (`agy`): Provides a dedicated `agy models` subcommand that queries available Gemini and Claude models from the API. Supports `--effort (low|medium|high)`.
+  - `codex` (OpenAI Codex CLI): Does not provide a `models` subcommand; positional arguments launch interactive sessions. System status is available via `codex doctor`. Reasoning effort is passed via `--config model_reasoning_effort=<effort>`.
+  - `opencode`: Provides a dedicated `opencode models` command listing provider-prefixed model identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Due to its pluggable multi-provider nature, any provider/model string is accepted, and effort is open-ended.
+- **Why static capability catalogues**:
+  - *Zero latency*: The config panel renders instantly without spawning subprocesses or waiting on network API round-trips.
+  - *Offline and air-gapped reliability*: The configuration panel is fully operable when disconnected from the network or prior to agent CLI authentication.
+  - *Host-free purity*: Keeps the config panel core completely free of Node `child_process` dependencies, preserving unit testability and browser-mirror parity.
+  - *Robust fallback*: The "Other…" input option guarantees users are never blocked from specifying newly-released models or custom deployments.
+- **Roadmap for dynamic discovery**:
+  - Future iterations may introduce background caching or an asynchronous "Refresh models from CLI" button for CLIs that support dynamic querying (`agy models`, `opencode models`), caching results in workspace storage while retaining static defaults as resilient fallbacks.
+
 ## Commands
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and
   moves keyboard focus to the Chat view.
+- **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
+  container and moves keyboard focus to the Configuration view.
 - **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — prompts
   for the orchestrator API key with a masked input and stores it securely in VS
   Code SecretStorage.

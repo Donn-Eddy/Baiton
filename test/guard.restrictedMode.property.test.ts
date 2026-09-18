@@ -61,6 +61,7 @@ function makeTool(
     description: 'fake tool for the restricted-mode guard harness',
     mutating,
     dispatch,
+    phases: ['gather', 'drive'],
     schema: {},
     async run(_args: unknown, _tc: ToolContext): Promise<ToolResult> {
       ran = true;

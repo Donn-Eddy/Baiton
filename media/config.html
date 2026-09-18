@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<!--
+  Config_Panel webview markup — spec "Configuration Panel" (config-panel), todos T04, T11.
+
+  This is the static shell the Config Panel WebviewView provider (T11) loads.
+  The provider substitutes three placeholders at load time before handing the
+  HTML to the webview, exactly as the Chat_View provider does for chat.html:
+
+    ${nonce}     — a fresh, unpredictable per-load nonce. Every <script> tag and
+                   the <style> tag carry it; the CSP admits only scripts bearing
+                   this exact nonce.
+    ${cspSource} — the webview's cspSource, used to allow the media/ scripts and
+                   styles that VS Code rewrites to vscode-webview-resource: URIs.
+    ${baseUri}   — the webview URI of the media/ folder, used to resolve the
+                   sibling script. localResourceRoots is limited to media/ by
+                   the provider.
+
+  The provider also sets retainContextWhenHidden at registration time. No UI
+  framework is used; the view is plain markup plus media/config.js. All colors
+  come from VS Code theme CSS variables so the view follows the active theme.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Baiton Config</title>
+    <style nonce="${nonce}">
+      /* Every color is derived from a VS Code theme variable — no hardcoded
+         color values — so the view matches the active theme and updates live
+         when the theme changes. */
+      :root {
+        --baiton-gap: 8px;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        box-sizing: border-box;
+        padding: var(--baiton-gap);
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-foreground);
+        background-color: var(--vscode-sideBar-background);
+      }
+
+      /* Sticky toolbar matching the sidebar background */
+      .toolbar {
+        position: sticky;
+        top: 0;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap) 0;
+        background-color: var(--vscode-sideBar-background);
+        border-bottom: 1px solid var(--vscode-panel-border);
+        margin-bottom: var(--baiton-gap);
+      }
+
+
+      #config-path {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--vscode-descriptionForeground);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      fieldset {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        margin: 0 0 calc(var(--baiton-gap) * 2) 0;
+        padding: var(--baiton-gap) calc(var(--baiton-gap) * 1.5);
+      }
+
+      legend {
+        padding: 0 4px;
+        color: var(--vscode-foreground);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 4px 6px;
+        vertical-align: top;
+      }
+
+      thead th {
+        color: var(--vscode-descriptionForeground);
+        font-weight: normal;
+        border-bottom: 1px solid var(--vscode-panel-border);
+      }
+
+      tbody th {
+        font-weight: normal;
+      }
+
+      .field-row {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-bottom: var(--baiton-gap);
+      }
+
+      .field-row label {
+        color: var(--vscode-foreground);
+      }
+
+      .field-row .hint {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.9em;
+      }
+
+      input[type='text'],
+      input[type='number'],
+      select {
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-input-foreground);
+        background-color: var(--vscode-input-background);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+        padding: 4px;
+        box-sizing: border-box;
+        width: 100%;
+      }
+
+      select {
+        color: var(--vscode-dropdown-foreground);
+        background-color: var(--vscode-dropdown-background);
+        border: 1px solid var(--vscode-dropdown-border);
+      }
+
+      input.invalid,
+      select.invalid {
+        border-color: var(--vscode-inputValidation-errorBorder);
+      }
+
+      .field-error {
+        color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+        font-size: 0.9em;
+        min-height: 1.2em;
+      }
+
+      .field-error:empty {
+        display: none;
+      }
+
+      .select-input-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .doc-link {
+        font-size: 0.9em;
+        color: var(--vscode-textLink-foreground);
+        text-decoration: underline;
+        margin-top: 2px;
+      }
+
+      .doc-link:hover {
+        color: var(--vscode-textLink-activeForeground);
+      }
+
+      /* Inline banner: external change, save conflict, or an I/O failure. */
+      #banner {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap);
+        margin-bottom: var(--baiton-gap);
+        color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+        background-color: var(--vscode-inputValidation-warningBackground);
+        border: 1px solid var(--vscode-inputValidation-warningBorder);
+      }
+
+      #banner.visible {
+        display: flex;
+      }
+
+      #banner-message {
+        flex: 1 1 auto;
+      }
+
+      #status {
+        min-height: 1.2em;
+        margin-bottom: var(--baiton-gap);
+        color: var(--vscode-descriptionForeground);
+        white-space: pre-line;
+      }
+
+      #error-view {
+        display: none;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--baiton-gap);
+        padding: calc(var(--baiton-gap) * 2) 0;
+      }
+
+      #error-view.visible {
+        display: flex;
+      }
+
+      button {
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-button-foreground);
+        background-color: var(--vscode-button-background);
+        border: 1px solid var(--vscode-button-border, transparent);
+        padding: 4px 12px;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        background-color: var(--vscode-button-hoverBackground);
+      }
+
+      button.secondary {
+        color: var(--vscode-button-secondaryForeground);
+        background-color: var(--vscode-button-secondaryBackground);
+      }
+
+      button.secondary:hover:not(:disabled) {
+        background-color: var(--vscode-button-secondaryHoverBackground);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .link-button {
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--vscode-textLink-foreground);
+        text-decoration: underline;
+        cursor: pointer;
+      }
+
+      .link-button:hover:not(:disabled) {
+        background: none;
+        color: var(--vscode-textLink-activeForeground);
+      }
+      .role-group {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        margin: 0 0 var(--baiton-gap) 0;
+        padding: var(--baiton-gap);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="toolbar">
+      <span id="config-path">.baiton/config.json</span>
+      <button id="save" type="button">Save</button>
+      <button id="reload" class="secondary" type="button">Reload</button>
+      <button id="reset" class="secondary" type="button">Reset&hellip;</button>
+    </header>
+
+    <div id="banner" role="alert">
+      <span id="banner-message"></span>
+      <button id="banner-primary" class="link-button" type="button"></button>
+      <button id="banner-secondary" class="link-button" type="button"></button>
+    </div>
+
+    <div id="status" aria-live="polite"></div>
+
+    <div id="error-view">
+      <p id="error-message"></p>
+      <button id="error-reset" type="button">Reset to Defaults&hellip;</button>
+      <button id="error-reload" class="secondary" type="button">Reload</button>
+    </div>
+
+    <form id="config-form">
+      <fieldset id="roles-fieldset">
+        <legend>Roles</legend>
+        <div id="roles-body"></div>
+      </fieldset>
+
+      <fieldset id="limits-fieldset">
+        <legend>Limits</legend>
+        <div class="field-row">
+          <label for="limit-plan_review_rounds">Plan review rounds</label>
+          <input
+            id="limit-plan_review_rounds"
+            type="number"
+            min="0"
+            max="10"
+            step="1"
+            data-path="limits.plan_review_rounds"
+            aria-describedby="error-limits-plan_review_rounds"
+          />
+          <span class="hint">0&ndash;10</span>
+          <div id="error-limits-plan_review_rounds" class="field-error" data-error-for="limits.plan_review_rounds"></div>
+        </div>
+        <div class="field-row">
+          <label for="limit-exec_attempts">Execute attempts</label>
+          <input
+            id="limit-exec_attempts"
+            type="number"
+            min="1"
+            max="10"
+            step="1"
+            data-path="limits.exec_attempts"
+            aria-describedby="error-limits-exec_attempts"
+          />
+          <span class="hint">1&ndash;10</span>
+          <div id="error-limits-exec_attempts" class="field-error" data-error-for="limits.exec_attempts"></div>
+        </div>
+        <div class="field-row">
+          <label for="limit-stall_notice_minutes">Stall notice (minutes)</label>
+          <input
+            id="limit-stall_notice_minutes"
+            type="number"
+            min="1"
+            max="1440"
+            step="1"
+            data-path="limits.stall_notice_minutes"
+            aria-describedby="error-limits-stall_notice_minutes"
+          />
+          <span class="hint">1&ndash;1440</span>
+          <div id="error-limits-stall_notice_minutes" class="field-error" data-error-for="limits.stall_notice_minutes"></div>
+        </div>
+      </fieldset>
+
+      <fieldset id="git-fieldset">
+        <legend>Git</legend>
+        <div class="field-row">
+          <label for="git-remote">Remote</label>
+          <input id="git-remote" type="text" data-path="git.remote" aria-describedby="error-git-remote" />
+          <div id="error-git-remote" class="field-error" data-error-for="git.remote"></div>
+        </div>
+        <div class="field-row">
+          <label for="git-base">Base branch</label>
+          <input id="git-base" type="text" data-path="git.base" aria-describedby="error-git-base" />
+          <div id="error-git-base" class="field-error" data-error-for="git.base"></div>
+        </div>
+      </fieldset>
+    </form>
+
+    <!-- No sanitizer and no markdown vendor are loaded: this view writes only
+         textContent and typed input values, never HTML, so nothing needs
+         sanitizing. The entry script carries the per-load nonce; scripts
+         without it are refused by the CSP. -->
+    <script nonce="${nonce}" src="${baseUri}/config.js"></script>
+  </body>
+</html>

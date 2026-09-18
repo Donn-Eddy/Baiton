@@ -24,6 +24,7 @@ class StubTerminalHost implements TerminalHost {
 function adapterThat(launch: (req: LaunchRequest) => LaunchSpec): Adapter {
   return {
     id: 'antigravity',
+    acceptsSessionId: false,
     probe: async (): Promise<ProbeResult> => ({ version: '1', ok: true }),
     launch,
     attach: () => ({ shellPath: 'agy', shellArgs: [] }),

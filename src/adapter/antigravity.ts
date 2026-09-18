@@ -7,6 +7,14 @@ import { isReadOnlyRole, runDirGrant } from './permissions';
 /** The antigravity CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const ANTIGRAVITY_BIN = AGENT_BINARY.antigravity;
 
+/**
+ * Reasoning effort levels offered in the config panel dropdown (Requirement
+ * 14.1): the union of the per-family suffixes in {@link ANTIGRAVITY_MODELS}.
+ * Whether a given pair is accepted is decided per family by
+ * {@link antigravityModelFlags}.
+ */
+export const ANTIGRAVITY_EFFORTS = ['low', 'medium', 'high'] as const;
+
 /** How long to wait for `agy --version` before giving up (ms). */
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -26,7 +34,9 @@ export const ANTIGRAVITY_ACCEPT_EDITS_MODE = 'accept-edits';
  *
  * `efforts` lists the suffixes agy offers for a family; an empty list means
  * the id is fixed and effort is not configurable. Refresh from `agy models`
- * when agy adds a model.
+ * when agy adds a model. The catalogue's keys are also the model dropdown
+ * the config panel offers for antigravity (see `agentCapabilities()`), with
+ * "Other…" for anything newer.
  */
 export const ANTIGRAVITY_MODELS: Readonly<Record<string, readonly string[]>> = {
   'gemini-3.8-flash': ['low', 'medium', 'high'],
@@ -122,6 +132,23 @@ export function antigravityModeFlags(role: Role): string[] {
  *    so read-only roles rely on `--mode plan` refusing edits outright rather
  *    than a scoped write allowance. There is no `readOnlyFallbackToAcceptEdits`
  *    -style flip because `plan` is agy's only non-edit mode.
+ *
+ *    CONSEQUENCE — read-only roles on agy are effectively unsupported.
+ *    `--mode plan` is a whole-session read-only mode with no per-path escape:
+ *    `agy --help` (v1.2.2) offers only `--mode accept-edits|plan`, no
+ *    permission/allow-list flag, and no config-content environment layer to
+ *    define a custom agent with one (`agy agent`/`agents` only lists agents).
+ *    So a spec-writer, planner, plan-reviewer or pr-writer run on agy is
+ *    expected to REFUSE to write its own `.baiton/runs/<run-id>/result.json`,
+ *    exit 0, and be recorded by the queue as `closed (exit 0)` with the todo
+ *    reverted. `--add-dir` widens the visible workspace; it does not lift plan
+ *    mode's edit ban. This mirrors exactly the opencode bug fixed by moving
+ *    that adapter off the built-in `--agent plan` onto Baiton-owned agents
+ *    declared in `OPENCODE_CONFIG_CONTENT` (see src/adapter/opencode.ts);
+ *    opencode had an env-var config layer to fix it with, agy does not. Use
+ *    claude (or opencode) for read-only roles until agy grows a scoped write
+ *    grant; the args below are deliberately left unchanged because there is no
+ *    correct alternative to emit.
  * 3. Unlike opencode, agy DOES support `--add-dir`, so the Requirement 15.4
  *    per-run grant is emitted normally via `runDirGrant(req.runId)` — this is
  *    not a degrade.
@@ -149,6 +176,12 @@ export function antigravityModeFlags(role: Role): string[] {
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;
+
+  /**
+   * antigravity mints its own session id and has no flag to pre-assign one,
+   * so Baiton's journal `sessionId` is not resumable with it.
+   */
+  readonly acceptsSessionId = false;
 
   /**
    * Run `agy --version` and report readiness (Requirements 14.2–14.4). A

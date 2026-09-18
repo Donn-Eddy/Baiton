@@ -42,12 +42,24 @@ export interface JournalEntry {
   terminalPid?: number;
   /** Transition.from at launch; absent on entries written before this field existed. */
   fromState?: TodoState;
-  /** The Claude `--session-id` UUID; absent on entries written before this field existed. */
+  /**
+   * The session id Baiton pre-assigned at launch. Only meaningful for a CLI
+   * whose `Adapter.acceptsSessionId` is true (claude); other CLIs ignore it and
+   * mint their own, recorded separately as {@link JournalEntry.discoveredSessionId}.
+   * Absent on entries written before this field existed.
+   */
   sessionId?: string;
 
   // Completion fields, appended later as a separate record:
   result?: RunResultKind;
   commit?: string;
+  /**
+   * The session id the agent CLI actually minted for this run, recovered after
+   * the run settled by `Adapter.discoverSessionId` (Req 3.2). Present only for
+   * CLIs that mint their own id (codex today) and only when the recovery
+   * succeeded; absent on every entry written before this field existed.
+   */
+  discoveredSessionId?: string;
   /** PR-run only; unused in the first pass. Carried as an optional shape. */
   pr?: PrCompletion;
 }
@@ -89,6 +101,12 @@ export interface CompletionRecord {
   result: RunResultKind;
   commit?: string;
   pr?: PrCompletion;
+  /**
+   * The session id the CLI actually minted for this run, discovered after it
+   * settled (Req 3.2). Written only when the adapter recovered one, so
+   * journals without it parse exactly as before.
+   */
+  discoveredSessionId?: string;
 }
 
 /** Either record kind, as written one-per-line to `runs.jsonl`. */

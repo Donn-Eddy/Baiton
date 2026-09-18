@@ -36,6 +36,7 @@ import { Result, ok } from '../src/model/result';
 /** A stub adapter whose probe verdict the test controls. */
 class StubAdapter implements Adapter {
   readonly id = 'claude' as const;
+  readonly acceptsSessionId = true;
   public launches: LaunchRequest[] = [];
   public probeCount = 0;
   private readonly probeOk: boolean;

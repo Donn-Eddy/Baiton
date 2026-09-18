@@ -3,7 +3,9 @@
     "allow": [
       "Bash(npm run *)",
       "Bash(npm test *)",
-      "Bash(npx mocha *)"
+      "Bash(npx mocha *)",
+      "Bash(node *)",
+      "Bash(npx ts-node *)"
     ]
   }
 }

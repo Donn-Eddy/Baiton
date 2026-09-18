@@ -47,7 +47,8 @@ import { AGENT_BINARY } from '../src/adapter/adapter';
  * - Packaging: extensionKind includes "workspace", engines.vscode "^1.106.0",
  *   MIT license in package.json + LICENSE file, zero native modules
  *   (Req 23.1, 23.2, 23.4); an executable-override setting declared for every
- *   AGENT_BINARY id (Req 22.7).
+ *   AGENT_BINARY id (Req 22.7); baiton.openConfigPanel and baiton.initialize
+ *   contributed without commandPalette gating.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -390,19 +391,40 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer to the activity bar and the Chat to the secondary side bar', () => {
+  it('contributes the Spec Explorer and bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+    interface ViewContrib {
+      id: string;
+      name?: string;
+      type?: string;
+      visibility?: string;
+    }
     const contributes = pkg.contributes as
-      | { viewsContainers?: Record<string, { id: string }[]>; views?: Record<string, { id: string }[]> }
+      | {
+          viewsContainers?: {
+            activitybar?: { id: string }[];
+            secondarySidebar?: { id: string }[];
+          };
+          views?: {
+            baiton?: ViewContrib[];
+            'baiton-chat'?: ViewContrib[];
+          };
+        }
       | undefined;
     const containers = contributes?.viewsContainers;
     assert.ok(containers, 'viewsContainers must be present');
-    assert.deepStrictEqual(containers.activitybar.map((c) => c.id), ['baiton']);
-    assert.deepStrictEqual(containers.secondarySidebar.map((c) => c.id), ['baiton-chat']);
+    assert.deepStrictEqual(containers.activitybar?.map((c) => c.id), ['baiton']);
+    assert.deepStrictEqual(containers.secondarySidebar?.map((c) => c.id), ['baiton-chat']);
 
     const views = contributes?.views;
     assert.ok(views, 'views must be present');
-    assert.deepStrictEqual(views.baiton.map((v) => v.id), ['baiton.specExplorer']);
-    assert.deepStrictEqual(views['baiton-chat'].map((v) => v.id), ['baiton.chatView']);
+    assert.deepStrictEqual(
+      views.baiton?.map((v) => v.id),
+      ['baiton.specExplorer', 'baiton.configPanel'],
+    );
+    const configView = views.baiton?.[1];
+    assert.strictEqual(configView?.type, 'webview');
+    assert.strictEqual(configView?.visibility, 'collapsed');
+    assert.deepStrictEqual(views['baiton-chat']?.map((v) => v.id), ['baiton.chatView']);
   });
 
   it('declares the MIT license in package.json (Req 23.4)', () => {
@@ -445,6 +467,43 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       assert.strictEqual(entry.type, 'string');
       assert.strictEqual(entry.default, '');
     }
+  });
+
+  it('contributes baiton.openConfigPanel without commandPalette gating', () => {
+    interface CommandContrib {
+      command: string;
+      title: string;
+      category?: string;
+    }
+    interface MenuContrib {
+      command: string;
+      when?: string;
+    }
+    const contributes = pkg.contributes as {
+      commands?: CommandContrib[];
+      menus?: { commandPalette?: MenuContrib[] };
+    };
+
+    const commands = contributes?.commands ?? [];
+    const openConfig = commands.find((c) => c.command === 'baiton.openConfigPanel');
+    assert.ok(openConfig, 'baiton.openConfigPanel must be contributed under contributes.commands');
+    assert.strictEqual(openConfig.title, 'Open Config Panel');
+    assert.strictEqual(openConfig.category, 'Baiton');
+
+    const palette = contributes?.menus?.commandPalette ?? [];
+    const openConfigPalette = palette.find((m) => m.command === 'baiton.openConfigPanel');
+    assert.strictEqual(
+      openConfigPalette,
+      undefined,
+      'baiton.openConfigPanel must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
+
+    const initPalette = palette.find((m) => m.command === 'baiton.initialize');
+    assert.strictEqual(
+      initPalette,
+      undefined,
+      'baiton.initialize must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
   });
 });
 

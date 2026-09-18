@@ -25,7 +25,21 @@ import type { ProcessControl } from './engine';
 import { writeTodoState } from './model/writer';
 import type { TodoState } from './model/todoState';
 import { Surface } from './activation/surface';
-import { registerCommands, registerInitializeCommand } from './activation/commands';
+import {
+  registerCommands,
+  registerInitializeCommand,
+  registerConfigPanelCommand,
+  resolveBaitonDirForCommands,
+  type CommandSurface,
+  type FolderScopedApplyConfig,
+} from './activation/commands';
+import { registerConfigPanel } from './activation/configPanel';
+import { agentCapabilities, createAdapterRegistry } from './adapter';
+import {
+  createConfigRefresh,
+  FOLDER_MISMATCH_NOTE,
+  NOT_ACTIVATED_NOTE,
+} from './activation/configRefresh';
 import { ROLES } from './model/role';
 
 /**
@@ -66,20 +80,26 @@ const SETTINGS_NS = 'baiton';
 export interface ActivationState {
   /** The resolved workspace the extension operates on (Req 22.3–22.5). */
   readonly workspace: WorkspaceContext<vscode.Uri>;
-  /** The validated configuration loaded from `.baiton/config.json`. */
-  readonly config: Config;
+  /**
+   * The validated configuration loaded from `.baiton/config.json`.
+   * Replaced wholesale by the refresh step on config save; must never be
+   * destructured into a long-lived local.
+   */
+  config: Config;
   /**
    * One resolution per distinct agent id referenced by `config.roles` (Req
-   * 22.7, 22.8, 14.5). Dispatch for a role is permitted when the workspace is
-   * not restricted (Req 22.2) and that role's agent resolved here — a stale or
-   * missing executable disables dispatch only for the roles configured with
-   * that agent, not for the whole extension.
+   * 22.7, 22.8, 14.5). Replaced wholesale by the refresh step when roles
+   * change on config save; must never be destructured into a long-lived local.
    */
-  readonly executables: AgentExecutables;
+  executables: AgentExecutables;
 }
 
 /** The single resolved activation state, exposed for the command layer (task 15.2). */
 let activationState: ActivationState | undefined;
+/** The active command surface, retained to probe in-flight runs for config refresh notes. */
+let commandSurface: CommandSurface | undefined;
+/** Guard ensuring the gated half of activation runs at most once to prevent duplicate command registrations. */
+let wired = false;
 
 /** Read the activation state resolved by {@link activate}, if any. */
 export function getActivationState(): ActivationState | undefined {
@@ -88,6 +108,8 @@ export function getActivationState(): ActivationState | undefined {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   activationState = undefined;
+  commandSurface = undefined;
+  wired = false;
 
   // 1. Engine-version guard (Req 23.2, 23.3). Refuse below the minimum with a
   //    message naming the minimum required version, and activate no further.
@@ -106,6 +128,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // (Req 1.1). It resolves its own workspace independently of the gate below.
   context.subscriptions.push(registerInitializeCommand(surface));
 
+  // The host-free hot-reload seam for the config panel (T08).
+  const applyConfig = createConfigRefresh({
+    state: () => activationState,
+    resolveExecutables: (agents) => resolveAgentExecutables(agents, pathLookup, settingsOverride),
+    completeActivation: () => completeActivation(context, surface),
+    runningSlugs: () => commandSurface?.runningSlugs() ?? [],
+    log: (m) => surface.log(m),
+  });
+
+  // Scope the seam to the activated workspace folder: resolveBaitonDirForCommands
+  // resolves its root independently, which in multi-root workspaces could differ
+  // from the activated folder. Comparing baitonDir prevents applying folder A's
+  // config to an extension activated against folder B.
+  const scopedApplyConfig: FolderScopedApplyConfig = async (
+    baitonDir: string,
+    config: Config,
+  ): Promise<readonly string[]> => {
+    const current = getActivationState();
+    if (current !== undefined && baitonDir !== current.workspace.baitonDir.fsPath) {
+      return [FOLDER_MISMATCH_NOTE];
+    }
+    const notes = await applyConfig(config);
+    const post = getActivationState();
+    if (post !== undefined && baitonDir !== post.workspace.baitonDir.fsPath) {
+      return [FOLDER_MISMATCH_NOTE];
+    }
+    return notes;
+  };
+
+  // Register the Config Panel WebviewView provider and the reveal command
+  // ahead of the gate as well. `activate` returns early on a workspace-resolution
+  // or config-load failure, and the view's error state plus Reset to defaults
+  // is exactly what repairs an absent or unparseable `.baiton/config.json`.
+  context.subscriptions.push(
+    registerConfigPanel({
+      extensionUri: context.extensionUri,
+      resolveBaitonDir: resolveBaitonDirForCommands,
+      agentIds: createAdapterRegistry().ids,
+      capabilities: agentCapabilities(),
+      log: (m) => surface.log(m),
+      applyConfig: scopedApplyConfig,
+    }),
+  );
+  context.subscriptions.push(registerConfigPanelCommand());
+
+  // Run the gated half of activation. Failures at initial activation keep using showErrorMessage.
+  void completeActivation(context, surface);
+}
+
+/**
+ * Run the gated half of activation (workspace resolution, trust read, config load,
+ * executable resolution, crash recovery, command registration).
+ *
+ * Guarded by `wired` so it runs at most once during a window's lifecycle,
+ * preventing duplicate command registrations.
+ */
+async function completeActivation(
+  context: vscode.ExtensionContext,
+  surface: Surface,
+): Promise<readonly string[]> {
+  if (wired) {
+    return [];
+  }
+
   // 2. Workspace resolution (Req 22.3–22.5). Read the real workspace folders,
   //    probe each for a `.baiton/` directory, and resolve the single root.
   const folders = readWorkspaceFolders();
@@ -115,7 +201,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const resolved = resolveWorkspace<vscode.Uri>(folders, trusted, baitonDirOf);
   if (isErr(resolved)) {
     void vscode.window.showErrorMessage(resolved.error.message);
-    return;
+    return [NOT_ACTIVATED_NOTE(resolved.error.message)];
   }
   const workspace = resolved.value;
 
@@ -124,7 +210,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const configResult = await loadConfig(workspace.baitonDir.fsPath);
   if (isErr(configResult)) {
     void vscode.window.showErrorMessage(configResult.error.message);
-    return;
+    return [`Configuration saved, but could not be activated: ${configResult.error.message}`];
   }
   const config = configResult.value;
 
@@ -161,19 +247,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
-  activationState = { workspace, config, executables };
+  const state: ActivationState = { workspace, config, executables };
+  activationState = state;
 
   // Wire the command surface: per-stage triggers, approve/re-approve, the chat
   // orchestrator entry, and the spec CodeLens, all against the run queue and
   // tool registry built from this activation state (task 15.2). Writes and
   // dispatch stay gated under Restricted Mode and per-role executable
   // resolution (Req 22.1, 22.2, 14.5).
-  const commandSurface = registerCommands(
+  commandSurface = registerCommands(
     context,
-    { workspace, config, executables },
+    state,
     surface,
   );
   context.subscriptions.push(...commandSurface.disposables);
+  wired = true;
 
   // Reveal the stage/approve/chat commands in the palette only once activation
   // has resolved a workspace and wired the surface (the `when` clauses in
@@ -182,12 +270,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(new vscode.Disposable(() => {
     activationState = undefined;
+    commandSurface = undefined;
+    wired = false;
     void vscode.commands.executeCommand('setContext', 'baiton.activated', false);
   }));
+
+  return [];
 }
 
 export function deactivate(): void {
   activationState = undefined;
+  commandSurface = undefined;
+  wired = false;
 }
 
 // --- vscode-backed seams over the pure activation cores -------------------

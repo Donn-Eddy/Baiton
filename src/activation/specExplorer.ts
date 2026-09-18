@@ -38,7 +38,7 @@ import {
 import { todoContextValue } from '../model/todoActions';
 import { specContextValue } from '../model/specActions';
 import { parseJournal, type JournalEntry } from '../journal';
-import { listSpecs } from './specLister';
+import { listSpecs, listTodoPlans } from './specLister';
 import type { Surface } from './surface';
 
 /**
@@ -242,6 +242,8 @@ export class SpecExplorer
         // Todo ids with a recorded Session_Id, from the spec's own journal
         // (Req 4.4); a missing `runs.jsonl` reads back as no entries.
         sessions: sessionSet(parseJournal(path.join(this.specsDir, spec.slug, 'runs.jsonl'))),
+        // Todo ids whose plan is on file, which gates the View plan action.
+        plans: await listTodoPlans(this.specsDir, spec.slug),
       })),
     );
     if (seq !== this.refreshSeq) {

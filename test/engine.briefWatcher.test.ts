@@ -1,6 +1,9 @@
 import * as assert from 'assert';
 import { buildBrief } from '../src/engine/brief';
-import { EXECUTOR_NO_GIT_INSTRUCTION } from '../src/engine/roleInstructions';
+import {
+  EXECUTOR_NO_GIT_INSTRUCTION,
+  EXECUTOR_RESULT_FILE_INSTRUCTION,
+} from '../src/engine/roleInstructions';
 import { initialPromptFor } from '../src/engine/launcher';
 import { awaitStageResult } from '../src/engine/resultFlow';
 import type { HostTerminal } from '../src/engine/terminalHost';
@@ -224,6 +227,51 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     });
   });
 
+  /**
+   * An executor brief ends with a ~300-line plan between the Role section and
+   * the "Result file"/"When you are done" sections, and an executor that
+   * finishes the code but never writes `result.json` has its whole attempt
+   * discarded. The finish line therefore has to be stated up front, in the Role
+   * section the agent reads first, as well as at the end.
+   */
+  describe('executor result-file requirement', () => {
+    const executorBrief = (): string =>
+      buildBrief({
+        stage: 'execute',
+        role: 'executor',
+        resultPath: '/repo/.baiton/runs/run-1/result.json',
+        context: '## Todo\n\nT01 do the thing.',
+      });
+
+    it('states the result-file requirement in the Role section, before the Context', () => {
+      const text = executorBrief();
+      const roleIdx = text.indexOf('# Role');
+      const requirementIdx = text.indexOf(EXECUTOR_RESULT_FILE_INSTRUCTION);
+      const contextIdx = text.indexOf('# Context');
+
+      assert.ok(requirementIdx >= 0, 'the executor role carries the requirement verbatim');
+      assert.ok(roleIdx < requirementIdx, 'the requirement sits inside the Role section');
+      assert.ok(
+        requirementIdx < contextIdx,
+        'the requirement is stated before the Context section, not only after the plan',
+      );
+    });
+
+    it('repeats the requirement in the closing write-and-stop section', () => {
+      const stop = executorBrief().slice(executorBrief().indexOf('# When you are done'));
+      assert.match(stop, /not complete until the result file exists/);
+    });
+
+    it('does not carry the executor-only requirement in a planner brief', () => {
+      const brief = buildBrief({
+        stage: 'plan',
+        role: 'planner',
+        resultPath: '/repo/.baiton/runs/run-1/result.json',
+      });
+      assert.ok(!brief.includes(EXECUTOR_RESULT_FILE_INSTRUCTION));
+    });
+  });
+
   describe('initialPromptFor (Req 11.4)', () => {
     it('returns exactly "Read <briefPath> and do what it says."', () => {
       const briefPath = '/repo/.baiton/runs/run-7/brief.md';
@@ -246,6 +294,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,
@@ -263,7 +312,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.strictEqual(written.length, 1, 'the artifact was persisted once');
       assert.strictEqual(
         written[0].path,
-        artifactPathFor('/repo', 'my-spec', 'execute', 1),
+        artifactPathFor('/repo', 'my-spec', 'execute', 'T01', 1),
         'artifact persisted at the numbered execute stage path',
       );
       assert.strictEqual(terminal.disposeCount, 1, 'terminal disposed on a valid result');
@@ -282,6 +331,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,
@@ -332,6 +382,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
           workspaceRoot: '/repo',
           slug: 'my-spec',
           stage: 'execute',
+          todoId: 'T01',
           index: 1,
           terminal,
           watcher,
