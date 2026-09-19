@@ -1,12 +1,12 @@
 ---
 version: 1
 name: chat-interventions-auto-mode
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 9f2f9d3a278565b286e6c65d24fa6092612b83d1
+branch: baiton/chat-interventions-auto-mode
+approved_rev: 2ac5456536653605633d0a52f95938494b16be53d6f8be99889db7586c0763ce
 ---
 
 # OVERVIEW
