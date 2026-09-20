@@ -5,9 +5,12 @@ import {
   pendingToolRecord,
   toRenderRecords,
   toolUpdate,
+  interventionRecord,
+  interventionUpdate,
   ConversationRecord,
   WebviewState,
   RenderRecord,
+  InterventionView,
   ConversationItem,
   SessionItem,
 } from '../src/orchestrator/webviewProtocol';
@@ -200,6 +203,9 @@ describe('webview protocol reducer', () => {
     reduce(seed, { type: 'setActive', conversationId: 'y' });
     reduce(seed, { type: 'setSessions', items: [{ id: 's', title: 't', updatedAt: 1, scopeId: 'workspace' }] });
     reduce(seed, { type: 'setActiveSession', sessionId: 's' });
+    reduce(seed, { type: 'showIntervention', intervention: { id: 'a1', kind: 'confirm', prompt: 'p', status: 'pending' } });
+    reduce(seed, { type: 'resolveIntervention', id: 'a1', answer: { kind: 'approved' } });
+    reduce(seed, { type: 'setAutoMode', enabled: true });
     assert.strictEqual(JSON.stringify(seed), snapshot);
   });
 });
@@ -306,6 +312,21 @@ describe('toRenderRecords', () => {
     assert.deepStrictEqual(out[0], { role: 'tool', content: 'early' });
     assert.strictEqual(out[1].tool?.result, 'pending');
   });
+
+  it('projects an intervention record with its card intact and a plain record bare', () => {
+    const card: InterventionView = { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'pending' };
+    const records: ConversationRecord[] = [
+      { role: 'system', content: 'Approve?', intervention: card },
+      { role: 'user', content: 'hi' },
+    ];
+    const [withCard, plain] = toRenderRecords(records);
+    // The card is carried through, copied rather than aliased.
+    assert.deepStrictEqual(withCard, { role: 'system', content: 'Approve?', intervention: card });
+    assert.notStrictEqual(withCard.intervention, card);
+    // A record without a card keeps projecting to exactly { role, content }.
+    assert.deepStrictEqual(plain, { role: 'user', content: 'hi' });
+    assert.strictEqual('intervention' in plain, false);
+  });
 });
 
 describe('updateTool', () => {
@@ -343,5 +364,161 @@ describe('updateTool', () => {
   it('is a no-op when no rendered row carries the call id', () => {
     const state: WebviewState = { ...initialWebviewState(), records: [pending] };
     assert.strictEqual(reduce(state, toolUpdate('nope', 'x')), state);
+  });
+});
+
+describe('interventions', () => {
+  const ask = (over: Partial<InterventionView> = {}): InterventionView => ({
+    id: 'a1', kind: 'confirm', prompt: 'Approve the spec?', status: 'pending', ...over,
+  });
+
+  it('showIntervention appends a system record with the prompt and the card, and clears empty', () => {
+    const card = ask();
+    const state: WebviewState = {
+      ...initialWebviewState(),
+      empty: { endpoint: null, model: null },
+    };
+    const next = reduce(state, { type: 'showIntervention', intervention: card });
+
+    assert.deepStrictEqual(next.records, [
+      { role: 'system', content: 'Approve the spec?', intervention: card },
+    ]);
+    assert.strictEqual(next.empty, undefined);
+  });
+
+  it('showIntervention replaces a card with the same id in place instead of appending', () => {
+    const state: WebviewState = { ...initialWebviewState(), records: [] };
+    const first = reduce(state, { type: 'showIntervention', intervention: ask() });
+    const repost = reduce(first, {
+      type: 'showIntervention',
+      intervention: ask({ prompt: 'Approve the spec? (again)' }),
+    });
+
+    assert.strictEqual(repost.records.length, 1);
+    assert.strictEqual(repost.records[0].intervention?.prompt, 'Approve the spec? (again)');
+    assert.strictEqual(repost.records[0].content, 'Approve the spec? (again)');
+  });
+
+  it('showIntervention finalizes a trailing streaming record first', () => {
+    const streaming = reduce(initialWebviewState(), { type: 'streamDelta', text: 'thinking' });
+    const next = reduce(streaming, { type: 'showIntervention', intervention: ask() });
+    assert.deepStrictEqual(next.records, [
+      { role: 'assistant', content: 'thinking', streaming: false },
+      { role: 'system', content: 'Approve the spec?', intervention: ask() },
+    ]);
+  });
+
+  it('showIntervention copies the card and does not mutate the input state', () => {
+    const card = ask();
+    const state: WebviewState = { ...initialWebviewState(), records: [] };
+    const next = reduce(state, { type: 'showIntervention', intervention: card });
+
+    assert.notStrictEqual(next.records[0].intervention, card);
+    assert.deepStrictEqual(state.records, []);
+    assert.deepStrictEqual(card, ask());
+    assert.strictEqual(card.status, 'pending');
+  });
+
+  it('resolveIntervention settles the matching pending card with the answer, rationale and auto flag', () => {
+    const card = ask();
+    const state: WebviewState = { ...initialWebviewState(), records: [interventionRecord(card)] };
+    const next = reduce(
+      state,
+      interventionUpdate('a1', { kind: 'approved' }, { auto: true, rationale: 'allow-listed' }),
+    );
+
+    assert.deepStrictEqual(next.records[0].intervention, {
+      ...card,
+      status: 'resolved',
+      answer: { kind: 'approved' },
+      rationale: 'allow-listed',
+      auto: true,
+    });
+    // Input state is not mutated.
+    assert.strictEqual(state.records[0].intervention?.status, 'pending');
+  });
+
+  it('resolveIntervention settles only the first pending card with that id', () => {
+    const state: WebviewState = {
+      ...initialWebviewState(),
+      records: [interventionRecord(ask()), interventionRecord(ask({ id: 'a2' }))],
+    };
+    const next = reduce(state, interventionUpdate('a1', { kind: 'approved' }));
+
+    assert.strictEqual(next.records[0].intervention?.status, 'resolved');
+    assert.strictEqual(next.records[1].intervention?.status, 'pending');
+  });
+
+  it('resolveIntervention is a no-op for an unknown id and for an already-settled card', () => {
+    const state: WebviewState = { ...initialWebviewState(), records: [interventionRecord(ask())] };
+    assert.strictEqual(reduce(state, interventionUpdate('nope', { kind: 'approved' })), state);
+
+    const settled = reduce(state, interventionUpdate('a1', { kind: 'approved' }));
+    assert.strictEqual(
+      reduce(settled, interventionUpdate('a1', { kind: 'declined' })),
+      settled,
+    );
+  });
+
+  it('interventionUpdate builds the resolveIntervention message', () => {
+    assert.deepStrictEqual(
+      interventionUpdate('a1', { kind: 'approved' }, { auto: true, rationale: 'allow-listed' }),
+      {
+        type: 'resolveIntervention',
+        id: 'a1',
+        answer: { kind: 'approved' },
+        rationale: 'allow-listed',
+        auto: true,
+      },
+    );
+  });
+
+  it('question, free-text and permission cards round-trip and settle', () => {
+    const optionsState: WebviewState = {
+      ...initialWebviewState(),
+      records: [
+        interventionRecord(
+          ask({
+            kind: 'question',
+            prompt: 'Which plan?',
+            options: [
+              { id: 'a', label: 'Option A' },
+              { id: 'b', label: 'Option B' },
+            ],
+          }),
+        ),
+      ],
+    };
+    const chosen = reduce(optionsState, interventionUpdate('a1', { kind: 'option', optionId: 'b' }));
+    assert.deepStrictEqual(chosen.records[0].intervention?.answer, { kind: 'option', optionId: 'b' });
+
+    const textState: WebviewState = {
+      ...initialWebviewState(),
+      records: [interventionRecord(ask({ kind: 'question', prompt: 'What next?', allowFreeText: true }))],
+    };
+    const typed = reduce(textState, interventionUpdate('a1', { kind: 'text', text: 'ship it' }));
+    assert.deepStrictEqual(typed.records[0].intervention?.answer, { kind: 'text', text: 'ship it' });
+
+    const permission = ask({
+      kind: 'permission',
+      prompt: 'Allow?',
+      detail: 'Runs in your home directory',
+      agent: 'claude',
+      tool: 'Bash',
+      args: '{"command":"ls"}',
+    });
+    const permState: WebviewState = { ...initialWebviewState(), records: [] };
+    const posted = reduce(permState, { type: 'showIntervention', intervention: permission });
+    assert.deepStrictEqual(posted.records[0].intervention, permission);
+  });
+
+  it('setAutoMode sets the flag both ways and the seed is false', () => {
+    assert.strictEqual(initialWebviewState().autoMode, false);
+
+    const on = reduce(initialWebviewState(), { type: 'setAutoMode', enabled: true });
+    assert.strictEqual(on.autoMode, true);
+
+    const off = reduce(on, { type: 'setAutoMode', enabled: false });
+    assert.strictEqual(off.autoMode, false);
   });
 });

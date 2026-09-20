@@ -15,6 +15,7 @@
  */
 import { appendFile, writeFile } from 'fs/promises';
 import type { ToolCall } from './modelClient';
+import type { InterventionView } from './webviewProtocol';
 import { Clock, systemClock } from './seams';
 
 /** One persisted transcript record. */
@@ -29,6 +30,8 @@ export interface TranscriptRecord {
   tool_call_id?: string;
   /** For an assistant message, the tool calls it requested. */
   tool_calls?: ToolCall[];
+  /** For an intervention record: the card and its settled state. */
+  intervention?: InterventionView;
 }
 
 /**
