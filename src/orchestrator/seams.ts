@@ -10,7 +10,9 @@
  *
  * - {@link ConfirmSeam} — the UI confirmation `approve_spec` requires before it
  *   changes anything (Req 10.1); a decline/cancel leaves the spec unchanged
- *   (Req 10.2).
+ *   (Req 10.2). This is now the narrow yes/no adapter over `InterventionSeam` in
+ *   `./interventions` (built with `confirmSeamFrom`); hosts should prefer the
+ *   intervention seam for new asks.
  * - {@link RunQueueSeam} — the per-repository serialized run queue the `run`
  *   tool dispatches into (Req 10.3–10.5). The stage engine owns the real queue
  *   (task 11); the tool only asks it to dispatch one stage and reports what it
@@ -25,6 +27,10 @@ import { Stage } from '../model/stage';
  * A yes/no confirmation prompt shown to the user. `approve_spec` calls this
  * before performing any git or frontmatter change and proceeds only on an
  * affirmative answer (Req 10.1, 10.2).
+ *
+ * This is now the narrow yes/no adapter over `InterventionSeam` in
+ * `./interventions` (built with `confirmSeamFrom`); hosts should prefer the
+ * intervention seam for new asks.
  */
 export interface ConfirmSeam {
   /**
