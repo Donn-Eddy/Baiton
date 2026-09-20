@@ -19,7 +19,9 @@
   The provider also enables retainContextWhenHidden (Req 16.4). No UI framework
   is used; the view is plain markup plus the scripts under media/ (Req 19.2).
   The transcript also renders inline intervention cards (question / confirm /
-  permission) built by chat.js.
+  permission) built by chat.js. The composer's control row also carries the
+  Auto-mode toggle immediately left of Stop, which reflects `state.autoMode`
+  and posts `setAutoMode`.
   All colors come from VS Code theme CSS variables so the view follows the
   active theme and reflects theme changes without a reload (Req 16.6, 16.7).
 -->
@@ -619,6 +621,23 @@
         cursor: default;
       }
 
+      /* Auto-mode toggle: secondary (off) vs. primary-filled (on). The pressed
+         state is driven by aria-pressed so the DOM attribute is the single source
+         of truth for both the visual and the accessible state. */
+      #auto-mode {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+
+      #auto-mode[aria-pressed='true'] {
+        color: var(--vscode-button-foreground);
+        background-color: var(--vscode-button-background);
+      }
+
+      #auto-mode[aria-pressed='true']:hover:not(:disabled) {
+        background-color: var(--vscode-button-hoverBackground);
+      }
+
       .link-button {
         background: none;
         border: none;
@@ -671,6 +690,13 @@
           aria-label="Message input"
         ></textarea>
         <div class="composer-actions">
+          <button
+            id="auto-mode"
+            class="secondary"
+            type="button"
+            aria-pressed="false"
+            title="Auto mode off: every ask waits for you. Click to turn on."
+          >Auto: Off</button>
           <button id="stop" class="secondary" type="button" disabled>Stop</button>
           <button id="send" type="button">Send</button>
         </div>

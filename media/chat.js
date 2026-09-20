@@ -18,7 +18,9 @@
  * transcript also renders inline intervention cards built from
  * record.intervention; a pending card offers answer controls and the user's
  * choice is posted back with `answerIntervention`, a resolved card shows the
- * decision as a durable inline record.
+ * decision as a durable inline record. The composer control row also carries
+ * an Auto-mode toggle immediately left of Stop that reflects `state.autoMode`,
+ * stays enabled while busy, and posts `setAutoMode`.
  *
  * The input box characters survive hide/show because they are persisted to the
  * webview state via acquireVsCodeApi().setState (Req 16.5) — retained across
@@ -46,6 +48,7 @@
   const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
   const sendBtn = /** @type {HTMLButtonElement} */ (document.getElementById('send'));
   const stopBtn = /** @type {HTMLButtonElement} */ (document.getElementById('stop'));
+  const autoBtn = /** @type {HTMLButtonElement} */ (document.getElementById('auto-mode'));
   const newChatBtn = /** @type {HTMLButtonElement} */ (document.getElementById('new-chat'));
   const sessionListEl = /** @type {HTMLElement} */ (document.getElementById('session-list'));
 
@@ -796,6 +799,23 @@
     }
   }
 
+  /**
+   * The Auto-mode toggle is a pure projection of `state.autoMode`: the host is
+   * authoritative, so the button never writes the flag locally — it posts
+   * `setAutoMode` and repaints when the host echoes `setAutoMode` back through
+   * the reducer. It is deliberately never disabled: an ask normally arrives
+   * while a pipeline is running, so Auto must be flippable mid-run.
+   */
+  function renderAutoMode() {
+    const on = Boolean(state.autoMode);
+    autoBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    autoBtn.textContent = on ? 'Auto: On' : 'Auto: Off';
+    autoBtn.title = on
+      ? 'Auto mode on: safe asks are auto-approved, the rest are escalated as cards. Click to turn off.'
+      : 'Auto mode off: every ask waits for you. Click to turn on.';
+    autoBtn.disabled = false;
+  }
+
   function updateEnablement() {
     // Send/stop enablement follows the busy flag; send additionally requires a
     // non-whitespace, in-limit input (Req 14.2, 14.3, 14.4, 14.5). The host
@@ -816,6 +836,7 @@
     renderError();
     renderEmptyState();
     renderTranscript();
+    renderAutoMode();
     updateEnablement();
   }
 
@@ -899,6 +920,12 @@
       }
       vscode.postMessage({ type: 'deleteSession', sessionId: sessionId });
     }
+  });
+
+  autoBtn.addEventListener('click', function () {
+    // Host-authoritative: request the flip and let the host's `setAutoMode`
+    // echo drive the repaint, exactly as `sendText` leaves `busy` to the host.
+    vscode.postMessage({ type: 'setAutoMode', enabled: !state.autoMode });
   });
 
   stopBtn.addEventListener('click', function () {
