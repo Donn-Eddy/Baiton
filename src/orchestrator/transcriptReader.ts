@@ -19,6 +19,10 @@
  * message, so after parsing, every `tool` record whose `tool_call_id` is not
  * among the nearest preceding assistant record's `tool_calls` is dropped too
  * (Req 8.5).
+ *
+ * Intervention records are passed through that pairing untouched: a card can
+ * sit between an assistant turn and the tool record answering it (a tool that
+ * asks for confirmation mid-call) and neither opens nor closes a call window.
  */
 import { readFile } from 'fs/promises';
 import { TranscriptRecord } from './chatTranscript';
@@ -74,6 +78,13 @@ function dropOrphanToolRecords(records: TranscriptRecord[]): TranscriptRecord[] 
       if (id === undefined || openCallIds === undefined || !openCallIds.has(id)) {
         continue;
       }
+      out.push(record);
+      continue;
+    }
+    if (record.intervention !== undefined) {
+      // An intervention card can be appended between an assistant turn and the
+      // tool record answering it (a tool that asks for confirmation mid-call).
+      // It is inert for pairing: keep the open call window intact.
       out.push(record);
       continue;
     }
@@ -139,6 +150,9 @@ function isTranscriptRecord(value: unknown): value is TranscriptRecord {
   if (rec.tool_calls !== undefined && !isToolCallList(rec.tool_calls)) {
     return false;
   }
+  if (rec.intervention !== undefined && !isInterventionView(rec.intervention)) {
+    return false;
+  }
   return true;
 }
 
@@ -157,5 +171,25 @@ function isToolCallList(value: unknown): boolean {
         typeof call.arguments === 'string'
       );
     })
+  );
+}
+
+/**
+ * Structural check for a persisted intervention card. Only the fields the view
+ * needs in order to key, label and settle a card are required; the optional
+ * fields (options, detail, agent, tool, args, answer, rationale, auto) are
+ * tolerated in any shape, so a card written by a newer version still loads.
+ */
+function isInterventionView(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const view = value as Record<string, unknown>;
+  return (
+    typeof view.id === 'string' &&
+    view.id.length > 0 &&
+    (view.kind === 'question' || view.kind === 'confirm' || view.kind === 'permission') &&
+    typeof view.prompt === 'string' &&
+    (view.status === 'pending' || view.status === 'resolved')
   );
 }

@@ -327,6 +327,78 @@ describe('toRenderRecords', () => {
     assert.deepStrictEqual(plain, { role: 'user', content: 'hi' });
     assert.strictEqual('intervention' in plain, false);
   });
+
+  it('collapses a pending and a resolved record for the same ask into one settled row', () => {
+    const pending: InterventionView = { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'pending' };
+    const resolved: InterventionView = {
+      id: 'a1',
+      kind: 'confirm',
+      prompt: 'Approve?',
+      status: 'resolved',
+      answer: { kind: 'approved' },
+      rationale: 'allow-listed',
+      auto: true,
+    };
+    const records: ConversationRecord[] = [
+      { role: 'system', content: 'Approve?', intervention: pending },
+      { role: 'user', content: 'hi' },
+      { role: 'system', content: 'Approve?', intervention: resolved },
+    ];
+
+    const out = toRenderRecords(records);
+
+    assert.strictEqual(out.length, 2, 'one ask id renders as one row');
+    assert.strictEqual(out[0].intervention?.status, 'resolved', 'the later state wins');
+    assert.deepStrictEqual(out[0].intervention?.answer, { kind: 'approved' });
+    assert.strictEqual(out[0].intervention?.auto, true);
+    assert.strictEqual(out[0].intervention?.rationale, 'allow-listed');
+    assert.strictEqual(out[0].role, 'system', 'the row sits at the first occurrence\'s position');
+    assert.deepStrictEqual(out[1], { role: 'user', content: 'hi' });
+  });
+
+  it('keeps two distinct asks as two rows in order', () => {
+    const records: ConversationRecord[] = [
+      { role: 'system', content: 'One?', intervention: { id: 'a1', kind: 'confirm', prompt: 'One?', status: 'pending' } },
+      { role: 'system', content: 'Two?', intervention: { id: 'a2', kind: 'confirm', prompt: 'Two?', status: 'pending' } },
+    ];
+
+    const out = toRenderRecords(records);
+
+    assert.deepStrictEqual(
+      out.map((r) => r.intervention?.id),
+      ['a1', 'a2'],
+    );
+  });
+
+  it('still projects a tool row after an intervention record', () => {
+    const records: ConversationRecord[] = [
+      { role: 'assistant', content: '', tool_calls: [call('c1', 'approve_spec', '{}')] },
+      { role: 'system', content: 'Approve?', intervention: { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'resolved', answer: { kind: 'approved' } } },
+      { role: 'tool', content: 'ok', tool_call_id: 'c1' },
+    ];
+
+    const out = toRenderRecords(records);
+
+    assert.strictEqual(out.length, 2, 'the card row and the tool row both render');
+    const cardRow = out.find((r) => r.intervention !== undefined);
+    const toolRow = out.find((r) => r.tool !== undefined);
+    assert.ok(cardRow, 'the card row is present');
+    assert.strictEqual(toolRow?.content, 'ok', 'the card between the pair does not break pairing');
+    assert.strictEqual(toolRow.tool?.result, 'ok');
+  });
+
+  it('does not mutate its input and does not alias the projected card', () => {
+    const card: InterventionView = { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'pending' };
+    const records: ConversationRecord[] = [
+      { role: 'system', content: 'Approve?', intervention: card },
+    ];
+    const snapshot = JSON.stringify(card);
+
+    const out = toRenderRecords(records);
+
+    assert.strictEqual(JSON.stringify(card), snapshot, 'the input card object is unchanged');
+    assert.notStrictEqual(out[0].intervention, card, 'the projected card is a copy, not the input');
+  });
 });
 
 describe('updateTool', () => {

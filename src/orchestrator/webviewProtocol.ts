@@ -371,6 +371,10 @@ const TOOL_ERROR_PREFIX = 'Error: ';
  * answers no preceding call (an orphan) still renders, as a plain tool message,
  * so nothing recorded is silently dropped.
  *
+ * A record carrying an `intervention` card renders as one card row; when the
+ * same ask id appears more than once (persisted pending, then resolved) the row
+ * keeps the first occurrence's position and the last occurrence's card state.
+ *
  * Pure: it reads the given records and allocates fresh output.
  */
 export function toRenderRecords(records: readonly ConversationRecord[]): RenderRecord[] {
@@ -384,6 +388,20 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
     }
   });
 
+  // Last recorded state of each intervention card, by ask id: a card may be
+  // persisted pending and then again resolved, and renders once, settled.
+  const cards = new Map<string, ConversationRecord['intervention']>();
+  const cardFirstIndex = new Map<string, number>();
+  records.forEach((record, index) => {
+    const card = record.intervention;
+    if (card !== undefined) {
+      cards.set(card.id, card);
+      if (!cardFirstIndex.has(card.id)) {
+        cardFirstIndex.set(card.id, index);
+      }
+    }
+  });
+
   const paired = new Set<number>();
   const out: RenderRecord[] = [];
   records.forEach((record, index) => {
@@ -392,11 +410,17 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
     }
     const calls = record.role === 'assistant' ? record.tool_calls : undefined;
     if (calls === undefined || calls.length === 0) {
-      out.push(
-        record.intervention === undefined
-          ? { role: record.role, content: record.content }
-          : { role: record.role, content: record.content, intervention: { ...record.intervention } },
-      );
+      const card = record.intervention;
+      if (card !== undefined) {
+        // Only the first record for an id emits a row; later ones update it.
+        if (cardFirstIndex.get(card.id) !== index) {
+          return;
+        }
+        const latest = cards.get(card.id) ?? card;
+        out.push({ role: record.role, content: record.content, intervention: { ...latest } });
+        return;
+      }
+      out.push({ role: record.role, content: record.content });
       return;
     }
     if (record.content.trim().length > 0) {
