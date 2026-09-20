@@ -219,6 +219,23 @@ export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
  *    prior attempt's Session_Id) before this resolution existed. An
  *    unresolvable id degrades to `-c` (most recent session in this project),
  *    which opencode accepts even when the project has no sessions yet.
+ * 3. This adapter emits **no** ask-relay wiring: `LaunchRequest.relay` is
+ *    deliberately ignored, and `launch()`/`attach()` produce byte-identical
+ *    specs with and without a descriptor. That is a probe result, not an
+ *    omission — see README.md, "Harness ask relay (per-adapter probe
+ *    findings)", for the transcript. On opencode 1.18.30 the only surface that
+ *    can intercept a tool call is a plugin's `tool.execute.before` hook
+ *    (verified end-to-end: it fires with the tool name and args, and throwing
+ *    from it blocks the call), but opencode only loads a plugin from a *file*
+ *    — a `file://` path or npm module named in the inline config's `plugin`
+ *    array, or `.opencode/plugin/<name>.js` in the cwd. A `data:` URL carrying
+ *    the source inline is silently ignored, so there is no way to install the
+ *    relay without writing a file to disk, and `launch()` is a pure function
+ *    that must not. opencode's own config-driven permission layer
+ *    ({@link opencodeAgentDefinition}) therefore remains its whole policy
+ *    surface, with the generic fallback covering asks; note that an `ask`
+ *    action is not a relay either, because a non-interactive `opencode run`
+ *    auto-rejects it ("permission requested: bash (…); auto-rejecting").
  *
  * The run-dir path this adapter hands opencode in the initial prompt relies on
  * the workspace root already being canonical (see `canonicalizeRoot` in
