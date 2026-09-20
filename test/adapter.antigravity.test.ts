@@ -7,10 +7,11 @@ import {
   antigravityModeFlags,
   antigravityModelFlags,
 } from '../src/adapter/antigravity';
-import type { LaunchRequest } from '../src/adapter/adapter';
+import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY, AdapterLaunchError } from '../src/adapter/adapter';
 import { isReadOnlyRole } from '../src/adapter/permissions';
 import { ROLES } from '../src/model/role';
+import { askRelayDescriptor } from '../src/engine/askRelay';
 
 /**
  * This file mirrors test/adapter.claude.test.ts for the antigravity (`agy`)
@@ -323,4 +324,97 @@ describe('antigravityModelFlags model-aware effort mapping (agy v1.2.2 catalogue
       assert.ok(!antigravityModelFlags(family, probe).includes('--effort'));
     }
   });
+});
+
+/**
+ * The probe recorded in README.md, "Harness ask relay (per-adapter probe
+ * findings)" (`agy` 1.2.7, 2026-09-20), found no relay this adapter can
+ * install. agy *does* ship the mechanism — a `hooks.json` `PreToolUse`
+ * handler that the probe watched fire with the tool name and arguments
+ * (`toolCall.name` / `toolCall.args`) and whose `{"decision":"deny"}` hard
+ * blocked the call and told the model — but it is disqualified twice over.
+ * It loads only from an on-disk `hooks.json` under a customization root
+ * (`<workspace>/.agents/hooks.json`, or the shared
+ * `~/.gemini/config/hooks.json`), with no `--settings`-style flag and no
+ * environment layer to supply it inline, so installing it means writing a
+ * file — and `launch()` is a pure function that writes nothing. And even
+ * with the file present the hook is veto-only in headless runs:
+ * `{"decision":"allow"}` did not grant the permission, so it could not carry
+ * an approval relay regardless. The generic fallback covers antigravity's
+ * asks.
+ *
+ * These tests PIN that outcome rather than merely describing it: a future
+ * native relay makes them fail, which forces the decision to be revisited
+ * deliberately instead of drifting in.
+ */
+describe('AntigravityAdapter ask-relay wiring (probe findings)', () => {
+  const adapter = new AntigravityAdapter();
+  const relay = askRelayDescriptor('/repo', 'run-123');
+
+  /** Flags that would buy a relay by giving up the policy, and are never emitted. */
+  const forbidden = ['--dangerously-skip-permissions', '--sandbox'];
+
+  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
+    assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
+  });
+
+  it('treats an explicitly undefined relay the same as an absent one', () => {
+    assert.deepStrictEqual(adapter.launch(req({ relay: undefined })), adapter.launch(req()));
+  });
+
+  it('never lets the asks directory reach the argv', () => {
+    const joined = adapter.launch(req({ relay })).shellArgs.join(' ');
+    assert.ok(!joined.includes(relay.dir), 'the asks directory must not leak into the argv');
+    assert.ok(!joined.includes(relay.askSuffix), 'no ask suffix is emitted');
+    assert.ok(!joined.includes(relay.responseSuffix), 'no response suffix is emitted');
+    assert.ok(!joined.includes('hooks.json'), 'no hooks.json path is emitted');
+  });
+
+  it('carries no env layer at all', () => {
+    assert.strictEqual(adapter.launch(req({ relay })).env, undefined);
+  });
+
+  it('emits no forbidden flag that would buy a relay by giving up the policy', () => {
+    for (const role of ROLES) {
+      const args = adapter.launch(req({ role, relay })).shellArgs;
+      for (const flag of forbidden) {
+        assert.ok(!args.includes(flag), `did not expect ${flag} in ${JSON.stringify(args)}`);
+      }
+      // The role's own mode value is still what the policy layer chose.
+      const mode = args[args.indexOf('--mode') + 1];
+      assert.strictEqual(
+        mode,
+        isReadOnlyRole(role) ? ANTIGRAVITY_PLAN_MODE : ANTIGRAVITY_ACCEPT_EDITS_MODE,
+      );
+    }
+  });
+
+  it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
+    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
+    assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
+  });
+
+  it('leaves both resume branches byte-identical', () => {
+    const withId = { resume: true, resumeSessionId: 'sess-real' };
+    assert.deepStrictEqual(adapter.launch(req({ ...withId, relay })), adapter.launch(req(withId)));
+
+    const last = { resume: true, resumeSessionId: undefined };
+    assert.deepStrictEqual(adapter.launch(req({ ...last, relay })), adapter.launch(req(last)));
+  });
+
+  it('attach() installs no relay (it takes no descriptor at all)', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    const joined = spec.shellArgs.join(' ');
+    assert.ok(!joined.includes(relay.dir));
+    assert.ok(!joined.includes('hooks.json'));
+    for (const flag of forbidden) {
+      assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} on attach`);
+    }
+  });
+
+  for (const role of ROLES) {
+    it(`is byte-identical with and without a relay for role ${role}`, () => {
+      assert.deepStrictEqual(adapter.launch(req({ role, relay })), adapter.launch(req({ role })));
+    });
+  }
 });
