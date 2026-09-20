@@ -9,6 +9,7 @@
  * seams; a test assembles one from a temp repo and stubs.
  */
 import { GitService } from '../git';
+import type { InterventionSeam } from './interventions';
 import { Clock, ConfirmSeam, DraftSpecSeam, IdGenerator, RunQueueSeam } from './seams';
 
 /** The git settings the approval flow needs (remote to fetch, base branch). */
@@ -26,7 +27,10 @@ export interface ToolGitSettings {
  * - `baitonDir` — absolute `.baiton/` directory at the repo root; `specs/` and
  *                 `runs/` live under it.
  * - `git`       — the single git service seam (status/diff/log/approval git).
- * - `confirm`   — the UI confirmation seam `approve_spec` uses (Req 10.1).
+ * - `confirm`   — the yes/no confirmation seam `approve_spec`, `draft_spec` and
+ *                 `submit_pr` gate on (Req 10.1); in the real host it is
+ *                 `confirmSeamFrom(interventionSeam)`, so those confirmations
+ *                 surface as inline chat cards.
  * - `runQueue`  — the serialized run-queue seam `run` dispatches into (Req 10.3).
  * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
  * - `clock`     — wall clock for transcript timestamps.
@@ -38,6 +42,14 @@ export interface ToolServices {
   baitonDir: string;
   git: GitService;
   confirm: ConfirmSeam;
+  /**
+   * The human-in-the-loop seam every richer ask goes through (question /
+   * confirm / permission). Optional so a host that has not wired the chat
+   * still builds a registry; `confirm` above is the narrow yes/no adapter
+   * over this seam (`confirmSeamFrom`), so a host that supplies only
+   * `confirm` keeps working unchanged.
+   */
+  intervention?: InterventionSeam;
   runQueue: RunQueueSeam;
   /**
    * The spec-draft runner the `draft_spec` tool hands an agreed requirements

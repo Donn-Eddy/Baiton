@@ -5,7 +5,7 @@
  * This is the `vscode`-aware glue that binds the {@link ChatWebview} surface to
  * the host-free cores: the {@link readTranscript} reader and {@link ChatTranscript}
  * writer, the {@link runToolLoop} tool loop, the {@link buildSystemPrompt}
- * builder, and the reused {@link ToolRegistry}/{@link ConfirmSeam}. It carries
+ * builder, and the reused {@link ToolRegistry} and its pending-ask seams. It carries
  * no rendering logic of its own — the webview is a pure projection of the
  * protocol state — and no lifecycle state beyond the current conversation and
  * active spec, everything else being re-derived from disk each round.
@@ -30,8 +30,14 @@
  *    tool loop (Req 9, 14.4);
  *  - abort through an {@link AbortController} on stop and surface a stopped
  *    indication (Req 14.6, 14.7);
- *  - present the {@link ConfirmSeam} when the approve tool is called and return
- *    the outcome to the loop (Req 15);
+ *  - present every human-in-the-loop ask raised through the shared
+ *    `PendingAskRegistry` as an inline card, settle it in place on
+ *    `answerIntervention` (which resumes the paused tool call), persist the
+ *    settled card to the transcript, and decline every pending ask on stop;
+ *  - present every human-in-the-loop ask raised through the shared
+ *    `PendingAskRegistry` as an inline card, settle it in place on
+ *    `answerIntervention` (which resumes the paused tool call), persist the
+ *    settled card to the transcript, and decline every pending ask on stop;
  *  - map {@link MissingConfigError} (by `.missing`) and
  *    {@link UnreachableEndpointError} to inline messages with the correct fix
  *    action, leaving the transcript unchanged on a fix action (Req 13.1–13.4);
@@ -45,12 +51,16 @@ import {
   MissingConfigError,
   UnreachableEndpointError,
   buildSystemPrompt,
+  interventionTranscriptRecord,
+  interventionUpdate,
   phaseFor,
   readTranscript,
   pendingToolRecord,
+  PendingAskRegistry,
   SessionStore,
   resolveRoundBound,
   runToolLoop,
+  settledInterventionView,
   toRenderRecords,
   toolUpdate,
 } from '../orchestrator';
@@ -59,11 +69,13 @@ import type {
   SessionItem,
   SessionMeta,
   SessionScope,
-  ConfirmSeam,
   ConversationItem,
   ConversationKind,
   FixAction,
   HostToWebview,
+  Intervention,
+  InterventionAnswer,
+  InterventionView,
   ModelClient,
   OrchestratorPhase,
   RenderRecord,
@@ -81,8 +93,8 @@ export const WORKSPACE_CONVERSATION_ID = 'workspace';
 /** The maximum input length a send is allowed to carry (Req 14.4, 14.5). */
 export const MAX_INPUT_CHARS = 100_000;
 
-/** The name of the approve control tool, matched to present the Confirm_Seam (Req 15.1). */
-const APPROVE_TOOL_NAME = 'approve_spec';
+/** The reason every still-pending ask is declined with when the user stops a run. */
+export const STOP_DECLINE_REASON = 'the run was stopped';
 
 /**
  * The webview surface the controller drives. The {@link ChatWebview} provider
@@ -132,8 +144,15 @@ export interface ChatControllerDeps {
   toolsFor(phase: OrchestratorPhase): ToolSpec[];
   /** Builds the guard context for a tool call (repo/specs/restricted). */
   guardContext(): GuardContext;
-  /** The reused approval modal, presented when the approve tool is called (Req 15). */
-  confirm: ConfirmSeam;
+  /**
+   * The pending-ask registry shared with the tool registry's seams. The host
+   * creates one registry, wraps it in an `InterventionSeam` whose `present`
+   * forwards to {@link ChatController.presentIntervention}, and adapts that
+   * seam into the `ConfirmSeam` the tools gate on, so every ask raised by a
+   * tool settles through this controller. Defaults to a private registry (no
+   * tool can reach it) so a test can construct the controller without one.
+   */
+  askRegistry?: PendingAskRegistry;
   /** Absolute `.baiton/` directory: `<baitonDir>/chat/` holds workspace sessions. */
   baitonDir: string;
   /** Absolute `.baiton/specs/` directory: `<specsDir>/<slug>/chat/` holds a spec's sessions. */
@@ -201,6 +220,12 @@ export class ChatController {
   /** `<scopeKey>/<sessionId>` of the session a run is in flight on, if any. */
   private runningKey: string | undefined;
 
+  /** The pending-ask registry every inline card settles through. */
+  private readonly asks: PendingAskRegistry;
+
+  /** Cards currently on screen, by ask id: the view plus where its settled record is written. */
+  private readonly cards = new Map<string, PendingCard>();
+
   /** Scope keys whose legacy `chat.jsonl` migration has already been attempted. */
   private readonly migrated = new Set<string>();
 
@@ -209,6 +234,11 @@ export class ChatController {
     this.sessions =
       deps.sessionStore ??
       new SessionStore({ baitonDir: deps.baitonDir, specsDir: deps.specsDir });
+    this.asks =
+      deps.askRegistry ??
+      new PendingAskRegistry({
+        ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+      });
   }
 
   /**
@@ -277,7 +307,67 @@ export class ChatController {
       case 'triggerFix':
         await this.deps.triggerFix(msg.action);
         return;
+      case 'answerIntervention':
+        await this.onAnswerIntervention(msg.id, msg.answer);
+        return;
     }
+  }
+
+  /**
+   * Show one pending ask as an inline card on the conversation currently in
+   * view, and remember which transcript its settled record belongs to. Bound
+   * by the host as the `present` of the shared `InterventionSeam`; the seam
+   * declines the ask automatically if this throws.
+   */
+  public presentIntervention(ask: Intervention): void {
+    const scope = this.activeScope();
+    const key = scopeId(scope);
+    const sessionId = this.activeSessions.get(key) ?? this.newSessionId(scope);
+    const view = toInterventionView(ask);
+    this.cards.set(ask.id, { view, transcript: this.transcriptFor(scope, sessionId) });
+    this.deps.webview.post({ type: 'showIntervention', intervention: view });
+  }
+
+  /**
+   * The user answered an inline card. A valid answer settles the originating
+   * ask — resuming whichever flow is awaiting it — settles the card in the
+   * view and appends the settled card to the transcript. An answer the request
+   * does not accept leaves the card pending and reports why; an id that is no
+   * longer active (a card left over from a previous window) is settled in the
+   * view as declined so it never stays stuck.
+   */
+  private async onAnswerIntervention(id: string, answer: InterventionAnswer): Promise<void> {
+    const outcome = this.asks.resolve(id, answer);
+    if (outcome.kind === 'invalid') {
+      this.deps.webview.post({ type: 'showError', message: `That answer was not accepted: ${outcome.reason}` });
+      return;
+    }
+    if (outcome.kind === 'unknown') {
+      this.deps.log(`Baiton chat: an answer arrived for an ask that is no longer active (${id})`);
+      const stale: InterventionAnswer = { kind: 'declined', reason: 'this ask is no longer active' };
+      await this.settleCard(id, stale, { rationale: 'This ask is no longer active.' });
+      return;
+    }
+    await this.settleCard(id, answer);
+  }
+
+  /**
+   * Settle one card in the view and persist it. The registry has already been
+   * resolved by the caller; this only does the view/transcript bookkeeping, so
+   * it is safe to call for an ask that has no card (nothing is posted twice).
+   */
+  private async settleCard(
+    id: string,
+    answer: InterventionAnswer,
+    opts: { rationale?: string; auto?: boolean } = {},
+  ): Promise<void> {
+    this.deps.webview.post(interventionUpdate(id, answer, opts));
+    const card = this.cards.get(id);
+    if (card === undefined) {
+      return;
+    }
+    this.cards.delete(id);
+    await this.append(card.transcript, interventionTranscriptRecord(settledInterventionView(card.view, answer, opts)));
   }
 
   /**
@@ -291,9 +381,26 @@ export class ChatController {
     this.setActiveSpec(slug);
   }
 
-  /** The user activated stop while a run is in flight: abort it (Req 14.6). */
+  /**
+   * The user activated stop: abort the in-flight run (Req 14.6) and decline
+   * every ask still waiting for an answer, so any flow paused on a card gets
+   * control back instead of hanging.
+   */
   private onStop(): void {
     this.abort?.abort();
+    void this.declinePendingAsks(STOP_DECLINE_REASON);
+  }
+
+  /** Decline every pending ask, settling each card it is showing. */
+  private async declinePendingAsks(reason: string): Promise<void> {
+    const answer: InterventionAnswer = { kind: 'declined', reason };
+    for (const ask of this.asks.pending()) {
+      if (this.asks.resolve(ask.id, answer).kind === 'resolved') {
+        await this.settleCard(ask.id, answer, { rationale: reason });
+      }
+    }
+    // Safety net for asks raised before any card was shown.
+    this.asks.rejectAll(reason);
   }
 
   /**
@@ -435,7 +542,7 @@ export class ChatController {
         client: this.deps.client,
         tools: this.deps.toolsFor(phase),
         call: (name, args, callId, signal) =>
-          this.callTool(name, args, callId, signal, slug, phase),
+          this.callTool(name, args, callId, signal, phase),
         systemPrompt: () => this.buildPrompt(slug),
         append: async (m) => {
           await this.append(transcript, m);
@@ -461,34 +568,22 @@ export class ChatController {
   }
 
   /**
-   * Invoke one tool through the guarded registry. The approve tool is gated
-   * behind the {@link ConfirmSeam}: a decline/cancel returns a result the loop
-   * records as approval-did-not-proceed rather than performing anything
-   * (Req 15.1, 15.2). `callId` is the model's tool-call id, used as the
-   * idempotency key (Req 9.2).
+   * Invoke one tool through the guarded registry. The approve/draft/submit
+   * tools gate themselves through `services.confirm`, which the host wires to
+   * the same intervention seam, so the confirmation appears as an inline card
+   * and a decline returns a result the loop records rather than performing
+   * anything (Req 15.1, 15.2). `callId` is the model's tool-call id, used as
+   * the idempotency key (Req 9.2).
    */
   private async callTool(
     name: string,
     args: string,
     callId: string,
     signal: AbortSignal,
-    slug: string | undefined,
     phase: OrchestratorPhase,
   ): Promise<ToolResult> {
     if (signal.aborted) {
       return { ok: false, error: 'the run was stopped before the tool call' };
-    }
-    if (name === APPROVE_TOOL_NAME) {
-      const approvalSlug = approveSlugFromArgs(args) ?? slug;
-      const target = approvalSlug ?? 'the spec';
-      const confirmed = await this.deps.confirm.confirm(
-        `Approve ${target}? This creates its branch and records the approval.`,
-      );
-      if (!confirmed) {
-        // The user declined/cancelled/dismissed: perform nothing, report it to
-        // the loop, and leave the spec unchanged (Req 15.2).
-        return { ok: false, error: 'approval did not proceed: the confirmation was declined' };
-      }
     }
     const parsed = parseArgs(args);
     return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), phase);
@@ -804,6 +899,11 @@ function toRenderRecord(
 
 /** Turn a persisted transcript record into a tool-loop chat message. */
 function toChatMessage(record: TranscriptRecord): ChatMessage {
+  if (record.intervention !== undefined) {
+    // A persisted card re-enters the model history as the ask and its outcome,
+    // never as a bare prompt that would read like a fresh question.
+    return { role: 'assistant', content: interventionHistoryText(record.intervention) };
+  }
   // Transcript records use the same role set the completions path expects,
   // except that a persisted `system` role is not part of the history the loop
   // sends (the loop prepends a fresh system prompt each round). Preserve the
@@ -815,6 +915,28 @@ function toChatMessage(record: TranscriptRecord): ChatMessage {
     ...(record.tool_call_id !== undefined ? { tool_call_id: record.tool_call_id } : {}),
     ...(record.tool_calls !== undefined ? { tool_calls: record.tool_calls } : {}),
   };
+}
+
+/** How a persisted card reads in the model history: the ask and what was decided. */
+function interventionHistoryText(view: InterventionView): string {
+  return `[intervention] ${view.prompt}\nDecision: ${describeAnswer(view.answer)}`;
+}
+
+/** A one-line description of an intervention answer. */
+function describeAnswer(answer: InterventionAnswer | undefined): string {
+  if (answer === undefined) {
+    return 'no answer was recorded';
+  }
+  switch (answer.kind) {
+    case 'approved':
+      return 'approved';
+    case 'declined':
+      return answer.reason === undefined ? 'declined' : `declined (${answer.reason})`;
+    case 'option':
+      return `chose "${answer.label ?? answer.optionId}"`;
+    case 'text':
+      return `answered: ${answer.text}`;
+  }
 }
 
 /** The inline message naming the missing configuration value (Req 13.1, 13.2). */
@@ -850,16 +972,34 @@ function parseArgs(args: string): unknown {
   }
 }
 
-/** The `slug` argument the approve tool was called with, when present. */
-function approveSlugFromArgs(args: string): string | undefined {
-  const parsed = parseArgs(args);
-  if (typeof parsed === 'object' && parsed !== null) {
-    const slug = (parsed as { slug?: unknown }).slug;
-    if (typeof slug === 'string' && slug.length > 0) {
-      return slug;
-    }
+/** Project a registry `Intervention` into the pending card the view renders. */
+function toInterventionView(ask: Intervention): InterventionView {
+  const base = { id: ask.id, kind: ask.kind, prompt: ask.prompt, status: 'pending' as const };
+  switch (ask.kind) {
+    case 'question':
+      return {
+        ...base,
+        ...(ask.options !== undefined ? { options: ask.options.map((o) => ({ ...o })) } : {}),
+        ...(ask.allowFreeText !== undefined ? { allowFreeText: ask.allowFreeText } : {}),
+        ...(ask.placeholder !== undefined ? { placeholder: ask.placeholder } : {}),
+      };
+    case 'confirm':
+      return { ...base, ...(ask.detail !== undefined ? { detail: ask.detail } : {}) };
+    case 'permission':
+      return {
+        ...base,
+        agent: ask.agent,
+        tool: ask.tool,
+        ...(ask.args !== undefined ? { args: ask.args } : {}),
+        ...(ask.detail !== undefined ? { detail: ask.detail } : {}),
+      };
   }
-  return undefined;
+}
+
+/** One card the view is showing, and the transcript its settled record belongs to. */
+interface PendingCard {
+  view: InterventionView;
+  transcript: ChatTranscript;
 }
 
 /** A short, safe description of a thrown value for a user-facing message. */

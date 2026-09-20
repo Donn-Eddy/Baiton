@@ -67,6 +67,9 @@ import type {
 } from '../engine';
 import { latestStart, parseJournal, resumableSessionId } from '../journal';
 import {
+  PendingAskRegistry,
+  confirmSeamFrom,
+  createInterventionSeam,
   GuardContext,
   OpenAiModelClient,
   assembleToolSpecs,
@@ -75,7 +78,9 @@ import {
 } from '../orchestrator';
 import type {
   ConfirmSeam,
+  Intervention,
   OrchestratorPhase,
+  PresentIntervention,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
@@ -287,6 +292,18 @@ export function registerCommands(
   // than through one, and the two exclude each other so only one stage runs per
   // repository. Its completion sink is bound after the ChatController exists.
   let reportDraftOutcome: (outcome: SpecDraftOutcome) => void = () => {};
+  // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
+  // goes through one registry and one seam. `present` is bound late: until the
+  // Chat_View has resolved, an ask falls back to the modal so a confirmation
+  // triggered from the tree is never silently declined.
+  const askRegistry = new PendingAskRegistry({
+    ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+    clock: systemClock,
+  });
+  const modalConfirm = buildConfirmSeam();
+  let presentAsk: PresentIntervention = (ask) => presentThroughModal(askRegistry, modalConfirm, ask);
+  const interventionSeam = createInterventionSeam(askRegistry, (ask) => presentAsk(ask));
+  const confirm = confirmSeamFrom(interventionSeam);
   const draftServices = buildToolServices(
     repoRoot,
     baitonDir,
@@ -295,6 +312,7 @@ export function registerCommands(
     specsDir,
     adapterFor,
     submitPrForSlug,
+    confirm,
   );
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
@@ -312,7 +330,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -427,14 +445,13 @@ export function registerCommands(
   // binds it to the tool loop, per-conversation transcripts, and the reused
   // registry/confirm seams. Both are wired against the assembled tool set.
   const chatWebview = new ChatWebviewProvider(context.extensionUri);
-  const confirm = buildConfirmSeam();
   const chatController = new ChatController({
     webview: chatWebview,
     client: modelClient,
     registry,
     toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
-    confirm,
+    askRegistry,
     baitonDir,
     specsDir,
     roundBound: () => readRoundBound(),
@@ -468,6 +485,9 @@ export function registerCommands(
     }
     void chatController.noteSystem(message);
   };
+  // Once the Chat_View has resolved, asks are presented as inline cards on the
+  // conversation in view; before that the modal fallback stands in.
+  presentAsk = (ask) => chatController.presentIntervention(ask);
   chatWebview.onResolve(() => chatController.start());
   disposables.push(
     vscode.window.registerWebviewViewProvider(
@@ -1316,7 +1336,9 @@ async function promptForSlug(
 
 /**
  * Build the {@link ToolServices} bundle for the tool registry from the real git
- * service, the run-queue seam, and a `vscode`-backed confirmation seam.
+ * service, the run-queue seam, and the injected confirmation seam — the
+ * inline-card adapter over the shared intervention seam, supplied by the caller
+ * so both tool-services bundles share one seam.
  */
 function buildToolServices(
   repoRoot: string,
@@ -1326,12 +1348,13 @@ function buildToolServices(
   specsDir: string,
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
+  confirm: ConfirmSeam,
 ): ToolServices {
   return {
     repoRoot,
     baitonDir,
     git,
-    confirm: buildConfirmSeam(),
+    confirm,
     runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
@@ -1355,10 +1378,33 @@ function readGitSettings(): { remote: string; base: string } {
 }
 
 /**
- * Build the `vscode`-backed {@link ConfirmSeam} presented as a modal for both
- * the approve control tool (through the registry) and the Chat_View approval
- * (through the {@link ChatController}, Req 15). "Approve" confirms; any other
- * dismissal declines.
+ * Present an ask while the Chat_View has not resolved yet: a confirmation or a
+ * permission ask falls back to the modal and is settled from its answer; a
+ * question has no modal form, so it is declined with a reason naming why.
+ */
+async function presentThroughModal(
+  registry: PendingAskRegistry,
+  confirm: ConfirmSeam,
+  ask: Intervention,
+): Promise<void> {
+  if (ask.kind === 'question') {
+    registry.reject(ask.id, 'the Baiton chat view is not open');
+    return;
+  }
+  const message = ask.detail === undefined ? ask.prompt : `${ask.prompt}\n\n${ask.detail}`;
+  const approved = await confirm.confirm(message);
+  registry.resolve(
+    ask.id,
+    approved ? { kind: 'approved' } : { kind: 'declined', reason: 'the confirmation was declined' },
+  );
+}
+
+/**
+ * Build the `vscode`-backed modal {@link ConfirmSeam} used only as the
+ * stand-in presenter before the Chat_View resolves (see
+ * {@link presentThroughModal}); the tool registry itself now holds the
+ * inline-card adapter built from the shared intervention seam.
+ * "Approve" confirms; any other dismissal declines.
  */
 function buildConfirmSeam(): ConfirmSeam {
   return {
