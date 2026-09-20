@@ -1,5 +1,6 @@
 import type { Role } from '../model/role';
 import { ROLES } from '../model/role';
+import type { AskRelayDescriptor } from './adapter';
 import {
   ROLE_PROFILES,
   roleProfile,
@@ -18,6 +19,11 @@ import {
  * `--add-dir` flags. Each role also receives write access to its own
  * `.baiton/runs/<run-id>/` directory; that per-run grant is appended by the
  * adapter at launch time (Requirement 15.4).
+ *
+ * The same module owns the claude ask-relay hook wiring at the bottom of the
+ * file: the `PreToolUse` hook shapes emitted through `--settings` are the ones
+ * verified by the CLI probe recorded in the README against
+ * `claude --version 2.1.278`.
  */
 
 /**
@@ -217,4 +223,127 @@ export function claudeAllowList(role: Role, runId: string, mode: PermissionMode 
     return { agent: 'claude', role, runId, rules };
   }
   return roleAllowList('claude', role, runId);
+}
+
+/**
+ * The claude ask-relay hook wiring, verified by the probe recorded in the
+ * README (`claude --version 2.1.278`). A `PreToolUse` command hook installed
+ * via inline `--settings` JSON fires for every tool call with a JSON event on
+ * stdin carrying `tool_name` / `tool_input` (verbatim field names the probe
+ * observed), and honours the hook's stdout contract
+ * `hookSpecificOutput.permissionDecision ∈ allow|deny|ask` plus
+ * `permissionDecisionReason`.
+ */
+
+/** How long the relay hook blocks (seconds) before degrading to `ask`. */
+export const CLAUDE_RELAY_HOOK_TIMEOUT_SECONDS = 600;
+
+/** The `PreToolUse` matcher: hear every tool call; Auto mode's allow-list absorbs reads. */
+export const CLAUDE_RELAY_HOOK_MATCHER = '*';
+
+/**
+ * POSIX single-quote wrap for values interpolated into the hook command,
+ * which the CLI executes through a shell. Quotes `value`'s embedded single
+ * quotes the standard `"'"'"'"` way so spaces and quotes cannot break the
+ * command.
+ */
+export function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * The node program the `PreToolUse` hook runs, passed its parameters as argv
+ * (never spliced into the source): the asks dir, the ask/response suffixes,
+ * the run id and the deadline in milliseconds. It reads the hook event from
+ * stdin, mints an ask file the relay core can parse (`parseAsk` accepts its
+ * exact bytes), polls for the response file and translates `approve`→`allow`
+ * and anything else→`deny`.
+ *
+ * On any failure — unparseable event, unwritable ask, unreadable response,
+ * deadline expiry — it emits `permissionDecision: "ask"`, never a silent
+ * allow: the run degrades to claude's own interactive prompt.
+ *
+ * Invariant: the script wraps in single quotes on the command line, so it
+ * contains no `'` character (string concatenation + double quotes only).
+ */
+export const CLAUDE_RELAY_HOOK_SCRIPT: string =
+  `const fs=require("fs"),path=require("path");` +
+  `const a=process.argv.slice(1);` +
+  `const dir=a[0],askSuffix=a[1],respSuffix=a[2],runId=a[3],deadline=Date.now()+Number(a[4]);` +
+  `function done(decision,reason){` +
+  `process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"PreToolUse",` +
+  `permissionDecision:decision,permissionDecisionReason:reason}}));process.exit(0)}` +
+  `let ev={};` +
+  `try{ev=JSON.parse(fs.readFileSync(0,"utf8")||"{}")}` +
+  `catch(e){done("ask","baiton ask relay: unparseable PreToolUse event")}` +
+  `const id=String(Date.now())+"-"+String(process.pid);` +
+  `const tool=String(ev.tool_name||"unknown");` +
+  `const ask={version:1,id:id,runId:runId,agent:"claude",kind:"permission",` +
+  `prompt:"claude wants to use "+tool,tool:tool,` +
+  `args:JSON.stringify(ev.tool_input===undefined?{}:ev.tool_input),` +
+  `createdAt:new Date().toISOString()};` +
+  `try{fs.mkdirSync(dir,{recursive:true});` +
+  `fs.writeFileSync(path.join(dir,id+askSuffix),JSON.stringify(ask,null,2)+"\\n")}` +
+  `catch(e){done("ask","baiton ask relay: cannot write ask file")}` +
+  `function poll(){try{const r=JSON.parse(fs.readFileSync(path.join(dir,id+respSuffix),"utf8"));` +
+  `done(r.decision==="approve"?"allow":"deny",String(r.reason||""))}` +
+  `catch(e){if(e&&e.code==="ENOENT"){setTimeout(poll,200)}else{` +
+  `done("ask","baiton ask relay: cannot read response")}}}` +
+  `setTimeout(function(){` +
+  `done("ask","baiton ask relay timed out - falling back to the harness prompt")},` +
+  `Math.max(0,deadline-Date.now()));` +
+  `poll()`;
+
+/**
+ * The shell command for the relay hook: the {@link CLAUDE_RELAY_HOOK_SCRIPT}
+ * program run with `node -e`, its parameters passed as argv (ask dir, ask
+ * suffix, response suffix, run id — each {@link shellQuote}-wrapped because
+ * the command executes through a shell) and the deadline in milliseconds.
+ */
+export function claudeAskRelayHookCommand(relay: AskRelayDescriptor): string {
+  return (
+    `node -e ${shellQuote(CLAUDE_RELAY_HOOK_SCRIPT)} ` +
+    `${shellQuote(relay.dir)} ${shellQuote(relay.askSuffix)} ` +
+    `${shellQuote(relay.responseSuffix)} ${shellQuote(relay.runId)} ` +
+    `${CLAUDE_RELAY_HOOK_TIMEOUT_SECONDS * 1000}`
+  );
+}
+
+/**
+ * The inline `--settings` JSON value carrying the relay hook: a `PreToolUse`
+ * group matching {@link CLAUDE_RELAY_HOOK_MATCHER} with one command hook
+ * whose command is {@link claudeAskRelayHookCommand} and whose `timeout` is
+ * {@link CLAUDE_RELAY_HOOK_TIMEOUT_SECONDS} (accepted by the probed CLI).
+ */
+export function claudeAskRelaySettings(relay: AskRelayDescriptor): Record<string, unknown> {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: CLAUDE_RELAY_HOOK_MATCHER,
+          hooks: [
+            {
+              type: 'command',
+              command: claudeAskRelayHookCommand(relay),
+              timeout: CLAUDE_RELAY_HOOK_TIMEOUT_SECONDS,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * The `--settings <inline JSON>` argv pair carrying the ask-relay hook.
+ * Returns `[]` when no relay was requested, or when the descriptor's
+ * `protocol` is not `file-v1` — an unknown protocol must never emit a
+ * half-understood hook — so callers can spread this straight into the argv
+ * ahead of the `--` end-of-options marker.
+ */
+export function claudeRelayFlags(relay?: AskRelayDescriptor): string[] {
+  if (relay === undefined || relay.protocol !== 'file-v1') {
+    return [];
+  }
+  return ['--settings', JSON.stringify(claudeAskRelaySettings(relay))];
 }

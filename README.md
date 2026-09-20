@@ -205,6 +205,29 @@ Baiton uses curated static capability catalogues in each adapter module rather t
 - **Roadmap for dynamic discovery**:
   - Future iterations may introduce background caching or an asynchronous "Refresh models from CLI" button for CLIs that support dynamic querying (`agy models`, `opencode models`), caching results in workspace storage while retaining static defaults as resilient fallbacks.
 
+#### Harness ask relay (per-adapter probe findings)
+
+A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the run stays paused until the answer file appears.
+
+- **claude findings** (probed `claude --version 2.1.278`):
+  - `--settings` accepts an inline JSON string as well as a file path (`<file-or-json>` in `claude --help`), and a `-p` run started with an inline hooks JSON launched cleanly and installed the hook — verified by the probe.
+  - `PreToolUse` command hooks fire for every tool call with the exact stdin event `{session_id, transcript_path, cwd, prompt_id, permission_mode, effort, hook_event_name, tool_name, tool_input, tool_use_id}` — the fields Baiton's hook reads (`hook_event_name`, `tool_name`, `tool_input`) are taken verbatim from this probe.
+  - The hook's stdout contract is `hookSpecificOutput.permissionDecision ∈ allow|deny|ask` plus `permissionDecisionReason`: `deny` blocked the tool call with the probe's reason string, `allow` let it run, and `ask` (non-interactive `-p`) blocked it the same way `deny` did — all verified by the probe; the `ask` lever only falls back to the interactive prompt in sessions with a terminal.
+  - A `timeout` field is accepted on the hook entry and is enforced by the CLI (a 1 s timeout clipped a 2 s hook); the probed CLI did not surface a distinct "timed out" decision to the hook, so Baiton's hook does not rely on the CLI-side timeout — it runs with its own 600 s deadline and degrades **deliberately** to `permissionDecision: "ask"` (never a silent `allow`) on expiry or on any parse/write failure.
+  - The `timeout` *field itself* beyond "no rejection" and the above clipping were **not independently re-verified at the 600 s scale**; anything the probe could not confirm is marked **unverified** rather than asserted.
+- **Per-adapter relay state**:
+
+  | Adapter | Relay | Verified |
+  | --- | --- | --- |
+  | claude | native `PreToolUse` hook via inline `--settings` | yes (version 2.1.278, 2026-09-20) |
+  | opencode | config-driven fallback | not probed yet |
+  | antigravity (agy) | config-driven fallback | not probed yet |
+  | codex | config-driven fallback | not probed yet |
+
+- Adapters without a verified native relay fall back to the config-driven
+  permission layer (`permissionFlags` / `--allowedTools` /
+  `--permission-mode`) and surface nothing inline.
+
 ## Commands
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and

@@ -4,6 +4,7 @@ import type { Role } from '../model/role';
 import {
   DEFAULT_PERMISSION_MODE,
   PermissionMode,
+  claudeRelayFlags,
   permissionFlags,
   runDirGrant,
 } from './permissions';
@@ -97,14 +98,21 @@ export class ClaudeAdapter implements Adapter {
    * Build the terminal launch for one stage.
    *
    * Fresh launch: `claude --session-id <id> --model <m> [--effort <e>]
-   * <permission flags> <run-dir grant> --append-system-prompt <profile prompt>
-   * -- "<prompt>"` (Requirement 3.1). On
-   * resume, `--resume <resumeSessionId>` leads the arguments when a prior
-   * Session_Id is known, falling back to the continue flag `-c` when it is
-   * not (Requirements 3.2, 13.2, 13.3, 15.1–15.4). Every role is additionally
-   * granted write access to its own `.baiton/runs/<run-id>/` directory
-   * (Requirement 15.4).
-   */
+    * <permission flags> <run-dir grant> [--settings <inline JSON>]
+    * --append-system-prompt <profile prompt> -- "<prompt>"` (Requirement 3.1).
+    * On resume, `--resume <resumeSessionId>` leads the arguments when a prior
+    * Session_Id is known, falling back to the continue flag `-c` when it is
+    * not (Requirements 3.2, 13.2, 13.3, 15.1–15.4). Every role is additionally
+    * granted write access to its own `.baiton/runs/<run-id>/` directory
+    * (Requirement 15.4).
+    *
+    * When the request carries a `file-v1` ask-relay descriptor, the pair
+    * `--settings <inline JSON>` is inserted after the run-dir grant, carrying
+    * the verified `PreToolUse` ask-relay hook (see `permissions.ts`); with no
+    * descriptor (or an unknown relay protocol) the argv is byte-identical to
+    * the plain launch above. `attach()` deliberately takes no relay: re-opening
+    * a finished session must not re-arm the hook.
+    */
   launch(req: LaunchRequest): LaunchSpec {
     const args: string[] = [];
 
@@ -125,6 +133,7 @@ export class ClaudeAdapter implements Adapter {
 
     args.push(...permissionFlags(req.role, this.mode));
     args.push(...runDirGrant(req.runId));
+    args.push(...claudeRelayFlags(req.relay));
     args.push(...claudeSystemPromptFlags(req.role));
     // `--add-dir` and `--allowedTools` are variadic; without the `--`
     // end-of-options marker the CLI swallows the prompt as another value and
