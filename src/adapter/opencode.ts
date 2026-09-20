@@ -3,6 +3,7 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from './adapter'
 import { AGENT_BINARY } from './adapter';
 import type { Role } from '../model/role';
 import { roleProfile, runDirPattern } from './roleProfile';
+import type { AgentAllowList, ToolAllowRule } from './roleProfile';
 
 /** The opencode CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const OPENCODE_BIN = AGENT_BINARY.opencode;
@@ -96,6 +97,59 @@ export function opencodeAgentDefinition(role: Role, runId: string): OpencodeAgen
     prompt: profile.systemPrompt,
     permission,
   };
+}
+
+/**
+ * Normalise an opencode glob pattern for the auto-mode gate's matcher.
+ * `src/orchestrator/glob.ts` treats a single `*` as non-separator-crossing,
+ * so opencode's trailing `/*` (the run-dir rule) is rewritten as `**` then
+ * `/*`, and a bare `*` likewise becomes `**` then `/*`: a lone trailing `**`
+ * compiles to segments-only `(?:[^/]+/)*` and would never match a file
+ * inside the tree, while the final `*` component provides it. Anything else
+ * passes through unchanged.
+ */
+function toGlob(pattern: string): string {
+  if (pattern.endsWith('/*') && !pattern.endsWith('/**/*')) {
+    // Drop the trailing `*`, keep the slash, then add `**/*`.
+    return `${pattern.slice(0, -1)}**/*`;
+  }
+  return pattern === '*' ? '**/*' : pattern;
+}
+
+/**
+ * Derive opencode's auto-mode allow-list from {@link opencodeAgentDefinition}
+ * rather than from the role profile directly, so the gate reads exactly the
+ * permission table opencode is launched with.
+ *
+ * - `edit` allow keys become the write rule's `paths` (deny keys are dropped:
+ *   they are the default-deny backdrop; a path only auto-approves when it
+ *   matches an `allow` glob);
+ * - no `bash` block means opencode's own default (allow) applies, so a shell
+ *   rule is emitted; a `bash` block denying `*` emits none;
+ * - read and search are always granted unscoped (opencode grants them to
+ *   every agent; there is no rule table for them).
+ */
+export function opencodeAllowList(role: Role, runId: string): AgentAllowList {
+  const definition = opencodeAgentDefinition(role, runId);
+
+  const writePaths: string[] = [];
+  for (const [pattern, value] of Object.entries(definition.permission.edit)) {
+    if (value === 'allow') {
+      writePaths.push(toGlob(pattern));
+    }
+  }
+  const rules: ToolAllowRule[] = [
+    { family: 'read', reason: 'every role may read' },
+    { family: 'search', reason: 'every role may search' },
+    { family: 'write', paths: writePaths, reason: 'opencode edit allow globs' },
+  ];
+
+  const bash = definition.permission.bash;
+  if (bash === undefined || bash['*'] !== 'deny') {
+    rules.push({ family: 'shell', reason: 'opencode agent has no bash deny rule' });
+  }
+
+  return { agent: 'opencode', role, runId, rules };
 }
 
 /**

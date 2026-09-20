@@ -58,6 +58,80 @@ export function runDirPattern(runId: string): string {
   return `.baiton/runs/${runId}/`;
 }
 
+/**
+ * The run-dir glob as a `**`-widened pattern: `.baiton/runs/<runId>/` with a
+ * trailing `**` followed by one final single-`*` file component (the
+ * `**`-then-`/*` form, `${runDirPattern(runId)}**` plus a trailing `/*`).
+ *
+ * A single `*` is not enough: `src/orchestrator/glob.ts` treats it as
+ * non-separator-crossing, so opencode's `.baiton/runs/<id>/*` rule matches
+ * only files directly inside the run dir and never
+ * `.baiton/runs/<id>/sub/file.json`. A lone `**` is not enough either: this
+ * matcher compiles `**` to segments-only `(?:[^/]+/)*` with no trailing file
+ * component, so `<dir>/**` matches the directory and its sub-directories but
+ * not a file inside them. Appending the final `*` component compiles to
+ * `(?:[^/]+/)*[^/]*`, which covers both `.baiton/runs/<id>/result.json` and
+ * `.baiton/runs/<id>/sub/file.json`. The allow-list gate matches write
+ * targets against this glob with `matchesGlob`.
+ */
+export function runDirGlob(runId: string): string {
+  return `${runDirPattern(runId)}**/*`;
+}
+
+/**
+ * The canonical, CLI-independent tool families every harness tool name is
+ * normalised onto by the auto-mode gate (`src/orchestrator/autoMode.ts`).
+ */
+export type AllowedToolFamily = 'read' | 'search' | 'write' | 'shell';
+
+/** One allow-list entry: a tool family, optionally scoped to repo-relative globs. */
+export interface ToolAllowRule {
+  family: AllowedToolFamily;
+  /** Repo-relative globs the rule is scoped to; absent means any path. */
+  paths?: readonly string[];
+  /** Short human reason used in the audit rationale, e.g. 'run-dir write grant'. */
+  reason: string;
+}
+
+/** The per-agent allow-list the auto-mode first gate consumes. */
+export interface AgentAllowList {
+  agent: string;
+  role: Role;
+  runId: string;
+  rules: readonly ToolAllowRule[];
+}
+
+/**
+ * The profile-derived default allow-list for a role — the fallback for
+ * adapters with no granular permission data of their own (codex runs
+ * `--sandbox workspace-write` for every role and antigravity has only
+ * `--mode plan|accept-edits`, so neither exposes a finer table than the
+ * profile; see their JSDoc).
+ *
+ * Derived purely from {@link ROLE_PROFILES}: read and search are always
+ * granted unscoped; the write rule's paths follow the profile's write scope
+ * (`workspace` → `**` then `/*`, `run-dir` → the run dir glob); a shell rule is emitted
+ * only when the profile grants shell. Note that a shell rule makes shell
+ * *eligible* only — `autoMode.ts` still restricts shell approval to
+ * recognised safe read-only/verification commands and escalates the rest.
+ */
+export function roleAllowList(agent: string, role: Role, runId: string): AgentAllowList {
+  const profile = ROLE_PROFILES[role];
+  const rules: ToolAllowRule[] = [
+    { family: 'read', reason: 'every role may read' },
+    { family: 'search', reason: 'every role may search' },
+  ];
+  rules.push(
+    profile.write === 'workspace'
+      ? { family: 'write', paths: ['**', '**/*'], reason: 'workspace write scope' }
+      : { family: 'write', paths: [runDirGlob(runId)], reason: 'run-dir write grant' },
+  );
+  if (profile.shell) {
+    rules.push({ family: 'shell', reason: 'role profile grants shell' });
+  }
+  return { agent, role, runId, rules };
+}
+
 /** Compose a profile's full system prompt: the role fragment plus the shared sentence. */
 function prompt(fragment: string): string {
   return `${fragment} ${RESULT_FILE_SENTENCE}`;

@@ -3,6 +3,7 @@ export * from './modelClient';
 export * from './guard';
 export * from './seams';
 export * from './interventions';
+export * from './autoMode';
 export * from './toolServices';
 export * from './chatTranscript';
 export * from './transcriptReader';

@@ -15,16 +15,47 @@ export * from './codex';
 
 import { AGENT_BINARY } from './adapter';
 import type { Adapter, AgentCapabilities, AgentId } from './adapter';
-import { DEFAULT_PERMISSION_MODE } from './permissions';
+import { DEFAULT_PERMISSION_MODE, claudeAllowList } from './permissions';
 import type { PermissionMode } from './permissions';
+import { opencodeAllowList } from './opencode';
+import { roleAllowList } from './roleProfile';
+import type { AgentAllowList } from './roleProfile';
 import { ClaudeAdapter, CLAUDE_MODELS, CLAUDE_EFFORTS } from './claude';
 import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS, OPENCODE_MODEL_DOC_URL } from './opencode';
 import { AntigravityAdapter, ANTIGRAVITY_MODELS, ANTIGRAVITY_EFFORTS } from './antigravity';
 import { CodexAdapter, CODEX_MODELS, CODEX_EFFORTS } from './codex';
+import type { Role } from '../model/role';
 
 /** Whether `value` is one of the known agent ids, derived from `AGENT_BINARY`'s keys. */
 export function isAgentId(value: string): value is AgentId {
   return Object.prototype.hasOwnProperty.call(AGENT_BINARY, value);
+}
+
+/**
+ * The per-agent auto-mode allow-list lookup: claude's list is parsed from the
+ * `--allowedTools` flags it is launched with, opencode's from its agent
+ * definition's permission rules, and codex (`--sandbox workspace-write` for
+ * every role) and antigravity (`--mode plan|accept-edits`) expose no finer
+ * table than the role profile, so they — and any unknown agent id — fall back
+ * to the profile-derived list, the conservative default that never widens
+ * beyond the role's own policy.
+ */
+export function agentAllowList(
+  agent: string,
+  role: Role,
+  runId: string,
+  mode: PermissionMode = DEFAULT_PERMISSION_MODE,
+): AgentAllowList {
+  switch (agent) {
+    case 'claude':
+      return claudeAllowList(role, runId, mode);
+    case 'opencode':
+      return opencodeAllowList(role, runId);
+    // codex (--sandbox workspace-write for every role) and antigravity
+    // (--mode plan|accept-edits) expose no finer table than the profile.
+    default:
+      return roleAllowList(agent, role, runId);
+  }
 }
 
 /**
