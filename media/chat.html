@@ -18,6 +18,8 @@
 
   The provider also enables retainContextWhenHidden (Req 16.4). No UI framework
   is used; the view is plain markup plus the scripts under media/ (Req 19.2).
+  The transcript also renders inline intervention cards (question / confirm /
+  permission) built by chat.js.
   All colors come from VS Code theme CSS variables so the view follows the
   active theme and reflects theme changes without a reload (Req 16.6, 16.7).
 -->
@@ -219,7 +221,8 @@
       /* Direct children of the column-flex transcript must keep their natural
          height rather than being squeezed to fit. */
       #transcript > .message,
-      #transcript > .tool-group {
+      #transcript > .tool-group,
+      #transcript > .intervention {
         flex-shrink: 0;
       }
 
@@ -379,6 +382,152 @@
         max-height: 20em;
         overflow-y: auto;
         color: var(--vscode-descriptionForeground);
+      }
+
+      /* Intervention cards: inline question / confirm / permission asks rendered
+         from record.intervention and answered with answerIntervention (chat.js).
+         Border + left accent mark the ask; the accent greys once resolved. */
+      .intervention {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: var(--baiton-gap);
+        border: 1px solid var(--vscode-panel-border);
+        border-left: 2px solid var(--vscode-focusBorder);
+        border-radius: 3px;
+        background-color: var(--vscode-editorWidget-background);
+      }
+
+      .intervention.resolved {
+        border-left-color: var(--vscode-panel-border);
+      }
+
+      .intervention-head {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        font-size: 0.85em;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .intervention-meta {
+        font-family: var(--vscode-editor-font-family, monospace);
+        text-transform: none;
+        letter-spacing: normal;
+      }
+
+      .intervention-prompt {
+        word-break: break-word;
+      }
+
+      .intervention-detail {
+        color: var(--vscode-descriptionForeground);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .intervention-args > summary {
+        cursor: pointer;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .intervention-args pre {
+        margin: 4px 0 0 0;
+        padding: 4px 6px;
+        background-color: var(--vscode-textCodeBlock-background);
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--vscode-editor-font-family, monospace);
+        max-height: 12em;
+        overflow-y: auto;
+      }
+
+      .intervention-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        border: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      fieldset.intervention-options {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .intervention-legend {
+        padding: 0;
+        font-size: 0.85em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .intervention-radio {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        cursor: pointer;
+      }
+
+      .intervention-option-detail {
+        font-size: 0.9em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .intervention-answer-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .intervention-input {
+        flex: 1 1 auto;
+        min-width: 0;
+        box-sizing: border-box;
+        padding: 4px;
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-input-foreground);
+        background-color: var(--vscode-input-background);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      }
+
+      .intervention-input::placeholder {
+        color: var(--vscode-input-placeholderForeground);
+      }
+
+      .intervention-actions {
+        display: flex;
+        gap: 6px;
+      }
+
+      .intervention-settled {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .intervention-decision {
+        color: var(--vscode-foreground);
+        word-break: break-word;
+      }
+
+      .intervention-auto {
+        align-self: flex-start;
+        padding: 0 4px;
+        font-size: 0.8em;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .intervention-rationale {
+        color: var(--vscode-descriptionForeground);
+        word-break: break-word;
       }
 
       /* Empty state (Req 13.5) */
