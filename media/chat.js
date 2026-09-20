@@ -392,6 +392,7 @@
         const option = options[i];
         const btn = document.createElement('button');
         btn.type = 'button';
+        btn.className = 'intervention-option';
         btn.disabled = locked;
         tagControl(btn, 'opt:' + option.id);
         const label = document.createElement('span');
@@ -465,7 +466,10 @@
       submit.disabled = locked;
       tagControl(submit, 'submit');
       function refresh() {
-        submit.disabled = locked || input.value.trim().length === 0;
+        // Non-whitespace text or a selected radio is enough to submit; Submit
+        // is disabled only when neither is present (or the card is locked).
+        submit.disabled =
+          locked || input.value.trim().length === 0 && !draft.optionId;
       }
       input.addEventListener('input', function () {
         cardDraft(card.id).text = input.value;
