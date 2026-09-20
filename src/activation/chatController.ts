@@ -34,10 +34,10 @@
  *    `PendingAskRegistry` as an inline card, settle it in place on
  *    `answerIntervention` (which resumes the paused tool call), persist the
  *    settled card to the transcript, and decline every pending ask on stop;
- *  - present every human-in-the-loop ask raised through the shared
- *    `PendingAskRegistry` as an inline card, settle it in place on
- *    `answerIntervention` (which resumes the paused tool call), persist the
- *    settled card to the transcript, and decline every pending ask on stop;
+ *    while Auto mode is on a harness permission ask is first put through the
+ *    gate — an approval settles it with no round-trip and an escalation asks
+ *    the user — and both outcomes are persisted, so the transcript is the
+ *    audit trail;
  *  - map {@link MissingConfigError} (by `.missing`) and
  *    {@link UnreachableEndpointError} to inline messages with the correct fix
  *    action, leaving the transcript unchanged on a fix action (Req 13.1–13.4);
@@ -51,6 +51,7 @@ import {
   MissingConfigError,
   UnreachableEndpointError,
   buildSystemPrompt,
+  escalatedInterventionView,
   interventionTranscriptRecord,
   interventionUpdate,
   phaseFor,
@@ -65,6 +66,7 @@ import {
   toolUpdate,
 } from '../orchestrator';
 import type {
+  AutoModeOutcome,
   ChatMessage,
   SessionItem,
   SessionMeta,
@@ -78,6 +80,7 @@ import type {
   InterventionView,
   ModelClient,
   OrchestratorPhase,
+  PermissionRequest,
   RenderRecord,
   ToolResult,
   ToolSpec,
@@ -177,7 +180,36 @@ export interface ChatControllerDeps {
   sessionMemory?: SessionMemory;
   /** Overrides the session store; defaults to one over `baitonDir`/`specsDir`. */
   sessionStore?: SessionStore;
+  /**
+   * Persists the Auto-mode toggle across windows. Absent, the toggle still
+   * works for the life of the controller but starts off on every reload.
+   */
+  autoModeMemory?: AutoModeMemory;
+  /**
+   * Decides a harness permission ask while Auto mode is on. Absent, Auto mode
+   * gates nothing and every ask is presented to the user as usual.
+   */
+  autoGate?: AutoModeGate;
 }
+
+/** Remembers the Auto-mode toggle across windows (backed by `workspaceState`). */
+export interface AutoModeMemory {
+  /** The remembered state; `false` when nothing was ever stored. */
+  get(): boolean;
+  /** Remember the new state. */
+  set(enabled: boolean): Promise<void>;
+}
+
+/**
+ * The Auto-mode gate over one harness permission ask: the host binds it to the
+ * two-stage `decideAsk` (deterministic allow-list, then the model risk
+ * evaluation). It must never throw — the controller treats a thrown value as
+ * an escalation, so a broken gate can only ever ask the user.
+ */
+export type AutoModeGate = (
+  ask: PermissionRequest,
+  opts: { signal?: AbortSignal },
+) => Promise<AutoModeOutcome>;
 
 /** Per-scope memory of the last active session (backed by `workspaceState`). */
 export interface SessionMemory {
@@ -204,6 +236,9 @@ export class ChatController {
 
   /** Whether a request or the tool loop is in flight (Req 14.2, 14.3). */
   private busy = false;
+
+  /** Whether Auto mode is on; seeded from `autoModeMemory` and echoed to the view. */
+  private autoMode = false;
 
   /** Aborts the in-flight run; created per send, triggered on stop (Req 14.6). */
   private abort: AbortController | undefined;
@@ -239,6 +274,7 @@ export class ChatController {
       new PendingAskRegistry({
         ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
       });
+    this.autoMode = deps.autoModeMemory?.get() ?? false;
   }
 
   /**
@@ -310,6 +346,9 @@ export class ChatController {
       case 'answerIntervention':
         await this.onAnswerIntervention(msg.id, msg.answer);
         return;
+      case 'setAutoMode':
+        await this.onSetAutoMode(msg.enabled);
+        return;
     }
   }
 
@@ -319,13 +358,99 @@ export class ChatController {
    * by the host as the `present` of the shared `InterventionSeam`; the seam
    * declines the ask automatically if this throws.
    */
-  public presentIntervention(ask: Intervention): void {
+  /**
+   * The user flipped the Auto toggle. The webview is a pure projection, so the
+   * host is the one that flips the state and echoes it back; the new state is
+   * remembered for the next window. Only asks presented after this point are
+   * gated: a card already on screen stays the user's to answer.
+   */
+  private async onSetAutoMode(enabled: boolean): Promise<void> {
+    this.autoMode = enabled;
+    this.deps.webview.post({ type: 'setAutoMode', enabled });
+    try {
+      await this.deps.autoModeMemory?.set(enabled);
+    } catch (err) {
+      this.deps.log(`Baiton chat: could not remember the Auto-mode setting: ${describe(err)}`);
+    }
+  }
+
+  /**
+   * Show one pending ask as an inline card on the conversation currently in
+   * view, and remember which transcript its settled record belongs to.
+   *
+   * While Auto mode is on, a harness `permission` ask is first put through the
+   * gate: an approval settles the ask with no round-trip and posts the card
+   * already resolved and flagged `auto`, and an escalation is shown as an
+   * ordinary pending card carrying the 'what you are approving / why it was
+   * flagged' description. Confirmations and questions are never gated — they
+   * carry human intent, not a harness capability. Both outcomes are persisted,
+   * so the transcript is the audit trail.
+   */
+  public async presentIntervention(ask: Intervention): Promise<void> {
     const scope = this.activeScope();
     const key = scopeId(scope);
     const sessionId = this.activeSessions.get(key) ?? this.newSessionId(scope);
+    const transcript = this.transcriptFor(scope, sessionId);
     const view = toInterventionView(ask);
-    this.cards.set(ask.id, { view, transcript: this.transcriptFor(scope, sessionId) });
-    this.deps.webview.post({ type: 'showIntervention', intervention: view });
+    const outcome = await this.autoDecision(ask);
+    if (outcome !== undefined && outcome.kind === 'approve') {
+      await this.autoApprove(ask.id, view, transcript, outcome);
+      return;
+    }
+    const card = outcome === undefined ? view : escalatedInterventionView(view, outcome);
+    this.cards.set(ask.id, { view: card, transcript });
+    this.deps.webview.post({ type: 'showIntervention', intervention: card });
+    if (outcome !== undefined) {
+      // Audit the escalation now, while it happens: the same id is appended
+      // again, settled, once the user answers, and `toRenderRecords` renders
+      // the pair as the one card in its original position.
+      await this.append(transcript, interventionTranscriptRecord(card));
+    }
+  }
+
+  /**
+   * Run the Auto-mode gate over one ask, or `undefined` when the ask is not
+   * gated (Auto mode off, no gate wired, or an ask that is not a harness
+   * permission). A gate that throws escalates: Auto mode may only ever fail
+   * towards asking the user.
+   */
+  private async autoDecision(ask: Intervention): Promise<AutoModeOutcome | undefined> {
+    if (!this.autoMode || this.deps.autoGate === undefined || ask.kind !== 'permission') {
+      return undefined;
+    }
+    try {
+      return await this.deps.autoGate(ask, { signal: this.abort?.signal });
+    } catch (err) {
+      this.deps.log(`Baiton chat: the Auto-mode gate failed: ${describe(err)}`);
+      return {
+        kind: 'escalate',
+        what: `${ask.agent} wants to run ${ask.tool}`,
+        why: `Auto mode could not decide: ${describe(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Settle an auto-approved ask: resolve the registry entry (resuming the
+   * paused harness), post the card already resolved — no card is ever shown
+   * pending for it — and persist it as the auditable record of the approval.
+   * A stop that declined the ask while the gate ran wins: the resolve fails
+   * and nothing further is posted or written.
+   */
+  private async autoApprove(
+    id: string,
+    view: InterventionView,
+    transcript: ChatTranscript,
+    outcome: Extract<AutoModeOutcome, { kind: 'approve' }>,
+  ): Promise<void> {
+    const answer: InterventionAnswer = { kind: 'approved' };
+    if (this.asks.resolve(id, answer).kind !== 'resolved') {
+      return;
+    }
+    const rationale = autoApprovalRationale(outcome);
+    const settled = settledInterventionView(view, answer, { rationale, auto: true });
+    this.deps.webview.post({ type: 'showIntervention', intervention: settled });
+    await this.append(transcript, interventionTranscriptRecord(settled));
   }
 
   /**
@@ -630,6 +755,7 @@ export class ChatController {
     const scope = this.activeScope();
     await this.migrate(scope);
     this.conversations = await this.buildConversationItems();
+    this.deps.webview.post({ type: 'setAutoMode', enabled: this.autoMode });
     this.deps.webview.post({ type: 'setConversations', items: this.conversations });
     this.deps.webview.post({ type: 'setActive', conversationId: this.activeConversationId() });
     const listed = await this.postSessions(scope);
@@ -1005,4 +1131,10 @@ interface PendingCard {
 /** A short, safe description of a thrown value for a user-facing message. */
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** The one-line audit rationale of an Auto-mode approval, naming the stage that decided. */
+function autoApprovalRationale(outcome: Extract<AutoModeOutcome, { kind: 'approve' }>): string {
+  const stage = outcome.stage === 'allow-list' ? 'allow-list' : 'model review';
+  return `Auto mode (${stage}): ${outcome.rationale}`;
 }

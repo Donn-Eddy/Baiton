@@ -70,8 +70,10 @@ import {
   PendingAskRegistry,
   confirmSeamFrom,
   createInterventionSeam,
+  decideAsk,
   GuardContext,
   OpenAiModelClient,
+  askFromPermission,
   assembleToolSpecs,
   createToolRegistry,
   systemClock,
@@ -87,7 +89,7 @@ import type {
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { createAdapterRegistry } from '../adapter';
+import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
 import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
@@ -104,7 +106,7 @@ import {
   type EngineTrigger,
 } from './engineFacade';
 import { ChatController } from './chatController';
-import type { OrchestratorConfig } from './chatController';
+import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
@@ -136,6 +138,18 @@ export const COMMANDS = {
   setApiKey: 'baiton.setOrchestratorApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
 } as const;
+
+/**
+ * The role the Auto-mode gate evaluates a harness ask against until the ask
+ * relay carries the originating run's role and id. `planner` is the most
+ * restrictive profile (read-only, no shell, writes confined to its run dir),
+ * so the deterministic stage can only ever clear reads and searches on its
+ * own and everything else goes to the model stage.
+ */
+const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
+
+/** Run id used for the same reason: it matches no real run directory, so no write rule can fire. */
+const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
 
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
@@ -447,6 +461,16 @@ export function registerCommands(
   // binds it to the tool loop, per-conversation transcripts, and the reused
   // registry/confirm seams. Both are wired against the assembled tool set.
   const chatWebview = new ChatWebviewProvider(context.extensionUri);
+  // Auto mode's two-stage gate: the per-agent allow-list first, then the
+  // orchestrator model. It is only consulted for harness permission asks that
+  // arrive while the toggle is on; see ChatController.presentIntervention.
+  const autoGate: AutoModeGate = (ask, opts) =>
+    decideAsk(
+      askFromPermission(ask),
+      agentAllowList(ask.agent, AUTO_MODE_FALLBACK_ROLE, AUTO_MODE_UNKNOWN_RUN),
+      modelClient,
+      { role: AUTO_MODE_FALLBACK_ROLE, signal: opts.signal },
+    );
   const chatController = new ChatController({
     webview: chatWebview,
     client: modelClient,
@@ -467,11 +491,20 @@ export function registerCommands(
     sessionMemory: {
       get: (scope: string) =>
         context.workspaceState.get<string>(`baiton.chat.session.${scope}`),
-      set: async (scope: string, sessionId: string) => {
-        await context.workspaceState.update(`baiton.chat.session.${scope}`, sessionId);
+        set: async (scope: string, sessionId: string) => {
+          await context.workspaceState.update(`baiton.chat.session.${scope}`, sessionId);
+        },
       },
-    },
-  });
+      autoGate,
+      // The Auto-mode toggle is remembered per workspace, so a window reload
+      // comes back in the mode the user left it in.
+      autoModeMemory: {
+        get: () => context.workspaceState.get<boolean>('baiton.chat.autoMode') === true,
+        set: async (enabled: boolean) => {
+          await context.workspaceState.update('baiton.chat.autoMode', enabled);
+        },
+      },
+    });
   // Re-start the controller on every fresh webview resolve so a reopen or a
   // window reload reloads the current conversation into the new webview
   // (Req 8.8).

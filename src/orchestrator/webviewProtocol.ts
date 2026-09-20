@@ -115,6 +115,14 @@ export interface InterventionView {
   status: 'pending' | 'resolved';
   /** The user's (or Auto mode's) answer; present once `status` is 'resolved'. */
   answer?: InterventionAnswer;
+  /**
+   * Present when Auto mode declined to decide the ask and escalated it: what
+   * the user would be approving, and why the gate flagged it. The card's
+   * `detail` carries the same text in rendered form, so the webview needs no
+   * change to show it; this field keeps the two parts separately readable in
+   * the persisted transcript record.
+   */
+  escalation?: { what: string; why: string };
   /** One-line reason shown on a settled card (auto-approval or escalation). */
   rationale?: string;
   /** True when Auto mode settled the card rather than the user. */
@@ -215,7 +223,9 @@ export function initialWebviewState(): WebviewState {
  * - `updateTool` settles the pending tool row carrying the given call id.
  * - `showIntervention` appends the card as a `system` render record and clears
  *   the empty state; an id already rendered is replaced in place, and a
- *   trailing streaming record is finalized first.
+ *   trailing streaming record is finalized first. An Auto-mode escalation
+ *   arrives as an ordinary pending card whose `detail`/`escalation` carry the
+ *   'what you are approving / why it was flagged' text.
  * - `resolveIntervention` settles the first pending card carrying the given
  *   id by attaching the answer, rationale and auto flag; an id that matches
  *   no pending card is a no-op returning the same state.
@@ -479,4 +489,29 @@ export function interventionUpdate(
   opts: { rationale?: string; auto?: boolean } = {},
 ): HostToWebview {
   return { type: 'resolveIntervention', id, answer, rationale: opts.rationale, auto: opts.auto };
+}
+
+/** Label of the 'what you are approving' line of an escalated card. */
+export const ESCALATION_WHAT_LABEL = 'What you are approving:';
+
+/** Label of the 'why it was flagged' line of an escalated card. */
+export const ESCALATION_WHY_LABEL = 'Why it was flagged:';
+
+/**
+ * The card an escalated ask renders as: the pending view with the escalation
+ * recorded structurally and appended to `detail` as two labelled lines. The
+ * view's own `detail` (the harness's description, when it supplied one) is
+ * kept as the first paragraph. Pure: it allocates a fresh view.
+ */
+export function escalatedInterventionView(
+  view: InterventionView,
+  escalation: { what: string; why: string },
+): InterventionView {
+  const parts: string[] = [];
+  if (view.detail !== undefined && view.detail.trim().length > 0) {
+    parts.push(view.detail);
+  }
+  parts.push(`${ESCALATION_WHAT_LABEL} ${escalation.what}`);
+  parts.push(`${ESCALATION_WHY_LABEL} ${escalation.why}`);
+  return { ...view, escalation: { ...escalation }, detail: parts.join('\n') };
 }
