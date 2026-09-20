@@ -30,7 +30,10 @@ export interface ToolGitSettings {
  * - `confirm`   — the yes/no confirmation seam `approve_spec`, `draft_spec` and
  *                 `submit_pr` gate on (Req 10.1); in the real host it is
  *                 `confirmSeamFrom(interventionSeam)`, so those confirmations
- *                 surface as inline chat cards.
+ *                 surface as inline chat cards. `ask_user` asks through the
+ *                 `intervention` seam below directly.
+ * - `intervention` — the richer human-in-the-loop seam `ask_user` asks its
+ *                 questions through (question / confirm / permission).
  * - `runQueue`  — the serialized run-queue seam `run` dispatches into (Req 10.3).
  * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
  * - `clock`     — wall clock for transcript timestamps.
@@ -44,10 +47,11 @@ export interface ToolServices {
   confirm: ConfirmSeam;
   /**
    * The human-in-the-loop seam every richer ask goes through (question /
-   * confirm / permission). Optional so a host that has not wired the chat
-   * still builds a registry; `confirm` above is the narrow yes/no adapter
-   * over this seam (`confirmSeamFrom`), so a host that supplies only
-   * `confirm` keeps working unchanged.
+   * confirm / permission). `ask_user` asks through it directly; `confirm`
+   * above is the narrow yes/no adapter over the same seam
+   * (`confirmSeamFrom`). Optional so a host that has not wired the chat still
+   * builds a registry — `ask_user` then reports itself unavailable, and a host
+   * that supplies only `confirm` keeps working unchanged.
    */
   intervention?: InterventionSeam;
   runQueue: RunQueueSeam;

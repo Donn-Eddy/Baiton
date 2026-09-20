@@ -17,6 +17,11 @@ import {
   RunDispatchOutcome,
   RunDispatchRequest,
 } from '../src/orchestrator/seams';
+import type {
+  InterventionAnswer,
+  InterventionRequest,
+  InterventionSeam,
+} from '../src/orchestrator/interventions';
 
 /**
  * Unit tests for the orchestrator tool registry and control tools (Task 13.8).
@@ -32,6 +37,9 @@ import {
  *    before the tool runs, changing nothing (Req 11.1).
  *  - `run` stage rejection: the tool itself rejects `plan-review` (and the
  *    spec-scoped `pr`) before the run-queue seam is reached (Req 11.1).
+ *  - `ask_user`: the question control tool forwards to the intervention seam,
+ *    validates its arguments before the seam, maps answers and declines, and
+ *    reports itself unavailable when no seam is wired.
  *
  * Every test builds the registry against a temp repo with a stub git and a
  * stub confirm seam, provides a valid idempotency `callId` for the one mutating
@@ -56,6 +64,7 @@ const EXPECTED_TOOLS = [
   'edit_todo',
   'remove_todo',
   // Control tools (Req 10.1, 10.3)
+  'ask_user',
   'draft_spec',
   'approve_spec',
   'run',
@@ -124,6 +133,23 @@ function recordingConfirm(answer: boolean): {
   };
 }
 
+/** An intervention seam that records the requests it received and answers a fixed answer. */
+function recordingIntervention(answer: InterventionAnswer): {
+  seam: InterventionSeam;
+  calls: InterventionRequest[];
+} {
+  const calls: InterventionRequest[] = [];
+  return {
+    calls,
+    seam: {
+      ask: async (request: InterventionRequest): Promise<InterventionAnswer> => {
+        calls.push(request);
+        return answer;
+      },
+    },
+  };
+}
+
 /** A run queue seam that is never expected to be dispatched into here. */
 const noRunQueue = {
   dispatch: async (_req: RunDispatchRequest): Promise<RunDispatchOutcome> => ({
@@ -152,6 +178,7 @@ function makeServices(
   confirm: { confirm: (message: string) => Promise<boolean> },
   draftSpec?: { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome> },
   runQueue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> } = noRunQueue,
+  intervention?: InterventionSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -163,6 +190,7 @@ function makeServices(
       throw new Error('submit_pr must not reach the PR flow on this path');
     },
     ...(draftSpec !== undefined ? { draftSpec } : {}),
+    ...(intervention !== undefined ? { intervention } : {}),
     clock: { now: () => '2024-01-01T00:00:00.000Z' },
     ids: { next: () => 'id-1' },
     gitSettings: { remote: 'origin', base: 'main' },
@@ -547,6 +575,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'add_todo',
         'edit_todo',
         'remove_todo',
+        'ask_user',
         'draft_spec',
         'approve_spec',
       ],
@@ -558,6 +587,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'add_todo',
         'edit_todo',
         'remove_todo',
+        'ask_user',
         'approve_spec',
         'run',
         'submit_pr',
@@ -800,6 +830,266 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       assert.strictEqual(result.ok, true, 'a legal stage still dispatches');
       assert.deepStrictEqual(queue.calls, [{ slug, todoId: 'T01', stage: 'plan' }]);
+    });
+  });
+
+  describe('ask_user', () => {
+    const QUESTION = 'Which branch should this spec target?';
+
+    it('forwards an option question to the seam and returns the chosen option', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'option', optionId: 'b' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        {
+          question: QUESTION,
+          options: [
+            { id: 'a', label: 'Option A' },
+            { id: 'b', label: 'Option B' },
+          ],
+        },
+        'call-ask-1',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.deepStrictEqual(result.data, {
+          answer: 'option',
+          optionId: 'b',
+          label: 'Option B',
+        });
+      }
+      assert.strictEqual(ask.calls.length, 1);
+      assert.deepStrictEqual(ask.calls[0], {
+        kind: 'question',
+        prompt: QUESTION,
+        options: [
+          { id: 'a', label: 'Option A' },
+          { id: 'b', label: 'Option B' },
+        ],
+      });
+    });
+
+    it('returns a typed answer for a free-text question', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'text', text: 'ship it' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question: 'What next?' },
+        'call-ask-2',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.deepStrictEqual(result.data, { answer: 'text', text: 'ship it' });
+      }
+      assert.ok(
+        !('options' in ask.calls[0]),
+        'a question with no options must send no options key',
+      );
+    });
+
+    it('passes allow_free_text and placeholder through as allowFreeText/placeholder', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'text', text: 'yes' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      await registry.call(
+        'ask_user',
+        { question: QUESTION, allow_free_text: true, placeholder: 'type here' },
+        'call-ask-3',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(ask.calls.length, 1);
+      assert.deepStrictEqual(ask.calls[0], {
+        kind: 'question',
+        prompt: QUESTION,
+        allowFreeText: true,
+        placeholder: 'type here',
+      });
+    });
+
+    it('a decline is a refusal carrying the decline reason', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'declined', reason: 'the run was stopped' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question: QUESTION },
+        'call-ask-4',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /the run was stopped/);
+      }
+    });
+
+    it('reports itself as unavailable when no seam is wired', async () => {
+      const repo = newRepo();
+      const confirmation = recordingConfirm(true);
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), confirmation),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question: QUESTION },
+        'call-ask-5',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /not available in this host/);
+      }
+    });
+
+    it('rejects an empty or missing question before the seam', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'text', text: 'ignored' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const missing = await registry.call(
+        'ask_user', {}, 'call-ask-6a', makeGuard(repo), 'gather',
+      );
+      const blank = await registry.call(
+        'ask_user', { question: '   ' }, 'call-ask-6b', makeGuard(repo), 'gather',
+      );
+
+      assert.strictEqual(missing.ok, false);
+      assert.strictEqual(blank.ok, false);
+      if (!missing.ok) {
+        assert.match(missing.error, /non-empty string "question"/);
+      }
+      assert.strictEqual(ask.calls.length, 0, 'a malformed call never raises a card');
+    });
+
+    it('rejects malformed options before the seam', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'option', optionId: 'a' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const cases: Record<string, unknown>[] = [
+        // an option missing label
+        {
+          question: QUESTION,
+          options: [{ id: 'a' }],
+        },
+        // a duplicate id
+        {
+          question: QUESTION,
+          options: [
+            { id: 'a', label: 'A' },
+            { id: 'a', label: 'A again' },
+          ],
+        },
+        // a non-array options
+        { question: QUESTION, options: 'nope' },
+        // nine options
+        {
+          question: QUESTION,
+          options: Array.from({ length: 9 }, (_, i) => ({ id: `o${i}`, label: `Option ${i}` })),
+        },
+      ];
+
+      for (let i = 0; i < cases.length; i++) {
+        const result = await registry.call(
+          'ask_user', cases[i], `call-ask-7-${i}`, makeGuard(repo), 'gather',
+        );
+        assert.strictEqual(result.ok, false, `case ${i} must refuse`);
+      }
+      assert.strictEqual(ask.calls.length, 0, 'the seam was never reached');
+    });
+
+    it('rejects a non-boolean allow_free_text before the seam', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'text', text: 'ignored' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question: QUESTION, allow_free_text: 'yes' },
+        'call-ask-8',
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /must be a boolean/);
+      }
+      assert.strictEqual(ask.calls.length, 0);
+    });
+
+    it('is callable without an idempotency key (it is non-mutating)', async () => {
+      const repo = newRepo();
+      const ask = recordingIntervention({ kind: 'text', text: 'later' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question: QUESTION },
+        undefined,
+        makeGuard(repo),
+        'gather',
+      );
+
+      assert.strictEqual(result.ok, true, 'a non-mutating call needs no key');
+      assert.strictEqual(ask.calls.length, 1, 'the call still reaches the seam');
+    });
+
+    it('is available while driving', async () => {
+      const repo = newRepo();
+      const question = 'Is the spec good to approve?';
+      const ask = recordingIntervention({ kind: 'text', text: 'yes' });
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
+      );
+
+      const result = await registry.call(
+        'ask_user',
+        { question },
+        'call-ask-10',
+        makeGuard(repo),
+        'drive',
+      );
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.deepStrictEqual(result.data, { answer: 'text', text: 'yes' });
+      }
+      assert.deepStrictEqual(ask.calls, [{ kind: 'question', prompt: question }]);
     });
   });
 });

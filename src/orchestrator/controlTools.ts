@@ -2,6 +2,10 @@
  * The orchestrator's control tools (Requirements 10.1–10.7, 5.2, 5.5,
  * 16.1–16.6, 17.1).
  *
+ * - `ask_user(question, options?, allow_free_text?, placeholder?)` (neither
+ *   mutating nor dispatch) — ask the user a question through the intervention
+ *   seam and return their answer as the tool result. The call blocks until the
+ *   card is answered; a decline (including Stop) comes back as a refusal.
  * - `approve_spec(slug)` (mutating) — confirm in the UI first (Req 10.1); on a
  *   decline or cancel leave the spec unchanged (Req 10.2). On a fresh approval
  *   it checks the tree is clean except the spec's own folder (Req 16.1, 16.2),
@@ -28,7 +32,7 @@
  *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
  * `draft_spec` only while gathering requirements, `run` and `submit_pr` only
- * while driving an approved spec, `approve_spec` in both.
+ * while driving an approved spec, and `ask_user` plus `approve_spec` in both.
  *
  * Every extension write under the spec folder is committed on the spec branch
  * as `spec(<slug>): <id> <what>` before any subsequent stage (Req 17.1); the
@@ -43,16 +47,114 @@ import { validateSpec } from '../model/validator';
 import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
 import { Tool, ToolContext, ToolResult } from './guard';
+import type { InterventionOption } from './interventions';
 import { ToolServices } from './toolServices';
 
 /** Build every control tool for the registry. */
 export function createControlTools(services: ToolServices): Tool[] {
   return [
+    askUserTool(services),
     draftSpecTool(services),
     approveSpecTool(services),
     runTool(services),
     submitPrTool(services),
   ];
+}
+
+/**
+ * `ask_user(question, options?, allow_free_text?, placeholder?)` — ask the user
+ * a question through the intervention seam and block until the card is
+ * answered; their answer comes back as the tool result. Neither mutating nor a
+ * dispatch, so it stays usable under Restricted Mode. Every argument is
+ * validated before the seam is touched, so a malformed call never raises a
+ * card; a decline (including a Stop-driven one) comes back as a refusal.
+ */
+function askUserTool(services: ToolServices): Tool {
+  return {
+    name: 'ask_user',
+    description:
+      'Ask the user a question and wait for their answer: offer a short list of options, accept a typed reply, or both. Use this instead of ending your turn with a question.',
+    mutating: false,
+    phases: ['gather', 'drive'],
+    schema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string' },
+        options: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              label: { type: 'string' },
+              detail: { type: 'string' },
+            },
+            required: ['id', 'label'],
+            additionalProperties: false,
+          },
+        },
+        allow_free_text: { type: 'boolean' },
+        placeholder: { type: 'string' },
+      },
+      required: ['question'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, _tc: ToolContext): Promise<ToolResult> {
+      const question = readString(args, 'question');
+      if (question === undefined || question.trim().length === 0) {
+        return { ok: false, error: 'ask_user requires a non-empty string "question"' };
+      }
+      const optionsRead = readOptions(args);
+      if (!optionsRead.ok) {
+        return { ok: false, error: optionsRead.error };
+      }
+      const options = optionsRead.options;
+
+      const freeRead = readBoolean(args, 'allow_free_text');
+      if (!freeRead.ok) {
+        return { ok: false, error: freeRead.error };
+      }
+      const allowFreeText = freeRead.value;
+      const placeholder = readString(args, 'placeholder');
+
+      if (services.intervention === undefined) {
+        return { ok: false, error: 'ask_user is not available in this host' };
+      }
+
+      const answer = await services.intervention.ask({
+        kind: 'question',
+        prompt: question.trim(),
+        ...(options.length > 0 ? { options } : {}),
+        ...(allowFreeText !== undefined ? { allowFreeText } : {}),
+        ...(placeholder !== undefined ? { placeholder } : {}),
+      });
+
+      switch (answer.kind) {
+        case 'option':
+          return {
+            ok: true,
+            data: {
+              answer: 'option',
+              optionId: answer.optionId,
+              label:
+                answer.label ??
+                options.find((o) => o.id === answer.optionId)?.label,
+            },
+          };
+        case 'text':
+          return { ok: true, data: { answer: 'text', text: answer.text } };
+        case 'declined':
+          return {
+            ok: false,
+            error:
+              'the question was not answered' +
+              (answer.reason ? `: ${answer.reason}` : ''),
+          };
+        default:
+          return { ok: false, error: 'ask_user received an approval instead of an answer' };
+      }
+    },
+  };
 }
 
 /**
@@ -520,6 +622,67 @@ function readString(args: unknown, key: string): string | undefined {
   }
   const value = (args as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+/** The most options one ask_user card may offer; more than this is a list, not a choice. */
+const MAX_ASK_USER_OPTIONS = 8;
+
+type OptionsRead = { ok: true; options: InterventionOption[] } | { ok: false; error: string };
+
+/** Read and validate the optional `options` array: objects with unique non-empty id/label. */
+function readOptions(args: unknown): OptionsRead {
+  if (typeof args !== 'object' || args === null) {
+    return { ok: true, options: [] };
+  }
+  const raw = (args as Record<string, unknown>)['options'];
+  if (raw === undefined) {
+    return { ok: true, options: [] };
+  }
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: 'ask_user "options" must be an array' };
+  }
+  if (raw.length > MAX_ASK_USER_OPTIONS) {
+    return { ok: false, error: `ask_user accepts at most ${MAX_ASK_USER_OPTIONS} options` };
+  }
+  const seen = new Set<string>();
+  const options: InterventionOption[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) {
+      return { ok: false, error: 'each ask_user option needs a non-empty string "id" and "label"' };
+    }
+    const rec = entry as Record<string, unknown>;
+    const id = typeof rec['id'] === 'string' ? rec['id'] : undefined;
+    const label = typeof rec['label'] === 'string' ? rec['label'] : undefined;
+    if (id === undefined || label === undefined || id.trim().length === 0 || label.trim().length === 0) {
+      return { ok: false, error: 'each ask_user option needs a non-empty string "id" and "label"' };
+    }
+    if (seen.has(id.trim())) {
+      return { ok: false, error: `duplicate ask_user option id: ${id.trim()}` };
+    }
+    seen.add(id.trim());
+    const detail = typeof rec['detail'] === 'string' ? rec['detail'] : undefined;
+    options.push({
+      id: id.trim(),
+      label: label.trim(),
+      ...(detail !== undefined && detail.trim().length > 0 ? { detail } : {}),
+    });
+  }
+  return { ok: true, options };
+}
+
+/** Read an optional boolean field; `undefined` when absent, an error when present but not a boolean. */
+function readBoolean(args: unknown, key: string): { ok: true; value: boolean | undefined } | { ok: false; error: string } {
+  if (typeof args !== 'object' || args === null) {
+    return { ok: true, value: undefined };
+  }
+  const value = (args as Record<string, unknown>)[key];
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof value !== 'boolean') {
+    return { ok: false, error: `ask_user "${key}" must be a boolean` };
+  }
+  return { ok: true, value };
 }
 
 /** Render a caught git error into a user-facing message. */

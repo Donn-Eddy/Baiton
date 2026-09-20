@@ -79,6 +79,7 @@ import {
 import type {
   ConfirmSeam,
   Intervention,
+  InterventionSeam,
   OrchestratorPhase,
   PresentIntervention,
   SubmitPrOutcome,
@@ -313,6 +314,7 @@ export function registerCommands(
     adapterFor,
     submitPrForSlug,
     confirm,
+    interventionSeam,
   );
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
@@ -330,7 +332,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -1336,9 +1338,10 @@ async function promptForSlug(
 
 /**
  * Build the {@link ToolServices} bundle for the tool registry from the real git
- * service, the run-queue seam, and the injected confirmation seam — the
- * inline-card adapter over the shared intervention seam, supplied by the caller
- * so both tool-services bundles share one seam.
+ * service, the run-queue seam, the injected confirmation seam, and the shared
+ * intervention seam itself — the seam the inline-card `confirm` adapter wraps,
+ * and which `ask_user` asks through directly. It is supplied by the caller so
+ * both tool-services bundles share one seam.
  */
 function buildToolServices(
   repoRoot: string,
@@ -1349,12 +1352,14 @@ function buildToolServices(
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
   confirm: ConfirmSeam,
+  intervention: InterventionSeam,
 ): ToolServices {
   return {
     repoRoot,
     baitonDir,
     git,
     confirm,
+    intervention,
     runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
