@@ -171,6 +171,38 @@ export function codexEffortFlags(effort: string | undefined): string[] {
  *    `--dangerously-bypass-hook-trust`, `--approve-for-me`,
  *    `--sandbox danger-full-access` and `--ask-for-approval never` are
  *    deliberately never emitted.
+ * 7. This adapter emits **no** ask-relay wiring: `LaunchRequest.relay` is
+ *    deliberately ignored, and `launch()`/`attach()` produce byte-identical
+ *    specs with and without a descriptor. That is a probe result, not an
+ *    omission — see README.md, "Harness ask relay (per-adapter probe
+ *    findings)", for the transcript. codex 0.154.0 *does* ship the surface:
+ *    a `PreToolUse` command hook, installable inline as
+ *    `-c 'hooks.PreToolUse=[{matcher="*",hooks=[{type="command",command="…",
+ *    timeout=600}]}]'`, which fires with `tool_name`/`tool_input` on stdin and
+ *    honours the same `hookSpecificOutput.permissionDecision ∈ allow|deny|ask`
+ *    contract claude uses — verified end-to-end, `deny` really blocks the call
+ *    ("Command blocked by PreToolUse hook: …") and a 45 s hook ran to
+ *    completion under `timeout=600`.
+ *
+ *    It is nevertheless **not installable from a pure `launch()`**: codex gates
+ *    every enabled hook behind *persisted hook trust*. With the identical
+ *    inline config and no trust entry the hook is silently skipped — no log, no
+ *    error, the tool call simply runs. Trust is reviewed and written back
+ *    through the TUI ("New hook - review required" / "Trust hook"), i.e. it
+ *    lives in `$CODEX_HOME`, and neither an inline `state={enabled=true}` nor an
+ *    inline `trusted_hash` nor `-c bypass_hook_trust=true` substitutes for it.
+ *    The only argv route is `--dangerously-bypass-hook-trust`, which is on
+ *    degrade 6's never-emit list alongside `--approve-for-me`; establishing
+ *    trust instead would mean writing to `$CODEX_HOME`, and `launch()` is a
+ *    pure function that writes nothing.
+ *
+ *    codex's own config-driven layer therefore remains its whole policy
+ *    surface: `--sandbox workspace-write --ask-for-approval on-request` from
+ *    {@link codexPermissionFlags} plus the run-dir {@link runDirGrant}, with the
+ *    generic fallback covering codex's asks. Note that `ask` would not be a
+ *    safe degrade here even if the hook ran: in a non-interactive `codex exec`
+ *    turn `permissionDecision: "ask"` let the command run, so it is a silent
+ *    allow rather than a fallback to a prompt.
  */
 export class CodexAdapter implements Adapter {
   readonly id = 'codex' as const;
