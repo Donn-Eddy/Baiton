@@ -31,7 +31,7 @@ Testing follows the repo conventions (mocha + ts-node under `test/`, host-free):
 
 # TODOS
 
-- [executed] T01 Intervention core: `Intervention` model, pending-ask registry and `InterventionSeam` with a `ConfirmSeam` adapter over it (files: src/orchestrator/seams.ts, src/orchestrator/interventions.ts, src/orchestrator/index.ts, test/interventions.test.ts)
+- [reviewing] T01 Intervention core: `Intervention` model, pending-ask registry and `InterventionSeam` with a `ConfirmSeam` adapter over it (files: src/orchestrator/seams.ts, src/orchestrator/interventions.ts, src/orchestrator/index.ts, test/interventions.test.ts)
 - [pending] T02 Protocol: intervention card records, `showIntervention`/`resolveIntervention`/`answerIntervention` messages and `autoMode` state in the pure reducer, with reducer tests (after T01; files: src/orchestrator/webviewProtocol.ts, test/webviewProtocol.reducer.test.ts)
 - [pending] T03 Persist intervention records in the session transcript and project them through `toRenderRecords` so resolved cards survive reload and conversation switching (after T01, T02; files: src/orchestrator/chatTranscript.ts, src/orchestrator/transcriptReader.ts, src/orchestrator/webviewProtocol.ts, test/transcriptReader.test.ts, test/webviewProtocol.reducer.test.ts)
 - [pending] T04 Mirror the reducer changes in `media/protocol.js` and add a shared-fixture parity test pinning TS and JS `reduce` to identical output (after T02; files: media/protocol.js, test/fixtures/protocolCases.ts, test/webviewProtocol.mirror.test.ts, test/configPanel.mirror.test.ts)
