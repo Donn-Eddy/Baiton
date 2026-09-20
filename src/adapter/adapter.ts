@@ -138,6 +138,24 @@ export interface ProbeResult {
   reason?: string;
 }
 
+/**
+ * Where a launched run's harness asks are relayed. An adapter that has a
+ * verified native permission hook/delegate wires it to these paths; adapters
+ * without one ignore the descriptor and the config-driven fallback applies.
+ */
+export interface AskRelayDescriptor {
+  /** The wire protocol; only `file-v1` exists today. */
+  protocol: 'file-v1';
+  /** Absolute path of the run's `asks/` directory. */
+  dir: string;
+  /** File suffix of an ask (`.json`). */
+  askSuffix: string;
+  /** File suffix of a response (`.response.json`). */
+  responseSuffix: string;
+  /** The run id the asks belong to. */
+  runId: string;
+}
+
 /** Everything the adapter needs to construct a stage launch. */
 export interface LaunchRequest {
   /** The role being launched; selects the permission row (Requirement 15). */
@@ -169,6 +187,12 @@ export interface LaunchRequest {
    * (Requirement 3.2).
    */
   resumeSessionId?: string;
+  /**
+   * Where to relay harness permission asks, when the caller enabled the ask
+   * relay for this launch. Absent means no relay: the adapter launches exactly
+   * as before.
+   */
+  relay?: AskRelayDescriptor;
 }
 
 /**
