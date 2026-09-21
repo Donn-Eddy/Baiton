@@ -33,6 +33,8 @@
  *      minted for the run (for CLIs that ignore Baiton's pre-assigned one) and
  *      journals it on the completion record, so a later Execute can resume that
  *      session (Req 3.2).
+ *   8. When ask relaying is wired, creates a watcher for the launched run's
+ *      `asks/` directory and disposes it once the run settles.
  *
  * Everything host-specific is injected — the per-role adapter lookup, git
  * service, terminal host, result-watcher factory, journal path, the
@@ -250,6 +252,25 @@ export interface ResultWatcherFactory {
   }): ResultWatcher;
 }
 
+/** A live watcher over one launched run's `asks/` directory. */
+export interface AskWatcher {
+  /** Tear down the directory watch and settle anything still pending. Idempotent. */
+  dispose(): void;
+}
+
+/** Constructs an {@link AskWatcher} for one launched run's relayed harness asks. */
+export interface AskWatcherFactory {
+  create(input: {
+    slug: string;
+    todoId: string;
+    runId: string;
+    /** The adapter id the run launched with (`adapter.id`), for the card's agent line. */
+    agent: string;
+    /** Absolute path of `.baiton/runs/<run-id>/asks/`, from the launch's relay descriptor. */
+    asksDir: string;
+  }): AskWatcher;
+}
+
 /** Surfaces a dispatch refusal or halt reason to the user (the notify seam). */
 export type QueueReporter = (error: DispatchError) => void;
 
@@ -267,6 +288,8 @@ export interface RunQueueDeps {
   git: GitService;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
+  /** When wired, launched stages relay harness asks into chat; absent leaves launches unchanged. */
+  askWatcherFactory?: AskWatcherFactory;
   specStore: SpecStore;
   /** Absolute path of the run journal `runs.jsonl` (Req 21.1, 21.2). */
   journalPath: string;
@@ -662,6 +685,7 @@ class SerialRunQueue implements RunQueue {
       ...(briefContext.value !== undefined
         ? { briefContext: briefContext.value }
         : {}),
+      ...(this.deps.askWatcherFactory !== undefined ? { relayAsks: true } : {}),
     };
     const launched = launchStage(launchInput, {
       adapter,
@@ -673,7 +697,7 @@ class SerialRunQueue implements RunQueue {
         message: `stage launch failed: ${launched.error.message}`,
       });
     }
-    const { terminal, resultPath } = launched.value;
+    const { terminal, resultPath, relay } = launched.value;
 
     // 4. Journal the start (Req 21.1). The pid is best-effort.
     const terminalPid = await resolvePid(terminal);
@@ -708,6 +732,20 @@ class SerialRunQueue implements RunQueue {
         cancelled = true;
       },
     };
+    let askWatcher: AskWatcher | undefined;
+    if (this.deps.askWatcherFactory !== undefined && relay !== undefined) {
+      try {
+        askWatcher = this.deps.askWatcherFactory.create({
+          slug: req.slug,
+          todoId: req.todoId,
+          runId,
+          agent: adapter.id,
+          asksDir: relay.dir,
+        });
+      } catch {
+        // A host watcher must never prevent an already-launched run from completing.
+      }
+    }
 
     let outcome: RunOutcome;
     try {
@@ -727,6 +765,7 @@ class SerialRunQueue implements RunQueue {
         },
       );
     } finally {
+      askWatcher?.dispose();
       this.running = undefined;
     }
 

@@ -98,6 +98,7 @@ import { Surface } from './surface';
 import { createSpecStore } from './specStore';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
+import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
 import {
   createRunQueueSeam,
   dispatchTrigger,
@@ -202,6 +203,21 @@ export function registerCommands(
   const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
 
   // --- shared seams -------------------------------------------------------
+  const askRegistry = new PendingAskRegistry({
+    ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+    clock: systemClock,
+  });
+  // Relayed harness asks are routed into chat as inline permission cards. Both
+  // hooks bind after the controller, exactly like the ordinary present seam.
+  let presentAsk: PresentIntervention = () => {};
+  let declineAsk: (id: string, reason: string) => void = () => {};
+  // The spec-draft runner launches outside the queue and deliberately has no relay.
+  const askWatcherFactory = createVscodeAskWatcherFactory({
+    registry: askRegistry,
+    present: (ask) => presentAsk(ask),
+    decline: (id, reason) => declineAsk(id, reason),
+    log: (message) => surface.log(message),
+  });
   const git = createGitService(repoRoot);
   const specStore = createSpecStore(specsDir, git);
   // Roles may mix agents, so each dispatch site selects its adapter from the
@@ -236,6 +252,7 @@ export function registerCommands(
       git,
       terminalHost,
       watcherFactory,
+      askWatcherFactory,
       specStore,
       journalPath,
       modelForRole: (role) => modelForRole(cfg(), role),
@@ -311,12 +328,8 @@ export function registerCommands(
   // goes through one registry and one seam. `present` is bound late: until the
   // Chat_View has resolved, an ask falls back to the modal so a confirmation
   // triggered from the tree is never silently declined.
-  const askRegistry = new PendingAskRegistry({
-    ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
-    clock: systemClock,
-  });
   const modalConfirm = buildConfirmSeam();
-  let presentAsk: PresentIntervention = (ask) => presentThroughModal(askRegistry, modalConfirm, ask);
+  presentAsk = (ask) => presentThroughModal(askRegistry, modalConfirm, ask);
   const interventionSeam = createInterventionSeam(askRegistry, (ask) => presentAsk(ask));
   const confirm = confirmSeamFrom(interventionSeam);
   const draftServices = buildToolServices(
@@ -523,6 +536,7 @@ export function registerCommands(
   // Once the Chat_View has resolved, asks are presented as inline cards on the
   // conversation in view; before that the modal fallback stands in.
   presentAsk = (ask) => chatController.presentIntervention(ask);
+  declineAsk = (id, reason) => void chatController.declineAsk(id, reason);
   chatWebview.onResolve(() => chatController.start());
   disposables.push(
     vscode.window.registerWebviewViewProvider(

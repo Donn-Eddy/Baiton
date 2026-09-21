@@ -387,7 +387,7 @@ export class ChatController {
    * so the transcript is the audit trail.
    */
   public async presentIntervention(ask: Intervention): Promise<void> {
-    const scope = this.activeScope();
+    const scope = await this.scopeForAsk(ask);
     const key = scopeId(scope);
     const sessionId = this.activeSessions.get(key) ?? this.newSessionId(scope);
     const transcript = this.transcriptFor(scope, sessionId);
@@ -398,7 +398,7 @@ export class ChatController {
       return;
     }
     const card = outcome === undefined ? view : escalatedInterventionView(view, outcome);
-    this.cards.set(ask.id, { view: card, transcript });
+    this.cards.set(ask.id, { view: card, transcript, scopeKey: key });
     this.deps.webview.post({ type: 'showIntervention', intervention: card });
     if (outcome !== undefined) {
       // Audit the escalation now, while it happens: the same id is appended
@@ -406,6 +406,17 @@ export class ChatController {
       // the pair as the one card in its original position.
       await this.append(transcript, interventionTranscriptRecord(card));
     }
+  }
+
+  /** Return the conversation an ask belongs on, switching to a scoped run when needed. */
+  private async scopeForAsk(ask: Intervention): Promise<SessionScope> {
+    const slug = ask.scopeId;
+    if (slug === undefined || slug === this.activeSpec) {
+      return this.activeScope();
+    }
+    this.activeSpec = slug;
+    await this.refresh();
+    return this.activeScope();
   }
 
   /**
@@ -518,14 +529,19 @@ export class ChatController {
 
   /** Decline every pending ask, settling each card it is showing. */
   private async declinePendingAsks(reason: string): Promise<void> {
-    const answer: InterventionAnswer = { kind: 'declined', reason };
     for (const ask of this.asks.pending()) {
-      if (this.asks.resolve(ask.id, answer).kind === 'resolved') {
-        await this.settleCard(ask.id, answer, { rationale: reason });
-      }
+      await this.declineAsk(ask.id, reason);
     }
     // Safety net for asks raised before any card was shown.
     this.asks.rejectAll(reason);
+  }
+
+  /** Decline one pending ask, settling its card and transcript. */
+  public async declineAsk(id: string, reason: string): Promise<void> {
+    const answer: InterventionAnswer = { kind: 'declined', reason };
+    if (this.asks.resolve(id, answer).kind === 'resolved') {
+      await this.settleCard(id, answer, { rationale: reason });
+    }
   }
 
   /**
@@ -763,9 +779,20 @@ export class ChatController {
     if (active === undefined) {
       // A fresh chat with no transcript yet: show the empty state.
       await this.renderConversation(undefined);
+      this.repostPendingCards(scopeId(scope));
       return;
     }
     await this.renderConversation(this.sessions.pathFor(scope, active));
+    this.repostPendingCards(scopeId(scope));
+  }
+
+  /** Re-post the pending cards belonging to the rendered conversation. */
+  private repostPendingCards(key: string): void {
+    for (const card of this.cards.values()) {
+      if (card.scopeKey === key) {
+        this.deps.webview.post({ type: 'showIntervention', intervention: card.view });
+      }
+    }
   }
 
   /**
@@ -1126,6 +1153,7 @@ function toInterventionView(ask: Intervention): InterventionView {
 interface PendingCard {
   view: InterventionView;
   transcript: ChatTranscript;
+  scopeKey: string;
 }
 
 /** A short, safe description of a thrown value for a user-facing message. */

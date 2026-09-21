@@ -24,7 +24,9 @@
  *   - replan / stop → control actions with no stage; attempt is unused.
  *
  * The facade never imports `vscode`; the command layer and the run tool call
- * into it with plain values.
+ * into it with plain values. Harness ask relaying is instead a queue-level
+ * `RunQueueDeps.askWatcherFactory` dependency wired in `commands.ts`, so all
+ * triggers reaching the queue relay asks identically.
  */
 import * as path from 'path';
 import type { Role } from '../model/role';
