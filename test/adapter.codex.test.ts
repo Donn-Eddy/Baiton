@@ -14,10 +14,11 @@ import {
   codexSystemPromptFlags,
   tomlQuote,
 } from '../src/adapter/codex';
-import type { LaunchRequest } from '../src/adapter/adapter';
+import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
+import { askRelayDescriptor } from '../src/engine/askRelay';
 
 /**
  * This file mirrors test/adapter.antigravity.test.ts (itself mirrored from
@@ -560,4 +561,99 @@ describe('CodexAdapter -c developer_instructions carries the role profile', () =
     assert.ok(spec.shellArgs.includes('-c'));
     assert.ok(!spec.shellArgs.includes('--'));
   });
+});
+
+
+/**
+ * The probe recorded in README.md, "Harness ask relay (per-adapter probe
+ * findings)" (codex-cli 0.154.0, 2026-09-20), found no relay this adapter can
+ * install. codex *does* ship the mechanism — a `PreToolUse` command hook,
+ * configurable inline through `-c hooks.PreToolUse=[…]`, firing with
+ * `tool_name`/`tool_input` and honouring
+ * `hookSpecificOutput.permissionDecision ∈ allow|deny|ask` — but every enabled
+ * hook is gated behind persisted hook trust held in `$CODEX_HOME`. Without a
+ * trust entry the hook is silently skipped; the only argv route past it is
+ * `--dangerously-bypass-hook-trust`, which is on the never-emit list. So
+ * `launch()`, a pure function that writes nothing, emits no wiring and the
+ * generic fallback covers codex's asks.
+ *
+ * These tests PIN that outcome rather than merely describing it: a future
+ * native relay makes them fail, which forces the decision to be revisited
+ * deliberately instead of drifting in.
+ */
+describe('CodexAdapter ask-relay wiring (probe findings)', () => {
+  const adapter = new CodexAdapter();
+  const relay = askRelayDescriptor('/repo', 'run-123');
+
+  /** Flags that would buy a relay by giving up the policy, and are never emitted. */
+  const forbidden = [
+    '--dangerously-bypass-hook-trust',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--approve-for-me',
+  ];
+
+  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
+    // Decisive negative: codex's hook surface is gated behind persisted hook
+    // trust (README "Harness ask relay (per-adapter probe findings)"; adapter
+    // doc comment, degrade 7).
+    assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
+  });
+
+  it('treats an explicitly undefined relay the same as an absent one', () => {
+    assert.deepStrictEqual(adapter.launch(req({ relay: undefined })), adapter.launch(req()));
+  });
+
+  it('never lets the asks directory reach the argv', () => {
+    const joined = adapter.launch(req({ relay })).shellArgs.join(' ');
+    assert.ok(!joined.includes(relay.dir), 'the asks directory must not leak into the argv');
+    assert.ok(!joined.includes('hooks.PreToolUse'), 'no inline hooks config is emitted');
+    assert.ok(!joined.includes(relay.askSuffix), 'no ask suffix is emitted');
+  });
+
+  it('carries no relay in the env either: codex is launched with no env layer at all', () => {
+    assert.strictEqual(adapter.launch(req({ relay })).env, undefined);
+  });
+
+  it('emits no forbidden flag that would buy a hook by giving up the policy', () => {
+    const args = adapter.launch(req({ relay })).shellArgs;
+    for (const flag of forbidden) {
+      assert.ok(!args.includes(flag), `did not expect ${flag} in ${JSON.stringify(args)}`);
+    }
+    assert.ok(findPair(args, '--sandbox', 'danger-full-access') < 0);
+    assert.ok(findPair(args, '--ask-for-approval', 'never') < 0);
+  });
+
+  it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
+    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
+    assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
+  });
+
+  it('leaves both resume branches byte-identical, prompt drop included', () => {
+    const withId = { resume: true, resumeSessionId: 'sess-real' };
+    assert.deepStrictEqual(adapter.launch(req({ ...withId, relay })), adapter.launch(req(withId)));
+
+    const last = { resume: true, resumeSessionId: undefined };
+    const lastSpec = adapter.launch(req({ ...last, relay }));
+    assert.deepStrictEqual(lastSpec, adapter.launch(req(last)));
+    // The `resume --last` branch still drops the prompt (degrade 4): a relay
+    // must not sneak a tail onto the one branch that has no `--` separator.
+    assert.ok(!lastSpec.shellArgs.includes('--'));
+    assert.ok(!lastSpec.shellArgs.includes(req().prompt));
+  });
+
+  it('attach() installs no relay (it takes no descriptor at all)', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    const joined = spec.shellArgs.join(' ');
+    assert.ok(!joined.includes(relay.dir));
+    assert.ok(!joined.includes('hooks.PreToolUse'));
+    for (const flag of forbidden) {
+      assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} on attach`);
+    }
+  });
+
+  for (const role of ROLES) {
+    it(`is byte-identical with and without a relay for role ${role}`, () => {
+      assert.deepStrictEqual(adapter.launch(req({ role, relay })), adapter.launch(req({ role })));
+    });
+  }
 });

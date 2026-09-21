@@ -21,6 +21,7 @@
       activeSessionId: '',
       records: [],
       busy: false,
+      autoMode: false,
     };
   }
 
@@ -85,6 +86,52 @@
         });
         return found ? Object.assign({}, state, { records: records }) : state;
       }
+      case 'showIntervention': {
+        const card = {
+          role: 'system',
+          content: msg.intervention.prompt,
+          intervention: Object.assign({}, msg.intervention),
+        };
+        const existing = state.records.findIndex(function (r) {
+          return r.intervention !== undefined && r.intervention.id === msg.intervention.id;
+        });
+        if (existing >= 0) {
+          const records = state.records.slice();
+          records[existing] = card;
+          return Object.assign({}, state, { records: records, empty: undefined });
+        }
+        const last = state.records[state.records.length - 1];
+        if (last !== undefined && last.streaming === true) {
+          return Object.assign({}, state, {
+            records: state.records
+              .slice(0, -1)
+              .concat([Object.assign({}, last, { streaming: false }), card]),
+            empty: undefined,
+          });
+        }
+        return Object.assign({}, state, { records: state.records.concat([card]), empty: undefined });
+      }
+      case 'resolveIntervention': {
+        let found = false;
+        const records = state.records.map(function (record) {
+          const card = record.intervention;
+          if (found || card === undefined || card.id !== msg.id || card.status !== 'pending') {
+            return record;
+          }
+          found = true;
+          return Object.assign({}, record, {
+            intervention: Object.assign({}, card, {
+              status: 'resolved',
+              answer: msg.answer,
+              rationale: msg.rationale,
+              auto: msg.auto,
+            }),
+          });
+        });
+        return found ? Object.assign({}, state, { records: records }) : state;
+      }
+      case 'setAutoMode':
+        return Object.assign({}, state, { autoMode: msg.enabled });
       case 'setConversations':
         return Object.assign({}, state, { conversations: msg.items.slice() });
       case 'setActive':

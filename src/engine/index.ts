@@ -1,13 +1,14 @@
 /**
  * Stage engine: brief writer, terminal launcher (task 10.1), result watcher and
  * validation-to-artifact flow (task 10.2), the pure state-machine transition
- * table and the serialized run queue + stage lifecycle (task 11.1), and crash
- * recovery over the journal (task 11.2).
+ * table and the serialized run queue + stage lifecycle (task 11.1), crash
+ * recovery over the journal (task 11.2), and the ask-relay file protocol.
  */
 export * from './roleInstructions';
 export * from './brief';
 export * from './terminalHost';
 export * from './launcher';
+export * from './askRelay';
 export * from './resultWatcher';
 export * from './resultValidation';
 export * from './resultFlow';

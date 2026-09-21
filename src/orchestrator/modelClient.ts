@@ -62,7 +62,12 @@ export type DeltaListener = (text: string) => void;
 /** The arguments to a single completion request. */
 export interface CompletionRequest {
   messages: ChatMessage[];
-  tools: ToolSpec[];
+  /**
+   * The tool surface the model may call. A caller that only wants text back —
+   * the auto-mode risk evaluator, which never lets the model act — may omit
+   * it, in which case no `tools` are advertised to the endpoint.
+   */
+  tools?: ToolSpec[];
   signal: AbortSignal;
   /** Optional listener for streamed assistant-text fragments (streaming path only). */
   onDelta?: DeltaListener;
@@ -369,7 +374,7 @@ export class OpenAiModelClient implements ModelClient {
           ? { tool_calls: m.tool_calls.map(toWireToolCall) }
           : {}),
       })),
-      tools: toWireTools(req.tools),
+      tools: toWireTools(req.tools ?? []),
       stream: streaming,
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
     });

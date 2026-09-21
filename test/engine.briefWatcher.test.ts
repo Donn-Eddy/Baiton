@@ -3,7 +3,9 @@ import { buildBrief } from '../src/engine/brief';
 import {
   EXECUTOR_NO_GIT_INSTRUCTION,
   EXECUTOR_RESULT_FILE_INSTRUCTION,
+  ASK_RELAY_SECTION_HEADING,
 } from '../src/engine/roleInstructions';
+import { askRelayDescriptor } from '../src/engine/askRelay';
 import { initialPromptFor } from '../src/engine/launcher';
 import { awaitStageResult } from '../src/engine/resultFlow';
 import type { HostTerminal } from '../src/engine/terminalHost';
@@ -150,6 +152,44 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       const resultPath = '/repo/.baiton/runs/run-42/result.json';
       const brief = buildBrief({ stage: 'plan', role: 'planner', resultPath });
       assert.ok(brief.includes(resultPath), 'the brief names the exact result path');
+    });
+
+    it('slots the optional ask-relay section between context and the result path', () => {
+      const relay = askRelayDescriptor('/repo', 'run-1');
+      const brief = buildBrief({
+        stage: 'plan',
+        role: 'planner',
+        resultPath: '/repo/.baiton/runs/run-1/result.json',
+        context: '## Todo\n\nT01 do the thing.',
+        askRelay: { agent: 'antigravity', relay },
+      });
+
+      const roleIdx = brief.indexOf('# Role');
+      const contextIdx = brief.indexOf('# Context');
+      const relayIdx = brief.indexOf(ASK_RELAY_SECTION_HEADING);
+      const resultIdx = brief.indexOf('# Result file');
+      const schemaIdx = brief.indexOf('# Result schema');
+      const stopIdx = brief.indexOf('# When you are done');
+
+      assert.ok(relayIdx >= 0, 'brief carries the ask-relay heading');
+      assert.ok(roleIdx < contextIdx, 'role before context');
+      assert.ok(contextIdx < relayIdx, 'context before the relay heading');
+      assert.ok(relayIdx < resultIdx, 'relay heading before the result path');
+      assert.ok(resultIdx < schemaIdx, 'result path before the schema');
+      assert.ok(schemaIdx < stopIdx, 'schema and stop stay last (Req 11.3)');
+    });
+
+    it('leaves the brief text unchanged when askRelay is omitted', () => {
+      const base = {
+        stage: 'plan' as const,
+        role: 'planner' as const,
+        resultPath: '/repo/.baiton/runs/run-1/result.json',
+        context: '## Todo\n\nT01 do the thing.',
+      };
+      const without = buildBrief(base);
+      const withField = buildBrief({ ...base, askRelay: undefined });
+      assert.strictEqual(withField, without, 'an absent askRelay produces the previous text');
+      assert.ok(!without.includes(ASK_RELAY_SECTION_HEADING));
     });
   });
 

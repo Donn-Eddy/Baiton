@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import {
+  ASK_USER_TEXT,
   buildSystemPrompt,
   ConversationKind,
   DRIVE_TEXT,
@@ -33,6 +34,9 @@ import {
  * - Frontmatter rules, status/mode enums, extension-written keys — Req 11.4.
  * - Spec content included when supplied — Req 11.5.
  * - Spec content omitted without error when absent — Req 11.7.
+ * - `ask_user` guidance: present verbatim in every phase, naming the tool,
+ *   its options/allow_free_text knobs, the blocking call and the
+ *   decline-is-a-refusal rule; the style bullet points at the tool.
  */
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
@@ -286,6 +290,39 @@ describe('buildSystemPrompt', () => {
       assert.match(REFUSAL_TEXT, /do not diagnose/i);
       assert.match(REFUSAL_TEXT, /different stage/i);
       assert.match(REFUSAL_TEXT, /read files to work around it/i);
+    });
+  });
+
+  describe('ask_user guidance', () => {
+    for (const [label, prompt] of [
+      ['workspace', buildSystemPrompt(WORKSPACE)],
+      ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
+      ['an approved spec', buildSystemPrompt(SPEC, APPROVED_SPEC)],
+      ['a spec with no content', buildSystemPrompt(SPEC)],
+    ] as Array<[string, string]>) {
+      it(`carries the ask_user guidance verbatim in ${label}`, () => {
+        assert.ok(prompt.includes(ASK_USER_TEXT), 'the ask_user text is present verbatim');
+      });
+    }
+
+    it('tells the model to call ask_user instead of ending the turn with a question', () => {
+      assert.match(ASK_USER_TEXT, /instead of ending your turn with a question/i);
+      assert.ok(ASK_USER_TEXT.includes('`ask_user`'), 'the text names the ask_user tool');
+    });
+
+    it('describes options, allow_free_text and the blocking call', () => {
+      assert.ok(ASK_USER_TEXT.includes('options'), 'the text mentions options');
+      assert.ok(ASK_USER_TEXT.includes('allow_free_text'), 'the text mentions allow_free_text');
+      assert.match(ASK_USER_TEXT, /blocks until the user answers/i);
+    });
+
+    it('makes a decline a refusal', () => {
+      assert.match(ASK_USER_TEXT, /declines/i);
+      assert.match(ASK_USER_TEXT, /refus/i);
+    });
+
+    it('styles the one-question-at-a-time rule through the tool', () => {
+      assert.match(buildSystemPrompt(WORKSPACE), /one clarifying question at a time with `ask_user`/i);
     });
   });
 

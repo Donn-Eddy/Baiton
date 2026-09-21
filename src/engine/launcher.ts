@@ -13,6 +13,14 @@
  *   4. Hand the one-line initial prompt `Read <brief path> and do what it says.`
  *      to the CLI as its positional argument (Req 11.4).
  *
+ * When `relayAsks` is set the launcher also creates the run's optional
+ * `asks/` directory and hands the adapter an ask-relay descriptor naming it,
+ * so harness permission asks can be relayed into the chat (Auto mode).
+ * Adapters without a verified native mechanism receive the relay instructions
+ * in the Brief instead, at the same `asks/` location, and nothing else about
+ * the launch changes. With the flag omitted the launch is byte-identical to
+ * the previous behaviour.
+ *
  * If resolving the workspace root or writing the Brief fails, it halts before
  * creating any terminal and returns a {@link Result} error; the caller leaves
  * the todo's state unchanged (Req 11.5). All git-forbidding executor guidance
@@ -28,9 +36,12 @@ import type { Stage } from '../model/stage';
 import type { Role } from '../model/role';
 import { Result, err, ok } from '../model/result';
 import type { Adapter, LaunchSpec } from '../adapter';
-import { AdapterLaunchError } from '../adapter';
+import { AdapterLaunchError, askRelayKind, usesConfigDrivenAskRelay } from '../adapter';
+import type { AskRelayKind } from '../adapter';
 import { writeBrief } from './brief';
+import { askRelayDescriptor, ensureAsksDir } from './askRelay';
 import type { HostTerminal, TerminalHost } from './terminalHost';
+import type { AskRelayDescriptor } from '../adapter';
 
 /** The file name of the Brief inside a run directory (Req 11.2). */
 export const BRIEF_FILE_NAME = 'brief.md';
@@ -60,6 +71,12 @@ export interface LaunchStageInput {
   resumeSessionId?: string;
   /** Optional markdown context written into the Brief after the role section. */
   briefContext?: string;
+  /**
+   * True to relay this run's harness asks through `.baiton/runs/<run-id>/asks/`
+   * (Auto mode + inline permission cards). Default false keeps the previous
+   * launch behaviour.
+   */
+  relayAsks?: boolean;
 }
 
 /** What a successful launch produced (Req 11.1–11.4). */
@@ -74,6 +91,10 @@ export interface LaunchStageOutput {
   initialPrompt: string;
   /** The launch spec the terminal was created from (Req 11.1). */
   launchSpec: LaunchSpec;
+  /** The ask-relay descriptor handed to the adapter, when the relay was enabled. */
+  relay?: AskRelayDescriptor;
+  /** How this launch relays asks, when the relay was enabled. */
+  askRelayKind?: AskRelayKind;
 }
 
 /**
@@ -138,6 +159,18 @@ export function launchStage(
   const briefPath = path.join(runDir, BRIEF_FILE_NAME);
   const resultPath = path.join(runDir, RESULT_FILE_NAME);
 
+  // Ask relay: only when explicitly enabled, so an unset flag produces a
+  // launch request byte-identical to the previous behaviour.
+  const relay = input.relayAsks === true ? askRelayDescriptor(root, input.runId) : undefined;
+
+  // Adapters with a verified native relay (claude's inline --settings PreToolUse
+  // hook) wire the asks themselves; the rest get the config-driven fallback,
+  // which is brief-carried instructions to write the same ask files.
+  const briefAskRelay =
+    relay !== undefined && usesConfigDrivenAskRelay(deps.adapter.id)
+      ? { agent: deps.adapter.id, relay }
+      : undefined;
+
   // 2. Build the launch args. An adapter that cannot express the request in
   //    the CLI's argv (e.g. an agy model/effort pair agy rejects) halts here,
   //    before the run directory or Brief exist, with no terminal created.
@@ -152,6 +185,7 @@ export function launchStage(
       resume: input.resume,
       sessionId: input.sessionId,
       resumeSessionId: input.resumeSessionId,
+      ...(relay ? { relay } : {}),
     });
   } catch (cause) {
     if (cause instanceof AdapterLaunchError) {
@@ -165,11 +199,15 @@ export function launchStage(
   //    launching, with no terminal created (Req 11.5).
   try {
     mkdirSync(runDir, { recursive: true });
+    if (relay) {
+      ensureAsksDir(root, input.runId);
+    }
     writeBriefFn(briefPath, {
       stage: input.stage,
       role: input.role,
       resultPath,
       ...(input.briefContext !== undefined ? { context: input.briefContext } : {}),
+      ...(briefAskRelay !== undefined ? { askRelay: briefAskRelay } : {}),
     });
   } catch (cause) {
     return err({
@@ -196,7 +234,15 @@ export function launchStage(
   //    the composer.
   const initialPrompt = initialPromptFor(briefPath);
 
-  return ok({ terminal, briefPath, resultPath, initialPrompt, launchSpec });
+  return ok({
+    terminal,
+    briefPath,
+    resultPath,
+    initialPrompt,
+    launchSpec,
+    ...(relay ? { relay } : {}),
+    ...(relay !== undefined ? { askRelayKind: askRelayKind(deps.adapter.id) } : {}),
+  });
 }
 
 /**

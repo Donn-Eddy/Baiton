@@ -67,21 +67,30 @@ import type {
 } from '../engine';
 import { latestStart, parseJournal, resumableSessionId } from '../journal';
 import {
+  PendingAskRegistry,
+  confirmSeamFrom,
+  createInterventionSeam,
+  decideAsk,
   GuardContext,
   OpenAiModelClient,
+  askFromPermission,
   assembleToolSpecs,
   createToolRegistry,
   systemClock,
 } from '../orchestrator';
 import type {
+  AutoModeRunContext,
   ConfirmSeam,
+  Intervention,
+  InterventionSeam,
   OrchestratorPhase,
+  PresentIntervention,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
   ToolSpec,
 } from '../orchestrator';
-import { createAdapterRegistry } from '../adapter';
+import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
 import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
@@ -90,6 +99,7 @@ import { Surface } from './surface';
 import { createSpecStore } from './specStore';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
+import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
 import {
   createRunQueueSeam,
   dispatchTrigger,
@@ -98,7 +108,7 @@ import {
   type EngineTrigger,
 } from './engineFacade';
 import { ChatController } from './chatController';
-import type { OrchestratorConfig } from './chatController';
+import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
@@ -130,6 +140,19 @@ export const COMMANDS = {
   setApiKey: 'baiton.setOrchestratorApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
 } as const;
+
+/**
+ * The role the Auto-mode gate evaluates a harness ask against when it arrives
+ * with no run context — an orchestrator-raised permission ask, which never
+ * passes through the relay. `planner` is the most restrictive profile
+ * (read-only, no shell, writes confined to its run dir), so the deterministic
+ * stage can only ever clear reads and searches on its own and everything else
+ * goes to the model stage.
+ */
+const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
+
+/** Run id used for the same reason: it matches no real run directory, so no write rule can fire. */
+const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
 
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
@@ -182,6 +205,25 @@ export function registerCommands(
   const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
 
   // --- shared seams -------------------------------------------------------
+  const askRegistry = new PendingAskRegistry({
+    ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+    clock: systemClock,
+  });
+  // Relayed harness asks are routed into chat as inline permission cards. Both
+  // hooks bind after the controller, exactly like the ordinary present seam.
+  let presentAsk: PresentIntervention = () => {};
+  // The relayed-ask binding: the watcher hands over the run's trusted identity
+  // alongside the card; the modal fallback stands in before Chat_View resolves.
+  let presentRelayAsk: (ask: Intervention, context: AutoModeRunContext) => void | Promise<void> =
+    (ask) => presentAsk(ask);
+  let declineAsk: (id: string, reason: string) => void = () => {};
+  // The spec-draft runner launches outside the queue and deliberately has no relay.
+  const askWatcherFactory = createVscodeAskWatcherFactory({
+    registry: askRegistry,
+    present: (ask, context) => presentRelayAsk(ask, context),
+    decline: (id, reason) => declineAsk(id, reason),
+    log: (message) => surface.log(message),
+  });
   const git = createGitService(repoRoot);
   const specStore = createSpecStore(specsDir, git);
   // Roles may mix agents, so each dispatch site selects its adapter from the
@@ -216,6 +258,7 @@ export function registerCommands(
       git,
       terminalHost,
       watcherFactory,
+      askWatcherFactory,
       specStore,
       journalPath,
       modelForRole: (role) => modelForRole(cfg(), role),
@@ -287,6 +330,14 @@ export function registerCommands(
   // than through one, and the two exclude each other so only one stage runs per
   // repository. Its completion sink is bound after the ChatController exists.
   let reportDraftOutcome: (outcome: SpecDraftOutcome) => void = () => {};
+  // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
+  // goes through one registry and one seam. `present` is bound late: until the
+  // Chat_View has resolved, an ask falls back to the modal so a confirmation
+  // triggered from the tree is never silently declined.
+  const modalConfirm = buildConfirmSeam();
+  presentAsk = (ask) => presentThroughModal(askRegistry, modalConfirm, ask);
+  const interventionSeam = createInterventionSeam(askRegistry, (ask) => presentAsk(ask));
+  const confirm = confirmSeamFrom(interventionSeam);
   const draftServices = buildToolServices(
     repoRoot,
     baitonDir,
@@ -295,6 +346,8 @@ export function registerCommands(
     specsDir,
     adapterFor,
     submitPrForSlug,
+    confirm,
+    interventionSeam,
   );
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
@@ -312,7 +365,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -427,14 +480,30 @@ export function registerCommands(
   // binds it to the tool loop, per-conversation transcripts, and the reused
   // registry/confirm seams. Both are wired against the assembled tool set.
   const chatWebview = new ChatWebviewProvider(context.extensionUri);
-  const confirm = buildConfirmSeam();
+  // Auto mode's two-stage gate: the per-agent allow-list first, then the
+  // orchestrator model. It is only consulted for harness permission asks that
+  // arrive while the toggle is on; see ChatController.presentIntervention.
+  const autoGate: AutoModeGate = (ask, opts) => {
+    // A relayed ask carries the run's trusted identity; the deterministic gate
+    // keys its allow-list on it. Without it (an orchestrator-raised ask) the
+    // host falls back to its most restrictive profile.
+    const agent = opts.context?.agent ?? ask.agent;
+    const role = opts.context?.role ?? AUTO_MODE_FALLBACK_ROLE;
+    const runId = opts.context?.runId ?? AUTO_MODE_UNKNOWN_RUN;
+    return decideAsk(
+      askFromPermission(ask),
+      agentAllowList(agent, role, runId),
+      modelClient,
+      { role, runId, signal: opts.signal },
+    );
+  };
   const chatController = new ChatController({
     webview: chatWebview,
     client: modelClient,
     registry,
     toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
-    confirm,
+    askRegistry,
     baitonDir,
     specsDir,
     roundBound: () => readRoundBound(),
@@ -448,11 +517,20 @@ export function registerCommands(
     sessionMemory: {
       get: (scope: string) =>
         context.workspaceState.get<string>(`baiton.chat.session.${scope}`),
-      set: async (scope: string, sessionId: string) => {
-        await context.workspaceState.update(`baiton.chat.session.${scope}`, sessionId);
+        set: async (scope: string, sessionId: string) => {
+          await context.workspaceState.update(`baiton.chat.session.${scope}`, sessionId);
+        },
       },
-    },
-  });
+      autoGate,
+      // The Auto-mode toggle is remembered per workspace, so a window reload
+      // comes back in the mode the user left it in.
+      autoModeMemory: {
+        get: () => context.workspaceState.get<boolean>('baiton.chat.autoMode') === true,
+        set: async (enabled: boolean) => {
+          await context.workspaceState.update('baiton.chat.autoMode', enabled);
+        },
+      },
+    });
   // Re-start the controller on every fresh webview resolve so a reopen or a
   // window reload reloads the current conversation into the new webview
   // (Req 8.8).
@@ -468,6 +546,11 @@ export function registerCommands(
     }
     void chatController.noteSystem(message);
   };
+  // Once the Chat_View has resolved, asks are presented as inline cards on the
+  // conversation in view; before that the modal fallback stands in.
+  presentAsk = (ask) => chatController.presentIntervention(ask);
+  presentRelayAsk = (ask, context) => chatController.presentIntervention(ask, context);
+  declineAsk = (id, reason) => void chatController.declineAsk(id, reason);
   chatWebview.onResolve(() => chatController.start());
   disposables.push(
     vscode.window.registerWebviewViewProvider(
@@ -1316,7 +1399,10 @@ async function promptForSlug(
 
 /**
  * Build the {@link ToolServices} bundle for the tool registry from the real git
- * service, the run-queue seam, and a `vscode`-backed confirmation seam.
+ * service, the run-queue seam, the injected confirmation seam, and the shared
+ * intervention seam itself — the seam the inline-card `confirm` adapter wraps,
+ * and which `ask_user` asks through directly. It is supplied by the caller so
+ * both tool-services bundles share one seam.
  */
 function buildToolServices(
   repoRoot: string,
@@ -1326,12 +1412,15 @@ function buildToolServices(
   specsDir: string,
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
+  confirm: ConfirmSeam,
+  intervention: InterventionSeam,
 ): ToolServices {
   return {
     repoRoot,
     baitonDir,
     git,
-    confirm: buildConfirmSeam(),
+    confirm,
+    intervention,
     runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
@@ -1355,10 +1444,33 @@ function readGitSettings(): { remote: string; base: string } {
 }
 
 /**
- * Build the `vscode`-backed {@link ConfirmSeam} presented as a modal for both
- * the approve control tool (through the registry) and the Chat_View approval
- * (through the {@link ChatController}, Req 15). "Approve" confirms; any other
- * dismissal declines.
+ * Present an ask while the Chat_View has not resolved yet: a confirmation or a
+ * permission ask falls back to the modal and is settled from its answer; a
+ * question has no modal form, so it is declined with a reason naming why.
+ */
+async function presentThroughModal(
+  registry: PendingAskRegistry,
+  confirm: ConfirmSeam,
+  ask: Intervention,
+): Promise<void> {
+  if (ask.kind === 'question') {
+    registry.reject(ask.id, 'the Baiton chat view is not open');
+    return;
+  }
+  const message = ask.detail === undefined ? ask.prompt : `${ask.prompt}\n\n${ask.detail}`;
+  const approved = await confirm.confirm(message);
+  registry.resolve(
+    ask.id,
+    approved ? { kind: 'approved' } : { kind: 'declined', reason: 'the confirmation was declined' },
+  );
+}
+
+/**
+ * Build the `vscode`-backed modal {@link ConfirmSeam} used only as the
+ * stand-in presenter before the Chat_View resolves (see
+ * {@link presentThroughModal}); the tool registry itself now holds the
+ * inline-card adapter built from the shared intervention seam.
+ * "Approve" confirms; any other dismissal declines.
  */
 function buildConfirmSeam(): ConfirmSeam {
   return {

@@ -8,8 +8,9 @@
  * without a host.
  *
  * The prompt always states the orchestrator's role and scope — its two jobs,
- * what it never does itself, and how to treat a tool refusal (Req 11.1) — the
- * section-5 todo grammar (Req 11.3) and the section-5 frontmatter rules
+ * what it never does itself, and how to treat a tool refusal (Req 11.1) — when
+ * to ask through `ask_user` rather than ending the turn, the section-5 todo
+ * grammar (Req 11.3) and the section-5 frontmatter rules
  * (Req 11.4). The rest depends on the conversation's {@link OrchestratorPhase}
  * (Req 11.1):
  *
@@ -124,6 +125,21 @@ export const REFUSAL_TEXT = [
 ].join('\n');
 
 /**
+ * When and how to use `ask_user` (the intervention seam's question tool). A
+ * question typed into a reply ends the turn and leaves the user to restart it;
+ * a question asked through `ask_user` keeps the turn alive and comes back as a
+ * tool result.
+ */
+export const ASK_USER_TEXT = [
+  'When you need an answer from the user, call `ask_user` instead of ending your turn with a question.',
+  '- `ask_user` shows the question as a card in the chat and blocks until the user answers; their answer comes back as the tool result, so the turn continues.',
+  '- Offer `options` when the useful answers are a short closed set. Each option needs a stable `id` and a short `label`; add `detail` only when the label is not enough.',
+  '- Set `allow_free_text` when a typed answer is also useful. A question with no options is always answered by typing.',
+  '- Ask one question per call and wait for the answer before asking the next.',
+  '- If the user declines the question, the call refuses: treat it like any other refusal — quote it and stop.',
+].join('\n');
+
+/**
  * The drive-phase text: the next legal stage for each todo state, that `run`
  * blocks until its stage finishes, that only one todo is driven at a time, and
  * what to offer once every todo is done (Req 11.1).
@@ -174,7 +190,7 @@ const STYLE_TEXT = [
   "- Do not restate the user's request back to them, and do not open with a preamble about what you are about to do.",
   '- Do not summarize tool output. Each tool call is shown in the chat as a row the user can expand, so describe a result only when it changes your answer.',
   '- Keep replies to a few sentences. The one exception is a requirements document, which you present in full.',
-  '- Ask one clarifying question at a time, and wait for the answer before asking the next.',
+  '- Ask one clarifying question at a time with `ask_user`, and wait for the answer before asking the next.',
 ].join('\n');
 
 /** The section-5 todo line grammar (Req 11.3). */
@@ -208,7 +224,7 @@ const FRONTMATTER_TEXT = [
  */
 export function buildSystemPrompt(kind: ConversationKind, specContent?: string): string {
   const phase = phaseFor(kind, specContent);
-  const sections: string[] = [ROLE_TEXT, SCOPE_TEXT, REFUSAL_TEXT];
+  const sections: string[] = [ROLE_TEXT, SCOPE_TEXT, REFUSAL_TEXT, ASK_USER_TEXT];
 
   // The phase decides which job the prompt describes: gathering requirements
   // for a new (or still draft) spec, or driving an approved one (Req 11.1).

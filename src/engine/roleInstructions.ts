@@ -24,8 +24,17 @@
  *
  * Kept as a pure lookup so the brief writer stays testable without a VS Code
  * host.
+ *
+ * Besides the per-role prose this module composes the optional ask-relay
+ * section of the Brief (`# Asking for permission or a decision`), emitted for
+ * agents with no native ask relay; `src/engine/askRelay.ts` owns the wire
+ * format the section shows (its `serializeAsk` / `serializeResponse` produce
+ * the fenced JSON examples so they cannot drift from the parser).
  */
 import type { Role } from '../model/role';
+import type { AskRelayDescriptor } from '../adapter';
+import type { RelayAsk } from './askRelay';
+import { serializeAsk, serializeResponse } from './askRelay';
 
 /**
  * The single instruction every executor Brief must carry: the extension owns
@@ -149,4 +158,93 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
 /** The instruction body for a role (the opening section of the Brief). */
 export function roleInstructions(role: Role): string {
   return ROLE_INSTRUCTIONS[role];
+}
+
+/** The heading of the ask-relay section in a Brief. */
+export const ASK_RELAY_SECTION_HEADING = '# Asking for permission or a decision';
+
+/** The rule that makes the relay safe: a pending or denied ask is never self-approved. */
+export const ASK_RELAY_NO_SELF_APPROVE_INSTRUCTION =
+  'Never carry out the action you asked about until a response file exists and its ' +
+  '"decision" is "approve". A "deny" is final: do not retry the action, do not work ' +
+  'around it — record that it was denied and continue with the rest of your work, or ' +
+  'stop and say so if you cannot.';
+
+/**
+ * The example ask a Brief shows, rendered with {@link serializeAsk} so it
+ * cannot drift from the wire format. Deterministic (no clock, no randomness):
+ * `createdAt` is deliberately omitted so the emitted text is pure.
+ */
+export function askRelayExampleAsk(agent: string, runId: string): RelayAsk {
+  return {
+    version: 1,
+    id: 'ask-0001',
+    runId,
+    agent,
+    kind: 'permission',
+    prompt: `${agent} needs permission to run a shell command`,
+    tool: 'bash',
+    args: '{"command":"npm test"}',
+    detail: 'Runs the test suite in the workspace root.',
+  };
+}
+
+/**
+ * The whole ask-relay section body (no heading) for one launched run: why to
+ * ask through a file, where to write it, the exact JSON body, the response
+ * format, how to wait, and the no-self-approve rule.
+ *
+ * Pure: it only interpolates the relay descriptor's fields and the serialized
+ * examples; it neither reads nor writes the filesystem.
+ */
+export function askRelayInstruction(input: { agent: string; relay: AskRelayDescriptor }): string {
+  const { agent, relay } = input;
+  const askBlock = serializeAsk(askRelayExampleAsk(agent, relay.runId)).trimEnd();
+  const responseBlock = serializeResponse({
+    version: 1,
+    id: 'ask-0001',
+    decision: 'approve',
+  }).trimEnd();
+
+  return [
+    `This CLI has no native permission relay, so when you need a human decision ` +
+      `you must ask through a file instead of printing a question into the ` +
+      `terminal: nobody is watching the terminal, and the harness's own prompt ` +
+      `may auto-deny.`,
+    ``,
+    `Write the ask to \`${relay.dir}/<ask-id>${relay.askSuffix}\`; the answer ` +
+      `appears at \`${relay.dir}/<ask-id>${relay.responseSuffix}\` (this run's ` +
+      `id is \`${relay.runId}\`).`,
+    ``,
+    `The ask-id rule: any short unique id you like, with no \`/\`, \`\\\` or ` +
+      `\`..\` in it.`,
+    ``,
+    `The ask file's exact JSON body, for an ask id \`ask-0001\`:`,
+    ``,
+    '```json',
+    askBlock,
+    '```',
+    ``,
+    `Field meanings: \`version\` is always 1; \`runId\` must be \`${relay.runId}\`; ` +
+      `\`agent\` must be \`${agent}\`; \`kind\` is \`"permission"\` (needs a ` +
+      `non-empty \`tool\`, plus \`args\` as a JSON *string* and an optional ` +
+      `human-readable \`detail\`) or \`"question"\` (optional ` +
+      `\`options: [{id,label,detail?}]\` and \`allowFreeText: true\`).`,
+    ``,
+    `The response file's JSON body looks like this (an approval):`,
+    ``,
+    '```json',
+    responseBlock,
+    '```',
+    ``,
+    `Field meanings: \`decision\` is \`"approve"\` or \`"deny"\`; \`answer\` ` +
+      `carries the chosen option id or typed text for a question; \`reason\` is ` +
+      `a one-line rationale.`,
+    ``,
+    `How to wait: poll for the response file (e.g. every second); it is written ` +
+      `atomically so a file that exists is complete. If it never appears, stop ` +
+      `rather than proceeding.`,
+    ``,
+    ASK_RELAY_NO_SELF_APPROVE_INSTRUCTION,
+  ].join('\n');
 }

@@ -173,6 +173,41 @@ export function antigravityModeFlags(role: Role): string[] {
  *    TODO: investigate `agy --agent` / `agy agents` and, if agents can be
  *    defined, translate the role profile here the way the opencode adapter
  *    does.
+ * 7. NO ask-relay wiring is emitted: `LaunchRequest.relay` is deliberately
+ *    ignored, and `launch()`/`attach()` are byte-identical with and without
+ *    an `AskRelayDescriptor`. This is a probe result, not an oversight —
+ *    `agy` 1.2.7 (probed 2026-09-20; note the rest of this doc comment cites
+ *    the older 1.2.2 it was written against) really does ship a lifecycle
+ *    hook mechanism, and the probe watched it work: a `PreToolUse` handler
+ *    fired with the tool name and arguments
+ *    (`{toolCall:{name:"run_command",args:{CommandLine:…}},stepIdx,
+ *    conversationId,workspacePaths,transcriptPath,…}` on stdin), and
+ *    `{"decision":"deny"}` hard-blocked the call and told the model so.
+ *
+ *    Two independent findings disqualify it anyway:
+ *    (a) Hooks load ONLY from an on-disk `hooks.json` in a customization
+ *        root — `<workspace>/.agents/hooks.json` (loaded only once that
+ *        workspace is passed with `--add-dir`) or the shared
+ *        `~/.gemini/config/hooks.json`. `agy --help` offers no
+ *        `--settings`/`--hooks`-style flag and no environment layer carries
+ *        the config inline, so installing one means WRITING A FILE. This
+ *        `launch()` is a pure function that writes nothing (and the launcher
+ *        is outside this change) — the same disqualifier that stopped the
+ *        opencode plugin route and codex's hook trust.
+ *    (b) Even with the file in place the hook is VETO-ONLY in headless
+ *        (`-p`) runs: `{"decision":"allow"}` did NOT grant the permission —
+ *        the run still ended in agy's headless soft-deny — and adding
+ *        `permissionOverrides:["command(echo)"]` did not change that. An
+ *        approval relay must be able to say yes, so this surface could not
+ *        carry one even if it were installable from argv.
+ *
+ *    `--dangerously-skip-permissions` would make the asks disappear, but it
+ *    is not a relay and stays on the never-emit list (degrade 4); a probe
+ *    result that depended on it would be a non-result. The config-driven
+ *    fallback (`--mode plan|accept-edits` plus the `--add-dir` run-dir grant)
+ *    therefore remains antigravity's whole policy surface, and the generic
+ *    fallback covers its asks. Full transcript and the legs that could not be
+ *    closed: README.md, "Harness ask relay (per-adapter probe findings)".
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;

@@ -13,6 +13,8 @@
  * host glue both speak this same contract.
  */
 
+import type { InterventionAnswer, InterventionKind, InterventionOption } from './interventions';
+
 /** The fix action an inline error message can offer (Req 13). */
 export type FixAction = 'openSettings' | 'setApiKey';
 
@@ -48,7 +50,21 @@ export type HostToWebview =
    * indicator to `ok`/`error` and attaches the tool's result content. A call id
    * that matches no rendered row leaves the state unchanged.
    */
-  | { type: 'updateTool'; callId: string; result: 'ok' | 'error'; content: string };
+  | { type: 'updateTool'; callId: string; result: 'ok' | 'error'; content: string }
+  /**
+   * Post a pending intervention card at the end of the conversation. A card
+   * whose id is already rendered is replaced in place, so a re-post after a
+   * re-render never duplicates the ask.
+   */
+  | { type: 'showIntervention'; intervention: InterventionView }
+  /**
+   * Settle the rendered card carrying `id`: flips it to `resolved` and attaches
+   * the answer, an optional one-line rationale, and whether Auto mode decided.
+   * An id that matches no pending card leaves the state unchanged.
+   */
+  | { type: 'resolveIntervention'; id: string; answer: InterventionAnswer; rationale?: string; auto?: boolean }
+  /** Set the Auto-mode toggle shown left of Stop. */
+  | { type: 'setAutoMode'; enabled: boolean };
 
 /** A message the webview sends back to the host in response to user actions. */
 export type WebviewToHost =
@@ -65,7 +81,53 @@ export type WebviewToHost =
   /** The user picked a conversation in the selector. */
   | { type: 'selectConversation'; conversationId: string }
   /** The user triggered the fix action on an inline error message. */
-  | { type: 'triggerFix'; action: FixAction };
+  | { type: 'triggerFix'; action: FixAction }
+  /** The user answered an intervention card. */
+  | { type: 'answerIntervention'; id: string; answer: InterventionAnswer }
+  /** The user flipped the Auto-mode toggle. */
+  | { type: 'setAutoMode'; enabled: boolean };
+
+/**
+ * One intervention card as the conversation renders it (pending or settled).
+ */
+export interface InterventionView {
+  /** The registry ask id; the key `resolveIntervention` settles the card by. */
+  id: string;
+  /** Which kind of ask the card presents. */
+  kind: InterventionKind;
+  /** The question/confirmation/permission prompt text. */
+  prompt: string;
+  /** Offered choices of an option question; absent means free text only. */
+  options?: InterventionOption[];
+  /** True when a typed answer is accepted in addition to any options. */
+  allowFreeText?: boolean;
+  /** Placeholder for the free-text input. */
+  placeholder?: string;
+  /** Secondary 'what you are approving' text, for confirms and permissions. */
+  detail?: string;
+  /** For a permission ask: the agent/adapter id the ask came from. */
+  agent?: string;
+  /** For a permission ask: the tool the harness wants to run. */
+  tool?: string;
+  /** For a permission ask: the tool arguments as JSON text. */
+  args?: string;
+  /** Pending until answered, then settled with `answer`. */
+  status: 'pending' | 'resolved';
+  /** The user's (or Auto mode's) answer; present once `status` is 'resolved'. */
+  answer?: InterventionAnswer;
+  /**
+   * Present when Auto mode declined to decide the ask and escalated it: what
+   * the user would be approving, and why the gate flagged it. The card's
+   * `detail` carries the same text in rendered form, so the webview needs no
+   * change to show it; this field keeps the two parts separately readable in
+   * the persisted transcript record.
+   */
+  escalation?: { what: string; why: string };
+  /** One-line reason shown on a settled card (auto-approval or escalation). */
+  rationale?: string;
+  /** True when Auto mode settled the card rather than the user. */
+  auto?: boolean;
+}
 
 /** One entry in the conversation selector: `'workspace'` plus one per slug. */
 export interface ConversationItem {
@@ -99,6 +161,8 @@ export interface RenderRecord {
    * result indicator.
    */
   tool?: { id?: string; name: string; args: string; result: 'ok' | 'error' | 'pending' };
+  /** Present for an intervention card row: the ask and its settled state. */
+  intervention?: InterventionView;
   /** True while this assistant record is still receiving streamed text. */
   streaming?: boolean;
 }
@@ -120,6 +184,8 @@ export interface WebviewState {
   records: RenderRecord[];
   /** Whether a request or the tool loop is in flight. */
   busy: boolean;
+  /** Whether Auto mode is on: safe asks are auto-approved, the rest escalate. */
+  autoMode: boolean;
   /** The inline error currently shown, if any. */
   error?: { message: string; action?: FixAction };
   /** The empty-state descriptor, if the conversation has no messages. */
@@ -140,6 +206,7 @@ export function initialWebviewState(): WebviewState {
     activeSessionId: '',
     records: [],
     busy: false,
+    autoMode: false,
   };
 }
 
@@ -154,6 +221,15 @@ export function initialWebviewState(): WebviewState {
  * - `streamDelta` grows the trailing streaming assistant record, or starts one.
  * - `streamEnd` marks the trailing streaming record complete, keeping its text.
  * - `updateTool` settles the pending tool row carrying the given call id.
+ * - `showIntervention` appends the card as a `system` render record and clears
+ *   the empty state; an id already rendered is replaced in place, and a
+ *   trailing streaming record is finalized first. An Auto-mode escalation
+ *   arrives as an ordinary pending card whose `detail`/`escalation` carry the
+ *   'what you are approving / why it was flagged' text.
+ * - `resolveIntervention` settles the first pending card carrying the given
+ *   id by attaching the answer, rationale and auto flag; an id that matches
+ *   no pending card is a no-op returning the same state.
+ * - `setAutoMode` sets the Auto-mode toggle.
  * - `setConversations` sets the selector entries.
  * - `setActive` sets the active conversation id.
  * - `setSessions` sets the session list; `setActiveSession` sets the active
@@ -205,6 +281,53 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
       });
       return found ? { ...state, records } : state;
     }
+    case 'showIntervention': {
+      const card: RenderRecord = {
+        role: 'system',
+        content: msg.intervention.prompt,
+        intervention: { ...msg.intervention },
+      };
+      const existing = state.records.findIndex(
+        (r) => r.intervention !== undefined && r.intervention.id === msg.intervention.id,
+      );
+      if (existing >= 0) {
+        const records = state.records.slice();
+        records[existing] = card;
+        return { ...state, records, empty: undefined };
+      }
+      const last = state.records[state.records.length - 1];
+      if (last !== undefined && last.streaming === true) {
+        return {
+          ...state,
+          records: [...state.records.slice(0, -1), { ...last, streaming: false }, card],
+          empty: undefined,
+        };
+      }
+      return { ...state, records: [...state.records, card], empty: undefined };
+    }
+    case 'resolveIntervention': {
+      let found = false;
+      const records = state.records.map((record) => {
+        const card = record.intervention;
+        if (found || card === undefined || card.id !== msg.id || card.status !== 'pending') {
+          return record;
+        }
+        found = true;
+        return {
+          ...record,
+          intervention: {
+            ...card,
+            status: 'resolved' as const,
+            answer: msg.answer,
+            rationale: msg.rationale,
+            auto: msg.auto,
+          },
+        };
+      });
+      return found ? { ...state, records } : state;
+    }
+    case 'setAutoMode':
+      return { ...state, autoMode: msg.enabled };
     case 'setConversations':
       return { ...state, conversations: [...msg.items] };
     case 'setActive':
@@ -239,6 +362,8 @@ export interface ConversationRecord {
   tool_call_id?: string;
   /** For an `assistant` record, the tool calls it requested. */
   tool_calls?: { id: string; name: string; arguments: string }[];
+  /** For an intervention record: the card and its settled state. */
+  intervention?: InterventionView;
 }
 
 /** The prefix `toolResultContent` gives a failed tool result (see `toolLoop`). */
@@ -256,6 +381,10 @@ const TOOL_ERROR_PREFIX = 'Error: ';
  * answers no preceding call (an orphan) still renders, as a plain tool message,
  * so nothing recorded is silently dropped.
  *
+ * A record carrying an `intervention` card renders as one card row; when the
+ * same ask id appears more than once (persisted pending, then resolved) the row
+ * keeps the first occurrence's position and the last occurrence's card state.
+ *
  * Pure: it reads the given records and allocates fresh output.
  */
 export function toRenderRecords(records: readonly ConversationRecord[]): RenderRecord[] {
@@ -269,6 +398,20 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
     }
   });
 
+  // Last recorded state of each intervention card, by ask id: a card may be
+  // persisted pending and then again resolved, and renders once, settled.
+  const cards = new Map<string, ConversationRecord['intervention']>();
+  const cardFirstIndex = new Map<string, number>();
+  records.forEach((record, index) => {
+    const card = record.intervention;
+    if (card !== undefined) {
+      cards.set(card.id, card);
+      if (!cardFirstIndex.has(card.id)) {
+        cardFirstIndex.set(card.id, index);
+      }
+    }
+  });
+
   const paired = new Set<number>();
   const out: RenderRecord[] = [];
   records.forEach((record, index) => {
@@ -277,6 +420,16 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
     }
     const calls = record.role === 'assistant' ? record.tool_calls : undefined;
     if (calls === undefined || calls.length === 0) {
+      const card = record.intervention;
+      if (card !== undefined) {
+        // Only the first record for an id emits a row; later ones update it.
+        if (cardFirstIndex.get(card.id) !== index) {
+          return;
+        }
+        const latest = cards.get(card.id) ?? card;
+        out.push({ role: record.role, content: record.content, intervention: { ...latest } });
+        return;
+      }
       out.push({ role: record.role, content: record.content });
       return;
     }
@@ -322,4 +475,43 @@ export function toolUpdate(callId: string, content: string): HostToWebview {
     result: content.startsWith(TOOL_ERROR_PREFIX) ? 'error' : 'ok',
     content,
   };
+}
+
+/** The pending card row posted when an intervention is raised. */
+export function interventionRecord(view: InterventionView): RenderRecord {
+  return { role: 'system', content: view.prompt, intervention: { ...view, status: view.status } };
+}
+
+/** The `resolveIntervention` message settling `id` with the given answer. */
+export function interventionUpdate(
+  id: string,
+  answer: InterventionAnswer,
+  opts: { rationale?: string; auto?: boolean } = {},
+): HostToWebview {
+  return { type: 'resolveIntervention', id, answer, rationale: opts.rationale, auto: opts.auto };
+}
+
+/** Label of the 'what you are approving' line of an escalated card. */
+export const ESCALATION_WHAT_LABEL = 'What you are approving:';
+
+/** Label of the 'why it was flagged' line of an escalated card. */
+export const ESCALATION_WHY_LABEL = 'Why it was flagged:';
+
+/**
+ * The card an escalated ask renders as: the pending view with the escalation
+ * recorded structurally and appended to `detail` as two labelled lines. The
+ * view's own `detail` (the harness's description, when it supplied one) is
+ * kept as the first paragraph. Pure: it allocates a fresh view.
+ */
+export function escalatedInterventionView(
+  view: InterventionView,
+  escalation: { what: string; why: string },
+): InterventionView {
+  const parts: string[] = [];
+  if (view.detail !== undefined && view.detail.trim().length > 0) {
+    parts.push(view.detail);
+  }
+  parts.push(`${ESCALATION_WHAT_LABEL} ${escalation.what}`);
+  parts.push(`${ESCALATION_WHY_LABEL} ${escalation.why}`);
+  return { ...view, escalation: { ...escalation }, detail: parts.join('\n') };
 }

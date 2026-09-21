@@ -12,9 +12,15 @@
  * conversation's sessions to `.baiton/specs/<slug>/chat/<id>.jsonl` (see
  * {@link SessionStore}); the caller supplies the full file path so one recorder
  * can serve any session of any conversation (Req 8.1, 8.2).
+ *
+ * Intervention cards are persisted as `system` records carrying `intervention`,
+ * appended when the ask settles, so they are part of the append-only history
+ * like any other message.
  */
 import { appendFile, writeFile } from 'fs/promises';
 import type { ToolCall } from './modelClient';
+import type { InterventionAnswer } from './interventions';
+import type { InterventionView } from './webviewProtocol';
 import { Clock, systemClock } from './seams';
 
 /** One persisted transcript record. */
@@ -29,6 +35,8 @@ export interface TranscriptRecord {
   tool_call_id?: string;
   /** For an assistant message, the tool calls it requested. */
   tool_calls?: ToolCall[];
+  /** For an intervention record: the card and its settled state. */
+  intervention?: InterventionView;
 }
 
 /**
@@ -65,4 +73,32 @@ export class ChatTranscript {
   public get path(): string {
     return this.file;
   }
+}
+
+/**
+ * The transcript record that persists one intervention card. Cards are stored
+ * once, in settled form: a card is appended when it resolves, so a reloaded
+ * conversation shows the decision inline and never re-offers an ask whose
+ * promise died with the window. `content` mirrors the prompt so a reader that
+ * ignores `intervention` still sees the text.
+ */
+export function interventionTranscriptRecord(
+  view: InterventionView,
+): Omit<TranscriptRecord, 'ts'> {
+  return { role: 'system', content: view.prompt, intervention: { ...view } };
+}
+
+/** The settled card to persist: `view` flipped to 'resolved' with its answer. */
+export function settledInterventionView(
+  view: InterventionView,
+  answer: InterventionAnswer,
+  opts: { rationale?: string; auto?: boolean } = {},
+): InterventionView {
+  return {
+    ...view,
+    status: 'resolved',
+    answer,
+    ...(opts.rationale !== undefined ? { rationale: opts.rationale } : {}),
+    ...(opts.auto !== undefined ? { auto: opts.auto } : {}),
+  };
 }

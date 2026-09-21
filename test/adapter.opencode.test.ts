@@ -7,10 +7,11 @@ import {
   opencodeConfigEnv,
 } from '../src/adapter/opencode';
 import type { OpencodeAgentDefinition } from '../src/adapter/opencode';
-import type { LaunchRequest } from '../src/adapter/adapter';
+import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
+import { askRelayDescriptor } from '../src/engine/askRelay';
 
 /**
  * This file mirrors test/adapter.claude.test.ts for the opencode CLI and pins:
@@ -400,4 +401,76 @@ describe('OpencodeAdapter documented degrades (no claude permission flags, no --
       }
     });
   }
+});
+
+/**
+ * The probe recorded in README.md, "Harness ask relay (per-adapter probe
+ * findings)" (opencode 1.18.30, 2026-09-20), found no relay this adapter can
+ * install: the one surface that can intercept a tool call is a plugin's
+ * `tool.execute.before` hook, and opencode loads plugins only from files
+ * (`file://` path, npm module, or `.opencode/plugin/<name>.js`) — a `data:`
+ * URL carrying the source inline is silently ignored. `launch()` is pure and
+ * writes nothing, so no wiring is emitted and the generic fallback covers
+ * opencode's asks.
+ *
+ * These tests pin that outcome rather than merely describing it: a future
+ * native relay makes them fail, which forces the decision to be revisited
+ * deliberately instead of drifting in.
+ */
+describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
+  const adapter = new OpencodeAdapter();
+  const relay = askRelayDescriptor('/repo', 'run-123');
+
+  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
+    // Decisive negative: opencode ships no native relay (README "Harness ask
+    // relay (per-adapter probe findings)"; adapter doc comment, point 3).
+    assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
+  });
+
+  it('treats an explicitly undefined relay the same as an absent one', () => {
+    assert.deepStrictEqual(adapter.launch(req({ relay: undefined })), adapter.launch(req()));
+  });
+
+  it('never lets a relay reach the argv, and emits no forbidden flag', () => {
+    const withRelay = adapter.launch(req({ relay }));
+    assert.deepStrictEqual(withRelay.shellArgs, adapter.launch(req()).shellArgs);
+    for (const flag of ['--add-dir', '--allowedTools', '--permission-mode', '--settings', '--auto']) {
+      assert.ok(
+        !withRelay.shellArgs.includes(flag),
+        `did not expect ${flag} in ${JSON.stringify(withRelay.shellArgs)}`,
+      );
+    }
+    const joined = withRelay.shellArgs.join(' ');
+    assert.ok(!joined.includes(relay.dir), 'the asks directory must not leak into the argv');
+    assert.ok(!joined.includes('plugin'), 'no plugin registration is emitted');
+  });
+
+  it('carries no relay in the env either: the config layer is unchanged', () => {
+    assert.deepStrictEqual(
+      adapter.launch(req({ relay })).env,
+      opencodeConfigEnv('executor', 'run-123'),
+    );
+  });
+
+  it('attach() installs no relay (it takes no descriptor at all)', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'ses_1' });
+    assert.deepStrictEqual(spec.env, opencodeConfigEnv('planner', 'run-777'));
+  });
+
+  for (const role of ROLES) {
+    it(`leaves the baiton-${role} permission block untouched with a relay present`, () => {
+      const withRelay = adapter.launch(req({ role, relay }));
+      const without = adapter.launch(req({ role }));
+      const agentName = roleProfile(role).agentName;
+      assert.deepStrictEqual(
+        agentDefinition(withRelay.env as Record<string, string>, agentName).permission,
+        agentDefinition(without.env as Record<string, string>, agentName).permission,
+      );
+    });
+  }
+
+  it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
+    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
+    assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
+  });
 });
