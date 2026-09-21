@@ -67,6 +67,7 @@ import {
 } from '../orchestrator';
 import type {
   AutoModeOutcome,
+  AutoModeRunContext,
   ChatMessage,
   SessionItem,
   SessionMeta,
@@ -205,10 +206,15 @@ export interface AutoModeMemory {
  * two-stage `decideAsk` (deterministic allow-list, then the model risk
  * evaluation). It must never throw — the controller treats a thrown value as
  * an escalation, so a broken gate can only ever ask the user.
+ *
+ * `context` is present exactly for relayed harness asks — the launching run's
+ * agent, role and run id, which the gate keys its allow-list on — and absent
+ * for an orchestrator-raised permission ask, in which case the host falls back
+ * to its most restrictive profile.
  */
 export type AutoModeGate = (
   ask: PermissionRequest,
-  opts: { signal?: AbortSignal },
+  opts: { signal?: AbortSignal; context?: AutoModeRunContext },
 ) => Promise<AutoModeOutcome>;
 
 /** Per-scope memory of the last active session (backed by `workspaceState`). */
@@ -385,14 +391,18 @@ export class ChatController {
    * flagged' description. Confirmations and questions are never gated — they
    * carry human intent, not a harness capability. Both outcomes are persisted,
    * so the transcript is the audit trail.
+   *
+   * A relayed harness ask carries its run context (`AutoModeRunContext`), so
+   * the deterministic stage is evaluated against the launching run's own
+   * agent/role/run directory rather than a fallback profile.
    */
-  public async presentIntervention(ask: Intervention): Promise<void> {
+  public async presentIntervention(ask: Intervention, context?: AutoModeRunContext): Promise<void> {
     const scope = await this.scopeForAsk(ask);
     const key = scopeId(scope);
     const sessionId = this.activeSessions.get(key) ?? this.newSessionId(scope);
     const transcript = this.transcriptFor(scope, sessionId);
     const view = toInterventionView(ask);
-    const outcome = await this.autoDecision(ask);
+    const outcome = await this.autoDecision(ask, context);
     if (outcome !== undefined && outcome.kind === 'approve') {
       await this.autoApprove(ask.id, view, transcript, outcome);
       return;
@@ -425,12 +435,12 @@ export class ChatController {
    * permission). A gate that throws escalates: Auto mode may only ever fail
    * towards asking the user.
    */
-  private async autoDecision(ask: Intervention): Promise<AutoModeOutcome | undefined> {
+  private async autoDecision(ask: Intervention, context?: AutoModeRunContext): Promise<AutoModeOutcome | undefined> {
     if (!this.autoMode || this.deps.autoGate === undefined || ask.kind !== 'permission') {
       return undefined;
     }
     try {
-      return await this.deps.autoGate(ask, { signal: this.abort?.signal });
+      return await this.deps.autoGate(ask, { signal: this.abort?.signal, context });
     } catch (err) {
       this.deps.log(`Baiton chat: the Auto-mode gate failed: ${describe(err)}`);
       return {

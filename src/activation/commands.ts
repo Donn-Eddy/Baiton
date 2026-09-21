@@ -79,6 +79,7 @@ import {
   systemClock,
 } from '../orchestrator';
 import type {
+  AutoModeRunContext,
   ConfirmSeam,
   Intervention,
   InterventionSeam,
@@ -141,11 +142,12 @@ export const COMMANDS = {
 } as const;
 
 /**
- * The role the Auto-mode gate evaluates a harness ask against until the ask
- * relay carries the originating run's role and id. `planner` is the most
- * restrictive profile (read-only, no shell, writes confined to its run dir),
- * so the deterministic stage can only ever clear reads and searches on its
- * own and everything else goes to the model stage.
+ * The role the Auto-mode gate evaluates a harness ask against when it arrives
+ * with no run context — an orchestrator-raised permission ask, which never
+ * passes through the relay. `planner` is the most restrictive profile
+ * (read-only, no shell, writes confined to its run dir), so the deterministic
+ * stage can only ever clear reads and searches on its own and everything else
+ * goes to the model stage.
  */
 const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
 
@@ -210,11 +212,15 @@ export function registerCommands(
   // Relayed harness asks are routed into chat as inline permission cards. Both
   // hooks bind after the controller, exactly like the ordinary present seam.
   let presentAsk: PresentIntervention = () => {};
+  // The relayed-ask binding: the watcher hands over the run's trusted identity
+  // alongside the card; the modal fallback stands in before Chat_View resolves.
+  let presentRelayAsk: (ask: Intervention, context: AutoModeRunContext) => void | Promise<void> =
+    (ask) => presentAsk(ask);
   let declineAsk: (id: string, reason: string) => void = () => {};
   // The spec-draft runner launches outside the queue and deliberately has no relay.
   const askWatcherFactory = createVscodeAskWatcherFactory({
     registry: askRegistry,
-    present: (ask) => presentAsk(ask),
+    present: (ask, context) => presentRelayAsk(ask, context),
     decline: (id, reason) => declineAsk(id, reason),
     log: (message) => surface.log(message),
   });
@@ -477,13 +483,20 @@ export function registerCommands(
   // Auto mode's two-stage gate: the per-agent allow-list first, then the
   // orchestrator model. It is only consulted for harness permission asks that
   // arrive while the toggle is on; see ChatController.presentIntervention.
-  const autoGate: AutoModeGate = (ask, opts) =>
-    decideAsk(
+  const autoGate: AutoModeGate = (ask, opts) => {
+    // A relayed ask carries the run's trusted identity; the deterministic gate
+    // keys its allow-list on it. Without it (an orchestrator-raised ask) the
+    // host falls back to its most restrictive profile.
+    const agent = opts.context?.agent ?? ask.agent;
+    const role = opts.context?.role ?? AUTO_MODE_FALLBACK_ROLE;
+    const runId = opts.context?.runId ?? AUTO_MODE_UNKNOWN_RUN;
+    return decideAsk(
       askFromPermission(ask),
-      agentAllowList(ask.agent, AUTO_MODE_FALLBACK_ROLE, AUTO_MODE_UNKNOWN_RUN),
+      agentAllowList(agent, role, runId),
       modelClient,
-      { role: AUTO_MODE_FALLBACK_ROLE, signal: opts.signal },
+      { role, runId, signal: opts.signal },
     );
+  };
   const chatController = new ChatController({
     webview: chatWebview,
     client: modelClient,
@@ -536,6 +549,7 @@ export function registerCommands(
   // Once the Chat_View has resolved, asks are presented as inline cards on the
   // conversation in view; before that the modal fallback stands in.
   presentAsk = (ask) => chatController.presentIntervention(ask);
+  presentRelayAsk = (ask, context) => chatController.presentIntervention(ask, context);
   declineAsk = (id, reason) => void chatController.declineAsk(id, reason);
   chatWebview.onResolve(() => chatController.start());
   disposables.push(

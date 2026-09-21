@@ -58,6 +58,7 @@ describe('vscode ask watcher routing', () => {
   let root: string;
   let asksDir: string;
   let cards: import('../src/orchestrator').Intervention[];
+  let contexts: import('../src/orchestrator').AutoModeRunContext[];
   let registry: PendingAskRegistry;
   let logs: string[];
   let declined: Array<{ id: string; reason: string }>;
@@ -77,6 +78,7 @@ describe('vscode ask watcher routing', () => {
     asksDir = join(root, 'asks');
     mkdirSync(asksDir, { recursive: true });
     cards = [];
+    contexts = [];
     logs = [];
     declined = [];
     registry = new PendingAskRegistry({ ids: { next: () => `card-${cards.length}` }, clock: systemClock });
@@ -87,12 +89,19 @@ describe('vscode ask watcher routing', () => {
   function make() {
     return createVscodeAskWatcherFactory({
       registry,
-      present: (card) => { cards.push(card); },
+      present: (card, context) => { cards.push(card); contexts.push(context); },
       decline: (id, reason) => { declined.push({ id, reason }); registry.reject(id, reason); },
       log: (message) => { logs.push(message); },
       now: () => '2026-01-01T00:00:00.000Z',
-    }).create({ slug: 'spec-a', todoId: 'T17', runId: 'run-a', agent: 'claude', asksDir });
+    }).create({ slug: 'spec-a', todoId: 'T17', runId: 'run-a', agent: 'claude', role: 'executor', asksDir });
   }
+
+  it('carries the run context with every routed ask', async () => {
+    writeFileSync(join(asksDir, 'ask-1.json'), serializeAsk({ version: 1, id: 'ask-1', runId: 'run-a', agent: 'claude', kind: 'permission', prompt: 'allow?', tool: 'Bash' }));
+    make();
+    await waitFor(() => cards.length === 1);
+    assert.deepStrictEqual(contexts[0], { agent: 'claude', role: 'executor', runId: 'run-a' });
+  });
 
   it('catches up asks, scopes cards, and writes approved responses', async () => {
     writeFileSync(join(asksDir, 'ask-1.json'), serializeAsk({ version: 1, id: 'ask-1', runId: 'run-a', agent: 'claude', kind: 'permission', prompt: 'allow?', tool: 'Bash', args: '{"x":1}', detail: 'run it' }));
@@ -244,7 +253,7 @@ describe('run queue ask watcher wiring', () => {
 
   it('creates and disposes a watcher over the launched relay directory', async () => {
     const result = await dispatch(true);
-    assert.deepStrictEqual(result.creates, [{ slug, todoId, runId: 'run-1', agent: 'claude', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
+    assert.deepStrictEqual(result.creates, [{ slug, todoId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
     assert.strictEqual(result.disposes(), 1);
     assert.ok(result.relay !== undefined);
   });

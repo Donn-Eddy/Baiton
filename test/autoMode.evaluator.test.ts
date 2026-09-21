@@ -112,6 +112,17 @@ describe('autoMode risk evaluator (stage b)', () => {
       assert.ok(user.includes('<ask>\n(none)\n</ask>'));
     });
 
+    it('names the run directory when a runId is supplied', () => {
+      const user = buildEvaluationMessages(ASK, { role: 'executor', runId: 'run-a' })[1].content;
+      assert.ok(user.includes('.baiton/runs/run-a/'));
+      assert.ok(user.includes("The agent's own run directory"));
+    });
+
+    it('omits the run-directory line when runId is omitted', () => {
+      const user = buildEvaluationMessages(ASK, { role: 'executor' })[1].content;
+      assert.ok(!user.includes('runs/'));
+    });
+
     it('truncates very long args inside the ask fence', () => {
       const long = 'x'.repeat(5000);
       const messages = buildEvaluationMessages({ agent: 'claude', tool: 'Bash', args: long });

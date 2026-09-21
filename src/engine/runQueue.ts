@@ -266,6 +266,8 @@ export interface AskWatcherFactory {
     runId: string;
     /** The adapter id the run launched with (`adapter.id`), for the card's agent line. */
     agent: string;
+    /** The role the run is executing; keys the Auto-mode allow-list for its asks. */
+    role: Role;
     /** Absolute path of `.baiton/runs/<run-id>/asks/`, from the launch's relay descriptor. */
     asksDir: string;
   }): AskWatcher;
@@ -740,6 +742,7 @@ class SerialRunQueue implements RunQueue {
           todoId: req.todoId,
           runId,
           agent: adapter.id,
+          role: req.role,
           asksDir: relay.dir,
         });
       } catch {

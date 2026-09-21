@@ -24,6 +24,10 @@
  * 9. A throwing gate escalates — Auto mode only ever fails towards asking.
  * 10. Stop during a slow gate wins — a late approval neither posts a card
  *     nor writes a record.
+ * 11. A relayed ask reaches the gate with its run context.
+ * 12. An orchestrator-raised ask reaches the gate with no context.
+ * 13. A relayed allow-list approval is audited.
+ * 14. A relayed escalation posts a pending card and is audited.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -44,6 +48,7 @@ import {
 } from '../src/orchestrator';
 import type {
   AutoModeOutcome,
+  AutoModeRunContext,
   CompletionResult,
   GuardContext,
   HostToWebview,
@@ -110,8 +115,8 @@ describe('ChatController auto mode', () => {
   let controller: ChatController;
   /** The answers the fake tool observed, in call order. */
   let observed: InterventionAnswer[];
-  /** The permission asks the gate received, in call order. */
-  let gateCalls: PermissionRequest[];
+  /** The permission asks the gate received, in call order, with their opts. */
+  let gateCalls: Array<{ ask: PermissionRequest; context?: AutoModeRunContext }>;
   /** The scripted gate outcome, or a deferred-gate thunk. */
   let gateResult: AutoModeOutcome | (() => Promise<AutoModeOutcome>);
   /** Every `set` call the fake autoModeMemory received. */
@@ -171,8 +176,8 @@ describe('ChatController auto mode', () => {
     let present: (ask: Intervention) => void | Promise<void> = () => {};
     seam = createInterventionSeam(askRegistry, (ask) => present(ask));
 
-    const autoGate: AutoModeGate = async (ask) => {
-      gateCalls.push(ask);
+    const autoGate: AutoModeGate = async (ask, opts) => {
+      gateCalls.push({ ask, context: opts.context });
       const outcome = gateResult;
       return typeof outcome === 'function' ? outcome() : outcome;
     };
@@ -226,6 +231,15 @@ describe('ChatController auto mode', () => {
     controller.start();
     await webview.send({ type: 'setAutoMode', enabled: true });
     return webview.send({ type: 'sendText', text: 'go' });
+  }
+
+  /** The trusted run context a relayed ask carries into the controller. */
+  const RUN_CONTEXT: AutoModeRunContext = { agent: 'claude', role: 'executor', runId: 'run-a' };
+
+  /** Present a relayed ask directly, the way the ask watcher does, without the tool loop. */
+  async function presentRelayed(ask: PermissionRequest = PERMISSION_ASK): Promise<void> {
+    const { intervention } = askRegistry.create(ask);
+    await controller.presentIntervention({ ...intervention }, RUN_CONTEXT);
   }
 
   /** Wait until the run has finished (busy off), having reached `minRequests` completions. */
@@ -461,5 +475,84 @@ describe('ChatController auto mode', () => {
       0,
     );
     assert.strictEqual((await interventionRecords()).length, 0);
+  });
+
+  it('reaches the gate with its run context for a relayed ask', async () => {
+    controller.start();
+    await webview.send({ type: 'setAutoMode', enabled: true });
+    await presentRelayed();
+    await waitFor(() => gateCalls.length === 1, 'the gate to be consulted');
+    assert.strictEqual(gateCalls[0].ask.tool, 'Read');
+    assert.deepStrictEqual(gateCalls[0].context, RUN_CONTEXT);
+  });
+
+  it('reaches the gate with no context for an orchestrator-raised ask', async () => {
+    await startSendWithAutoOn();
+    await awaitRunEnd();
+    assert.strictEqual(gateCalls.length, 1);
+    assert.strictEqual(gateCalls[0].context, undefined);
+  });
+
+  it('audits a relayed allow-list approval with no pending card', async () => {
+    gateResult = {
+      kind: 'approve',
+      stage: 'allow-list',
+      rationale: 'claude/executor may write inside its run dir',
+    };
+    controller.start();
+    await webview.send({ type: 'setAutoMode', enabled: true });
+    await presentRelayed();
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the settled card');
+
+    const shown = webview.all('showIntervention');
+    assert.strictEqual(shown.length, 1);
+    const card = shown[0].intervention;
+    assert.strictEqual(card.status, 'resolved');
+    assert.strictEqual(card.auto, true);
+    assert.ok(card.rationale!.includes('Auto mode (allow-list)'));
+    assert.strictEqual(webview.all('resolveIntervention').length, 0);
+    assert.strictEqual(askRegistry.size, 0);
+
+    const records = await interventionRecords();
+    assert.strictEqual(records.length, 1);
+    const record = records[0].intervention!;
+    assert.strictEqual(record.status, 'resolved');
+    assert.strictEqual(record.auto, true);
+  });
+
+  it('posts and audits a relayed escalation, then settles on answer', async () => {
+    const escalation = { what: 'claude wants to run Write', why: 'outside the allowed paths' };
+    gateResult = { kind: 'escalate', ...escalation };
+    controller.start();
+    await webview.send({ type: 'setAutoMode', enabled: true });
+    await presentRelayed();
+    // The start-time refresh re-posts pending cards, so poll on "at least one"
+    // rather than an exact count.
+    await waitFor(() => webview.all('showIntervention').length >= 1, 'the pending card');
+
+    const card = webview.last('showIntervention')!.intervention;
+    assert.strictEqual(card.status, 'pending');
+    assert.strictEqual(card.escalation!.what, escalation.what);
+    assert.strictEqual(card.escalation!.why, escalation.why);
+    assert.ok(card.detail!.includes(`What you are approving: ${escalation.what}`));
+    assert.ok(card.detail!.includes(`Why it was flagged: ${escalation.why}`));
+
+    let records = await interventionRecords();
+    assert.strictEqual(records.length, 1);
+    assert.strictEqual(records[0].intervention!.status, 'pending');
+
+    await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'declined', reason: 'no' } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    records = await interventionRecords();
+    assert.strictEqual(records.length, 2);
+    assert.strictEqual(records[0].intervention!.status, 'pending');
+    assert.strictEqual(records[1].intervention!.status, 'resolved');
+    assert.deepStrictEqual(records[1].intervention!.answer, { kind: 'declined', reason: 'no' });
+
+    const rendered: RenderRecord[] = toRenderRecords(await readTranscript(transcriptFile()));
+    const withCard = rendered.filter((r) => r.intervention !== undefined);
+    assert.strictEqual(withCard.length, 1);
+    assert.strictEqual(withCard[0].intervention!.status, 'resolved');
+    assert.strictEqual(withCard[0].intervention!.escalation!.what, escalation.what);
   });
 });

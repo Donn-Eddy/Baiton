@@ -15,6 +15,8 @@ import {
 import type { AskRelayIo, AskWatcher, AskWatcherFactory, RelayAsk } from '../engine';
 import { PendingAskRegistry } from '../orchestrator';
 import type { Intervention, InterventionAnswer } from '../orchestrator';
+import type { AutoModeRunContext } from '../orchestrator';
+import type { Role } from '../model/role';
 
 /** The reason a still-pending relayed ask is declined with when its run settles. */
 export const RUN_SETTLED_DECLINE_REASON = 'the run ended before this ask was answered';
@@ -22,7 +24,12 @@ export const RUN_SETTLED_DECLINE_REASON = 'the run ended before this ask was ans
 /** The seams the ask watcher routes through; all host-free so routing is unit-testable. */
 export interface AskRoute {
   registry: PendingAskRegistry;
-  present(ask: Intervention): void | Promise<void>;
+  /**
+   * Present one routed ask. `context` is the run's trusted identity (the
+   * queue's adapter id, role and run id) and is what the Auto-mode gate keys
+   * its allow-list on.
+   */
+  present(ask: Intervention, context: AutoModeRunContext): void | Promise<void>;
   decline(id: string, reason: string): void | Promise<void>;
   log(message: string): void;
   now?(): string;
@@ -34,6 +41,7 @@ interface AskWatcherInput {
   todoId: string;
   runId: string;
   agent: string;
+  role: Role;
   asksDir: string;
 }
 
@@ -43,11 +51,14 @@ class VscodeAskWatcher implements AskWatcher {
   private readonly inFlight = new Map<string, RelayAsk>();
   private readonly io: AskRelayIo;
   private readonly now: () => string;
+  /** The run's trusted identity, computed once and reused for every routed ask. */
+  private readonly context: AutoModeRunContext;
   private disposed = false;
 
   constructor(private readonly input: AskWatcherInput, private readonly route: AskRoute) {
     this.io = route.io ?? nodeAskRelayIo;
     this.now = route.now ?? (() => new Date().toISOString());
+    this.context = { agent: input.agent, role: input.role, runId: input.runId };
     // An explicit Uri-based RelativePattern remains correct when VS Code opened
     // a symlinked spelling of the workspace while Baiton uses its canonical path.
     const pattern = new vscode.RelativePattern(vscode.Uri.file(input.asksDir), '*.json');
@@ -106,7 +117,7 @@ class VscodeAskWatcher implements AskWatcher {
     const card: Intervention = { ...intervention, scopeId: this.input.slug };
     this.inFlight.set(intervention.id, ask);
     try {
-      await this.route.present(card);
+      await this.route.present(card, this.context);
     } catch (err) {
       this.route.registry.reject(intervention.id, `the ask could not be shown: ${describe(err)}`);
     }
