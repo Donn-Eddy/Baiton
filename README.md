@@ -254,9 +254,18 @@ A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and
   | antigravity (agy) | config-driven fallback | probed 2026-09-20, version 1.2.7 — native `PreToolUse` hook works but loads only from an on-disk `hooks.json`, and its `allow` cannot grant a permission |
   | codex | config-driven fallback | probed 2026-09-20, version 0.154.0 — native `PreToolUse` hook works but is gated behind persisted hook trust, not installable from argv |
 
-- Adapters without a verified native relay fall back to the config-driven
-  permission layer (`permissionFlags` / `--allowedTools` /
-  `--permission-mode`) and surface nothing inline.
+- Adapters whose probe found no argv-installable native mechanism (opencode,
+  antigravity, codex — and any unknown agent id) receive a **config-driven
+  fallback relay**: the Brief carries an 'Asking for permission or a decision'
+  section telling the sub-agent to write `<run>/asks/<ask-id>.json` in the same
+  `file-v1` wire format and to wait for `<ask-id>.response.json`, so the same
+  `vscodeAskWatcher` routes those asks to the same inline chat cards and Auto
+  mode applies unchanged. The config-driven permission layer
+  (`permissionFlags` / `--allowedTools` / `--permission-mode`) remains the
+  enforcement floor underneath, and the selection lives in `ASK_RELAY_KIND` in
+  `src/adapter/index.ts`. This route is instruction-driven, not enforced by the
+  CLI: a model that ignores the instruction simply asks in its terminal as
+  before, and nothing is auto-approved on its behalf.
 
 ## Commands
 

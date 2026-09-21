@@ -59,6 +59,62 @@ export function agentAllowList(
 }
 
 /**
+ * How a launched agent's harness asks reach the run's watched `asks/`
+ * directory. Probed per adapter (see the README 'Per-adapter relay state'
+ * table and the four findings blocks above it):
+ *
+ * - `native`        — the CLI installs a permission hook straight from argv, so
+ *                     the relay needs nothing but the launch command
+ *                     (`claudeRelayFlags` in `src/adapter/permissions.ts`).
+ * - `config-driven` — the CLI's hook/plugin surface exists but loads only from
+ *                     a file on disk (opencode's plugin file, agy's
+ *                     `hooks.json`, codex's persisted hook trust) or cannot
+ *                     grant an approval at all (agy's `allow`), so no hook is
+ *                     wired; instead the Brief carries instructions telling the
+ *                     sub-agent to write the ask files itself
+ *                     (`askRelayInstruction` in `src/engine/roleInstructions.ts`).
+ */
+export type AskRelayKind = 'native' | 'config-driven';
+
+/**
+ * Probe-derived per-adapter ask-relay selection; mirrors the README
+ * 'Per-adapter relay state' table. Each row cites its probe outcome:
+ *
+ * - claude: native — the inline `--settings` PreToolUse hook is installable
+ *   from pure argv (verified against 2.1.278), so the harness relay runs
+ *   without any brief text.
+ * - opencode: config-driven — a native plugin hook exists and fires, but
+ *   opencode loads plugins only from a file on disk (a `file://`/npm entry or
+ *   `.opencode/plugin/`), never inline, and `launch()` writes nothing.
+ * - antigravity: config-driven — the `hooks.json` PreToolUse hook works but
+ *   loads only from an on-disk file, and its `allow` decision cannot grant a
+ *   headless permission anyway, so it could never carry an approval relay.
+ * - codex: config-driven — the PreToolUse hook works but every enabled hook is
+ *   gated behind persisted hook trust written through the TUI, which argv
+ *   alone cannot satisfy.
+ */
+export const ASK_RELAY_KIND: Record<AgentId, AskRelayKind> = {
+  claude: 'native',
+  opencode: 'config-driven',
+  antigravity: 'config-driven',
+  codex: 'config-driven',
+};
+
+/**
+ * The ask-relay kind for an agent id. An unknown id resolves to
+ * `config-driven` deliberately — the conservative default, since the fallback
+ * only adds brief text and never widens a permission.
+ */
+export function askRelayKind(agent: string): AskRelayKind {
+  return isAgentId(agent) ? ASK_RELAY_KIND[agent] : 'config-driven';
+}
+
+/** True when the agent needs the config-driven ask-relay fallback (brief text) rather than a native hook. */
+export function usesConfigDrivenAskRelay(agent: string): boolean {
+  return askRelayKind(agent) === 'config-driven';
+}
+
+/**
  * A per-role lookup from agent id to its adapter. Roles may mix agents (a
  * role's `RoleConfig.agent` is an unvalidated string — see
  * src/config/types.ts and src/config/loadConfig.ts), so the engine needs a
