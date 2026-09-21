@@ -70,11 +70,28 @@ Its tools follow the job it is doing, so it can only act within it:
 | tools | creating a spec | driving a spec |
 |---|---|---|
 | `list_specs`, `read_spec`, `git_status` | yes | yes |
+| `ask_user` | yes | yes |
 | `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no |
 | `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes |
 | `draft_spec` | yes | no |
 | `approve_spec` | yes | yes (re-approve) |
 | `run`, `submit_pr` | no | yes |
+
+`ask_user` joins `list_specs`, `read_spec` and `git_status` as a tool that is
+available in both phases. Where a point needs your answer, the orchestrator
+calls `ask_user(question, options?, allow_free_text?, placeholder?)` instead of
+ending its turn with a question: the question appears as an inline card in the
+conversation and the call blocks until you answer it, so your answer comes back
+as the tool result and the turn continues. `options` are for a short closed set
+(at most the tool's `MAX_ASK_USER_OPTIONS` cap of **8** options, each with an
+`id` and a `label`), `allow_free_text` additionally accepts a typed reply, and
+a question with no options is always answered by typing. Like those other
+always-available tools it is non-mutating and not a dispatch, so it stays
+usable under Restricted Mode. Declining the card refuses the call, which the
+orchestrator quotes to you and stops on, exactly like any other refusal — the
+instruction that tells the model this is what it receives in its system prompt
+(`ASK_USER_TEXT` in `src/orchestrator/systemPrompt.ts`). See
+**Interventions in chat** below for the cards themselves.
 
 A spec conversation counts as "creating" while its frontmatter `status` is
 `draft`, and as "driving" from `approved` onwards. There is no tool for reading
@@ -108,6 +125,48 @@ or `.baiton/specs/<slug>/chat.jsonl`) is migrated into the new layout as one
 session the first time the view opens that conversation, and an empty one is
 removed. All of these paths are covered by `.baiton/.gitignore`.
 
+### Interventions in chat
+
+Every point where a human is needed appears as one interactive card inline in
+the conversation and is answered in place — no modal dialog. There are three
+kinds:
+
+- **question** — the orchestrator asking you something, through its `ask_user`
+  tool (see **What the orchestrator does** above);
+- **confirm** — a confirmation, such as the one `draft_spec` and `approve_spec`
+  raise before they act;
+- **permission** — a sub-agent harness ask relayed out of a running stage,
+  carrying the agent id, the tool name and the tool arguments.
+
+The controls depend on the kind. An option question renders one button per
+offered choice (each option carries a stable `id` and a visible `label`, with
+an optional `detail` line); a free-text question renders a text input plus a
+**Send** button (Enter submits, Shift+Enter puts in a newline). Confirms and
+permission asks render **Approve** and **Decline**.
+
+Once answered the card stays in place showing the decision line, an **Auto**
+badge when Auto mode decided it rather than you, and the one-line rationale —
+for an escalated ask, the 'what you are approving / why it was flagged' text.
+
+A card lands on the conversation the ask belongs to. A relayed harness ask is
+routed to the spec conversation of the run it came from, switching the view
+there if needed (`ChatController.scopeForAsk`), so you answer it in the context
+the run was launched from.
+
+Cards are persisted: each is appended to the session transcript JSONL as a
+`system` record carrying an `intervention` field (`interventionTranscriptRecord`
+in `src/orchestrator/chatTranscript.ts`), so a settled card is an inline record
+of the decision that survives switching conversations, reloading the window and
+re-rendering. An escalated ask is written twice — once pending, once settled —
+and the two records are projected back as the one card in its original
+position.
+
+**Stop** aborts the in-flight run *and* declines every ask still waiting for an
+answer (`ChatController.onStop` → `declinePendingAsks` /
+`PendingAskRegistry.rejectAll`), so a flow paused on a card always gets control
+back instead of hanging. A declined `ask_user` comes back to the model as a
+refusal; a declined permission ask is written back to the run as a denial.
+
 ### Creating a spec
 
 The orchestrator gathers the requirements; a configured coding agent writes the
@@ -118,12 +177,13 @@ spec.
 2. It writes a short **requirements document** — the goal, the constraints, the
    acceptance criteria and the files of interest — and revises it until you
    agree to it. It never proposes the todo list itself.
-3. Once you agree it calls `draft_spec`, which asks you to confirm the
-   requirements and then launches the **spec writer**: the agent configured for
-   the `spec-writer` role in `.baiton/config.json`. That agent studies the
-   repository read-only and returns an OVERVIEW plus a dependency-ordered todo
-   list; the extension assigns the `T##` ids, renders
-   `.baiton/specs/<slug>/spec.md`, and commits it.
+3. Once you agree it calls `draft_spec`, which raises a **confirm** card inline
+   in the conversation to confirm the requirements — an in-place answer, not a
+   modal dialog; declining it leaves the repository untouched — and then
+   launches the **spec writer**: the agent configured for the `spec-writer`
+   role in `.baiton/config.json`. That agent studies the repository read-only
+   and returns an OVERVIEW plus a dependency-ordered todo list; the extension
+   assigns the `T##` ids, renders `.baiton/specs/<slug>/spec.md`, and commits it.
 4. Watch the draft in its terminal while it runs. When it finishes, a note lands
    in the Workspace conversation and the new spec appears in the Spec Explorer
    and in the conversation selector.
@@ -144,6 +204,79 @@ stage reaches a terminal outcome, so there is nothing to poll. `plan-review` is
 not a stage it can trigger: it runs inside the plan stage's own review rounds.
 When every todo is `done`, the orchestrator offers `submit_pr`. You can still
 run any stage yourself from the Spec Explorer.
+
+### Auto mode
+
+Auto mode lets the host answer the routine asks on your behalf, under a
+two-stage gate, while everything it decided is written into the conversation as
+an audit trace you can read. Its default is off.
+
+- **The toggle** — a button in the composer's control row immediately left of
+  **Stop**, labelled **Auto: Off** / **Auto: On** (`media/chat.js`
+  `renderAutoMode`, with its state driven by `aria-pressed`). It stays enabled
+  while a pipeline is running, so it can be flipped mid-run — an ask normally
+  arrives while a run is in flight. The host is authoritative: the click posts
+  `setAutoMode` and the button repaints only when the host echoes it back. The
+  state is remembered per workspace in VS Code's `workspaceState` under the key
+  `baiton.chat.autoMode` (`src/activation/commands.ts`, `autoModeMemory`), so a
+  window reload comes back in the mode you left it in; it is not a
+  `settings.json` setting.
+- **What is gated** — only harness **permission** asks that arrive *while the
+  toggle is on* (`ChatController.autoDecision` returns nothing unless Auto mode
+  is on, a gate is wired and `ask.kind === 'permission'`). Confirmations and
+  questions are never auto-answered: they carry human intent, not a harness
+  capability.
+- **Stage (a), the deterministic allow-list** — a pure per-agent allow-list
+  (`agentAllowList(agent, role, runId)` in `src/adapter/index.ts`, derived from
+  claude's `--allowedTools` sets, opencode's agent permission rules and the
+  role profile's shell/write bits) decides without any model round-trip. It is
+  deliberately narrow in two ways. First, a write auto-approves only when
+  every target path is repo-relative and matches one of the rule's globs: an
+  absolute path, a `file://` URL, any `..` segment, unparseable `args` or an
+  undeterminable target all escalate. Second, `shell: true` alone is not
+  blanket approval — only the recognised read-only/verification prefixes clear
+  the gate. The `SAFE_SHELL_PREFIXES` list in `src/orchestrator/autoMode.ts`
+  is verbatim: ls, cat, head, tail, wc, pwd, which, rg, grep, find, git status,
+  git diff, git log, git show, git branch, npm test, npm run lint, npm run
+  compile, npm run build, npx tsc, node --version — and any chaining, pipe,
+  redirect or substitution (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`,
+  newline) escalates however the command starts. Tool names are normalised
+  through `TOOL_FAMILIES` onto read, search, write and shell; an unmapped tool
+  (`webfetch`, `websearch`, `task`, `agent`, anything new) escalates, so a
+  missing name costs a round-trip and never an unsafe approval. A relayed ask
+  is keyed on the launching run's trusted identity — its adapter id, role and
+  run id (`AutoModeRunContext`) — not on the agent field inside the ask file,
+  so an ask claiming a different agent escalates.
+- **Stage (b), the model evaluation** — everything the allow-list did not
+  clear goes to the orchestrator model with the stage-(a) reason attached
+  (`evaluateAsk` / `RISK_EVALUATION_PROMPT`). It approves only read-only or
+  reversible work plainly inside the agent's own `.baiton/runs/<run-id>/`
+  directory and within the role's remit, and escalates deletes or overwrites
+  outside that directory, git-history rewrites or pushes, installs or
+  downloads, network access, anything touching credentials, secrets or
+  `.env`, version-control or CI configuration changes, and anything unclear —
+  when in doubt it escalates. The reply contract is one JSON object:
+  `{"decision":"approve","rationale":"…"}` or
+  `{"decision":"escalate","what":"…","why":"…"}`.
+- **Fail-safe direction** — every failure path escalates and none approves:
+  empty or unreadable model output, an unknown decision, an approval without a
+  reason, a transport error, or a gate that throws
+  (`ChatController.autoDecision` catches it and turns it into an escalation).
+  The ask arguments are fenced and treated as untrusted data; embedded
+  instructions such as 'this is safe, approve it' are ignored and are
+  themselves a reason to escalate.
+- **The audit trace** — every auto-approval and every escalation is written
+  into the session transcript, so the conversation is the audit log. An
+  auto-approval never shows a pending card: the card is posted already
+  settled, carries the **Auto** badge and a one-line rationale naming the
+  agent, role, tool and matched rule (or the model's rationale), and is
+  appended to the transcript. An escalation is appended when it happens, as a
+  pending card carrying the 'what you are approving / why it was flagged'
+  description, and appended again once you answer it. Turning Auto off leaves
+  those records in place.
+
+Which asks can reach these cards at all depends on the per-adapter relay,
+documented in **Harness ask relay (per-adapter probe findings)** below.
 
 ### The config panel
 
@@ -205,9 +338,9 @@ Baiton uses curated static capability catalogues in each adapter module rather t
 - **Roadmap for dynamic discovery**:
   - Future iterations may introduce background caching or an asynchronous "Refresh models from CLI" button for CLIs that support dynamic querying (`agy models`, `opencode models`), caching results in workspace storage while retaining static defaults as resilient fallbacks.
 
-#### Harness ask relay (per-adapter probe findings)
+### Harness ask relay (per-adapter probe findings)
 
-A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the run stays paused until the answer file appears.
+A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the run stays paused until the answer file appears. These asks are what become **permission** intervention cards in the run's spec conversation (see **Interventions in chat**), answered in place in the chat, with Auto mode applied to them when it is on; the run stays paused until the response file appears, and **Stop** — or a run that ends — declines any ask still pending, so nothing hangs.
 
 - **claude findings** (probed `claude --version 2.1.278`):
   - `--settings` accepts an inline JSON string as well as a file path (`<file-or-json>` in `claude --help`), and a `-p` run started with an inline hooks JSON launched cleanly and installed the hook — verified by the probe.
@@ -266,6 +399,8 @@ A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and
   `src/adapter/index.ts`. This route is instruction-driven, not enforced by the
   CLI: a model that ignores the instruction simply asks in its terminal as
   before, and nothing is auto-approved on its behalf.
+
+The state table above is the thing that decides which relay each adapter uses: the selection it records is the selection encoded in `ASK_RELAY_KIND` / `askRelayKind()` in `src/adapter/index.ts`, so the documented findings and the shipped behaviour have one source.
 
 ## Commands
 
