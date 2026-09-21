@@ -140,9 +140,10 @@ kinds:
 
 The controls depend on the kind. An option question renders one button per
 offered choice (each option carries a stable `id` and a visible `label`, with
-an optional `detail` line); a free-text question renders a text input plus a
-**Send** button (Enter submits, Shift+Enter puts in a newline). Confirms and
-permission asks render **Approve** and **Decline**.
+an optional `detail` line); a free-text question renders a single-line text
+input plus a **Send** button (Enter submits; the answer box holds one line, so
+there is no Shift+Enter newline there). Confirms and permission asks render
+**Approve** and **Decline**.
 
 Once answered the card stays in place showing the decision line, an **Auto**
 badge when Auto mode decided it rather than you, and the one-line rationale —
