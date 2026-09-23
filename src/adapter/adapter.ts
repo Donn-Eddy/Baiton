@@ -116,6 +116,30 @@ export interface Adapter {
    * its "most recent session" flag). Must never throw.
    */
   resolveSessionId?(sessionId: string, cwd: string): Promise<string | undefined>;
+
+  /**
+   * The files a relay-enabled launch needs on disk before the CLI starts, for
+   * adapters whose verified native relay loads only from a file (antigravity's
+   * `hooks.json`). Pure, like {@link Adapter.launch}: it only computes the
+   * files; the launcher writes them (creating parent directories) after
+   * `launch()` accepts the request and before any terminal is created, and a
+   * failed write halts the launch. Every `path` is relative to the workspace
+   * root and must stay inside the run's own `.baiton/runs/<run-id>/`
+   * directory — the launcher refuses the launch otherwise. The launcher
+   * passes the paths it will write back to `launch()` as
+   * {@link LaunchRequest.relayFiles}, so an adapter can refuse to emit a flag
+   * that is only safe with its file in place. Returns `[]` for a descriptor
+   * the adapter does not understand. Adapters without such a relay omit it.
+   */
+  relayFiles?(relay: AskRelayDescriptor): RelayFile[];
+}
+
+/** One file an adapter's native ask relay needs written before launch. */
+export interface RelayFile {
+  /** Workspace-relative path, inside `.baiton/runs/<run-id>/`. */
+  path: string;
+  /** The exact file contents. */
+  content: string;
 }
 
 /** What an adapter needs to locate the session a specific run created. */
@@ -193,6 +217,14 @@ export interface LaunchRequest {
    * as before.
    */
   relay?: AskRelayDescriptor;
+  /**
+   * The workspace-relative paths of the {@link Adapter.relayFiles} the
+   * launcher writes for this launch, set only alongside `relay`. The launcher
+   * creates no terminal unless every one of them was written and read back,
+   * so an adapter may treat a path listed here as present when the CLI
+   * starts. Absent means no relay file will exist.
+   */
+  relayFiles?: readonly string[];
 }
 
 /**

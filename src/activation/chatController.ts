@@ -50,7 +50,10 @@ import type { GuardContext, ToolRegistry } from '../orchestrator';
 import {
   MissingConfigError,
   UnreachableEndpointError,
+  askCommandText,
+  askFromPermission,
   buildSystemPrompt,
+  defaultSummary,
   escalatedInterventionView,
   interventionTranscriptRecord,
   interventionUpdate,
@@ -78,6 +81,7 @@ import type {
   HostToWebview,
   Intervention,
   InterventionAnswer,
+  InterventionEscalation,
   InterventionView,
   ModelClient,
   OrchestratorPhase,
@@ -387,8 +391,9 @@ export class ChatController {
    * While Auto mode is on, a harness `permission` ask is first put through the
    * gate: an approval settles the ask with no round-trip and posts the card
    * already resolved and flagged `auto`, and an escalation is shown as an
-   * ordinary pending card carrying the 'what you are approving / why it was
-   * flagged' description. Confirmations and questions are never gated — they
+   * ordinary pending card led by one plain sentence saying what the user is
+   * approving, with the raw command under it; the rule that tripped is kept
+   * in the persisted record for the audit trail only. Confirmations and questions are never gated — they
    * carry human intent, not a harness capability. Both outcomes are persisted,
    * so the transcript is the audit trail.
    *
@@ -407,7 +412,10 @@ export class ChatController {
       await this.autoApprove(ask.id, view, transcript, outcome);
       return;
     }
-    const card = outcome === undefined ? view : escalatedInterventionView(view, outcome);
+    const card =
+      outcome === undefined || ask.kind !== 'permission'
+        ? view
+        : escalatedInterventionView(view, cardEscalation(ask, outcome));
     this.cards.set(ask.id, { view: card, transcript, scopeKey: key });
     this.deps.webview.post({ type: 'showIntervention', intervention: card });
     if (outcome !== undefined) {
@@ -445,8 +453,8 @@ export class ChatController {
       this.deps.log(`Baiton chat: the Auto-mode gate failed: ${describe(err)}`);
       return {
         kind: 'escalate',
-        what: `${ask.agent} wants to run ${ask.tool}`,
-        why: `Auto mode could not decide: ${describe(err)}`,
+        summary: defaultSummary(askFromPermission(ask), context?.role),
+        detail: `Auto mode could not decide: ${describe(err)}`,
       };
     }
   }
@@ -1157,6 +1165,24 @@ function toInterventionView(ask: Intervention): InterventionView {
         ...(ask.detail !== undefined ? { detail: ask.detail } : {}),
       };
   }
+}
+
+/**
+ * The escalation an escalated permission card carries: the gate's one-sentence
+ * summary and optional detail line, the raw command (or args) to show under
+ * it, and the stage-(a) reason for the audit record only.
+ */
+function cardEscalation(
+  ask: PermissionRequest,
+  outcome: Extract<AutoModeOutcome, { kind: 'escalate' }>,
+): InterventionEscalation {
+  const command = askCommandText(askFromPermission(ask));
+  return {
+    summary: outcome.summary,
+    ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+    ...(command !== undefined ? { command } : {}),
+    ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+  };
 }
 
 /** One card the view is showing, and the transcript its settled record belongs to. */

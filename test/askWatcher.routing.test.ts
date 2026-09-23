@@ -100,7 +100,7 @@ describe('vscode ask watcher routing', () => {
     writeFileSync(join(asksDir, 'ask-1.json'), serializeAsk({ version: 1, id: 'ask-1', runId: 'run-a', agent: 'claude', kind: 'permission', prompt: 'allow?', tool: 'Bash' }));
     make();
     await waitFor(() => cards.length === 1);
-    assert.deepStrictEqual(contexts[0], { agent: 'claude', role: 'executor', runId: 'run-a' });
+    assert.deepStrictEqual(contexts[0], { agent: 'claude', role: 'executor', runId: 'run-a', slug: 'spec-a', todoId: 'T17' });
   });
 
   it('catches up asks, scopes cards, and writes approved responses', async () => {

@@ -315,6 +315,25 @@
   }
 
   /**
+   * The escalation a card carries, read in either the current
+   * { summary, detail?, command? } shape or the legacy { what, why } shape
+   * older transcripts persisted; null when the card was not escalated.
+   */
+  function escalationOf(card) {
+    const raw = card.escalation;
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+    const summary = typeof raw.summary === 'string' && raw.summary ? raw.summary : typeof raw.what === 'string' ? raw.what : '';
+    if (!summary) {
+      return null;
+    }
+    const detail = typeof raw.detail === 'string' && raw.detail ? raw.detail : typeof raw.why === 'string' ? raw.why : '';
+    const command = typeof raw.command === 'string' ? raw.command : '';
+    return { summary: summary, detail: detail, command: command };
+  }
+
+  /**
    * Build one inline intervention card from a record carrying `intervention`.
    *
    * Everything except the prompt is assigned with textContent (the prompt is
@@ -356,14 +375,38 @@
     prompt.innerHTML = renderMarkdown(card.prompt || record.content);
     wrap.appendChild(prompt);
 
-    if (typeof card.detail === 'string' && card.detail.length > 0) {
+    // An Auto-mode escalation leads with one plain sentence saying what the
+    // user is approving, then the raw command as a code block, then an
+    // optional muted secondary line. The rule that tripped is audit-only and
+    // never rendered. A legacy { what, why } record is read the same way.
+    const escalation = escalationOf(card);
+    if (escalation) {
+      const summary = document.createElement('div');
+      summary.className = 'intervention-escalation-summary';
+      summary.textContent = escalation.summary;
+      wrap.appendChild(summary);
+      if (escalation.command) {
+        const command = document.createElement('pre');
+        command.className = 'intervention-command';
+        command.textContent = escalation.command;
+        wrap.appendChild(command);
+      }
+      if (escalation.detail) {
+        const secondary = document.createElement('div');
+        secondary.className = 'intervention-escalation-detail';
+        secondary.textContent = escalation.detail;
+        wrap.appendChild(secondary);
+      }
+    } else if (typeof card.detail === 'string' && card.detail.length > 0) {
       const detail = document.createElement('div');
       detail.className = 'intervention-detail';
       detail.textContent = card.detail;
       wrap.appendChild(detail);
     }
 
-    if (typeof card.args === 'string' && card.args.length > 0) {
+    // The raw arguments stay available behind a disclosure, unless the
+    // escalation block already shows them as its command.
+    if (typeof card.args === 'string' && card.args.length > 0 && !(escalation && escalation.command)) {
       const args = document.createElement('details');
       args.className = 'intervention-args';
       const summary = document.createElement('summary');
