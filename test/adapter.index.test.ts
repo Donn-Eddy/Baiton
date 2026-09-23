@@ -105,16 +105,18 @@ describe('agentCapabilities', () => {
 });
 
 /**
- * The probe-derived ask-relay selection (chat-interventions-auto-mode T18):
- * claude is the only adapter with a verified argv-installable native hook; the
- * other three — and any unknown agent id — take the config-driven fallback.
+ * The probe-derived ask-relay selection (chat-interventions-auto-mode T18,
+ * T21, T22): claude (argv-installed hook), antigravity (launcher-written
+ * run-dir `hooks.json`) and codex (argv-installed `PermissionRequest` hook)
+ * have a verified native hook; opencode — and any unknown agent id — take
+ * the config-driven fallback.
  */
 describe('askRelayKind selection', () => {
-  it('returns native only for claude and config-driven for the other known ids', () => {
+  it('returns native for claude, antigravity and codex and config-driven for opencode', () => {
     assert.strictEqual(askRelayKind('claude'), 'native');
     assert.strictEqual(askRelayKind('opencode'), 'config-driven');
-    assert.strictEqual(askRelayKind('antigravity'), 'config-driven');
-    assert.strictEqual(askRelayKind('codex'), 'config-driven');
+    assert.strictEqual(askRelayKind('antigravity'), 'native');
+    assert.strictEqual(askRelayKind('codex'), 'native');
   });
 
   it('resolves an unknown agent id to the conservative config-driven default', () => {
@@ -123,7 +125,9 @@ describe('askRelayKind selection', () => {
 
   it('usesConfigDrivenAskRelay mirrors askRelayKind', () => {
     assert.ok(!usesConfigDrivenAskRelay('claude'));
-    for (const agent of ['opencode', 'antigravity', 'codex', 'future-cli']) {
+    assert.ok(!usesConfigDrivenAskRelay('antigravity'));
+    assert.ok(!usesConfigDrivenAskRelay('codex'));
+    for (const agent of ['opencode', 'future-cli']) {
       assert.ok(usesConfigDrivenAskRelay(agent), `${agent} uses the config-driven fallback`);
     }
   });

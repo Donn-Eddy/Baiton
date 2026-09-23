@@ -116,17 +116,61 @@ export interface InterventionView {
   /** The user's (or Auto mode's) answer; present once `status` is 'resolved'. */
   answer?: InterventionAnswer;
   /**
-   * Present when Auto mode declined to decide the ask and escalated it: what
-   * the user would be approving, and why the gate flagged it. The card's
-   * `detail` carries the same text in rendered form, so the webview needs no
-   * change to show it; this field keeps the two parts separately readable in
-   * the persisted transcript record.
+   * Present when Auto mode declined to decide the ask and escalated it; see
+   * {@link InterventionEscalation}. The card's `detail` carries the summary
+   * (and detail line) as plain text for readers that ignore this field; the
+   * webview renders the structured form.
    */
-  escalation?: { what: string; why: string };
+  escalation?: InterventionEscalation;
   /** One-line reason shown on a settled card (auto-approval or escalation). */
   rationale?: string;
   /** True when Auto mode settled the card rather than the user. */
   auto?: boolean;
+}
+
+/**
+ * An Auto-mode escalation as a card carries it: one plain sentence saying
+ * what the user is approving (the headline), an optional secondary line, the
+ * raw command or args the card shows under the sentence, and — for the audit
+ * record only, never rendered — the deterministic rule that tripped.
+ */
+export interface InterventionEscalation {
+  /** One plain sentence: "<Role> wants to <action and effect on target>". */
+  summary: string;
+  /** Optional secondary line, rendered muted under the summary. */
+  detail?: string;
+  /** The raw command (shell) or args JSON (other tools), shown as a code block. */
+  command?: string;
+  /** The stage-(a) reason the deterministic gate escalated with; audit only. */
+  reason?: string;
+}
+
+/**
+ * Read a persisted escalation in either shape: the current
+ * {@link InterventionEscalation}, or the legacy `{ what, why }` written by
+ * older sessions (`what` becomes the summary, `why` the detail line).
+ * Anything else yields `undefined`. Pure.
+ */
+export function normalizeEscalation(value: unknown): InterventionEscalation | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  const str = (key: string): string | undefined =>
+    typeof raw[key] === 'string' && (raw[key] as string).length > 0 ? (raw[key] as string) : undefined;
+  const summary = str('summary') ?? str('what');
+  if (summary === undefined) {
+    return undefined;
+  }
+  const detail = str('detail') ?? str('why');
+  const command = str('command');
+  const reason = str('reason');
+  return {
+    summary,
+    ...(detail !== undefined ? { detail } : {}),
+    ...(command !== undefined ? { command } : {}),
+    ...(reason !== undefined ? { reason } : {}),
+  };
 }
 
 /** One entry in the conversation selector: `'workspace'` plus one per slug. */
@@ -224,8 +268,8 @@ export function initialWebviewState(): WebviewState {
  * - `showIntervention` appends the card as a `system` render record and clears
  *   the empty state; an id already rendered is replaced in place, and a
  *   trailing streaming record is finalized first. An Auto-mode escalation
- *   arrives as an ordinary pending card whose `detail`/`escalation` carry the
- *   'what you are approving / why it was flagged' text.
+ *   arrives as an ordinary pending card whose `escalation` carries the
+ *   one-sentence summary of what the user is approving, and the raw command.
  * - `resolveIntervention` settles the first pending card carrying the given
  *   id by attaching the answer, rationale and auto flag; an id that matches
  *   no pending card is a no-op returning the same state.
@@ -384,6 +428,8 @@ const TOOL_ERROR_PREFIX = 'Error: ';
  * A record carrying an `intervention` card renders as one card row; when the
  * same ask id appears more than once (persisted pending, then resolved) the row
  * keeps the first occurrence's position and the last occurrence's card state.
+ * An escalation persisted by an older session in the legacy `{ what, why }`
+ * shape is read through {@link normalizeEscalation}, so it still renders.
  *
  * Pure: it reads the given records and allocates fresh output.
  */
@@ -427,7 +473,7 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
           return;
         }
         const latest = cards.get(card.id) ?? card;
-        out.push({ role: record.role, content: record.content, intervention: { ...latest } });
+        out.push({ role: record.role, content: record.content, intervention: projectCard(latest) });
         return;
       }
       out.push({ role: record.role, content: record.content });
@@ -452,6 +498,16 @@ export function toRenderRecords(records: readonly ConversationRecord[]): RenderR
     }
   });
   return out;
+}
+
+/** A fresh copy of a persisted card, with any legacy escalation read into the current shape. */
+function projectCard(card: InterventionView): InterventionView {
+  if (card.escalation === undefined) {
+    return { ...card };
+  }
+  const escalation = normalizeEscalation(card.escalation);
+  const { escalation: _legacy, ...rest } = card;
+  return escalation === undefined ? rest : { ...rest, escalation };
 }
 
 /** The pending tool row posted when an assistant turn requests `call`. */
@@ -491,27 +547,30 @@ export function interventionUpdate(
   return { type: 'resolveIntervention', id, answer, rationale: opts.rationale, auto: opts.auto };
 }
 
-/** Label of the 'what you are approving' line of an escalated card. */
-export const ESCALATION_WHAT_LABEL = 'What you are approving:';
-
-/** Label of the 'why it was flagged' line of an escalated card. */
-export const ESCALATION_WHY_LABEL = 'Why it was flagged:';
-
 /**
  * The card an escalated ask renders as: the pending view with the escalation
- * recorded structurally and appended to `detail` as two labelled lines. The
- * view's own `detail` (the harness's description, when it supplied one) is
- * kept as the first paragraph. Pure: it allocates a fresh view.
+ * recorded structurally and its `detail` replaced by the plain-text form —
+ * the one-sentence summary, then the optional detail line. The rule that
+ * tripped (`reason`) is kept in the structured record for the audit trail
+ * and never shown as text. The harness's own description, when it supplied
+ * one, follows as a last paragraph. Pure: it allocates a fresh view.
  */
 export function escalatedInterventionView(
   view: InterventionView,
-  escalation: { what: string; why: string },
+  escalation: InterventionEscalation,
 ): InterventionView {
-  const parts: string[] = [];
+  const parts: string[] = [escalation.summary];
+  if (escalation.detail !== undefined && escalation.detail.trim().length > 0) {
+    parts.push(escalation.detail);
+  }
   if (view.detail !== undefined && view.detail.trim().length > 0) {
     parts.push(view.detail);
   }
-  parts.push(`${ESCALATION_WHAT_LABEL} ${escalation.what}`);
-  parts.push(`${ESCALATION_WHY_LABEL} ${escalation.why}`);
-  return { ...view, escalation: { ...escalation }, detail: parts.join('\n') };
+  const copy: InterventionEscalation = {
+    summary: escalation.summary,
+    ...(escalation.detail !== undefined ? { detail: escalation.detail } : {}),
+    ...(escalation.command !== undefined ? { command: escalation.command } : {}),
+    ...(escalation.reason !== undefined ? { reason: escalation.reason } : {}),
+  };
+  return { ...view, escalation: copy, detail: parts.join('\n') };
 }

@@ -379,4 +379,30 @@ cases.push({
   messages: [{ type: 'setEmptyState', endpoint: 'http://x', model: 'm' }],
 });
 
+// (36) an Auto-mode escalated card (summary, detail, command, audit reason)
+// is shown, then settled by the user, carrying its escalation unchanged
+cases.push({
+  name: 'escalated card shows and settles with its escalation intact',
+  messages: [
+    {
+      type: 'showIntervention',
+      intervention: ask({
+        kind: 'permission',
+        prompt: 'Allow Bash?',
+        agent: 'claude',
+        tool: 'Bash',
+        args: '{"command":"python scripts/seed.py"}',
+        detail: 'Planner wants to run a script that edits rows in the dev database.',
+        escalation: {
+          summary: 'Planner wants to run a script that edits rows in the dev database.',
+          detail: 'The script opens a connection to postgres://dev.',
+          command: 'python scripts/seed.py',
+          reason: 'the command is not a recognised read-only or verification command',
+        },
+      }),
+    },
+    { type: 'resolveIntervention', id: 'a1', answer: { kind: 'declined', reason: 'not now' } },
+  ],
+});
+
 export const PROTOCOL_CASES: readonly ProtocolCase[] = cases;

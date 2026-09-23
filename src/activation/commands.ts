@@ -41,7 +41,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { isErr } from '../model/result';
-import { parseSpec } from '../model/parser';
+import { parseSpec, type ParsedSpec } from '../model/parser';
 import { legalActions, type TodoAction } from '../model/todoActions';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -70,17 +70,25 @@ import {
   PendingAskRegistry,
   confirmSeamFrom,
   createInterventionSeam,
+  askCwd,
+  askShellCommand,
   decideAsk,
   GuardContext,
+  MAX_SCRIPT_CHARS,
   OpenAiModelClient,
   askFromPermission,
   assembleToolSpecs,
+  scriptPathCandidates,
+  toolFamily,
   createToolRegistry,
   systemClock,
 } from '../orchestrator';
 import type {
+  AutoModeAsk,
   AutoModeRunContext,
   ConfirmSeam,
+  EvaluationScript,
+  EvaluationTaskContext,
   Intervention,
   InterventionSeam,
   OrchestratorPhase,
@@ -146,13 +154,104 @@ export const COMMANDS = {
  * with no run context — an orchestrator-raised permission ask, which never
  * passes through the relay. `planner` is the most restrictive profile
  * (read-only, no shell, writes confined to its run dir), so the deterministic
- * stage can only ever clear reads and searches on its own and everything else
- * goes to the model stage.
+ * stage can only ever clear reads, searches and recognised read-only shell
+ * commands on its own and everything else goes to the model stage.
  */
 const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
 
 /** Run id used for the same reason: it matches no real run directory, so no write rule can fire. */
 const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
+
+/**
+ * Resolve what the Auto-mode risk evaluator is told about a relayed ask's
+ * task: the workspace root, the command's working directory, the run's todo
+ * (id and title, read from `spec.md` through the spec store) and the body of
+ * every script the command names. A script is read only when it resolves —
+ * symlinks followed — to a regular file inside the workspace root, and only
+ * its first {@link MAX_SCRIPT_CHARS} bytes; nothing outside the workspace is
+ * ever read. Every failure degrades to "not included", never to a throw.
+ */
+async function autoModeTaskContext(
+  workspaceRoot: string,
+  ask: AutoModeAsk,
+  context: AutoModeRunContext,
+  readSpec: (slug: string) => Promise<ParsedSpec | undefined>,
+): Promise<EvaluationTaskContext> {
+  const out: EvaluationTaskContext = { workspaceRoot };
+  if (context.slug !== undefined) {
+    out.specSlug = context.slug;
+  }
+  if (context.todoId !== undefined) {
+    out.todoId = context.todoId;
+    if (context.slug !== undefined) {
+      try {
+        const spec = await readSpec(context.slug);
+        const title = spec?.todos.find((t) => t.id === context.todoId)?.title;
+        if (title !== undefined) {
+          out.todoTitle = title;
+        }
+      } catch {
+        // No title: the todo id alone still names the task.
+      }
+    }
+  }
+  const realRoot = realpathOrUndefined(workspaceRoot);
+  if (realRoot === undefined) {
+    return out;
+  }
+  const inside = (p: string): boolean => {
+    const rel = path.relative(realRoot, p);
+    return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  const rawCwd = askCwd(ask.args);
+  let base = realRoot;
+  if (rawCwd !== undefined) {
+    out.cwd = rawCwd;
+    const resolved = realpathOrUndefined(path.resolve(realRoot, rawCwd));
+    if (resolved !== undefined && (resolved === realRoot || inside(resolved))) {
+      base = resolved;
+    }
+  }
+  const command = toolFamily(ask.tool) === 'shell' ? askShellCommand(ask.args) : undefined;
+  if (command === undefined) {
+    return out;
+  }
+  const scripts: EvaluationScript[] = [];
+  for (const candidate of scriptPathCandidates(command)) {
+    const resolved = realpathOrUndefined(path.resolve(base, candidate));
+    if (resolved === undefined || !inside(resolved)) {
+      continue;
+    }
+    try {
+      if (!fs.statSync(resolved).isFile()) {
+        continue;
+      }
+      const fd = fs.openSync(resolved, 'r');
+      try {
+        const buf = Buffer.alloc(MAX_SCRIPT_CHARS);
+        const n = fs.readSync(fd, buf, 0, MAX_SCRIPT_CHARS, 0);
+        scripts.push({ path: candidate, body: buf.subarray(0, n).toString('utf8') });
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      // Unreadable: leave it out; the evaluator still sees the command.
+    }
+  }
+  if (scripts.length > 0) {
+    out.scriptBodies = scripts;
+  }
+  return out;
+}
+
+/** `fs.realpathSync`, or `undefined` when the path does not resolve. */
+function realpathOrUndefined(p: string): string | undefined {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return undefined;
+  }
+}
 
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
@@ -483,19 +582,28 @@ export function registerCommands(
   // Auto mode's two-stage gate: the per-agent allow-list first, then the
   // orchestrator model. It is only consulted for harness permission asks that
   // arrive while the toggle is on; see ChatController.presentIntervention.
-  const autoGate: AutoModeGate = (ask, opts) => {
+  const autoGate: AutoModeGate = async (ask, opts) => {
     // A relayed ask carries the run's trusted identity; the deterministic gate
     // keys its allow-list on it. Without it (an orchestrator-raised ask) the
     // host falls back to its most restrictive profile.
     const agent = opts.context?.agent ?? ask.agent;
     const role = opts.context?.role ?? AUTO_MODE_FALLBACK_ROLE;
     const runId = opts.context?.runId ?? AUTO_MODE_UNKNOWN_RUN;
-    return decideAsk(
-      askFromPermission(ask),
-      agentAllowList(agent, role, runId),
-      modelClient,
-      { role, runId, signal: opts.signal },
-    );
+    const gateAsk = askFromPermission(ask);
+    // Stage (b) judges the action's effect, so it is told where the
+    // workspace is, which todo the run is on and what any script it runs
+    // says. Only a relayed ask has a run context; an orchestrator-raised ask
+    // keeps the context-free fallback.
+    const taskContext =
+      opts.context === undefined
+        ? undefined
+        : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => specStore.readSpec(slug));
+    return decideAsk(gateAsk, agentAllowList(agent, role, runId), modelClient, {
+      role,
+      runId,
+      signal: opts.signal,
+      ...(taskContext !== undefined ? { taskContext } : {}),
+    });
   };
   const chatController = new ChatController({
     webview: chatWebview,

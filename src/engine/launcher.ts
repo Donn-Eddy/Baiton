@@ -18,8 +18,13 @@
  * so harness permission asks can be relayed into the chat (Auto mode).
  * Adapters without a verified native mechanism receive the relay instructions
  * in the Brief instead, at the same `asks/` location, and nothing else about
- * the launch changes. With the flag omitted the launch is byte-identical to
- * the previous behaviour.
+ * the launch changes. A native relay that loads from a file (antigravity's
+ * `hooks.json`) names that file through `Adapter.relayFiles()`; the launcher
+ * refuses any such path outside the run directory, writes each file after
+ * the adapter accepts the launch and before the terminal is created, and
+ * reads it back — a failed write halts the launch like a failed Brief write.
+ * With the flag omitted the launch is byte-identical to the previous
+ * behaviour.
  *
  * If resolving the workspace root or writing the Brief fails, it halts before
  * creating any terminal and returns a {@link Result} error; the caller leaves
@@ -30,12 +35,12 @@
  * `TerminalHost` seam creates the terminal, and node `fs`/`path` handle the
  * Brief. The activation layer wires a `vscode`-backed `TerminalHost` later.
  */
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import type { Stage } from '../model/stage';
 import type { Role } from '../model/role';
 import { Result, err, ok } from '../model/result';
-import type { Adapter, LaunchSpec } from '../adapter';
+import type { Adapter, LaunchSpec, RelayFile } from '../adapter';
 import { AdapterLaunchError, askRelayKind, usesConfigDrivenAskRelay } from '../adapter';
 import type { AskRelayKind } from '../adapter';
 import { writeBrief } from './brief';
@@ -104,7 +109,8 @@ export interface LaunchStageOutput {
  * - `root-resolution` — the workspace root could not be resolved.
  * - `launch-args`     — the adapter refused the request (e.g. a model/effort
  *                       pair the CLI rejects); `message` says what to fix.
- * - `brief-write`     — writing `brief.md` failed; `path` names the target.
+ * - `brief-write`     — writing `brief.md`, or an adapter's ask-relay file,
+ *                       failed; `path` names the target.
  */
 export type LaunchError =
   | { kind: 'root-resolution'; message: string }
@@ -164,12 +170,29 @@ export function launchStage(
   const relay = input.relayAsks === true ? askRelayDescriptor(root, input.runId) : undefined;
 
   // Adapters with a verified native relay (claude's inline --settings PreToolUse
-  // hook) wire the asks themselves; the rest get the config-driven fallback,
+  // hook, antigravity's run-dir hooks.json) wire the asks themselves; the rest get the config-driven fallback,
   // which is brief-carried instructions to write the same ask files.
   const briefAskRelay =
     relay !== undefined && usesConfigDrivenAskRelay(deps.adapter.id)
       ? { agent: deps.adapter.id, relay }
       : undefined;
+
+  // Relay files a native file-loaded relay needs (antigravity's hooks.json).
+  // Computed purely here and refused before anything is written when a path
+  // would leave the run directory.
+  const relayFiles: RelayFile[] =
+    relay !== undefined && deps.adapter.relayFiles !== undefined ? deps.adapter.relayFiles(relay) : [];
+  const relayTargets: { file: RelayFile; absPath: string }[] = [];
+  for (const file of relayFiles) {
+    const absPath = path.resolve(root, file.path);
+    if (path.isAbsolute(file.path) || !isInsideDir(runDir, absPath)) {
+      return err({
+        kind: 'launch-args',
+        message: `ask-relay file ${file.path} is outside the run directory .baiton/runs/${input.runId}/`,
+      });
+    }
+    relayTargets.push({ file, absPath });
+  }
 
   // 2. Build the launch args. An adapter that cannot express the request in
   //    the CLI's argv (e.g. an agy model/effort pair agy rejects) halts here,
@@ -186,6 +209,7 @@ export function launchStage(
       sessionId: input.sessionId,
       resumeSessionId: input.resumeSessionId,
       ...(relay ? { relay } : {}),
+      ...(relayTargets.length > 0 ? { relayFiles: relayTargets.map((t) => t.file.path) } : {}),
     });
   } catch (cause) {
     if (cause instanceof AdapterLaunchError) {
@@ -202,6 +226,31 @@ export function launchStage(
     if (relay) {
       ensureAsksDir(root, input.runId);
     }
+  } catch (cause) {
+    return err({
+      kind: 'brief-write',
+      path: briefPath,
+      message: `failed to write brief: ${errorMessage(cause)}`,
+    });
+  }
+  // The adapter was told (`relayFiles`) these files exist when the CLI
+  // starts, so each is written and read back before any terminal is created.
+  for (const target of relayTargets) {
+    try {
+      mkdirSync(path.dirname(target.absPath), { recursive: true });
+      writeFileSync(target.absPath, target.file.content, 'utf8');
+      if (readFileSync(target.absPath, 'utf8') !== target.file.content) {
+        throw new Error('the written contents did not read back');
+      }
+    } catch (cause) {
+      return err({
+        kind: 'brief-write',
+        path: target.absPath,
+        message: `failed to write ask-relay file: ${errorMessage(cause)}`,
+      });
+    }
+  }
+  try {
     writeBriefFn(briefPath, {
       stage: input.stage,
       role: input.role,
@@ -273,6 +322,12 @@ function resolveRoot(
     });
   }
   return ok(workspaceRoot);
+}
+
+/** True when `candidate` is strictly inside `dir` (both absolute). */
+function isInsideDir(dir: string, candidate: string): boolean {
+  const rel = path.relative(dir, candidate);
+  return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
 /** Extract a user-facing message from an unknown thrown value. */

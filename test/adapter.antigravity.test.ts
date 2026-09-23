@@ -1,17 +1,30 @@
 import * as assert from 'assert';
+import * as child_process from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   AntigravityAdapter,
   ANTIGRAVITY_PLAN_MODE,
   ANTIGRAVITY_ACCEPT_EDITS_MODE,
   ANTIGRAVITY_MODELS,
+  ANTIGRAVITY_HOOK_ALLOW_GRANTS,
+  ANTIGRAVITY_SKIP_PERMISSIONS_FLAG,
+  ANTIGRAVITY_RELAY_HOOK_NAME,
+  ANTIGRAVITY_RELAY_HOOK_SCRIPT,
+  ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS,
+  ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS,
+  antigravityAskRelayHookCommand,
+  antigravityAskRelayHooks,
+  antigravityRelayHooksPath,
   antigravityModeFlags,
   antigravityModelFlags,
 } from '../src/adapter/antigravity';
 import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY, AdapterLaunchError } from '../src/adapter/adapter';
-import { isReadOnlyRole } from '../src/adapter/permissions';
+import { isReadOnlyRole, shellQuote } from '../src/adapter/permissions';
 import { ROLES } from '../src/model/role';
-import { askRelayDescriptor } from '../src/engine/askRelay';
+import { askRelayDescriptor, parseAsk } from '../src/engine/askRelay';
 
 /**
  * This file mirrors test/adapter.claude.test.ts for the antigravity (`agy`)
@@ -25,7 +38,9 @@ import { askRelayDescriptor } from '../src/engine/askRelay';
  * - the `--mode plan|accept-edits` per-role permission mapping and the
  *   per-run `--add-dir` grant that agy — unlike opencode — does support
  *   (Req 15.1-15.4);
- * - one documented degrade: `req.sessionId` is ignored on a fresh launch.
+ * - one documented degrade: `req.sessionId` is ignored on a fresh launch;
+ * - the native ask relay: the launcher-written `hooks.json`, the guarded
+ *   `--dangerously-skip-permissions`, and the hook script's deny degrade.
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -327,94 +342,252 @@ describe('antigravityModelFlags model-aware effort mapping (agy v1.2.2 catalogue
 });
 
 /**
- * The probe recorded in README.md, "Harness ask relay (per-adapter probe
- * findings)" (`agy` 1.2.7, 2026-09-20), found no relay this adapter can
- * install. agy *does* ship the mechanism — a `hooks.json` `PreToolUse`
- * handler that the probe watched fire with the tool name and arguments
- * (`toolCall.name` / `toolCall.args`) and whose `{"decision":"deny"}` hard
- * blocked the call and told the model — but it is disqualified twice over.
- * It loads only from an on-disk `hooks.json` under a customization root
- * (`<workspace>/.agents/hooks.json`, or the shared
- * `~/.gemini/config/hooks.json`), with no `--settings`-style flag and no
- * environment layer to supply it inline, so installing it means writing a
- * file — and `launch()` is a pure function that writes nothing. And even
- * with the file present the hook is veto-only in headless runs:
- * `{"decision":"allow"}` did not grant the permission, so it could not carry
- * an approval relay regardless. The generic fallback covers antigravity's
- * asks.
- *
- * These tests PIN that outcome rather than merely describing it: a future
- * native relay makes them fail, which forces the decision to be revisited
- * deliberately instead of drifting in.
+ * The native antigravity ask relay, as probed in README.md, "Harness ask
+ * relay (per-adapter probe findings)" (`agy` 1.2.8, 2026-09-22): a
+ * `PreToolUse` hook in `.baiton/runs/<run-id>/.agents/hooks.json` that the
+ * LAUNCHER writes (`relayFiles()` only computes it — the adapter stays pure),
+ * loaded because the absolute run directory is an `--add-dir` workspace, and
+ * made the sole permission authority with `--dangerously-skip-permissions`
+ * because the hook's `allow` cannot grant on its own. The flag is guarded:
+ * it is never emitted unless the launcher has promised the hook file.
  */
-describe('AntigravityAdapter ask-relay wiring (probe findings)', () => {
+describe('AntigravityAdapter native ask relay (probe findings, agy 1.2.8)', () => {
   const adapter = new AntigravityAdapter();
   const relay = askRelayDescriptor('/repo', 'run-123');
+  const hooksPath = antigravityRelayHooksPath('run-123');
+  const relayed = (overrides: Partial<LaunchRequest> = {}): LaunchRequest =>
+    req({ relay, relayFiles: [hooksPath], ...overrides });
 
-  /** Flags that would buy a relay by giving up the policy, and are never emitted. */
-  const forbidden = ['--dangerously-skip-permissions', '--sandbox'];
-
-  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
-    assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
+  it('pins the probe outcome: the hook allow does not grant, so the relay needs skip-permissions', () => {
+    assert.strictEqual(ANTIGRAVITY_HOOK_ALLOW_GRANTS, false);
+    assert.strictEqual(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG, '--dangerously-skip-permissions');
   });
 
-  it('treats an explicitly undefined relay the same as an absent one', () => {
-    assert.deepStrictEqual(adapter.launch(req({ relay: undefined })), adapter.launch(req()));
+  it('relayFiles returns exactly the run-dir hooks.json, relative to the workspace root', () => {
+    const files = adapter.relayFiles(relay);
+    assert.strictEqual(files.length, 1);
+    assert.strictEqual(files[0].path, '.baiton/runs/run-123/.agents/hooks.json');
+    assert.ok(files[0].path.startsWith('.baiton/runs/run-123/'), 'the file stays inside the run dir');
   });
 
-  it('never lets the asks directory reach the argv', () => {
-    const joined = adapter.launch(req({ relay })).shellArgs.join(' ');
-    assert.ok(!joined.includes(relay.dir), 'the asks directory must not leak into the argv');
-    assert.ok(!joined.includes(relay.askSuffix), 'no ask suffix is emitted');
-    assert.ok(!joined.includes(relay.responseSuffix), 'no response suffix is emitted');
-    assert.ok(!joined.includes('hooks.json'), 'no hooks.json path is emitted');
+  it('relayFiles content is one named PreToolUse hook matching every tool', () => {
+    const [file] = adapter.relayFiles(relay);
+    const parsed = JSON.parse(file.content) as Record<
+      string,
+      { PreToolUse: { matcher: string; hooks: { type: string; command: string; timeout: number }[] }[] }
+    >;
+    assert.deepStrictEqual(Object.keys(parsed), [ANTIGRAVITY_RELAY_HOOK_NAME]);
+    const groups = parsed[ANTIGRAVITY_RELAY_HOOK_NAME].PreToolUse;
+    assert.strictEqual(groups.length, 1);
+    assert.strictEqual(groups[0].matcher, '*');
+    assert.strictEqual(groups[0].hooks.length, 1);
+    const handler = groups[0].hooks[0];
+    assert.strictEqual(handler.type, 'command');
+    assert.strictEqual(handler.timeout, ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS);
+    assert.strictEqual(handler.command, antigravityAskRelayHookCommand(relay));
+    assert.deepStrictEqual(parsed, antigravityAskRelayHooks(relay));
   });
 
-  it('carries no env layer at all', () => {
-    assert.strictEqual(adapter.launch(req({ relay })).env, undefined);
+  it('the hook command runs the script with node -e and passes every parameter shell-quoted as argv', () => {
+    const command = antigravityAskRelayHookCommand(relay);
+    assert.ok(command.startsWith(`node -e ${shellQuote(ANTIGRAVITY_RELAY_HOOK_SCRIPT)} `));
+    assert.ok(command.includes(shellQuote(relay.dir)), `missing dir: ${command}`);
+    assert.ok(command.includes(shellQuote(relay.askSuffix)), `missing askSuffix: ${command}`);
+    assert.ok(command.includes(shellQuote(relay.responseSuffix)), `missing responseSuffix: ${command}`);
+    assert.ok(command.includes(shellQuote(relay.runId)), `missing runId: ${command}`);
+    assert.ok(command.endsWith(` ${ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS * 1000}`));
+    assert.ok(ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS < ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS);
+    // The script is wrapped in single quotes, so it can never contain one.
+    assert.ok(!ANTIGRAVITY_RELAY_HOOK_SCRIPT.includes("'"), 'the hook script must contain no single quote');
   });
 
-  it('emits no forbidden flag that would buy a relay by giving up the policy', () => {
+  it('relayFiles returns nothing for an unknown protocol', () => {
+    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
+    assert.deepStrictEqual(adapter.relayFiles(future), []);
+  });
+
+  it('a relay launch adds the absolute run dir and skip-permissions before the prompt', () => {
+    const args = adapter.launch(relayed()).shellArgs;
+    const plain = adapter.launch(req()).shellArgs;
+    const prompt = args.indexOf('--prompt-interactive');
+    assert.ok(findPair(args, '--add-dir', '.baiton/runs/run-123/') >= 0, 'the relative grant is kept');
+    const abs = findPair(args, '--add-dir', '/repo/.baiton/runs/run-123');
+    assert.ok(abs >= 0 && abs < prompt, `absolute run dir before the prompt: ${JSON.stringify(args)}`);
+    const skip = args.indexOf(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG);
+    assert.ok(skip >= 0 && skip < prompt, `skip-permissions before the prompt: ${JSON.stringify(args)}`);
+    // Nothing else changes.
+    assert.deepStrictEqual(
+      args.filter((a, i) => a !== ANTIGRAVITY_SKIP_PERMISSIONS_FLAG && i !== abs && i !== abs + 1),
+      plain,
+    );
+  });
+
+  it('never emits skip-permissions without a relay', () => {
     for (const role of ROLES) {
-      const args = adapter.launch(req({ role, relay })).shellArgs;
-      for (const flag of forbidden) {
-        assert.ok(!args.includes(flag), `did not expect ${flag} in ${JSON.stringify(args)}`);
-      }
-      // The role's own mode value is still what the policy layer chose.
-      const mode = args[args.indexOf('--mode') + 1];
-      assert.strictEqual(
-        mode,
-        isReadOnlyRole(role) ? ANTIGRAVITY_PLAN_MODE : ANTIGRAVITY_ACCEPT_EDITS_MODE,
-      );
+      assert.ok(!adapter.launch(req({ role })).shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
+      assert.ok(!adapter.launch(req({ role, relay: undefined })).shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
     }
   });
 
-  it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
+  it('refuses a relay launch whose hook file the launcher did not promise to write', () => {
+    assert.throws(() => adapter.launch(req({ relay })), AdapterLaunchError);
+    assert.throws(() => adapter.launch(req({ relay, relayFiles: [] })), AdapterLaunchError);
+    assert.throws(
+      () => adapter.launch(req({ relay, relayFiles: ['.baiton/runs/other/.agents/hooks.json'] })),
+      AdapterLaunchError,
+    );
+  });
+
+  it('refuses a relay whose descriptor does not name this run under an absolute .baiton/runs dir', () => {
+    const otherRun = askRelayDescriptor('/repo', 'run-999');
+    assert.throws(() => adapter.launch(relayed({ relay: otherRun })), AdapterLaunchError);
+    const relative = { ...relay, dir: '.baiton/runs/run-123/asks' };
+    assert.throws(() => adapter.launch(relayed({ relay: relative })), AdapterLaunchError);
+    const elsewhere = { ...relay, dir: '/tmp/somewhere/asks' };
+    assert.throws(() => adapter.launch(relayed({ relay: elsewhere })), AdapterLaunchError);
+  });
+
+  it('ignores an unknown protocol: the launch is byte-identical to no relay', () => {
     const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
     assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
   });
 
-  it('leaves both resume branches byte-identical', () => {
-    const withId = { resume: true, resumeSessionId: 'sess-real' };
-    assert.deepStrictEqual(adapter.launch(req({ ...withId, relay })), adapter.launch(req(withId)));
-
-    const last = { resume: true, resumeSessionId: undefined };
-    assert.deepStrictEqual(adapter.launch(req({ ...last, relay })), adapter.launch(req(last)));
-  });
-
-  it('attach() installs no relay (it takes no descriptor at all)', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
-    const joined = spec.shellArgs.join(' ');
-    assert.ok(!joined.includes(relay.dir));
-    assert.ok(!joined.includes('hooks.json'));
-    for (const flag of forbidden) {
-      assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} on attach`);
+  it('keeps every role on its own --mode and carries no env layer', () => {
+    for (const role of ROLES) {
+      const spec = adapter.launch(relayed({ role }));
+      assert.strictEqual(spec.env, undefined);
+      const mode = spec.shellArgs[spec.shellArgs.indexOf('--mode') + 1];
+      assert.strictEqual(mode, isReadOnlyRole(role) ? ANTIGRAVITY_PLAN_MODE : ANTIGRAVITY_ACCEPT_EDITS_MODE);
+      assert.ok(!spec.shellArgs.includes('--sandbox'));
+      assert.ok(!spec.shellArgs.join(' ').includes('hooks.json'), 'the hook path never reaches the argv');
     }
   });
 
-  for (const role of ROLES) {
-    it(`is byte-identical with and without a relay for role ${role}`, () => {
-      assert.deepStrictEqual(adapter.launch(req({ role, relay })), adapter.launch(req({ role })));
+  it('carries the relay on both resume branches', () => {
+    for (const resume of [{ resumeSessionId: 'sess-real' }, { resumeSessionId: undefined }]) {
+      const args = adapter.launch(relayed({ resume: true, ...resume })).shellArgs;
+      assert.ok(args.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
+    }
+  });
+
+  it('attach() installs no relay and never emits skip-permissions', () => {
+    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    assert.ok(!spec.shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
+    assert.ok(!spec.shellArgs.join(' ').includes('hooks.json'));
+  });
+
+  /**
+   * Round-trip behaviour of the emitted script, fed the stdin event shape the
+   * probe observed (`{toolCall:{name, args}, …}`): the ask it writes parses
+   * through `parseAsk`, and its stdout follows the response — approve→allow,
+   * anything else→deny — and every failure degrades to deny, never allow.
+   * Argv order mirrors the hook command: asks dir, ask suffix, response
+   * suffix, run id, deadline in ms.
+   */
+  function runHook(
+    stdin: string,
+    deadlineMs: number,
+    respond?: (asksDir: string, askFile: string) => void,
+  ): Promise<{ stdout: string; code: number | null; asksDir: string }> {
+    const asksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-agy-relay-'));
+    return new Promise((resolve, reject) => {
+      const child = child_process.spawn(
+        process.execPath,
+        ['-e', ANTIGRAVITY_RELAY_HOOK_SCRIPT, asksDir, '.json', '.response.json', 'run-123', String(deadlineMs)],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      let stdout = '';
+      child.stdout!.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString('utf8');
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => resolve({ stdout, code, asksDir }));
+      child.stdin!.write(stdin);
+      child.stdin!.end();
+      if (respond !== undefined) {
+        const watcher = setInterval(() => {
+          const asks = fs.readdirSync(asksDir).filter((f) => f.endsWith('.json') && !f.endsWith('.response.json'));
+          if (asks.length > 0) {
+            clearInterval(watcher);
+            respond(asksDir, asks[0]);
+          }
+        }, 20);
+      }
     });
   }
+
+  const event = JSON.stringify({
+    conversationId: 'c-1',
+    stepIdx: 2,
+    toolCall: { name: 'run_command', args: { CommandLine: 'echo baiton-probe', Cwd: '/repo' } },
+  });
+
+  function answer(decision: 'approve' | 'deny', reason?: string) {
+    return (asksDir: string, askFile: string): void => {
+      const raw = fs.readFileSync(path.join(asksDir, askFile), 'utf8');
+      const parsed = parseAsk(raw);
+      assert.ok(parsed.ok, `the ask parses: ${parsed.ok ? '' : parsed.error.message}`);
+      if (parsed.ok) {
+        assert.strictEqual(parsed.value.agent, 'antigravity');
+        assert.strictEqual(parsed.value.kind, 'permission');
+        assert.strictEqual(parsed.value.runId, 'run-123');
+        assert.strictEqual(parsed.value.tool, 'run_command');
+        assert.deepStrictEqual(JSON.parse(parsed.value.args ?? '{}'), {
+          CommandLine: 'echo baiton-probe',
+          Cwd: '/repo',
+        });
+        fs.writeFileSync(
+          path.join(asksDir, parsed.value.id + '.response.json'),
+          JSON.stringify({ version: 1, id: parsed.value.id, decision, ...(reason ? { reason } : {}) }),
+        );
+      }
+    };
+  }
+
+  it('writes a parseAsk-valid ask and prints allow on approve', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 10_000, answer('approve'));
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), { decision: 'allow' });
+  });
+
+  it('prints deny with the reason on a deny response', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 10_000, answer('deny', 'not today'));
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), { decision: 'deny', reason: 'not today' });
+  });
+
+  it('degrades to deny (not allow) when no answer arrives before the deadline', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 300);
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    const out = JSON.parse(stdout) as { decision: string; reason: string };
+    assert.strictEqual(out.decision, 'deny');
+    assert.ok(/timed out/.test(out.reason));
+  });
+
+  it('degrades to deny on an unparseable event, writing no ask', async () => {
+    const { stdout, code, asksDir } = await runHook('not json', 10_000);
+    const written = fs.readdirSync(asksDir);
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.strictEqual((JSON.parse(stdout) as { decision: string }).decision, 'deny');
+    assert.deepStrictEqual(written, []);
+  });
+
+  it('denies outright, without asking, any tool call that names an .agents hooks.json', async () => {
+    const tamper = JSON.stringify({
+      toolCall: {
+        name: 'write_to_file',
+        args: { TargetFile: '/repo/.baiton/runs/run-123/.agents/hooks.json', CodeContent: '{}' },
+      },
+    });
+    const { stdout, code, asksDir } = await runHook(tamper, 10_000);
+    const written = fs.readdirSync(asksDir);
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.strictEqual((JSON.parse(stdout) as { decision: string }).decision, 'deny');
+    assert.deepStrictEqual(written, []);
+  });
 });

@@ -112,8 +112,10 @@ export interface AgentAllowList {
  * granted unscoped; the write rule's paths follow the profile's write scope
  * (`workspace` → `**` then `/*`, `run-dir` → the run dir glob); a shell rule is emitted
  * only when the profile grants shell. Note that a shell rule makes shell
- * *eligible* only — `autoMode.ts` still restricts shell approval to
- * recognised safe read-only/verification commands and escalates the rest.
+ * *eligible* only — `autoMode.ts` approves recognised read-only shell commands
+ * for every role regardless of this rule, approves recognised verification
+ * commands (tests, builds, linters) only when this rule is present, and
+ * escalates the rest.
  */
 export function roleAllowList(agent: string, role: Role, runId: string): AgentAllowList {
   const profile = ROLE_PROFILES[role];

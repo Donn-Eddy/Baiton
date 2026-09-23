@@ -63,14 +63,15 @@ export function agentAllowList(
  * directory. Probed per adapter (see the README 'Per-adapter relay state'
  * table and the four findings blocks above it):
  *
- * - `native`        — the CLI installs a permission hook straight from argv, so
- *                     the relay needs nothing but the launch command
- *                     (`claudeRelayFlags` in `src/adapter/permissions.ts`).
+ * - `native`        — the CLI runs a Baiton permission hook the CLI itself
+ *                     enforces: installed straight from argv (claude,
+ *                     `claudeRelayFlags` in `src/adapter/permissions.ts`;
+ *                     codex, `codexRelayFlags` in `src/adapter/codex.ts`), or
+ *                     from a file the launcher writes inside the run directory
+ *                     (antigravity, `Adapter.relayFiles()`).
  * - `config-driven` — the CLI's hook/plugin surface exists but loads only from
- *                     a file on disk (opencode's plugin file, agy's
- *                     `hooks.json`, codex's persisted hook trust) or cannot
- *                     grant an approval at all (agy's `allow`), so no hook is
- *                     wired; instead the Brief carries instructions telling the
+ *                     a file outside Baiton's run directory (opencode's plugin
+ *                     file), so no hook is wired; instead the Brief carries instructions telling the
  *                     sub-agent to write the ask files itself
  *                     (`askRelayInstruction` in `src/engine/roleInstructions.ts`).
  */
@@ -86,18 +87,23 @@ export type AskRelayKind = 'native' | 'config-driven';
  * - opencode: config-driven — a native plugin hook exists and fires, but
  *   opencode loads plugins only from a file on disk (a `file://`/npm entry or
  *   `.opencode/plugin/`), never inline, and `launch()` writes nothing.
- * - antigravity: config-driven — the `hooks.json` PreToolUse hook works but
- *   loads only from an on-disk file, and its `allow` decision cannot grant a
- *   headless permission anyway, so it could never carry an approval relay.
- * - codex: config-driven — the PreToolUse hook works but every enabled hook is
- *   gated behind persisted hook trust written through the TUI, which argv
- *   alone cannot satisfy.
+ * - antigravity: native — the `hooks.json` PreToolUse hook loads from
+ *   `.baiton/runs/<run-id>/.agents/hooks.json` because the run directory is an
+ *   `--add-dir` workspace (verified against 1.2.8), so the launcher writes it
+ *   there. Its `allow` cannot grant by itself, so a relay launch also passes
+ *   `--dangerously-skip-permissions` and the hook, which degrades to `deny`,
+ *   becomes the sole permission authority (see `AntigravityAdapter`).
+ * - codex: native — an inline `-c hooks.PermissionRequest=[…]` command hook,
+ *   run under `--dangerously-bypass-hook-trust`, replaces codex's own approval
+ *   prompt with the relay (verified interactively against 0.155.1); the
+ *   sandbox and `--ask-for-approval on-request` stay the floor, and a hook
+ *   failure falls back to codex's prompt (see `CodexAdapter`).
  */
 export const ASK_RELAY_KIND: Record<AgentId, AskRelayKind> = {
   claude: 'native',
   opencode: 'config-driven',
-  antigravity: 'config-driven',
-  codex: 'config-driven',
+  antigravity: 'native',
+  codex: 'native',
 };
 
 /**

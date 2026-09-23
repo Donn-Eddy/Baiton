@@ -1,8 +1,10 @@
 import { execFile } from 'child_process';
-import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from './adapter';
+import * as path from 'path';
+import type { Adapter, AskRelayDescriptor, LaunchRequest, LaunchSpec, ProbeResult, RelayFile } from './adapter';
 import { AGENT_BINARY, AdapterLaunchError } from './adapter';
 import type { Role } from '../model/role';
-import { isReadOnlyRole, runDirGrant } from './permissions';
+import { isReadOnlyRole, runDirGrant, shellQuote } from './permissions';
+import { runDirPattern } from './roleProfile';
 
 /** The antigravity CLI executable name, sourced from the canonical binary map (Requirement 14.1). */
 const ANTIGRAVITY_BIN = AGENT_BINARY.antigravity;
@@ -118,6 +120,168 @@ export function antigravityModeFlags(role: Role): string[] {
 }
 
 /**
+ * The antigravity ask-relay wiring, verified by the probes recorded in the
+ * README ("antigravity (agy) findings", `agy` 1.2.7 on 2026-09-20 and 1.2.8
+ * on 2026-09-22). agy loads `PreToolUse` command hooks from
+ * `<dir>/.agents/hooks.json` for every directory passed with an ABSOLUTE
+ * `--add-dir` (a relative one loaded none), so the hook file lives inside the
+ * run directory Baiton already grants (`.baiton/runs/<run-id>/`), the relay
+ * launch passes that directory's absolute path, and nothing is written into
+ * the user's own `.agents/`. The handler receives `{toolCall:{name, args}, …}`
+ * on stdin (for `run_command`, `view_file`, `write_to_file`,
+ * `replace_file_content`, … — every tool call) and answers `{"decision":"allow"|"deny", "reason"}` on
+ * stdout; its working directory is the `.agents` directory.
+ */
+
+/**
+ * Whether the hook's `{"decision":"allow"}` grants a permission on its own.
+ * It does NOT: probed against `agy` 1.2.8 (2026-09-22) in the interactive
+ * `--prompt-interactive` form Baiton launches, a hook answering `allow` was
+ * followed by agy's own `Surfacing tool confirmation: "RunCommand"` and the
+ * command never ran (the 1.2.7 headless probe had already shown the same
+ * soft-deny for `-p`). The hook is a veto, not a grant — so the relay must
+ * turn agy's own prompt off with {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG}
+ * and let the hook be the sole permission authority.
+ */
+export const ANTIGRAVITY_HOOK_ALLOW_GRANTS = false;
+
+/**
+ * agy's "auto-approve all tool permission requests" flag. Emitted ONLY by a
+ * relay launch whose hook file the launcher writes, and only because
+ * {@link ANTIGRAVITY_HOOK_ALLOW_GRANTS} is false: probed against 1.2.8 with
+ * this flag on, a hook `deny` still blocked the call (headless and
+ * interactive), `allow` ran it without any prompt, and a hook that crashed
+ * (exit 1), timed out, or printed non-JSON blocked the call too. One gap the
+ * hook script itself must close: a hook that exits 0 with EMPTY stdout was
+ * treated as allow, so the script never exits 0 without printing a decision.
+ */
+export const ANTIGRAVITY_SKIP_PERMISSIONS_FLAG = '--dangerously-skip-permissions';
+
+/** How long agy lets the relay hook block (seconds; the `timeout` field of the handler). */
+export const ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS = 600;
+
+/**
+ * The hook script's own deadline, a margin inside the handler timeout so the
+ * script's explicit `deny` (with a reason the model can read) lands before
+ * agy kills it. A kill also blocks the call (probed), so the margin only
+ * improves the message.
+ */
+export const ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS = ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS - 10;
+
+/**
+ * The `PreToolUse` matcher: every tool. With {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG}
+ * on, a tool the matcher missed would run unasked, so this must stay `*`.
+ */
+export const ANTIGRAVITY_RELAY_HOOK_MATCHER = '*';
+
+/** The named-hook key in the relay `hooks.json`. */
+export const ANTIGRAVITY_RELAY_HOOK_NAME = 'baiton-ask-relay';
+
+/**
+ * The workspace-relative path of a run's relay hook file:
+ * `.baiton/runs/<run-id>/.agents/hooks.json`.
+ */
+export function antigravityRelayHooksPath(runId: string): string {
+  return `${runDirPattern(runId)}.agents/hooks.json`;
+}
+
+/**
+ * The node program the `PreToolUse` hook runs, passed its parameters as argv
+ * (never spliced into the source): the asks dir, the ask/response suffixes,
+ * the run id and the deadline in milliseconds. It reads the hook event from
+ * stdin, takes `toolCall.name` / `toolCall.args`, mints an ask file the relay
+ * core can parse (`parseAsk` accepts its exact bytes), polls for the response
+ * file and prints `{"decision":"allow"}` for `approve` and
+ * `{"decision":"deny","reason"}` for anything else.
+ *
+ * It degrades to `deny`, never `allow`: an unparseable event, an unwritable
+ * ask, an unreadable response and the deadline all print a `deny` with a
+ * reason. agy has no verified `ask` fallback, and with
+ * {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG} on there is no prompt left to fall
+ * back to. The exit code starts at 1 and becomes 0 only after a decision was
+ * written, because agy treats an empty stdout with exit 0 as allow (probed)
+ * while any non-zero exit blocks. A tool call whose arguments name an
+ * `.agents` `hooks.json` is denied outright without asking, so the agent
+ * cannot rewrite its own permission hook.
+ *
+ * Invariant: the script wraps in single quotes on the command line, so it
+ * contains no `'` character (string concatenation + double quotes only).
+ */
+export const ANTIGRAVITY_RELAY_HOOK_SCRIPT: string =
+  `const fs=require("fs"),path=require("path");` +
+  `process.exitCode=1;` +
+  `const a=process.argv.slice(1);` +
+  `const dir=a[0],askSuffix=a[1],respSuffix=a[2],runId=a[3],deadline=Date.now()+Number(a[4]);` +
+  `function done(decision,reason){` +
+  `const out=decision==="allow"?{decision:"allow"}:{decision:"deny",reason:reason};` +
+  `try{fs.writeSync(1,JSON.stringify(out))}catch(e){process.exit(1)}` +
+  `process.exit(0)}` +
+  `let ev={};` +
+  `try{ev=JSON.parse(fs.readFileSync(0,"utf8")||"{}")}` +
+  `catch(e){done("deny","baiton ask relay: unparseable PreToolUse event")}` +
+  `const call=ev&&typeof ev.toolCall==="object"&&ev.toolCall!==null?ev.toolCall:{};` +
+  `const tool=String(call.name||"unknown");` +
+  `const argsText=JSON.stringify(call.args===undefined?{}:call.args);` +
+  `if(argsText.indexOf(".agents")>=0&&argsText.indexOf("hooks.json")>=0){` +
+  `done("deny","baiton ask relay: the relay hook file may not be touched")}` +
+  `const id=String(Date.now())+"-"+String(process.pid);` +
+  `const ask={version:1,id:id,runId:runId,agent:"antigravity",kind:"permission",` +
+  `prompt:"antigravity wants to use "+tool,tool:tool,args:argsText,` +
+  `createdAt:new Date().toISOString()};` +
+  `try{fs.mkdirSync(dir,{recursive:true});` +
+  `fs.writeFileSync(path.join(dir,id+askSuffix),JSON.stringify(ask,null,2)+"\\n")}` +
+  `catch(e){done("deny","baiton ask relay: cannot write ask file")}` +
+  `function poll(){try{const r=JSON.parse(fs.readFileSync(path.join(dir,id+respSuffix),"utf8"));` +
+  `done(r.decision==="approve"?"allow":"deny",String(r.reason||"denied in Baiton"))}` +
+  `catch(e){if(e&&e.code==="ENOENT"){setTimeout(poll,200)}else{` +
+  `done("deny","baiton ask relay: cannot read response")}}}` +
+  `setTimeout(function(){` +
+  `done("deny","baiton ask relay timed out waiting for an answer")},` +
+  `Math.max(0,deadline-Date.now()));` +
+  `poll()`;
+
+/**
+ * The shell command for the relay hook (agy runs it through `sh -c`): the
+ * {@link ANTIGRAVITY_RELAY_HOOK_SCRIPT} program run with `node -e`, its
+ * parameters passed as argv (ask dir, ask suffix, response suffix, run id —
+ * each {@link shellQuote}-wrapped) and the deadline in milliseconds.
+ */
+export function antigravityAskRelayHookCommand(relay: AskRelayDescriptor): string {
+  return (
+    `node -e ${shellQuote(ANTIGRAVITY_RELAY_HOOK_SCRIPT)} ` +
+    `${shellQuote(relay.dir)} ${shellQuote(relay.askSuffix)} ` +
+    `${shellQuote(relay.responseSuffix)} ${shellQuote(relay.runId)} ` +
+    `${ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS * 1000}`
+  );
+}
+
+/**
+ * The relay `hooks.json` object: one named hook
+ * ({@link ANTIGRAVITY_RELAY_HOOK_NAME}) with a `PreToolUse` group matching
+ * {@link ANTIGRAVITY_RELAY_HOOK_MATCHER} and one command handler running
+ * {@link antigravityAskRelayHookCommand} with
+ * {@link ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS}.
+ */
+export function antigravityAskRelayHooks(relay: AskRelayDescriptor): Record<string, unknown> {
+  return {
+    [ANTIGRAVITY_RELAY_HOOK_NAME]: {
+      PreToolUse: [
+        {
+          matcher: ANTIGRAVITY_RELAY_HOOK_MATCHER,
+          hooks: [
+            {
+              type: 'command',
+              command: antigravityAskRelayHookCommand(relay),
+              timeout: ANTIGRAVITY_RELAY_HOOK_TIMEOUT_SECONDS,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
  * The antigravity (`agy`) CLI adapter (Requirement 14.1). Flags verified
  * against `agy` v1.2.2 via `agy --version`/`agy --help`.
  *
@@ -148,11 +312,18 @@ export function antigravityModeFlags(role: Role): string[] {
  *    opencode had an env-var config layer to fix it with, agy does not. Use
  *    claude (or opencode) for read-only roles until agy grows a scoped write
  *    grant; the args below are deliberately left unchanged because there is no
- *    correct alternative to emit.
+ *    correct alternative to emit. (This describes a launch WITHOUT the ask
+ *    relay; degrade 7 explains how a relay launch changes the floor.)
  * 3. Unlike opencode, agy DOES support `--add-dir`, so the Requirement 15.4
  *    per-run grant is emitted normally via `runDirGrant(req.runId)` — this is
  *    not a degrade.
- * 4. `--dangerously-skip-permissions` is deliberately never emitted.
+ * 4. `--dangerously-skip-permissions` ({@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG})
+ *    is emitted ONLY on a relay launch (degrade 7), never otherwise, and
+ *    never without the relay hook file: `launch()` throws
+ *    `AdapterLaunchError` when a `file-v1` relay arrives without the
+ *    launcher's promise ({@link LaunchRequest.relayFiles}) to write
+ *    {@link antigravityRelayHooksPath}. Without a relay it stays off the argv,
+ *    exactly as before.
  * 6. agy has no standalone effort control for most models: Gemini efforts
  *    are model-id suffixes and Claude/GPT-OSS ids take none, and agy exits
  *    with "invalid model selection" when `--effort` is passed with either.
@@ -173,41 +344,41 @@ export function antigravityModeFlags(role: Role): string[] {
  *    TODO: investigate `agy --agent` / `agy agents` and, if agents can be
  *    defined, translate the role profile here the way the opencode adapter
  *    does.
- * 7. NO ask-relay wiring is emitted: `LaunchRequest.relay` is deliberately
- *    ignored, and `launch()`/`attach()` are byte-identical with and without
- *    an `AskRelayDescriptor`. This is a probe result, not an oversight —
- *    `agy` 1.2.7 (probed 2026-09-20; note the rest of this doc comment cites
- *    the older 1.2.2 it was written against) really does ship a lifecycle
- *    hook mechanism, and the probe watched it work: a `PreToolUse` handler
- *    fired with the tool name and arguments
- *    (`{toolCall:{name:"run_command",args:{CommandLine:…}},stepIdx,
- *    conversationId,workspacePaths,transcriptPath,…}` on stdin), and
- *    `{"decision":"deny"}` hard-blocked the call and told the model so.
+ * 7. The ask relay is a NATIVE hook installed from a file the launcher
+ *    writes, not from argv. `relayFiles()` returns
+ *    `.baiton/runs/<run-id>/.agents/hooks.json` with a `PreToolUse` handler
+ *    for every tool that writes a `file-v1` ask and prints agy's decision
+ *    ({@link ANTIGRAVITY_RELAY_HOOK_SCRIPT}); `launch()` stays pure. Probed
+ *    against 1.2.8 (2026-09-22): agy loads that file when the run directory
+ *    is an `--add-dir` workspace (`loaded 1 named hooks from 1 hooks.json
+ *    file(s)`), so nothing lands in the user's own `.agents/` or in
+ *    `~/.gemini` — but ONLY when that `--add-dir` value is absolute. The
+ *    relative run-dir grant (`--add-dir .baiton/runs/<run-id>/`, degrade 3)
+ *    loaded 0 hooks, with the cwd at the workspace root exactly as Baiton
+ *    launches, and a skip-permissions run in that state ran its command
+ *    unasked. A relay launch therefore adds the absolute run directory as a
+ *    second `--add-dir`.
  *
- *    Two independent findings disqualify it anyway:
- *    (a) Hooks load ONLY from an on-disk `hooks.json` in a customization
- *        root — `<workspace>/.agents/hooks.json` (loaded only once that
- *        workspace is passed with `--add-dir`) or the shared
- *        `~/.gemini/config/hooks.json`. `agy --help` offers no
- *        `--settings`/`--hooks`-style flag and no environment layer carries
- *        the config inline, so installing one means WRITING A FILE. This
- *        `launch()` is a pure function that writes nothing (and the launcher
- *        is outside this change) — the same disqualifier that stopped the
- *        opencode plugin route and codex's hook trust.
- *    (b) Even with the file in place the hook is VETO-ONLY in headless
- *        (`-p`) runs: `{"decision":"allow"}` did NOT grant the permission —
- *        the run still ended in agy's headless soft-deny — and adding
- *        `permissionOverrides:["command(echo)"]` did not change that. An
- *        approval relay must be able to say yes, so this surface could not
- *        carry one even if it were installable from argv.
+ *    The hook alone cannot say yes: `{"decision":"allow"}` did not grant in
+ *    headless (1.2.7) or interactive (1.2.8) runs — agy surfaced its own
+ *    confirmation anyway ({@link ANTIGRAVITY_HOOK_ALLOW_GRANTS}). So a relay
+ *    launch also emits {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG}, which hands
+ *    the whole permission decision to the hook: with it on, `deny` still
+ *    blocked and `allow` ran without a prompt. The degrade is `deny`, never
+ *    `allow` — every hook failure (unparseable event, unwritable ask,
+ *    unreadable response, the {@link ANTIGRAVITY_RELAY_HOOK_DEADLINE_SECONDS}
+ *    deadline) prints `deny`, and a crash, kill or garbage output also
+ *    blocked the call in the probe. An unanswered ask therefore blocks the
+ *    tool rather than falling back to agy's prompt, unlike claude's `ask`.
  *
- *    `--dangerously-skip-permissions` would make the asks disappear, but it
- *    is not a relay and stays on the never-emit list (degrade 4); a probe
- *    result that depended on it would be a non-result. The config-driven
- *    fallback (`--mode plan|accept-edits` plus the `--add-dir` run-dir grant)
- *    therefore remains antigravity's whole policy surface, and the generic
- *    fallback covers its asks. Full transcript and the legs that could not be
- *    closed: README.md, "Harness ask relay (per-adapter probe findings)".
+ *    CONSEQUENCE for degrade 2: with the flag on, `--mode plan` no longer
+ *    holds by itself — the 1.2.8 probe saw a plan-mode run write a file once
+ *    the hook allowed it. On a relay launch the enforcement floor for every
+ *    role is the hook, i.e. Baiton's permission cards and Auto mode's gate,
+ *    which see every tool call (reads included). A launch without a relay is
+ *    unchanged. Unverified: whether agy re-reads `hooks.json` while running;
+ *    the hook denies any tool call that names an `.agents` `hooks.json` so
+ *    the agent cannot rewrite it either way.
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;
@@ -256,6 +427,17 @@ export class AntigravityAdapter implements Adapter {
    * Session_Id is known, falling back to `-c` when it is not (Requirements
    * 13.2, 13.3, 15.1–15.4). Every role is additionally granted write access
    * to its own `.baiton/runs/<run-id>/` directory (Requirement 15.4).
+   *
+   * With a `file-v1` relay, a second `--add-dir <absolute run dir>` and
+   * {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG} are added before
+   * `--prompt-interactive` (class doc, degrades 4 and 7) — the absolute form
+   * because agy loads a workspace's `.agents/hooks.json` only for an absolute
+   * `--add-dir` (the relative run-dir grant loaded none in the 1.2.8 probe).
+   * Both are emitted only when `req.relayFiles` lists
+   * {@link antigravityRelayHooksPath} and the descriptor's asks dir is
+   * `<abs root>/.baiton/runs/<run-id>/asks`; otherwise it throws
+   * `AdapterLaunchError` rather than start agy with its prompt off and no
+   * hook. An unknown protocol is ignored and the launch is unchanged.
    */
   launch(req: LaunchRequest): LaunchSpec {
     const args: string[] = [];
@@ -272,9 +454,28 @@ export class AntigravityAdapter implements Adapter {
 
     args.push(...antigravityModeFlags(req.role));
     args.push(...runDirGrant(req.runId));
+    args.push(...antigravityRelayFlags(req));
     args.push('--prompt-interactive', req.prompt);
 
     return { shellPath: ANTIGRAVITY_BIN, shellArgs: args };
+  }
+
+  /**
+   * The relay hook file for a `file-v1` descriptor:
+   * {@link antigravityRelayHooksPath} holding {@link antigravityAskRelayHooks}
+   * as pretty-printed JSON. `[]` for any other protocol. Pure — the launcher
+   * writes it.
+   */
+  relayFiles(relay: AskRelayDescriptor): RelayFile[] {
+    if (relay.protocol !== 'file-v1') {
+      return [];
+    }
+    return [
+      {
+        path: antigravityRelayHooksPath(relay.runId),
+        content: JSON.stringify(antigravityAskRelayHooks(relay), null, 2) + '\n',
+      },
+    ];
   }
 
   /**
@@ -310,6 +511,59 @@ export class AntigravityAdapter implements Adapter {
       );
     });
   }
+}
+
+/**
+ * The relay flags for a launch: `[]` without a `file-v1` relay, or when the
+ * hook grants on its own ({@link ANTIGRAVITY_HOOK_ALLOW_GRANTS}); otherwise
+ * {@link ANTIGRAVITY_SKIP_PERMISSIONS_FLAG}, guarded so it is never emitted
+ * unless the launcher will write the run's hook file first.
+ */
+function antigravityRelayFlags(req: LaunchRequest): string[] {
+  const relay = req.relay;
+  if (relay === undefined || relay.protocol !== 'file-v1') {
+    return [];
+  }
+  const hooksPath = antigravityRelayHooksPath(req.runId);
+  const runDir = antigravityRelayRunDir(relay);
+  if (
+    runDir === undefined ||
+    relay.runId !== req.runId ||
+    !(req.relayFiles ?? []).includes(hooksPath)
+  ) {
+    throw new AdapterLaunchError(
+      `the antigravity ask relay needs its hook file ${hooksPath} written before launch; ` +
+        `refusing to start agy with ${ANTIGRAVITY_SKIP_PERMISSIONS_FLAG} and no hook`,
+    );
+  }
+  // agy loads `<dir>/.agents/hooks.json` only for an ABSOLUTE `--add-dir`
+  // (probed, 1.2.8): the relative run-dir grant loaded 0 hooks.
+  const flags = ['--add-dir', runDir];
+  if (!ANTIGRAVITY_HOOK_ALLOW_GRANTS) {
+    flags.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG);
+  }
+  return flags;
+}
+
+/**
+ * The absolute run directory a `file-v1` descriptor's asks dir sits in
+ * (`<root>/.baiton/runs/<run-id>/asks` → `<root>/.baiton/runs/<run-id>`), or
+ * `undefined` when the descriptor does not have that exact shape — the relay
+ * then refuses to launch rather than point agy somewhere else.
+ */
+function antigravityRelayRunDir(relay: AskRelayDescriptor): string | undefined {
+  if (!path.isAbsolute(relay.dir) || path.basename(relay.dir) !== 'asks') {
+    return undefined;
+  }
+  const runDir = path.dirname(relay.dir);
+  if (
+    path.basename(runDir) !== relay.runId ||
+    path.basename(path.dirname(runDir)) !== 'runs' ||
+    path.basename(path.dirname(path.dirname(runDir))) !== '.baiton'
+  ) {
+    return undefined;
+  }
+  return runDir;
 }
 
 /** Turn a probe failure into a human-readable, non-empty reason. */

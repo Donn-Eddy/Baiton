@@ -430,6 +430,30 @@
         word-break: break-word;
       }
 
+      /* Auto-mode escalation: one plain sentence, the raw command, a muted line. */
+      .intervention-escalation-summary {
+        font-weight: 600;
+        word-break: break-word;
+      }
+
+      .intervention-command {
+        margin: 0;
+        padding: 4px 6px;
+        background-color: var(--vscode-textCodeBlock-background);
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--vscode-editor-font-family, monospace);
+        max-height: 12em;
+        overflow: auto;
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+      }
+
+      .intervention-escalation-detail {
+        color: var(--vscode-descriptionForeground);
+        word-break: break-word;
+      }
+
       .intervention-args > summary {
         cursor: pointer;
         color: var(--vscode-descriptionForeground);

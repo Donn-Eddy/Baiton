@@ -13,6 +13,8 @@ import {
   InterventionView,
   ConversationItem,
   SessionItem,
+  escalatedInterventionView,
+  normalizeEscalation,
 } from '../src/orchestrator/webviewProtocol';
 
 describe('webview protocol reducer', () => {
@@ -592,5 +594,73 @@ describe('interventions', () => {
 
     const off = reduce(on, { type: 'setAutoMode', enabled: false });
     assert.strictEqual(off.autoMode, false);
+  });
+
+  describe('escalated cards', () => {
+    const permission: InterventionView = {
+      id: 'p1',
+      kind: 'permission',
+      prompt: 'Allow Bash?',
+      status: 'pending',
+      agent: 'claude',
+      tool: 'Bash',
+      args: '{"command":"python seed.py"}',
+    };
+
+    it('escalatedInterventionView leads the detail with the summary and never shows the tripped rule', () => {
+      const card = escalatedInterventionView(permission, {
+        summary: 'Planner wants to run a script that edits rows in the dev database.',
+        detail: 'It connects to postgres://dev.',
+        command: 'python seed.py',
+        reason: 'the command is not a recognised read-only or verification command',
+      });
+      assert.strictEqual(card.detail, 'Planner wants to run a script that edits rows in the dev database.\nIt connects to postgres://dev.');
+      assert.deepStrictEqual(card.escalation, {
+        summary: 'Planner wants to run a script that edits rows in the dev database.',
+        detail: 'It connects to postgres://dev.',
+        command: 'python seed.py',
+        reason: 'the command is not a recognised read-only or verification command',
+      });
+      assert.strictEqual(permission.escalation, undefined, 'the input view is not mutated');
+    });
+
+    it('escalatedInterventionView keeps the harness description as a last paragraph', () => {
+      const card = escalatedInterventionView({ ...permission, detail: 'Seeds the db.' }, { summary: 'Planner wants to seed the dev database.' });
+      assert.strictEqual(card.detail, 'Planner wants to seed the dev database.\nSeeds the db.');
+      assert.deepStrictEqual(card.escalation, { summary: 'Planner wants to seed the dev database.' });
+    });
+
+    it('normalizeEscalation reads the current and the legacy shape', () => {
+      assert.deepStrictEqual(normalizeEscalation({ summary: 's', detail: 'd', command: 'c', reason: 'r' }), {
+        summary: 's',
+        detail: 'd',
+        command: 'c',
+        reason: 'r',
+      });
+      assert.deepStrictEqual(normalizeEscalation({ what: 'w', why: 'y' }), { summary: 'w', detail: 'y' });
+      assert.strictEqual(normalizeEscalation({ why: 'y' }), undefined);
+      assert.strictEqual(normalizeEscalation(null), undefined);
+      assert.strictEqual(normalizeEscalation('x'), undefined);
+    });
+
+    it('toRenderRecords maps a legacy { what, why } escalation onto summary/detail', () => {
+      const legacy = {
+        ...permission,
+        escalation: { what: 'claude wants to run Bash', why: 'planner may not use shell tools' },
+      } as unknown as InterventionView;
+      const records: ConversationRecord[] = [{ role: 'system', content: 'Allow Bash?', intervention: legacy }];
+      const out = toRenderRecords(records);
+      assert.deepStrictEqual(out[0].intervention!.escalation, {
+        summary: 'claude wants to run Bash',
+        detail: 'planner may not use shell tools',
+      });
+    });
+
+    it('toRenderRecords passes a current escalation through as a copy', () => {
+      const card = escalatedInterventionView(permission, { summary: 'S', command: 'python seed.py' });
+      const out = toRenderRecords([{ role: 'system', content: 'Allow Bash?', intervention: card }]);
+      assert.deepStrictEqual(out[0].intervention, card);
+      assert.notStrictEqual(out[0].intervention, card);
+    });
   });
 });

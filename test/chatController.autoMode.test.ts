@@ -15,8 +15,9 @@
  * 4. On: allow-list approval settles with no card to answer — one
  *    already-resolved `auto` card, the ask approved, and the audit record.
  * 5. On: model-stage approval — same shape, rationale naming `model review`.
- * 6. On: escalation renders on the card and is audited — a pending card with
- *    the escalation, a transcript record when it happens, and the
+ * 6. On: escalation renders on the card and is audited — a pending card led
+ *    by the one-sentence summary with the raw args under it and the tripped
+ *    rule kept for the audit only, a transcript record when it happens, and the
  *    pending-then-resolved pair collapsing to one card on re-render.
  * 7. Confirms and questions are never gated.
  * 8. Only asks presented while on are gated — a card already pending when the
@@ -28,6 +29,8 @@
  * 12. An orchestrator-raised ask reaches the gate with no context.
  * 13. A relayed allow-list approval is audited.
  * 14. A relayed escalation posts a pending card and is audited.
+ * 15. A shell escalation carries the raw command, and a failed gate's summary
+ *     names the run's role.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -357,18 +360,32 @@ describe('ChatController auto mode', () => {
   });
 
   it('renders and audits an escalated ask', async () => {
-    const escalation = { what: 'claude wants to run Bash: rm -rf build', why: 'a destructive shell command' };
+    const escalation = {
+      summary: 'Planner wants to read a file outside the project folder (/etc/shadow).',
+      detail: 'The path is absolute and outside the workspace.',
+      reason: '"/etc/shadow" cannot be proven to stay inside the workspace',
+    };
     gateResult = { kind: 'escalate', ...escalation };
     await startSendWithAutoOn();
     await waitFor(() => webview.all('showIntervention').length === 1, 'the escalated card');
 
     const card = webview.last('showIntervention')!.intervention;
     assert.strictEqual(card.status, 'pending');
-    assert.strictEqual(card.escalation!.what, escalation.what);
-    assert.strictEqual(card.escalation!.why, escalation.why);
+    // The card carries the one-sentence summary, the raw args to show under
+    // it, and the tripped rule for the audit record only.
+    assert.deepStrictEqual(card.escalation, {
+      summary: escalation.summary,
+      detail: escalation.detail,
+      command: '{"file_path":"src/a.ts"}',
+      reason: escalation.reason,
+    });
+    // The plain-text form leads with the summary; no rule label, no reason.
+    assert.ok(card.detail!.startsWith(escalation.summary));
+    assert.ok(card.detail!.includes(escalation.detail));
     assert.ok(card.detail!.includes('Reads one file.'));
-    assert.ok(card.detail!.includes(`What you are approving: ${escalation.what}`));
-    assert.ok(card.detail!.includes(`Why it was flagged: ${escalation.why}`));
+    assert.ok(!card.detail!.includes('What you are approving'));
+    assert.ok(!card.detail!.includes('Why it was flagged'));
+    assert.ok(!card.detail!.includes(escalation.reason));
 
     // The escalation is written to the transcript before any answer.
     let records = await interventionRecords();
@@ -391,8 +408,9 @@ describe('ChatController auto mode', () => {
     const withCard = rendered.filter((r) => r.intervention !== undefined);
     assert.strictEqual(withCard.length, 1);
     assert.strictEqual(withCard[0].intervention!.status, 'resolved');
-    assert.strictEqual(withCard[0].intervention!.escalation!.what, escalation.what);
-    assert.strictEqual(withCard[0].intervention!.escalation!.why, escalation.why);
+    assert.strictEqual(withCard[0].intervention!.escalation!.summary, escalation.summary);
+    assert.strictEqual(withCard[0].intervention!.escalation!.detail, escalation.detail);
+    assert.strictEqual(withCard[0].intervention!.escalation!.reason, escalation.reason);
   });
 
   it('never gates a confirm ask, even with Auto mode on', async () => {
@@ -437,9 +455,9 @@ describe('ChatController auto mode', () => {
 
     const card = webview.last('showIntervention')!.intervention;
     assert.strictEqual(card.status, 'pending');
-    assert.strictEqual(card.escalation!.what, 'claude wants to run Read');
-    assert.ok(card.escalation!.why.includes('Auto mode could not decide'));
-    assert.ok(card.escalation!.why.includes('boom'));
+    assert.strictEqual(card.escalation!.summary, 'Claude wants to run Read');
+    assert.ok(card.escalation!.detail!.includes('Auto mode could not decide'));
+    assert.ok(card.escalation!.detail!.includes('boom'));
     assert.ok(card.detail!.includes('Auto mode could not decide'));
     assert.strictEqual(askRegistry.size, 1);
 
@@ -521,7 +539,7 @@ describe('ChatController auto mode', () => {
   });
 
   it('posts and audits a relayed escalation, then settles on answer', async () => {
-    const escalation = { what: 'claude wants to run Write', why: 'outside the allowed paths' };
+    const escalation = { summary: 'Executor wants to write src/app.ts outside its allowed paths.' };
     gateResult = { kind: 'escalate', ...escalation };
     controller.start();
     await webview.send({ type: 'setAutoMode', enabled: true });
@@ -532,10 +550,10 @@ describe('ChatController auto mode', () => {
 
     const card = webview.last('showIntervention')!.intervention;
     assert.strictEqual(card.status, 'pending');
-    assert.strictEqual(card.escalation!.what, escalation.what);
-    assert.strictEqual(card.escalation!.why, escalation.why);
-    assert.ok(card.detail!.includes(`What you are approving: ${escalation.what}`));
-    assert.ok(card.detail!.includes(`Why it was flagged: ${escalation.why}`));
+    assert.strictEqual(card.escalation!.summary, escalation.summary);
+    assert.strictEqual(card.escalation!.detail, undefined);
+    assert.strictEqual(card.escalation!.command, '{"file_path":"src/a.ts"}');
+    assert.ok(card.detail!.startsWith(escalation.summary));
 
     let records = await interventionRecords();
     assert.strictEqual(records.length, 1);
@@ -553,6 +571,25 @@ describe('ChatController auto mode', () => {
     const withCard = rendered.filter((r) => r.intervention !== undefined);
     assert.strictEqual(withCard.length, 1);
     assert.strictEqual(withCard[0].intervention!.status, 'resolved');
-    assert.strictEqual(withCard[0].intervention!.escalation!.what, escalation.what);
+    assert.strictEqual(withCard[0].intervention!.escalation!.summary, escalation.summary);
+  });
+
+  it('shows a shell escalation with the raw command and names the role in a thrown-gate summary', async () => {
+    gateResult = async () => {
+      throw new Error('boom');
+    };
+    controller.start();
+    await webview.send({ type: 'setAutoMode', enabled: true });
+    await presentRelayed({
+      kind: 'permission',
+      prompt: 'Allow Bash?',
+      agent: 'claude',
+      tool: 'Bash',
+      args: '{"command":"python scripts/seed.py --db dev"}',
+    });
+    await waitFor(() => webview.all('showIntervention').length >= 1, 'the pending card');
+    const card = webview.last('showIntervention')!.intervention;
+    assert.strictEqual(card.escalation!.command, 'python scripts/seed.py --db dev');
+    assert.strictEqual(card.escalation!.summary, 'Executor wants to run Bash');
   });
 });

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { readTranscript } from '../src/orchestrator/transcriptReader';
 import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
-import type { InterventionView } from '../src/orchestrator/webviewProtocol';
+import { toRenderRecords, type InterventionView } from '../src/orchestrator/webviewProtocol';
 
 /**
  * Unit tests for the transcript reader's tolerance behavior (Task 1.3).
@@ -253,6 +253,37 @@ describe('intervention records (Task T03)', () => {
       role: 'user',
       content: 'hello',
     };
+
+    it('reads a legacy { what, why } escalation record and renders it as summary/detail', async () => {
+      const legacyLine = JSON.stringify({
+        ts: '2024-01-01T00:00:02.000Z',
+        role: 'system',
+        content: 'Allow Bash?',
+        intervention: {
+          id: 'p1',
+          kind: 'permission',
+          prompt: 'Allow Bash?',
+          status: 'resolved',
+          agent: 'claude',
+          tool: 'Bash',
+          args: '{"command":"ls"}',
+          answer: { kind: 'approved' },
+          detail: 'What you are approving: claude wants to run Bash\nWhy it was flagged: planner may not use shell tools',
+          escalation: { what: 'claude wants to run Bash', why: 'planner may not use shell tools' },
+        },
+      });
+      const file = writeTranscript(`${line(user)}\n${legacyLine}\n`);
+
+      const records = await readTranscript(file);
+      assert.strictEqual(records.length, 2, 'the legacy record is not dropped');
+      const rendered = toRenderRecords(records);
+      const card = rendered.find((r) => r.intervention !== undefined)!.intervention!;
+      assert.deepStrictEqual(card.escalation, {
+        summary: 'claude wants to run Bash',
+        detail: 'planner may not use shell tools',
+      });
+      assert.strictEqual(card.status, 'resolved');
+    });
 
     it('returns a resolved intervention record unchanged', async () => {
       const view: InterventionView = {

@@ -24,7 +24,16 @@ import {
   askPaths,
   normalizeAskPath,
   shellCommandIsSafe,
+  shellCommandIsReadOnly,
+  classifyShellCommand,
+  splitShellPipeline,
+  scriptPathCandidates,
+  askShellCommand,
+  askCwd,
   SAFE_SHELL_PREFIXES,
+  READ_ONLY_SHELL_PREFIXES,
+  VERIFICATION_SHELL_PREFIXES,
+  READ_ONLY_SHELL_RULE,
   allowListDecision,
   askFromPermission,
   type AutoModeDecision,
@@ -188,6 +197,18 @@ describe('autoMode allow-lists', () => {
       assert.strictEqual(toolFamily('execute_command'), 'shell');
     });
 
+    it('maps the antigravity (agy) tool names', () => {
+      assert.strictEqual(toolFamily('run_command'), 'shell');
+      assert.strictEqual(toolFamily('read_file'), 'read');
+      assert.strictEqual(toolFamily('view_file'), 'read');
+      assert.strictEqual(toolFamily('list_dir'), 'search');
+      assert.strictEqual(toolFamily('find_by_name'), 'search');
+      assert.strictEqual(toolFamily('grep_search'), 'search');
+      assert.strictEqual(toolFamily('write_to_file'), 'write');
+      assert.strictEqual(toolFamily('replace_file_content'), 'write');
+      assert.strictEqual(toolFamily('edit_file'), 'write');
+    });
+
     it('returns undefined for deliberately unmapped names', () => {
       assert.strictEqual(toolFamily('WebFetch'), undefined);
       assert.strictEqual(toolFamily('Task'), undefined);
@@ -263,6 +284,114 @@ describe('autoMode allow-lists', () => {
       assert.ok(!shellCommandIsSafe('`rm x`'));
       assert.ok(!shellCommandIsSafe('rm -rf build'));
       assert.ok(!shellCommandIsSafe(''));
+      assert.ok(!shellCommandIsSafe('ls & rm x'));
+      assert.ok(!shellCommandIsSafe('ls || rm x'));
+      assert.ok(!shellCommandIsSafe('ls\nrm x'));
+      assert.ok(!shellCommandIsSafe('echo "$(rm x)"'));
+      assert.ok(!shellCommandIsSafe('echo \\" ; rm x \\"'));
+      assert.ok(!shellCommandIsSafe('echo "unterminated'));
+    });
+
+    it('splits read-only and verification prefixes into two lists', () => {
+      assert.deepStrictEqual([...SAFE_SHELL_PREFIXES].sort(), [...READ_ONLY_SHELL_PREFIXES, ...VERIFICATION_SHELL_PREFIXES].sort());
+      for (const prefix of READ_ONLY_SHELL_PREFIXES) {
+        assert.strictEqual(classifyShellCommand(prefix), 'read-only', prefix);
+      }
+      for (const prefix of VERIFICATION_SHELL_PREFIXES) {
+        assert.strictEqual(classifyShellCommand(prefix), 'verification', prefix);
+      }
+      for (const banned of ['node -e', 'python -c', 'curl', 'wget', 'rm', 'mv', 'cp', 'chmod']) {
+        assert.ok(!SAFE_SHELL_PREFIXES.includes(banned), banned);
+      }
+    });
+
+    it('recognises read-only commands and pipelines of them', () => {
+      for (const cmd of [
+        'ls -la src',
+        'grep -rn foo src',
+        'grep -E "a|b" src/x.ts',
+        "sed -n 1,20p x",
+        "sed -n '/foo/p' x",
+        'cat x | head',
+        'git log --oneline | head -20',
+        'find . -name "*.ts" | wc -l',
+        'awk \'{print $1}\' x | sort | uniq -c',
+        'git branch -a',
+        'git branch --contains HEAD',
+        'jq .name package.json',
+        'npx tsc --noEmit',
+        'git remote -v',
+      ]) {
+        assert.ok(shellCommandIsReadOnly(cmd), cmd);
+      }
+    });
+
+    it('rejects mutating flags on otherwise read-only commands', () => {
+      for (const cmd of [
+        'sed -i s/a/b/ x',
+        'sed -n -i 1p x',
+        "sed -n 'w out' x",
+        'find . -delete',
+        'find . -name x -exec rm {} ;',
+        'find . -execdir rm {} +',
+        'sort -o out.txt in.txt',
+        'uniq in.txt out.txt',
+        'tree -o out.txt',
+        'rg --pre ./evil foo',
+        'git grep -O foo',
+        'git diff --output=patch.diff',
+        'git branch new-feature',
+        'git branch -D main',
+        'git remote -v add x y',
+        'git push',
+        'git commit -m x',
+        'awk \'{ system("rm x") }\' f',
+        'python --version script.py',
+        'echo x > f',
+      ]) {
+        assert.strictEqual(classifyShellCommand(cmd), undefined, cmd);
+      }
+    });
+
+    it('classes a pipeline with a verification segment as verification', () => {
+      assert.strictEqual(classifyShellCommand('npm test | tail -5'), 'verification');
+      assert.strictEqual(classifyShellCommand('npx tsc'), 'verification');
+    });
+  });
+
+  describe('splitShellPipeline', () => {
+    it('splits on single pipes and unquotes tokens', () => {
+      assert.deepStrictEqual(splitShellPipeline(`grep -E 'a|b' "x y" | head`), [['grep', '-E', 'a|b', 'x y'], ['head']]);
+    });
+
+    it('rejects empty segments and dangling pipes', () => {
+      assert.strictEqual(splitShellPipeline('ls |'), undefined);
+      assert.strictEqual(splitShellPipeline('| ls'), undefined);
+      assert.strictEqual(splitShellPipeline('   '), undefined);
+    });
+  });
+
+  describe('askShellCommand / askCwd / scriptPathCandidates', () => {
+    it('reads command, cmd and agy CommandLine', () => {
+      assert.strictEqual(askShellCommand('{"command":"ls"}'), 'ls');
+      assert.strictEqual(askShellCommand('{"cmd":"ls"}'), 'ls');
+      assert.strictEqual(askShellCommand('{"CommandLine":"ls -la","Cwd":"/w"}'), 'ls -la');
+      assert.strictEqual(askShellCommand('{"command":"  "}'), undefined);
+      assert.strictEqual(askShellCommand('{oops'), undefined);
+    });
+
+    it('reads cwd and agy Cwd', () => {
+      assert.strictEqual(askCwd('{"CommandLine":"ls","Cwd":"/w/sub"}'), '/w/sub');
+      assert.strictEqual(askCwd('{"command":"ls","cwd":"sub"}'), 'sub');
+      assert.strictEqual(askCwd('{"command":"ls"}'), undefined);
+    });
+
+    it('names script-looking tokens once, quotes stripped', () => {
+      assert.deepStrictEqual(
+        scriptPathCandidates(`cd x && python "scripts/analyze.py" --in a.csv; bash run.sh | node tool.mjs scripts/analyze.py`),
+        ['scripts/analyze.py', 'run.sh', 'tool.mjs'],
+      );
+      assert.deepStrictEqual(scriptPathCandidates('ls -la'), []);
     });
   });
 
@@ -309,12 +438,73 @@ describe('autoMode allow-lists', () => {
       assert.strictEqual(d.kind, 'approve');
     });
 
-    it('escalates claude/planner Bash (planner has no shell rule)', () => {
+    it('escalates a claude/planner verification command (planner has no shell rule)', () => {
       const d = decide({ agent: 'claude', tool: 'Bash', args: '{"command":"npm test"}' }, planner);
       assert.strictEqual(d.kind, 'escalate');
       if (d.kind === 'escalate') {
         assert.ok(d.reason.includes('shell'));
       }
+    });
+
+    for (const command of ['ls -la src', 'grep -rn foo src', 'sed -n 1,20p x', 'cat x | head', 'git log --oneline | head']) {
+      it(`approves read-only shell for every role: ${command}`, () => {
+        for (const list of [planner, reviewer, executor]) {
+          const d = decide({ agent: 'claude', tool: 'Bash', args: JSON.stringify({ command }) }, list);
+          assert.strictEqual(d.kind, 'approve', `${list.role}: ${command}`);
+          if (d.kind === 'approve') {
+            assert.strictEqual(d.rationale, `claude/${list.role}: read-only shell command, equivalent to read/search`);
+            assert.deepStrictEqual(d.rule, READ_ONLY_SHELL_RULE);
+          }
+        }
+      });
+    }
+
+    for (const command of ['sed -i s/a/b/ x', 'find . -delete', 'python script.py', 'rm -rf build', 'a && b', 'echo x > f']) {
+      it(`escalates a non-read-only command for the planner: ${command}`, () => {
+        const d = decide({ agent: 'claude', tool: 'Bash', args: JSON.stringify({ command }) }, planner);
+        assert.strictEqual(d.kind, 'escalate', command);
+        if (d.kind === 'escalate') {
+          assert.ok(!d.reason.includes('may not use'), d.reason);
+        }
+      });
+    }
+
+    it('approves an agy run_command ls via CommandLine for the planner', () => {
+      const list = agentAllowList('antigravity', 'planner', 'run-1');
+      const d = decide(
+        { agent: 'antigravity', tool: 'run_command', args: '{"CommandLine":"ls","Cwd":"/w"}' },
+        list,
+      );
+      assert.strictEqual(d.kind, 'approve');
+    });
+
+    it('escalates the codex PermissionRequest shapes the probe observed (apply_patch patch text, Bash curl)', () => {
+      // codex 0.155.1: apply_patch names its target only inside the patch
+      // text under `command`, so no path is provable and the write escalates.
+      const executor = agentAllowList('codex', 'executor', 'run-1');
+      const patch = decide(
+        {
+          agent: 'codex',
+          tool: 'apply_patch',
+          args: JSON.stringify({ command: '*** Begin Patch\n*** Add File: /elsewhere/x.txt\n+hi\n*** End Patch' }),
+        },
+        executor,
+      );
+      assert.strictEqual(patch.kind, 'escalate');
+      const fetch = decide(
+        {
+          agent: 'codex',
+          tool: 'Bash',
+          args: JSON.stringify({ command: 'curl -fsSL https://example.com', description: 'May I fetch it?' }),
+        },
+        executor,
+      );
+      assert.strictEqual(fetch.kind, 'escalate');
+    });
+
+    it('escalates a shell ask with no determinable command', () => {
+      const d = decide({ agent: 'claude', tool: 'Bash', args: '{}' }, planner);
+      assert.strictEqual(d.kind, 'escalate');
     });
 
     it('approves claude/reviewer Bash npm test', () => {

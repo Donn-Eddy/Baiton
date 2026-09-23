@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -13,12 +14,21 @@ import {
   codexEffortFlags,
   codexSystemPromptFlags,
   tomlQuote,
+  CODEX_BYPASS_HOOK_TRUST_FLAG,
+  CODEX_RELAY_HOOK_DEADLINE_SECONDS,
+  CODEX_RELAY_HOOK_MATCHER,
+  CODEX_RELAY_HOOK_SCRIPT,
+  CODEX_RELAY_HOOK_TIMEOUT_SECONDS,
+  codexAskRelayHookCommand,
+  codexAskRelayHookConfig,
+  codexRelayFlags,
 } from '../src/adapter/codex';
 import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
 import { AGENT_BINARY } from '../src/adapter/adapter';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
-import { askRelayDescriptor } from '../src/engine/askRelay';
+import { askRelayDescriptor, parseAsk } from '../src/engine/askRelay';
+import { shellQuote } from '../src/adapter/permissions';
 
 /**
  * This file mirrors test/adapter.antigravity.test.ts (itself mirrored from
@@ -36,7 +46,10 @@ import { askRelayDescriptor } from '../src/engine/askRelay';
  * - the codex-specific degrades: `req.sessionId` dropped on a fresh launch,
  *   the `--config model_reasoning_effort=<effort>` effort degrade, the
  *   interactive form (not `codex exec`), and the prompt dropped on the
- *   `resume --last` branch.
+ *   `resume --last` branch;
+ * - the native ask relay: the `--dangerously-bypass-hook-trust` + inline
+ *   `-c hooks.PermissionRequest=[…]` argv and the hook script's fallback to
+ *   codex's own prompt.
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -565,95 +578,266 @@ describe('CodexAdapter -c developer_instructions carries the role profile', () =
 
 
 /**
- * The probe recorded in README.md, "Harness ask relay (per-adapter probe
- * findings)" (codex-cli 0.154.0, 2026-09-20), found no relay this adapter can
- * install. codex *does* ship the mechanism — a `PreToolUse` command hook,
- * configurable inline through `-c hooks.PreToolUse=[…]`, firing with
- * `tool_name`/`tool_input` and honouring
- * `hookSpecificOutput.permissionDecision ∈ allow|deny|ask` — but every enabled
- * hook is gated behind persisted hook trust held in `$CODEX_HOME`. Without a
- * trust entry the hook is silently skipped; the only argv route past it is
- * `--dangerously-bypass-hook-trust`, which is on the never-emit list. So
- * `launch()`, a pure function that writes nothing, emits no wiring and the
- * generic fallback covers codex's asks.
- *
- * These tests PIN that outcome rather than merely describing it: a future
- * native relay makes them fail, which forces the decision to be revisited
- * deliberately instead of drifting in.
+ * The native ask relay (README.md, "Harness ask relay (per-adapter probe
+ * findings)", codex-cli 0.155.1, 2026-09-22): a `file-v1` relay adds
+ * `--dangerously-bypass-hook-trust` plus an inline
+ * `-c hooks.PermissionRequest=[…]` command hook, and nothing else. Probed
+ * interactively, the hook's `decision.behavior` replaces codex's own approval
+ * prompt, while a missing decision, a crash or a timeout falls back to it.
  */
-describe('CodexAdapter ask-relay wiring (probe findings)', () => {
+describe('CodexAdapter native ask relay (probe findings, codex 0.155.1)', () => {
   const adapter = new CodexAdapter();
   const relay = askRelayDescriptor('/repo', 'run-123');
 
-  /** Flags that would buy a relay by giving up the policy, and are never emitted. */
-  const forbidden = [
-    '--dangerously-bypass-hook-trust',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--approve-for-me',
-  ];
+  /**
+   * Minimal TOML basic-string reader for the tests: read the `"…"` string
+   * starting at `from`, undoing `\\`, `\"` and `\n`, and return it with the
+   * index just past its closing quote.
+   */
+  function readTomlString(text: string, from: number): { value: string; end: number } {
+    assert.strictEqual(text[from], '"', `expected a TOML string at ${from}`);
+    let value = '';
+    let i = from + 1;
+    while (i < text.length && text[i] !== '"') {
+      if (text[i] === '\\') {
+        const next = text[i + 1];
+        value += next === 'n' ? '\n' : next;
+        i += 2;
+      } else {
+        value += text[i];
+        i += 1;
+      }
+    }
+    assert.ok(i < text.length, 'unterminated TOML string');
+    return { value, end: i + 1 };
+  }
 
-  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
-    // Decisive negative: codex's hook surface is gated behind persisted hook
-    // trust (README "Harness ask relay (per-adapter probe findings)"; adapter
-    // doc comment, degrade 7).
-    assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
+  it('pins the hook constants', () => {
+    assert.strictEqual(CODEX_BYPASS_HOOK_TRUST_FLAG, '--dangerously-bypass-hook-trust');
+    assert.strictEqual(CODEX_RELAY_HOOK_TIMEOUT_SECONDS, 600);
+    assert.strictEqual(CODEX_RELAY_HOOK_MATCHER, '*');
+    assert.ok(CODEX_RELAY_HOOK_DEADLINE_SECONDS < CODEX_RELAY_HOOK_TIMEOUT_SECONDS);
   });
 
-  it('treats an explicitly undefined relay the same as an absent one', () => {
+  it('emits no relay flags without a relay, or for an unknown protocol', () => {
+    assert.deepStrictEqual(codexRelayFlags(), []);
+    assert.deepStrictEqual(codexRelayFlags(undefined), []);
+    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
+    assert.deepStrictEqual(codexRelayFlags(future), []);
+    assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
     assert.deepStrictEqual(adapter.launch(req({ relay: undefined })), adapter.launch(req()));
+    for (const role of ROLES) {
+      assert.ok(!adapter.launch(req({ role })).shellArgs.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
+    }
   });
 
-  it('never lets the asks directory reach the argv', () => {
-    const joined = adapter.launch(req({ relay })).shellArgs.join(' ');
-    assert.ok(!joined.includes(relay.dir), 'the asks directory must not leak into the argv');
-    assert.ok(!joined.includes('hooks.PreToolUse'), 'no inline hooks config is emitted');
-    assert.ok(!joined.includes(relay.askSuffix), 'no ask suffix is emitted');
-  });
-
-  it('carries no relay in the env either: codex is launched with no env layer at all', () => {
+  it('a relay launch adds exactly the bypass flag and the -c hook pair, before the -- prompt', () => {
+    const args = adapter.launch(req({ relay })).shellArgs;
+    const plain = adapter.launch(req()).shellArgs;
+    assert.deepStrictEqual(codexRelayFlags(relay), [
+      CODEX_BYPASS_HOOK_TRUST_FLAG,
+      '-c',
+      codexAskRelayHookConfig(relay),
+    ]);
+    const bypass = args.indexOf(CODEX_BYPASS_HOOK_TRUST_FLAG);
+    const sep = args.indexOf('--');
+    assert.ok(bypass >= 0 && bypass < sep, `bypass before the prompt: ${JSON.stringify(args)}`);
+    assert.deepStrictEqual(args.slice(bypass, bypass + 3), codexRelayFlags(relay));
+    // Nothing else changes: removing the three relay args yields the plain launch.
+    assert.deepStrictEqual([...args.slice(0, bypass), ...args.slice(bypass + 3)], plain);
     assert.strictEqual(adapter.launch(req({ relay })).env, undefined);
   });
 
-  it('emits no forbidden flag that would buy a hook by giving up the policy', () => {
-    const args = adapter.launch(req({ relay })).shellArgs;
-    for (const flag of forbidden) {
-      assert.ok(!args.includes(flag), `did not expect ${flag} in ${JSON.stringify(args)}`);
+  it('the -c value is the probed PermissionRequest shape and its command round-trips through TOML', () => {
+    const value = codexAskRelayHookConfig(relay);
+    const prefix = 'hooks.PermissionRequest=[{matcher="*",hooks=[{type="command",command=';
+    assert.ok(value.startsWith(prefix), value.slice(0, 120));
+    const { value: command, end } = readTomlString(value, prefix.length);
+    assert.strictEqual(command, codexAskRelayHookCommand(relay));
+    assert.strictEqual(value.slice(end), `,timeout=${CODEX_RELAY_HOOK_TIMEOUT_SECONDS}}]}]`);
+    assert.ok(!value.includes('\n'), 'the -c value is a single line');
+  });
+
+  it('the hook command runs the script with node -e and passes every parameter shell-quoted as argv', () => {
+    const command = codexAskRelayHookCommand(relay);
+    assert.ok(command.startsWith(`node -e ${shellQuote(CODEX_RELAY_HOOK_SCRIPT)} `));
+    for (const part of [relay.dir, relay.askSuffix, relay.responseSuffix, relay.runId]) {
+      assert.ok(command.includes(shellQuote(part)), `missing ${part}: ${command}`);
     }
-    assert.ok(findPair(args, '--sandbox', 'danger-full-access') < 0);
-    assert.ok(findPair(args, '--ask-for-approval', 'never') < 0);
+    assert.ok(command.endsWith(` ${CODEX_RELAY_HOOK_DEADLINE_SECONDS * 1000}`));
+    assert.ok(!CODEX_RELAY_HOOK_SCRIPT.includes("'"), 'the hook script must contain no single quote');
   });
 
-  it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
-    const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
-    assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
+  it('never emits a decision field that makes codex fail closed, nor a policy-bypassing flag', () => {
+    for (const reserved of ['interrupt', 'updatedInput', 'updatedPermissions']) {
+      assert.ok(!CODEX_RELAY_HOOK_SCRIPT.includes(reserved), `the script must not mention ${reserved}`);
+    }
+    for (const role of ROLES) {
+      const args = adapter.launch(req({ role, relay })).shellArgs;
+      for (const flag of ['--dangerously-bypass-approvals-and-sandbox', '--approve-for-me']) {
+        assert.ok(!args.includes(flag), `did not expect ${flag} for ${role}`);
+      }
+      assert.ok(findPair(args, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0, 'the sandbox stays the floor');
+      assert.ok(findPair(args, '--ask-for-approval', CODEX_ASK_FOR_APPROVAL) >= 0, 'on-request stays the floor');
+      assert.ok(!args.join(' ').includes('hooks.PreToolUse'), 'the relay hooks PermissionRequest, not PreToolUse');
+    }
   });
 
-  it('leaves both resume branches byte-identical, prompt drop included', () => {
-    const withId = { resume: true, resumeSessionId: 'sess-real' };
-    assert.deepStrictEqual(adapter.launch(req({ ...withId, relay })), adapter.launch(req(withId)));
+  it('carries the relay on both resume branches, and resume --last still drops the prompt', () => {
+    const withId = adapter.launch(req({ resume: true, resumeSessionId: 'sess-real', relay })).shellArgs;
+    assert.ok(withId.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
+    assert.ok(withId.indexOf(CODEX_BYPASS_HOOK_TRUST_FLAG) < withId.indexOf('--'));
 
-    const last = { resume: true, resumeSessionId: undefined };
-    const lastSpec = adapter.launch(req({ ...last, relay }));
-    assert.deepStrictEqual(lastSpec, adapter.launch(req(last)));
-    // The `resume --last` branch still drops the prompt (degrade 4): a relay
-    // must not sneak a tail onto the one branch that has no `--` separator.
-    assert.ok(!lastSpec.shellArgs.includes('--'));
-    assert.ok(!lastSpec.shellArgs.includes(req().prompt));
+    const last = adapter.launch(req({ resume: true, resumeSessionId: undefined, relay })).shellArgs;
+    assert.ok(last.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
+    assert.ok(!last.includes('--'));
+    assert.ok(!last.includes(req().prompt));
   });
 
-  it('attach() installs no relay (it takes no descriptor at all)', () => {
+  it('attach() installs no relay (no attach caller passes one)', () => {
     const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
-    const joined = spec.shellArgs.join(' ');
-    assert.ok(!joined.includes(relay.dir));
-    assert.ok(!joined.includes('hooks.PreToolUse'));
-    for (const flag of forbidden) {
-      assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} on attach`);
-    }
+    assert.ok(!spec.shellArgs.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
+    assert.ok(!spec.shellArgs.join(' ').includes('hooks.'));
   });
 
-  for (const role of ROLES) {
-    it(`is byte-identical with and without a relay for role ${role}`, () => {
-      assert.deepStrictEqual(adapter.launch(req({ role, relay })), adapter.launch(req({ role })));
+  /**
+   * Round-trip behaviour of the emitted script, fed the stdin event shape the
+   * probe observed (`{hook_event_name:"PermissionRequest", tool_name,
+   * tool_input:{command, description}, …}`): the ask it writes parses through
+   * `parseAsk`, and its stdout follows the response — approve→allow,
+   * anything else→deny with the reason — while every failure prints the
+   * event with no decision, which codex answers with its own prompt. Argv
+   * order mirrors the hook command.
+   */
+  function runHook(
+    stdin: string,
+    deadlineMs: number,
+    respond?: (asksDir: string, askFile: string) => void,
+  ): Promise<{ stdout: string; code: number | null; asksDir: string }> {
+    const asksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-codex-relay-'));
+    return new Promise((resolve, reject) => {
+      const child = child_process.spawn(
+        process.execPath,
+        ['-e', CODEX_RELAY_HOOK_SCRIPT, asksDir, '.json', '.response.json', 'run-123', String(deadlineMs)],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      let stdout = '';
+      child.stdout!.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString('utf8');
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => resolve({ stdout, code, asksDir }));
+      child.stdin!.write(stdin);
+      child.stdin!.end();
+      if (respond !== undefined) {
+        const watcher = setInterval(() => {
+          const asks = fs.readdirSync(asksDir).filter((f) => f.endsWith('.json') && !f.endsWith('.response.json'));
+          if (asks.length > 0) {
+            clearInterval(watcher);
+            respond(asksDir, asks[0]);
+          }
+        }, 20);
+      }
     });
   }
+
+  const toolInput = {
+    command: 'touch /outside/marker',
+    description: 'Allow creating the marker outside the sandbox?',
+  };
+  const event = JSON.stringify({
+    session_id: 's-1',
+    turn_id: 't-1',
+    cwd: '/repo',
+    hook_event_name: 'PermissionRequest',
+    permission_mode: 'default',
+    tool_name: 'Bash',
+    tool_input: toolInput,
+  });
+
+  function answer(decision: 'approve' | 'deny', reason?: string) {
+    return (asksDir: string, askFile: string): void => {
+      const parsed = parseAsk(fs.readFileSync(path.join(asksDir, askFile), 'utf8'));
+      assert.ok(parsed.ok, `the ask parses: ${parsed.ok ? '' : parsed.error.message}`);
+      if (parsed.ok) {
+        assert.strictEqual(parsed.value.agent, 'codex');
+        assert.strictEqual(parsed.value.kind, 'permission');
+        assert.strictEqual(parsed.value.runId, 'run-123');
+        assert.strictEqual(parsed.value.tool, 'Bash');
+        assert.strictEqual(parsed.value.detail, toolInput.description);
+        assert.deepStrictEqual(JSON.parse(parsed.value.args ?? '{}'), toolInput);
+        fs.writeFileSync(
+          path.join(asksDir, parsed.value.id + '.response.json'),
+          JSON.stringify({ version: 1, id: parsed.value.id, decision, ...(reason ? { reason } : {}) }),
+        );
+      }
+    };
+  }
+
+  const noDecision = { hookSpecificOutput: { hookEventName: 'PermissionRequest' } };
+
+  it('writes a parseAsk-valid ask (description as detail) and prints allow on approve', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 10_000, answer('approve'));
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), {
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow', message: 'approved in Baiton' },
+      },
+    });
+  });
+
+  it('prints deny with the reason as the message on a deny response', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 10_000, answer('deny', 'not today'));
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), {
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'deny', message: 'not today' },
+      },
+    });
+  });
+
+  it('falls back to codex own prompt (no decision, never allow) when no answer arrives before the deadline', async () => {
+    const { stdout, code, asksDir } = await runHook(event, 300);
+    const written = fs.readdirSync(asksDir);
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), noDecision);
+    assert.strictEqual(written.length, 1, 'the ask was written before the wait');
+  });
+
+  it('falls back to codex own prompt on an unparseable event, writing no ask', async () => {
+    const { stdout, code, asksDir } = await runHook('not json', 10_000);
+    const written = fs.readdirSync(asksDir);
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(JSON.parse(stdout), noDecision);
+    assert.deepStrictEqual(written, []);
+  });
+
+  it('omits detail when the tool input carries no description', async () => {
+    const bare = JSON.stringify({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    let detail: string | undefined = 'unset';
+    const { stdout, asksDir } = await runHook(bare, 10_000, (dir, file) => {
+      const parsed = parseAsk(fs.readFileSync(path.join(dir, file), 'utf8'));
+      assert.ok(parsed.ok);
+      if (parsed.ok) {
+        detail = parsed.value.detail;
+        fs.writeFileSync(
+          path.join(dir, parsed.value.id + '.response.json'),
+          JSON.stringify({ version: 1, id: parsed.value.id, decision: 'approve' }),
+        );
+      }
+    });
+    fs.rmSync(asksDir, { recursive: true, force: true });
+    assert.strictEqual(detail, undefined);
+    assert.strictEqual(
+      (JSON.parse(stdout) as { hookSpecificOutput: { decision: { behavior: string } } }).hookSpecificOutput.decision
+        .behavior,
+      'allow',
+    );
+  });
 });
