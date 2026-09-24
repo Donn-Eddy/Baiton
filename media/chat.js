@@ -962,9 +962,15 @@
         errorFix.textContent =
           state.error.action === 'setApiKey' ? 'Set Orchestrator API Key' : 'Open Baiton Settings';
         errorFix.dataset.action = state.error.action;
+        if (state.error.provider) {
+          errorFix.dataset.provider = state.error.provider;
+        } else {
+          delete errorFix.dataset.provider;
+        }
       } else {
         errorFix.style.display = 'none';
         delete errorFix.dataset.action;
+        delete errorFix.dataset.provider;
       }
       errorBanner.classList.add('visible');
     } else {
@@ -1166,7 +1172,12 @@
   errorFix.addEventListener('click', function () {
     const action = errorFix.dataset.action;
     if (action) {
-      vscode.postMessage({ type: 'triggerFix', action: action });
+      const provider = errorFix.dataset.provider;
+      vscode.postMessage(
+        provider
+          ? { type: 'triggerFix', action: action, provider: provider }
+          : { type: 'triggerFix', action: action },
+      );
     }
   });
 

@@ -507,4 +507,28 @@ cases.push({
   ],
 });
 
+// (43) showError with a provider-scoped key action
+cases.push({
+  name: 'showError with a provider-scoped key action',
+  messages: [
+    {
+      type: 'showError',
+      message: 'The Google AI Studio API key is not configured.',
+      action: 'setApiKey',
+      provider: 'google',
+    },
+  ],
+});
+
+// (44) showError replaces a provider-scoped error with a plain one: the
+// `provider` key is cleared (present-undefined) rather than carried over
+cases.push({
+  name: 'showError replaces a provider-scoped error with a plain one',
+  state: seed(),
+  messages: [
+    { type: 'showError', message: 'a', action: 'setApiKey', provider: 'mistral' },
+    { type: 'showError', message: 'b' },
+  ],
+});
+
 export const PROTOCOL_CASES: readonly ProtocolCase[] = cases;

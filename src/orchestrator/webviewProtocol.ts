@@ -55,8 +55,12 @@ export type HostToWebview =
   | { type: 'setSessions'; items: SessionItem[] }
   /** Set which session is shown as active. */
   | { type: 'setActiveSession'; sessionId: string }
-  /** Show an inline error message, optionally with a fix action. */
-  | { type: 'showError'; message: string; action?: FixAction }
+  /**
+   * Show an inline error message, optionally with a fix action. `provider` is
+   * set when the error is about one provider's missing API key, so the fix
+   * action can open that provider's key prompt directly.
+   */
+  | { type: 'showError'; message: string; action?: FixAction; provider?: ProviderId }
   /** Toggle the in-flight (busy) indication and send/stop enablement. */
   | { type: 'setBusy'; busy: boolean }
   /** Show the empty state with the configured endpoint and model values. */
@@ -110,8 +114,12 @@ export type WebviewToHost =
   | { type: 'selectConversation'; conversationId: string }
   /** The user picked a provider/model pair in the dropdown. */
   | { type: 'selectModel'; provider: ProviderId; model: string }
-  /** The user triggered the fix action on an inline error message. */
-  | { type: 'triggerFix'; action: FixAction }
+  /**
+   * The user triggered the fix action on an inline error message. `provider`
+   * echoes back the provider the error carried; the generic 'Set API key…'
+   * affordances post it without a provider, meaning "let the host quick-pick".
+   */
+  | { type: 'triggerFix'; action: FixAction; provider?: ProviderId }
   /** The user answered an intervention card. */
   | { type: 'answerIntervention'; id: string; answer: InterventionAnswer }
   /** The user flipped the Auto-mode toggle. */
@@ -265,7 +273,7 @@ export interface WebviewState {
   /** The active provider/model pair, or null when none is chosen. */
   selection: ModelSelection | null;
   /** The inline error currently shown, if any. */
-  error?: { message: string; action?: FixAction };
+  error?: { message: string; action?: FixAction; provider?: ProviderId };
   /** The empty-state descriptor, if the conversation has no messages. */
   empty?: { endpoint: string | null; model: string | null };
 }
@@ -418,7 +426,7 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
     case 'setActiveSession':
       return { ...state, activeSessionId: msg.sessionId };
     case 'showError':
-      return { ...state, error: { message: msg.message, action: msg.action } };
+      return { ...state, error: { message: msg.message, action: msg.action, provider: msg.provider } };
     case 'setBusy':
       return { ...state, busy: msg.busy };
     case 'setEmptyState':

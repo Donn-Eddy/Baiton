@@ -143,7 +143,7 @@
       case 'setActiveSession':
         return Object.assign({}, state, { activeSessionId: msg.sessionId });
       case 'showError':
-        return Object.assign({}, state, { error: { message: msg.message, action: msg.action } });
+        return Object.assign({}, state, { error: { message: msg.message, action: msg.action, provider: msg.provider } });
       case 'setBusy':
         return Object.assign({}, state, { busy: msg.busy });
       case 'setEmptyState':

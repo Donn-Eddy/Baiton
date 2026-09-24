@@ -26,30 +26,50 @@
  * 8. History projection — a settled card re-enters the model history as one
  *    assistant message `[intervention] <prompt>\nDecision: approved`, never as
  *    the bare prompt.
+ * 9. Provider selection — `start()` posts `setProviders` (router entries in
+ *    order, before `setEmptyState`), `selectModel` switches the selection for
+ *    the next turn without touching the transcript, a rejected switch repaints
+ *    the unchanged selection, a router-side change posts a fresh dropdown, the
+ *    subscription never stacks across `start()` calls and `dispose()` stops
+ *    the posts, a missing provider key maps to a provider-scoped inline error
+ *    whose fix echoes `triggerFix { provider }`, the controller works without
+ *    the `providers` dep, and an `availability()` failure logs and skips only
+ *    the dropdown post.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ChatController, STOP_DECLINE_REASON } from '../src/activation/chatController';
+import {
+  ChatController,
+  STOP_DECLINE_REASON,
+} from '../src/activation/chatController';
 import type {
   ChatWebview,
+  ProviderAvailabilityView,
+  ProviderSource,
 } from '../src/activation/chatController';
 import {
+  COPILOT_UNAVAILABLE_REASON,
   createInterventionSeam,
+  MissingConfigError,
   PendingAskRegistry,
+  providerNeedsKeyReason,
   readTranscript,
   systemClock,
   toRenderRecords,
 } from '../src/orchestrator';
 import type {
   CompletionResult,
+  FixAction,
   GuardContext,
   HostToWebview,
   Intervention,
   InterventionAnswer,
   InterventionSeam,
   ModelClient,
+  ModelSelection,
+  ProviderId,
   RenderRecord,
   ToolRegistry,
   TranscriptRecord,
@@ -91,12 +111,59 @@ class FakeModelClient implements ModelClient {
   public readonly requests: Array<{ role: string; content: string }[]> = [];
   /** The `sessionId` each request carried, in completion order. */
   public readonly sessionIds: Array<string | undefined> = [];
+  /** When set, `complete` throws it instead of popping the queue. */
+  public failWith: unknown;
 
   public async complete(req: { messages: { role: string; content: string }[]; sessionId?: string }): Promise<CompletionResult> {
     this.requests.push(req.messages);
     this.sessionIds.push(req.sessionId);
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     const next = this.queue.shift();
     return next ?? { content: 'done', tool_calls: [] };
+  }
+}
+
+/** A fake ProviderRouter bound as the controller's provider seam. */
+class FakeProviders implements ProviderSource {
+  public entries: ProviderAvailabilityView[] = [
+    { id: 'copilot', label: 'GitHub Copilot', enabled: false, reason: COPILOT_UNAVAILABLE_REASON, models: [] },
+    { id: 'google', label: 'Google AI Studio', enabled: true, models: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
+    { id: 'mistral', label: 'Mistral AI', enabled: false, reason: providerNeedsKeyReason('mistral'), models: ['mistral-large-latest'] },
+  ];
+  public selection: ModelSelection | undefined = { provider: 'google', model: 'gemini-2.5-pro' };
+  public readonly selected: unknown[] = [];
+  public accept = true;
+  public failAvailability = false;
+  private readonly listeners = new Set<(s: ModelSelection | undefined) => void>();
+
+  public async availability(): Promise<ProviderAvailabilityView[]> {
+    if (this.failAvailability) {
+      throw new Error('nope');
+    }
+    return this.entries;
+  }
+
+  public getSelection(): ModelSelection | undefined {
+    return this.selection;
+  }
+
+  public async select(value: unknown): Promise<boolean> {
+    this.selected.push(value);
+    if (!this.accept) {
+      return false;
+    }
+    this.selection = value as ModelSelection;
+    for (const l of [...this.listeners]) {
+      l(this.selection);
+    }
+    return true;
+  }
+
+  public onDidChangeSelection(l: (s: ModelSelection | undefined) => void): { dispose(): void } {
+    this.listeners.add(l);
+    return { dispose: () => { this.listeners.delete(l); } };
   }
 }
 
@@ -108,6 +175,9 @@ describe('ChatController interventions', () => {
   let askRegistry: PendingAskRegistry;
   let seam: InterventionSeam;
   let controller: ChatController;
+  let providers: FakeProviders;
+  let fixes: Array<{ action: FixAction; provider?: ProviderId }>;
+  let logs: string[];
   /** The answers the fake tool observed, in call order. */
   let observed: InterventionAnswer[];
   let cleanup: (() => void) | undefined;
@@ -121,6 +191,9 @@ describe('ChatController interventions', () => {
 
     webview = new FakeWebview();
     client = new FakeModelClient();
+    providers = new FakeProviders();
+    fixes = [];
+    logs = [];
     // Round 1 asks for the confirm tool call, round 2 finishes the loop.
     client.queue.push(
       { content: '', tool_calls: [{ id: 'c1', name: 'confirm_tool', arguments: '{}' }] },
@@ -161,9 +234,14 @@ describe('ChatController interventions', () => {
       specsDir,
       roundBound: () => 4,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
-      triggerFix: () => {},
-      log: () => {},
+      triggerFix: (action, provider) => {
+        fixes.push({ action, provider });
+      },
+      log: (message) => {
+        logs.push(message);
+      },
       askRegistry,
+      providers,
     });
     present = (ask) => controller.presentIntervention(ask);
   }
@@ -406,5 +484,181 @@ describe('ChatController interventions', () => {
     await awaitRunEnd(4);
     const last = client.sessionIds[client.sessionIds.length - 1];
     assert.ok(last !== undefined && last !== first, 'a different chat session yields a different sessionId');
+  });
+
+  describe('provider selection', () => {
+    it('start() posts one setProviders with the router entries in order and the active selection', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      const posted = webview.last('setProviders')!;
+      assert.deepStrictEqual(posted.groups, [
+        { id: 'copilot', label: 'GitHub Copilot', enabled: false, reason: COPILOT_UNAVAILABLE_REASON, models: [] },
+        {
+          id: 'google',
+          label: 'Google AI Studio',
+          enabled: true,
+          models: [{ id: 'gemini-2.5-pro' }, { id: 'gemini-2.5-flash' }],
+        },
+        {
+          id: 'mistral',
+          label: 'Mistral AI',
+          enabled: false,
+          reason: providerNeedsKeyReason('mistral'),
+          models: [{ id: 'mistral-large-latest' }],
+        },
+      ]);
+      assert.deepStrictEqual(posted.selection, { provider: 'google', model: 'gemini-2.5-pro' });
+    });
+
+    it('posts setProviders before the first setEmptyState', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setEmptyState').length > 0, 'the empty state');
+      const firstProviders = webview.posts.findIndex((m) => m.type === 'setProviders');
+      const firstEmpty = webview.posts.findIndex((m) => m.type === 'setEmptyState');
+      assert.ok(firstProviders >= 0, 'setProviders was posted');
+      assert.ok(firstProviders < firstEmpty, 'setProviders must precede setEmptyState');
+    });
+
+    it('posts selection null when the router has no selection', async () => {
+      providers.selection = undefined;
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      assert.strictEqual(webview.last('setProviders')!.selection, null);
+    });
+
+    it('selectModel switches for the next turn without touching the transcript', async () => {
+      startSend();
+      await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');
+      const card = webview.last('showIntervention')!.intervention;
+      await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'approved' } });
+      await awaitRunEnd(2);
+
+      const beforePosts = webview.posts.length;
+      const beforeBytes = fs.readFileSync(transcriptFile(), 'utf8');
+      const beforeFiles = fs.readdirSync(path.join(baitonDir, 'chat')).slice().sort();
+      const beforeRenders = webview.all('renderConversation').length;
+      const beforeAppends = webview.all('appendMessage').length;
+      const beforeBusy = webview.all('setBusy').length;
+
+      await webview.send({ type: 'selectModel', provider: 'google', model: 'gemini-2.5-flash' });
+
+      assert.deepStrictEqual(providers.selected, [{ provider: 'google', model: 'gemini-2.5-flash' }]);
+      await waitFor(() => webview.posts.length > beforePosts, 'the repaint to arrive');
+      assert.deepStrictEqual(
+        webview.all('setProviders')[webview.all('setProviders').length - 1].selection,
+        { provider: 'google', model: 'gemini-2.5-flash' },
+      );
+      assert.strictEqual(webview.posts.length, beforePosts + 1, 'only the setProviders repaint was posted');
+      assert.strictEqual(fs.readFileSync(transcriptFile(), 'utf8'), beforeBytes, 'the transcript bytes are untouched');
+      assert.deepStrictEqual(
+        fs.readdirSync(path.join(baitonDir, 'chat')).slice().sort(),
+        beforeFiles,
+        'the session file list is untouched',
+      );
+      // No re-render of the transcript.
+      assert.strictEqual(webview.all('renderConversation').length, beforeRenders, 'no extra renderConversation');
+      assert.strictEqual(webview.all('appendMessage').length, beforeAppends, 'no extra appendMessage');
+      assert.strictEqual(webview.all('setBusy').length, beforeBusy, 'no extra setBusy');
+    });
+
+    it('a rejected switch repaints the unchanged selection and never throws', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      providers.accept = false;
+      await assert.doesNotReject(
+        webview.send({ type: 'selectModel', provider: 'mistral', model: 'mistral-large-latest' }),
+      );
+      const posted = webview.last('setProviders')!;
+      assert.deepStrictEqual(posted.selection, { provider: 'google', model: 'gemini-2.5-pro' });
+      assert.deepStrictEqual(providers.selected, [{ provider: 'mistral', model: 'mistral-large-latest' }]);
+    });
+
+    it('a router-side change posts a fresh setProviders with the new selection', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      const before = webview.all('setProviders').length;
+      await providers.select({ provider: 'mistral', model: 'mistral-large-latest' });
+      await waitFor(() => webview.all('setProviders').length === before + 1, 'the response to the change');
+      assert.deepStrictEqual(
+        webview.last('setProviders')!.selection,
+        { provider: 'mistral', model: 'mistral-large-latest' },
+      );
+    });
+
+    it('start() twice yields one post per change, and dispose() stops them', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 2, 'the second refresh');
+      const before = webview.all('setProviders').length;
+      await providers.select({ provider: 'mistral', model: 'mistral-large-latest' });
+      await waitFor(() => webview.all('setProviders').length === before + 1, 'the extra post');
+      assert.strictEqual(webview.all('setProviders').length, before + 1, 'exactly one post per change');
+
+      controller.dispose();
+      const afterDispose = webview.all('setProviders').length;
+      await providers.select({ provider: 'google', model: 'gemini-2.5-pro' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.strictEqual(webview.all('setProviders').length, afterDispose, 'dispose() stops the posts');
+    });
+
+    it('a missing provider key maps to a provider-scoped inline error and echoes the provider back', async () => {
+      client.failWith = new MissingConfigError('apiKey');
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      await webview.send({ type: 'sendText', text: 'go' });
+      await waitFor(() => webview.all('showError').length === 1, 'the error');
+      const error = webview.last('showError')!;
+      assert.strictEqual(error.message, 'The Google AI Studio API key is not configured.');
+      assert.strictEqual(error.action, 'setApiKey');
+      assert.deepStrictEqual(error.provider, 'google');
+
+      await webview.send({ type: 'triggerFix', action: 'setApiKey', provider: 'google' });
+      await webview.send({ type: 'triggerFix', action: 'setApiKey' });
+      assert.strictEqual(fixes.length, 2);
+      assert.deepStrictEqual(fixes[0], { action: 'setApiKey', provider: 'google' });
+      assert.deepStrictEqual(fixes[1], { action: 'setApiKey', provider: undefined });
+    });
+
+    it('without the providers dep there is no setProviders and selectModel is a no-op', async () => {
+      const second = new ChatController({
+        webview,
+        client,
+        registry: {
+          call: async (): Promise<{ ok: false; error: string }> => ({ ok: false, error: 'unused' }),
+        } as unknown as ToolRegistry,
+        toolsFor: () => [],
+        guardContext: () => ({}) as GuardContext,
+        baitonDir,
+        specsDir,
+        roundBound: () => 4,
+        config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
+        triggerFix: () => {},
+        log: (message) => {
+          logs.push(message);
+        },
+        askRegistry,
+      });
+      second.start();
+      await waitFor(() => webview.all('setConversations').length > 0, 'the refresh to post');
+      assert.strictEqual(webview.all('setProviders').length, 0);
+      await assert.doesNotReject(
+        webview.send({ type: 'selectModel', provider: 'google', model: 'gemini-2.5-flash' }),
+      );
+      assert.strictEqual(providers.selected.length, 0, 'the switch never reached the router');
+      second.dispose();
+    });
+
+    it('an availability failure logs and skips only the dropdown post', async () => {
+      providers.failAvailability = true;
+      controller.start();
+      await waitFor(() => webview.all('setConversations').length > 0, 'the refresh to continue');
+      assert.strictEqual(webview.all('setProviders').length, 0, 'no setProviders when availability fails');
+      assert.ok(
+        webview.all('renderConversation').length > 0 || webview.all('setEmptyState').length > 0,
+        'the rest of the refresh still happens',
+      );
+      assert.strictEqual(logs.filter((m) => m.includes('could not list the providers')).length, 1);
+    });
   });
 });

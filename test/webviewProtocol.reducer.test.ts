@@ -115,6 +115,7 @@ describe('webview protocol reducer', () => {
     assert.deepStrictEqual(withAction.error, {
       message: 'API key missing',
       action: 'setApiKey',
+      provider: undefined,
     });
 
     const withoutAction = reduce(initialWebviewState(), {
@@ -124,6 +125,7 @@ describe('webview protocol reducer', () => {
     assert.deepStrictEqual(withoutAction.error, {
       message: 'endpoint unreachable',
       action: undefined,
+      provider: undefined,
     });
   });
 
