@@ -19,9 +19,12 @@
   The provider also enables retainContextWhenHidden (Req 16.4). No UI framework
   is used; the view is plain markup plus the scripts under media/ (Req 19.2).
   The transcript also renders inline intervention cards (question / confirm /
-  permission) built by chat.js. The composer's control row also carries the
+  permission) built by chat.js.   The composer's control row also carries the
   Auto-mode toggle immediately left of Stop, which reflects `state.autoMode`
-  and posts `setAutoMode`.
+  and posts `setAutoMode`. The composer also carries the grouped Provider &
+  Model dropdown: one <optgroup> per provider in catalog order, with disabled
+  groups for providers without a key (and a Set API key affordance); the empty
+  state shows the active provider + model rather than an endpoint URL.
   All colors come from VS Code theme CSS variables so the view follows the
   active theme and reflects theme changes without a reload (Req 16.6, 16.7).
 -->
@@ -95,6 +98,47 @@
 
       .selector-bar label {
         color: var(--vscode-descriptionForeground);
+      }
+
+      /* Provider & Model bar: the grouped provider/model dropdown plus the
+         conditional Set API key affordance. */
+      .model-bar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: var(--baiton-gap);
+      }
+
+      .model-bar label {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #model-select {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--vscode-dropdown-foreground);
+        background-color: var(--vscode-dropdown-background);
+        border: 1px solid var(--vscode-dropdown-border);
+        padding: 2px 4px;
+      }
+
+      #model-select:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      #model-select optgroup:disabled {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #model-set-key {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        display: none;
+      }
+
+      #model-set-key.visible {
+        display: inline;
       }
 
       #new-chat {
@@ -698,15 +742,20 @@
       <div id="empty-state">
         <p>No messages yet. Configure the orchestrator to get started.</p>
         <dl>
-          <dt>Endpoint</dt>
-          <dd id="empty-endpoint"></dd>
+          <dt>Provider</dt>
+          <dd id="empty-provider"></dd>
           <dt>Model</dt>
           <dd id="empty-model"></dd>
         </dl>
-        <button id="empty-set-key" class="secondary" type="button">Set Orchestrator API Key</button>
+        <button id="empty-set-key" class="secondary" type="button">Set Provider API Key</button>
       </div>
 
       <div class="composer">
+        <div class="model-bar">
+          <label for="model-select">Model</label>
+          <select id="model-select" aria-label="Provider and model"></select>
+          <button id="model-set-key" class="link-button" type="button">Set API key…</button>
+        </div>
         <textarea
           id="input"
           rows="3"
