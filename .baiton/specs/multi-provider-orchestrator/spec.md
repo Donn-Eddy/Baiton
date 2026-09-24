@@ -1,12 +1,12 @@
 ---
 version: 1
 name: multi-provider-orchestrator
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: be39dc5726ea67f47328c4f73615c6114decf111
+branch: baiton/multi-provider-orchestrator
+approved_rev: b2457202795ee060c325126c66ffd92bf24282214d5a37c58c6242afbf4fed26
 ---
 
 # OVERVIEW
