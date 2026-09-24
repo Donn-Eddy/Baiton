@@ -195,3 +195,43 @@ export function normalizeModelSelection(value: unknown): ModelSelection | undefi
   }
   return { provider: raw['provider'], model };
 }
+
+// --- availability vocabulary (multi-provider orchestrator) ------------------
+//
+// These are the exact strings the host-side provider router reports as a
+// disabled provider's `reason` (src/activation/providerRouter.ts). Keeping
+// them in the catalog lets the Chat webview render them without duplicating
+// wording: the webview todo imports this module rather than restating the
+// text. The module stays import-free — these are strings and pure functions
+// only, no `vscode` and no modelClient dependency.
+
+/** The user-facing reason shown when provider `id` has no API key stored. */
+export function providerNeedsKeyReason(id: ProviderId): string {
+  return `Set an API key for ${PROVIDERS[id].label} to use it.`;
+}
+
+/** The user-facing reason shown when `openai` has no `baiton.orchestrator.endpoint`. */
+export const PROVIDER_NEEDS_ENDPOINT_REASON =
+  'Set baiton.orchestrator.endpoint to use OpenAI / Custom.';
+
+/**
+ * The user-facing reason shown when GitHub Copilot is unavailable in the
+ * current window (no Copilot Chat extension, or signed out).
+ */
+export const COPILOT_UNAVAILABLE_REASON =
+  'GitHub Copilot is not available in this window. Install and sign in to GitHub Copilot Chat.';
+
+/**
+ * Structural equality of two {@link ModelSelection}s: both undefined, or both
+ * defined with equal `provider` and `model`. Pure; never throws. Backed by
+ * the router's `select` so a repeat of the active selection is a no-op.
+ */
+export function sameModelSelection(
+  a: ModelSelection | undefined,
+  b: ModelSelection | undefined,
+): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return a.provider === b.provider && a.model === b.model;
+}
