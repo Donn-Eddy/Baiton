@@ -128,6 +128,18 @@ export function providerKeySaveFailedMessage(label: string): string {
 export const PROVIDER_KEY_NO_VALUE_MESSAGE =
   'Baiton: no value provided; the API key was left unchanged.';
 
+/** Fires the availability notification without letting it break the command. */
+async function notifyChanged(
+  onChanged: ((id: ProviderId) => void | Promise<void>) | undefined,
+  id: ProviderId,
+): Promise<void> {
+  try {
+    await onChanged?.(id);
+  } catch {
+    /* the refresh is best-effort */
+  }
+}
+
 /**
  * Prompt for and manage one provider's API key.
  *
@@ -147,12 +159,24 @@ export const PROVIDER_KEY_NO_VALUE_MESSAGE =
  *  - Write/delete failure: the previous value is untouched and an error is
  *    shown; neither failure path confirms anything.
  *
+ * When a key is actually written or deleted, `onChanged` (when supplied) is
+ * invoked with the affected provider id so the host can recompute provider
+ * availability. It fires only after a successful store or clear: never on
+ * cancel, on the empty-submit-with-nothing-stored path, or on a store/delete
+ * failure. A throwing/rejecting callback is contained by {@link notifyChanged}.
+ *
  * @param secrets The VS Code SecretStorage the per-provider keys live in.
  * @param providerId Optional provider to skip the quick pick for.
+ * @param onChanged Invoked with the affected provider id after a key is
+ *   successfully stored or cleared — and only then — so the host can recompute
+ *   provider availability. Never invoked on cancel, on the empty-submit-with-
+ *   nothing-stored path, or on a store/delete failure; a throwing/rejecting
+ *   callback is contained.
  */
 export async function setProviderApiKey(
   secrets: vscode.SecretStorage,
   providerId?: ProviderId,
+  onChanged?: (id: ProviderId) => void | Promise<void>,
 ): Promise<void> {
   const candidates = providerCatalog().filter((p) => p.requiresKey);
 
@@ -212,6 +236,7 @@ export async function setProviderApiKey(
       return;
     }
     if (hadKey) {
+      await notifyChanged(onChanged, picked);
       void vscode.window.showInformationMessage(providerKeyClearedMessage(label));
     } else {
       void vscode.window.showWarningMessage(PROVIDER_KEY_NO_VALUE_MESSAGE);
@@ -227,6 +252,11 @@ export async function setProviderApiKey(
     void vscode.window.showErrorMessage(providerKeySaveFailedMessage(label));
     return;
   }
+
+  // Availability changed out of band: let the host recompute before the
+  // confirmation (which must never be delayed by a failing refresh either way
+  // — notifyChanged contains the callback).
+  await notifyChanged(onChanged, picked);
 
   // Success: confirm without revealing the stored value.
   void vscode.window.showInformationMessage(providerKeySavedMessage(label));
@@ -246,8 +276,9 @@ interface MementoLike {
  * (`baiton.orchestrator.apiKey`) into the `openai` provider slot.
  *
  * The migration runs at most once, gated by {@link LEGACY_MIGRATION_FLAG} in
- * the caller's `globalState`. It never deletes the legacy secret: the live
- * `buildModelClient` still reads it until the ProviderRouter replaces it. A
+ * the caller's `globalState`. It never deletes the legacy secret; nothing in
+ * the live build reads it any more (the ProviderRouter reads the `openai`
+ * slot directly). A
  * non-empty value already in the `openai` slot is never clobbered, and a
  * missing/whitespace-only legacy secret sets the flag so the read never
  * repeats. Any failure resolves `false` — activation must not break here.

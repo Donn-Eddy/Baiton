@@ -496,6 +496,152 @@ describe('setProviderApiKey', () => {
   });
 });
 
+describe('setProviderApiKey onChanged notification', () => {
+  before(async () => {
+    const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
+    setProviderApiKey = mod.setProviderApiKey;
+  });
+
+  beforeEach(() => {
+    vscodeFake = makeVscodeFake();
+    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
+  });
+
+  it('non-empty submit for a picked provider: callback called once with that id, after the secret is present', async () => {
+    vscodeFake.inputResult = '  mk-abc  ';
+    const secrets = new FakeSecretStorage();
+    const calls: Array<{ id: string; secretPresent: boolean }> = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'mistral', (id) => {
+      calls.push({ id, secretPresent: secrets.values.get(providerSecretKey('mistral')!) === 'mk-abc' });
+    });
+
+    assert.deepStrictEqual(calls, [{ id: 'mistral', secretPresent: true }]);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('Mistral AI') },
+    ]);
+  });
+
+  it('empty submit that clears an existing key: callback called once with that id, after the key is gone', async () => {
+    vscodeFake.inputResult = '';
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.google', 'g-key');
+    const calls: Array<{ id: string; keyGone: boolean }> = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'google', (id) => {
+      calls.push({ id, keyGone: !secrets.values.has(providerSecretKey('google')!) });
+    });
+
+    assert.deepStrictEqual(calls, [{ id: 'google', keyGone: true }]);
+    assert.strictEqual(secrets.values.has('baiton.orchestrator.key.google'), false);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeyClearedMessage('Google AI Studio') },
+    ]);
+  });
+
+  it('empty submit with nothing stored: callback NOT called', async () => {
+    vscodeFake.inputResult = '   ';
+    const secrets = new FakeSecretStorage();
+    const calls: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'openai', (id) => {
+      calls.push(id);
+    });
+
+    assert.deepStrictEqual(calls, []);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'warning', message: PROVIDER_KEY_NO_VALUE_MESSAGE },
+    ]);
+  });
+
+  it('cancelled input box: callback NOT called', async () => {
+    vscodeFake.inputResult = undefined;
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.google', 'g-key');
+    const calls: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'google', (id) => {
+      calls.push(id);
+    });
+
+    assert.deepStrictEqual(calls, []);
+    assert.strictEqual(secrets.values.get('baiton.orchestrator.key.google'), 'g-key');
+  });
+
+  it('dismissed quick pick: callback NOT called', async () => {
+    vscodeFake.quickPickResult = undefined;
+    const secrets = new FakeSecretStorage();
+    const calls: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), undefined, (id) => {
+      calls.push(id);
+    });
+
+    assert.deepStrictEqual(calls, []);
+    assert.strictEqual(vscodeFake.messages.length, 0);
+  });
+
+  it('a store that throws: callback NOT called and the failure message still shown', async () => {
+    vscodeFake.inputResult = 'new-key';
+    const secrets = new FakeSecretStorage();
+    secrets.failStore = true;
+    const calls: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'google', (id) => {
+      calls.push(id);
+    });
+
+    assert.deepStrictEqual(calls, []);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'error', message: providerKeySaveFailedMessage('Google AI Studio') },
+    ]);
+  });
+
+  it('a delete that throws: callback NOT called and the failure message still shown', async () => {
+    vscodeFake.inputResult = '';
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.google', 'g-key');
+    secrets.failDelete = true;
+    const calls: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), 'google', (id) => {
+      calls.push(id);
+    });
+
+    assert.deepStrictEqual(calls, []);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'error', message: providerKeySaveFailedMessage('Google AI Studio') },
+    ]);
+  });
+
+  it('a callback that rejects: setProviderApiKey still resolves and the confirmation is still shown', async () => {
+    vscodeFake.inputResult = 'mk-abc';
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), 'mistral', async () => {
+      throw new Error('refresh boom');
+    });
+
+    assert.strictEqual(secrets.values.get(providerSecretKey('mistral')!), 'mk-abc');
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('Mistral AI') },
+    ]);
+  });
+
+  it('a callback that throws synchronously is contained the same way', async () => {
+    vscodeFake.inputResult = 'mk-abc';
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), 'mistral', () => {
+      throw new Error('refresh boom');
+    });
+
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('Mistral AI') },
+    ]);
+  });
+});
+
 describe('migrateLegacyApiKey', () => {
   before(async () => {
     const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;

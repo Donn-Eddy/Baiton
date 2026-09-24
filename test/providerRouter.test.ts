@@ -710,6 +710,142 @@ describe('ProviderRouter.select', () => {
   });
 });
 
+// --- refresh -----------------------------------------------------------------
+
+describe('ProviderRouter.refresh', () => {
+  it('with no selection and a key newly present, selects the provider and its first model, persists and fires', async () => {
+    const h = makeHarness({ lm: fakeLm([]) }); // copilot unavailable
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), {
+      provider: 'google',
+      model: 'gemini-2.5-pro',
+    });
+    assert.deepStrictEqual(h.memento.updates, [
+      { key: MODEL_SELECTION_KEY, value: { provider: 'google', model: 'gemini-2.5-pro' } },
+    ]);
+    assert.deepStrictEqual(events, [{ provider: 'google', model: 'gemini-2.5-pro' }]);
+    assert.strictEqual(h.router.modelFor('google'), 'gemini-2.5-pro');
+  });
+
+  it('with the active provider just cleared, re-resolves to the next enabled provider and fires once', async () => {
+    const h = makeHarness({ lm: fakeLm([]) });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    h.secrets.values.set(providerSecretKey('mistral')!, 'm');
+    await h.router.select({ provider: 'google', model: 'm-google' });
+    // Out of band: the google key is cleared.
+    h.secrets.values.delete(providerSecretKey('google')!);
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'mistral', model: 'mistral-large-latest' });
+    assert.strictEqual(events.length, 1);
+  });
+
+  it('with the active provider still enabled, leaves the selection untouched, persists nothing, and still fires once', async () => {
+    const h = makeHarness({ lm: fakeLm([]) });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    await h.router.select({ provider: 'google', model: 'gemini-2.5-flash' });
+    const before = h.memento.updates.length;
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'google', model: 'gemini-2.5-flash' });
+    assert.strictEqual(h.memento.updates.length, before, 'nothing was written to workspaceState');
+    assert.strictEqual(events.length, 1, 'exactly one change event');
+  });
+
+  it('with no provider usable, re-resolves to undefined and still fires once', async () => {
+    const h = makeHarness({ lm: fakeLm([]) });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    await h.router.select({ provider: 'google', model: 'gemini-2.5-flash' });
+    h.secrets.values.delete(providerSecretKey('google')!);
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+
+    await h.router.refresh();
+
+    assert.strictEqual(h.router.getSelection(), undefined);
+    assert.deepStrictEqual(events, [undefined]);
+  });
+
+  it('a throwing secrets fake resolves (never rejects), logs through config.log, and still fires', async () => {
+    const secrets = new FakeSecrets();
+    const memento = new FakeMemento();
+    secrets.failGet = true;
+    const logs: string[] = [];
+    const router = new ProviderRouter({
+      secrets,
+      workspaceState: memento,
+      settings: makeSettings(),
+      lm: fakeLm([]),
+      version: '1.2.3',
+      log: (message) => logs.push(message),
+    });
+    const events: Array<ModelSelection | undefined> = [];
+    router.onDidChangeSelection((s) => events.push(s));
+
+    await router.refresh(); // must not throw
+
+    // The throwing secret reads surface through the router's contained
+    // per-provider catches, all of which log through config.log.
+    assert.ok(logs.length > 0, 'the failure was logged through config.log');
+    assert.strictEqual(events.length, 1, 'the event still fired');
+    assert.strictEqual(router.getSelection(), undefined);
+  });
+
+  it('a rejected workspaceState.update during refresh resolves, logs through config.log, and still fires', async () => {
+    const secrets = new FakeSecrets();
+    const memento = new FakeMemento();
+    memento.failUpdate = true;
+    secrets.values.set(providerSecretKey('google')!, 'g');
+    const logs: string[] = [];
+    const router = new ProviderRouter({
+      secrets,
+      workspaceState: memento,
+      settings: makeSettings(),
+      lm: fakeLm([]),
+      version: '1.2.3',
+      log: (message) => logs.push(message),
+    });
+    const events: Array<ModelSelection | undefined> = [];
+    router.onDidChangeSelection((s) => events.push(s));
+
+    await router.refresh();
+
+    assert.ok(
+      logs.some((line) => line.includes('refreshing provider availability failed')),
+      'the failure was logged',
+    );
+    assert.deepStrictEqual(
+      router.getSelection(),
+      { provider: 'google', model: 'gemini-2.5-pro' },
+      'the in-memory selection is applied even though the persist rejected',
+    );
+    assert.strictEqual(events.length, 1);
+  });
+
+  it('select() and init() behaviour is unchanged by the refactor', async () => {
+    const h = makeHarness({ lm: fakeLm([{ id: 'fake-model', family: 'f' }]) });
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+
+    await h.router.init();
+
+    assert.strictEqual(events.length, 0, 'init still does not fire');
+    // select() unchanged: the basic switch behaviour is asserted elsewhere and
+    // stays green (see the ProviderRouter.select suite).
+  });
+});
+
 // --- routing -----------------------------------------------------------------
 
 describe('ProviderRouter.complete routing', () => {

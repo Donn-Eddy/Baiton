@@ -291,18 +291,10 @@ export class ProviderRouter implements ModelClient {
       } else {
         // Fall back to the first enabled provider whose first model exists,
         // and persist that fallback so the next window restores it.
-        for (const id of PROVIDER_IDS) {
-          if (!enabled.includes(id)) {
-            continue;
-          }
-          const models = await this.modelsFor(id);
-          const model = models[0];
-          if (model !== undefined) {
-            const fallback: ModelSelection = { provider: id, model };
-            this.selected = fallback;
-            await this.config.workspaceState.update(MODEL_SELECTION_KEY, fallback);
-            break;
-          }
+        const fallback = await this.firstUsableSelection();
+        if (fallback !== undefined) {
+          this.selected = fallback;
+          await this.config.workspaceState.update(MODEL_SELECTION_KEY, fallback);
         }
       }
       if (this.selected !== undefined) {
@@ -312,6 +304,53 @@ export class ProviderRouter implements ModelClient {
       this.config.log?.(`Baiton: provider router init failed: ${describe(err)}`);
       this.selected = undefined;
     }
+  }
+
+  /**
+   * The first enabled provider that offers at least one model, or undefined
+   * when no provider is currently usable. Availability is re-read here.
+   */
+  private async firstUsableSelection(): Promise<ModelSelection | undefined> {
+    const enabled = await this.enabledProviders();
+    for (const id of PROVIDER_IDS) {
+      if (!enabled.includes(id)) {
+        continue;
+      }
+      const models = await this.modelsFor(id);
+      const model = models[0];
+      if (model !== undefined) {
+        return { provider: id, model };
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Re-reads availability after something outside the router changed it — an
+   * API key stored or cleared, Copilot sign-in. When nothing is selected, or
+   * the active provider is no longer enabled, the selection is re-resolved
+   * (and the new one persisted); either way the change event fires exactly
+   * once so the Chat view repaints its Provider & Model dropdown. A listener
+   * must therefore tolerate an event whose selection did not actually change.
+   * Every failure is swallowed and logged: this runs off a command handler and
+   * must never reject.
+   */
+  public async refresh(): Promise<void> {
+    try {
+      const enabled = await this.enabledProviders();
+      const active = this.selected;
+      if (active === undefined || !enabled.includes(active.provider)) {
+        const next = await this.firstUsableSelection();
+        this.selected = next;
+        if (next !== undefined) {
+          this.lastModel.set(next.provider, next.model);
+          await this.config.workspaceState.update(MODEL_SELECTION_KEY, next);
+        }
+      }
+    } catch (err) {
+      this.config.log?.(`Baiton: refreshing provider availability failed: ${describe(err)}`);
+    }
+    this.fire();
   }
 
   /**
@@ -349,7 +388,9 @@ export class ProviderRouter implements ModelClient {
   /**
    * Subscribes to selection changes. The returned handle removes the
    * listener on `dispose()`. A throwing listener is logged and skipped so it
-   * cannot break a provider switch for the others.
+   * cannot break a provider switch for the others. A listener must tolerate a
+   * call whose selection is unchanged: `refresh()` fires even when re-reading
+   * availability changed nothing, so the view still repaints.
    */
   public onDidChangeSelection(listener: (s: ModelSelection | undefined) => void): {
     dispose(): void;
