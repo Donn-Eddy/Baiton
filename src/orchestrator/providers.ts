@@ -1,0 +1,166 @@
+/**
+ * The orchestrator's provider catalog (host-free core).
+ *
+ * This module is the single source of truth for the inference providers the
+ * orchestrator can talk to: their ids, dropdown order, human labels, default
+ * OpenAI-compatible base URLs, per-provider SecretStorage key names, built-in
+ * model lists and the persisted {@link ModelSelection}. It carries no `vscode`
+ * import and touches no host API, so the host glue and the unit tests both
+ * consume this same contract — like src/orchestrator/webviewProtocol.ts.
+ */
+
+/** One orchestrator inference provider, keyed by its stable id. */
+export type ProviderId = 'copilot' | 'google' | 'opencode' | 'mistral' | 'openai';
+
+/** Dropdown order, top to bottom. */
+export const PROVIDER_IDS: readonly ProviderId[] = ['copilot', 'google', 'opencode', 'mistral', 'openai'] as const;
+
+/** True when `value` is one of the known {@link ProviderId} strings. */
+export function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === 'string' && (PROVIDER_IDS as readonly string[]).includes(value);
+}
+
+/** One catalog entry: how a provider is labelled, reached and keyed. */
+export interface ProviderInfo {
+  /** Stable id, also the suffix of the SecretStorage key. */
+  id: ProviderId;
+  /** Human label shown as the <optgroup> label in the Chat dropdown. */
+  label: string;
+  /** Default OpenAI-compatible base URL, or undefined when the provider is not HTTP-based (`copilot`) or takes its base URL from settings (`openai`). */
+  defaultBaseUrl?: string;
+  /** True when the provider needs an API key in SecretStorage before it can be used. */
+  requiresKey: boolean;
+  /** True when endpoint/model come from the `baiton.orchestrator.endpoint` / `baiton.orchestrator.model` settings rather than this catalog (`openai` only). */
+  usesSettings: boolean;
+  /** Built-in model ids offered in the dropdown; empty means "enumerate at runtime / free text". */
+  models: readonly string[];
+}
+
+/**
+ * The provider catalog, one record per {@link ProviderId}.
+ *
+ * Base URLs are the prefix `completionsUrl()` (src/orchestrator/modelClient.ts)
+ * appends `/chat/completions` to, so the Google base keeps its trailing slash
+ * and the Mistral base stays bare — do not add `/chat/completions` by hand.
+ */
+export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
+  // Enumerated at runtime through `vscode.lm.selectChatModels({ vendor: 'copilot' })`;
+  // the catalog deliberately carries no model ids and needs no API key or HTTP base.
+  copilot: {
+    id: 'copilot',
+    label: 'GitHub Copilot',
+    requiresKey: false,
+    usesSettings: false,
+    models: [],
+  },
+  google: {
+    id: 'google',
+    label: 'Google AI Studio',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    requiresKey: true,
+    usesSettings: false,
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+  },
+  // Base URL and model list follow the hosted Go gateway; the model ids are
+  // documented at OPENCODE_MODEL_DOC_URL (src/adapter/opencode.ts,
+  // 'https://opencode.ai/docs/go/'). Keep both here so a later correction is
+  // a one-line edit.
+  opencode: {
+    id: 'opencode',
+    label: 'OpenCode Go',
+    defaultBaseUrl: 'https://opencode.ai/zen/v1',
+    requiresKey: true,
+    usesSettings: false,
+    models: ['grok-code', 'qwen3-coder', 'kimi-k2', 'claude-sonnet-4-5', 'gpt-5-codex'],
+  },
+  mistral: {
+    id: 'mistral',
+    label: 'Mistral AI',
+    defaultBaseUrl: 'https://api.mistral.ai/v1',
+    requiresKey: true,
+    usesSettings: false,
+    models: [
+      'mistral-large-latest',
+      'mistral-medium-latest',
+      'mistral-small-latest',
+      'codestral-latest',
+      'devstral-medium-latest',
+    ],
+  },
+  // The endpoint/model come from the `baiton.orchestrator.endpoint` /
+  // `baiton.orchestrator.model` settings, not from this catalog.
+  openai: {
+    id: 'openai',
+    label: 'OpenAI / Custom',
+    requiresKey: true,
+    usesSettings: true,
+    models: [],
+  },
+};
+
+/** The catalog entry of `id`; callers never index {@link PROVIDERS} by hand. */
+export function providerInfo(id: ProviderId): ProviderInfo {
+  return PROVIDERS[id];
+}
+
+/** Catalog entries in dropdown order. */
+export function providerCatalog(): readonly ProviderInfo[] {
+  return PROVIDER_IDS.map((id) => PROVIDERS[id]);
+}
+
+/** Prefix of every per-provider SecretStorage key. */
+export const PROVIDER_SECRET_KEY_PREFIX = 'baiton.orchestrator.key.';
+
+/**
+ * The SecretStorage key holding `id`'s API key, or undefined for a provider
+ * that needs none (`copilot`).
+ */
+export function providerSecretKey(id: ProviderId): string | undefined {
+  return PROVIDERS[id].requiresKey ? `${PROVIDER_SECRET_KEY_PREFIX}${id}` : undefined;
+}
+
+/**
+ * The pre-multi-provider single-key secret, written by
+ * `setOrchestratorApiKey` in src/activation/setApiKey.ts. Migrated once into
+ * the `openai` slot by the host glue; kept here so the migration and the
+ * catalog cannot drift.
+ */
+export const LEGACY_API_KEY_SECRET = 'baiton.orchestrator.apiKey';
+
+/** The active provider + model pair, as persisted and as sent to the webview. */
+export interface ModelSelection {
+  provider: ProviderId;
+  model: string;
+}
+
+/** `workspaceState` key the active selection is persisted under. */
+export const MODEL_SELECTION_KEY = 'baiton.orchestrator.selection';
+
+/** The first built-in model for `id`, or undefined when the catalog lists none. */
+export function defaultModelFor(id: ProviderId): string | undefined {
+  return PROVIDERS[id].models[0];
+}
+
+/**
+ * Read an untrusted value (a `workspaceState` blob written by an older
+ * build, or a webview `selectModel` payload) as a {@link ModelSelection}.
+ * Returns undefined for anything that is not an object with a known
+ * `provider` and a non-empty string `model`. Pure; never throws.
+ */
+export function normalizeModelSelection(value: unknown): ModelSelection | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  if (!isProviderId(raw['provider'])) {
+    return undefined;
+  }
+  if (typeof raw['model'] !== 'string') {
+    return undefined;
+  }
+  const model = raw['model'].trim();
+  if (model.length === 0) {
+    return undefined;
+  }
+  return { provider: raw['provider'], model };
+}
