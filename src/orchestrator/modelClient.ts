@@ -17,6 +17,8 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { StringDecoder } from 'string_decoder';
+import { randomUUID } from 'crypto';
+import type { DialectId } from './providers';
 
 /** A single chat message on the OpenAI chat-completions path. */
 export interface ChatMessage {
@@ -69,6 +71,12 @@ export interface CompletionRequest {
    */
   tools?: ToolSpec[];
   signal: AbortSignal;
+  /**
+   * The chat session this completion belongs to. Never serialised into the
+   * request body; it is handed to `extraHeaders` so a provider can derive a
+   * per-conversation header (OpenCode's `x-opencode-session`).
+   */
+  sessionId?: string;
   /** Optional listener for streamed assistant-text fragments (streaming path only). */
   onDelta?: DeltaListener;
 }
@@ -151,8 +159,54 @@ export interface ModelClientConfig {
   isStreaming?: StreamingCapabilityProvider;
   /** The configured completion token cap; omitted from the request unless positive. */
   getMaxTokens?: MaxTokensProvider;
+  /** The wire shaping applied to messages; defaults to {@link openAiDialect}. */
+  dialect?: WireDialect;
+  /** Extra request headers for every completion; lowercased and merged under the base headers. */
+  extraHeaders?: ExtraHeadersProvider;
   /** Connect budget in milliseconds; defaults to 30000 (Req 7.1). */
   connectTimeoutMs?: number;
+}
+
+/** Extra request headers for one completion, keyed by lowercase header name. */
+export type ExtraHeadersProvider = (req: CompletionRequest) => Record<string, string> | undefined;
+
+/**
+ * The OpenCode extra-header provider: tags every request with the extension's
+ * User-Agent and a stable per-conversation session uuid.
+ */
+export interface OpenCodeHeaderOptions {
+  /** Extension version, rendered as `baiton/<version>` in User-Agent. */
+  version: string;
+  /** Session-uuid generator; defaults to crypto.randomUUID (injectable for tests). */
+  newSessionId?: () => string;
+}
+
+/**
+ * Builds an {@link ExtraHeadersProvider} for OpenCode: sends
+ * `user-agent: baiton/<version>` and `x-opencode-session: <uuid>`.
+ *
+ * The uuid is stable across a whole conversation: a closed-over map is keyed by
+ * the completion's `sessionId` (or by `''` when the caller has not threaded one
+ * yet), minting through `newSessionId` on first miss and reusing thereafter.
+ * The map grows one entry per distinct chat session for the lifetime of the
+ * factory — a handful of chat sessions per window, never keyed on anything
+ * unbounded like the transcript.
+ */
+export function openCodeExtraHeaders(options: OpenCodeHeaderOptions): ExtraHeadersProvider {
+  const mint = options.newSessionId ?? randomUUID;
+  const sessionIds = new Map<string, string>();
+  return (req) => {
+    const key = req.sessionId ?? '';
+    let uuid = sessionIds.get(key);
+    if (uuid === undefined) {
+      uuid = mint();
+      sessionIds.set(key, uuid);
+    }
+    return {
+      'user-agent': `baiton/${options.version}`,
+      'x-opencode-session': uuid,
+    };
+  };
 }
 
 /** The default connect budget: 30 seconds (Req 7.1). */
@@ -161,6 +215,15 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 /** Trims a trailing slash so we can safely append the completions path. */
 function normalizeBase(endpoint: string): string {
   return endpoint.replace(/\/+$/, '');
+}
+
+/** Lowercases every header name so provider casing cannot produce duplicates. */
+function lowercaseKeys(h: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(h)) {
+    out[key.toLowerCase()] = h[key];
+  }
+  return out;
 }
 
 /**
@@ -196,6 +259,137 @@ function toWireToolCall(call: ToolCall): unknown {
     type: 'function',
     function: { name: call.name, arguments: call.arguments },
   };
+}
+
+/** One message as it goes on the wire; `content` may be omitted entirely. */
+export interface WireMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string;
+  tool_call_id?: string;
+  tool_calls?: unknown[];
+}
+
+/** Shapes the recorded transcript into the messages array a provider accepts. */
+export interface WireDialect {
+  shapeMessages(messages: ChatMessage[]): WireMessage[];
+}
+
+/**
+ * Reproduces today's OpenAI serialisation: `content` is always present
+ * (even when empty) on every message, and an assistant turn's `tool_calls`
+ * are carried verbatim.
+ */
+export function shapeOpenAiMessages(messages: ChatMessage[]): WireMessage[] {
+  return messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+    ...(m.tool_call_id !== undefined ? { tool_call_id: m.tool_call_id } : {}),
+    ...(m.tool_calls !== undefined && m.tool_calls.length > 0
+      ? { tool_calls: m.tool_calls.map(toWireToolCall) }
+      : {}),
+  }));
+}
+
+/** The default dialect: byte-for-byte what the client has always sent. */
+export const openAiDialect: WireDialect = { shapeMessages: shapeOpenAiMessages };
+
+/**
+ * Returns `args` unchanged when it parses to a non-null, non-array JSON object,
+ * otherwise `'{}'`. Never throws.
+ */
+export function sanitizeToolArguments(args: string): string {
+  try {
+    const parsed: unknown = JSON.parse(args);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? args : '{}';
+  } catch {
+    return '{}';
+  }
+}
+
+/** Wire `tool_calls` entry for the Gemini dialect, with its arguments sanitised. */
+function toGeminiWireToolCall(call: ToolCall): unknown {
+  return {
+    id: call.id,
+    type: 'function',
+    function: { name: call.name, arguments: sanitizeToolArguments(call.arguments) },
+  };
+}
+
+/**
+ * The Gemini wire dialect. Google's OpenAI-compatible endpoint rejects three
+ * things today's unified transcript can produce:
+ *
+ * 1. an `assistant` message whose `content` is empty on the same turn that
+ *    carries `tool_calls`;
+ * 2. a `tool` message carrying stray keys or sitting detached from the
+ *    assistant turn that requested its `tool_call_id`;
+ * 3. a tool-call `arguments` value that is not a JSON object string.
+ *
+ * {@link shapeGeminiMessages} fixes all three in one pass: the `content` key is
+ * omitted on tool-call assistant turns with empty/whitespace content, tool
+ * messages are re-attached directly after their requesting assistant turn and
+ * carry exactly `role`/`tool_call_id`/`content`, and argument strings are
+ * sanitised to JSON objects. Orphan tool messages are dropped.
+ */
+export function shapeGeminiMessages(messages: ChatMessage[]): WireMessage[] {
+  // Bucket tool messages by the call id they answer, so each can be re-attached
+  // directly after the assistant turn that requested it.
+  const buckets = new Map<string, ChatMessage[]>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.tool_call_id !== undefined) {
+      const bucket = buckets.get(m.tool_call_id);
+      if (bucket) {
+        bucket.push(m);
+      } else {
+        buckets.set(m.tool_call_id, [m]);
+      }
+    }
+  }
+
+  const out: WireMessage[] = [];
+  for (const m of messages) {
+    if (m.role === 'tool') {
+      continue; // Re-attached after their assistant turn, or dropped when orphan.
+    }
+    if (
+      m.role === 'assistant' &&
+      m.tool_calls !== undefined &&
+      m.tool_calls.length > 0
+    ) {
+      out.push({
+        role: 'assistant',
+        ...(m.content.trim() !== '' ? { content: m.content } : {}),
+        tool_calls: m.tool_calls.map(toGeminiWireToolCall),
+      });
+      // Drain each call's tool responses right after this turn, in call order
+      // (transcript order for repeats of the same id).
+      for (const call of m.tool_calls) {
+        for (const tool of buckets.get(call.id) ?? []) {
+          out.push({
+            role: 'tool',
+            tool_call_id: tool.tool_call_id,
+            content: tool.content ?? '',
+          });
+        }
+      }
+      continue;
+    }
+    // Plain messages (system, user, assistant without calls — including an
+    // assistant turn whose tool_calls array is empty).
+    out.push({ role: m.role, content: m.content });
+  }
+  return out;
+}
+
+/** The Gemini dialect implementation. */
+export const geminiDialect: WireDialect = { shapeMessages: shapeGeminiMessages };
+
+/**
+ * Maps a provider catalog {@link DialectId} to its wire-dialect implementation,
+ * so the host glue stays catalog-driven without providers.ts importing code.
+ */
+export function dialectFor(id: DialectId): WireDialect {
+  return id === 'gemini' ? geminiDialect : openAiDialect;
 }
 
 /**
@@ -364,30 +558,25 @@ export class OpenAiModelClient implements ModelClient {
       this.config.getMaxTokens ? await this.config.getMaxTokens() : undefined,
     );
     const url = completionsUrl(endpoint);
+    const dialect = this.config.dialect ?? openAiDialect;
     const body = JSON.stringify({
       model,
-      messages: req.messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-        ...(m.tool_call_id !== undefined ? { tool_call_id: m.tool_call_id } : {}),
-        ...(m.tool_calls !== undefined && m.tool_calls.length > 0
-          ? { tool_calls: m.tool_calls.map(toWireToolCall) }
-          : {}),
-      })),
+      messages: dialect.shapeMessages(req.messages),
       tools: toWireTools(req.tools ?? []),
       stream: streaming,
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
     });
+    const extra = this.config.extraHeaders?.(req) ?? {};
 
     if (!streaming) {
-      const raw = await this.postCompletion(url, apiKey, body, req.signal);
+      const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra);
       return this.parseNonStreaming(raw);
     }
 
     // Streaming: feed each response chunk to the SSE parser as it arrives so
     // assistant text reaches `onDelta` incrementally rather than at end of body.
     const parser = new SseCompletionParser(req.onDelta);
-    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk));
+    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk), extra);
     return parser.finish();
   }
 
@@ -403,6 +592,7 @@ export class OpenAiModelClient implements ModelClient {
     body: string,
     signal: AbortSignal,
     onChunk?: (text: string) => void,
+    extra: Record<string, string> = {},
   ): Promise<string> {
     const connectTimeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const transport = url.protocol === 'https:' ? https : http;
@@ -439,6 +629,9 @@ export class OpenAiModelClient implements ModelClient {
         {
           method: 'POST',
           headers: {
+            // Extras first, base last: a provider's extras must never be able
+            // to clobber auth, content type or content length.
+            ...lowercaseKeys(extra),
             'content-type': 'application/json',
             authorization: `Bearer ${apiKey}`,
             'content-length': Buffer.byteLength(body).toString(),

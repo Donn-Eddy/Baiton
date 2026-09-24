@@ -34,7 +34,17 @@ export interface ProviderInfo {
   usesSettings: boolean;
   /** Built-in model ids offered in the dropdown; empty means "enumerate at runtime / free text". */
   models: readonly string[];
+  /** The wire shaping applied to messages before serialisation; `gemini` fixes Google's tool-chaining rejections. */
+  dialect: DialectId;
+  /** Extra headers added to every request; `opencode` adds User-Agent and x-opencode-session. */
+  headerStyle: HeaderStyleId;
 }
+
+/** Which wire shaping a provider's OpenAI-compatible payload needs. */
+export type DialectId = 'openai' | 'gemini';
+
+/** Which extra request headers a provider needs beyond the OpenAI defaults. */
+export type HeaderStyleId = 'default' | 'opencode';
 
 /**
  * The provider catalog, one record per {@link ProviderId}.
@@ -52,6 +62,10 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
     requiresKey: false,
     usesSettings: false,
     models: [],
+    // Unused: the Copilot client is not HTTP, so neither the dialect nor the
+    // header style applies to it.
+    dialect: 'openai',
+    headerStyle: 'default',
   },
   google: {
     id: 'google',
@@ -60,6 +74,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
     requiresKey: true,
     usesSettings: false,
     models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    dialect: 'gemini',
+    headerStyle: 'default',
   },
   // Base URL and model list follow the hosted Go gateway; the model ids are
   // documented at OPENCODE_MODEL_DOC_URL (src/adapter/opencode.ts,
@@ -72,6 +88,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
     requiresKey: true,
     usesSettings: false,
     models: ['grok-code', 'qwen3-coder', 'kimi-k2', 'claude-sonnet-4-5', 'gpt-5-codex'],
+    dialect: 'openai',
+    headerStyle: 'opencode',
   },
   mistral: {
     id: 'mistral',
@@ -86,6 +104,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
       'codestral-latest',
       'devstral-medium-latest',
     ],
+    dialect: 'openai',
+    headerStyle: 'default',
   },
   // The endpoint/model come from the `baiton.orchestrator.endpoint` /
   // `baiton.orchestrator.model` settings, not from this catalog.
@@ -95,6 +115,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
     requiresKey: true,
     usesSettings: true,
     models: [],
+    dialect: 'openai',
+    headerStyle: 'default',
   },
 };
 
