@@ -44,14 +44,23 @@ export interface ProviderInfo {
 export type DialectId = 'openai' | 'gemini';
 
 /** Which extra request headers a provider needs beyond the OpenAI defaults. */
+/**
+ * The catalog has no `extraHeadersFor(style)` counterpart that would build an
+ * {@link ExtraHeadersProvider} from a `HeaderStyleId` alone: the OpenCode
+ * header provider needs the extension version at construction time, an
+ * argument a host-free catalog cannot supply. The host glue branches on the
+ * catalog field by hand and calls `openCodeExtraHeaders({ version })`
+ * (src/orchestrator/modelClient.ts) for the `'opencode'` style itself.
+ */
 export type HeaderStyleId = 'default' | 'opencode';
 
 /**
  * The provider catalog, one record per {@link ProviderId}.
  *
  * Base URLs are the prefix `completionsUrl()` (src/orchestrator/modelClient.ts)
- * appends `/chat/completions` to, so the Google base keeps its trailing slash
- * and the Mistral base stays bare — do not add `/chat/completions` by hand.
+ * appends `/chat/completions` to: `normalizeBase` strips every trailing slash
+ * first, so the Google base's trailing slash is harmless rather than required —
+ * do not add `/chat/completions` by hand.
  */
 export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
   // Enumerated at runtime through `vscode.lm.selectChatModels({ vendor: 'copilot' })`;

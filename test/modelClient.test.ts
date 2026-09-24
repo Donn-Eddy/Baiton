@@ -1025,4 +1025,56 @@ describe('OpenAiModelClient', () => {
       }
     });
   });
+
+  describe('shapeGeminiMessages multi-round chaining', () => {
+    const toolCall = (id: string, args = '{}'): ToolCall => ({ id, name: 'read_file', arguments: args });
+    const wireCall = (id: string, args = '{}'): unknown => ({
+      id,
+      type: 'function',
+      function: { name: 'read_file', arguments: args },
+    });
+
+    it('shapes a two-round chain into the exact alternating order with no empty content on either tool-call turn', () => {
+      const out = shapeGeminiMessages([
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('r1')] },
+        { role: 'tool', content: 'first result', tool_call_id: 'r1' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('r2')] },
+        { role: 'tool', content: 'second result', tool_call_id: 'r2' },
+        { role: 'assistant', content: 'all done', tool_calls: undefined } as ChatMessage,
+      ]);
+      assert.deepStrictEqual(out, [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', tool_calls: [wireCall('r1')] },
+        { role: 'tool', tool_call_id: 'r1', content: 'first result' },
+        { role: 'assistant', tool_calls: [wireCall('r2')] },
+        { role: 'tool', tool_call_id: 'r2', content: 'second result' },
+        { role: 'assistant', content: 'all done' },
+      ]);
+      // Neither tool-call assistant turn emitted an empty `content` key.
+      for (const msg of out) {
+        if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+          assert.ok(!('content' in msg) || msg.content! !== '');
+        }
+      }
+    });
+
+    it('drains tool results destructively: a repeated tool_call_id emits its results once, after the first requester', () => {
+      const out = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('dup')] },
+        { role: 'tool', content: 'only once', tool_call_id: 'dup' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('dup')] },
+        { role: 'tool', content: 'never repeated', tool_call_id: 'dup' },
+      ]);
+      // Every buffered result of the repeated id is consumed by the first
+      // requester; nothing is re-emitted after the second turn, where a
+      // duplicate tool shape would be rejected by Gemini.
+      assert.deepStrictEqual(out, [
+        { role: 'assistant', tool_calls: [wireCall('dup')] },
+        { role: 'tool', tool_call_id: 'dup', content: 'only once' },
+        { role: 'tool', tool_call_id: 'dup', content: 'never repeated' },
+        { role: 'assistant', tool_calls: [wireCall('dup')] },
+      ]);
+    });
+  });
 });

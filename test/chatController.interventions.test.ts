@@ -89,9 +89,12 @@ class FakeWebview implements ChatWebview {
 class FakeModelClient implements ModelClient {
   public readonly queue: CompletionResult[] = [];
   public readonly requests: Array<{ role: string; content: string }[]> = [];
+  /** The `sessionId` each request carried, in completion order. */
+  public readonly sessionIds: Array<string | undefined> = [];
 
-  public async complete(req: { messages: { role: string; content: string }[] }): Promise<CompletionResult> {
+  public async complete(req: { messages: { role: string; content: string }[]; sessionId?: string }): Promise<CompletionResult> {
     this.requests.push(req.messages);
+    this.sessionIds.push(req.sessionId);
     const next = this.queue.shift();
     return next ?? { content: 'done', tool_calls: [] };
   }
@@ -367,5 +370,41 @@ describe('ChatController interventions', () => {
     assert.strictEqual(projected.length, 1);
     assert.ok(projected[0].content.includes('Decision: approved'));
     assert.ok(projected[0].content.includes('[intervention] Approve spec "x"?'));
+  });
+
+  it('sends the same sessionId the transcript is written under, stable within a session and distinct after newChat', async () => {
+    // Send 1: the controller allocates and remembers the chat session id. The
+    // loop makes two completions (tool call + final), so wait for exactly 2.
+    startSend();
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');
+    const run1Card = webview.last('showIntervention')!.intervention;
+    await webview.send({ type: 'answerIntervention', id: run1Card.id, answer: { kind: 'approved' } });
+    await awaitRunEnd(2);
+
+    const first = client.sessionIds[0];
+    assert.ok(first !== undefined, 'the controller threads its session id into every completion');
+    assert.strictEqual(client.sessionIds[1], first, 'stays stable across one session');
+
+    // The id matches the one the transcript was written under (the filename).
+    const file = path.basename(transcriptFile());
+    assert.ok(file.includes(first), `transcript file ${file} carries session id ${first}`);
+
+    // Send 2 in the same session, answering its own confirm card: both
+    // completions reuse the same id. The send is fire-and-forget: the handler
+    // resolves only when the whole loop ends.
+    void webview.send({ type: 'sendText', text: 'continue' }).catch(() => {});
+    await awaitRunEnd(3);
+    assert.strictEqual(client.sessionIds[2], first, 'second send in one session keeps the id');
+
+    // A new chat switches sessions, so the next send keys on a different id.
+    await webview.send({ type: 'newChat' });
+    await waitFor(() => {
+      const active = webview.last('setActiveSession')?.sessionId;
+      return active !== undefined && active !== first;
+    }, 'the controller to switch to a fresh session');
+    void webview.send({ type: 'sendText', text: 'fresh' }).catch(() => {});
+    await awaitRunEnd(4);
+    const last = client.sessionIds[client.sessionIds.length - 1];
+    assert.ok(last !== undefined && last !== first, 'a different chat session yields a different sessionId');
   });
 });

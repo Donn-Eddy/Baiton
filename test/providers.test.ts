@@ -13,6 +13,7 @@ import {
   providerInfo,
   providerSecretKey,
 } from '../src/orchestrator/providers';
+import { completionsUrl } from '../src/orchestrator/modelClient';
 
 describe('orchestrator/providers', () => {
   describe('catalog shape', () => {
@@ -49,6 +50,37 @@ describe('orchestrator/providers', () => {
       for (const id of PROVIDER_IDS) {
         assert.strictEqual(providerInfo(id), PROVIDERS[id]);
       }
+    });
+  });
+
+  describe('wire dialect + header style', () => {
+    it('every entry carries a dialect: only google needs the gemini shaping', () => {
+      for (const entry of providerCatalog()) {
+        assert.strictEqual(entry.dialect, entry.id === 'google' ? 'gemini' : 'openai');
+      }
+      assert.strictEqual(PROVIDERS.google.dialect, 'gemini');
+    });
+
+    it('every entry carries a headerStyle: only opencode is non-default', () => {
+      assert.strictEqual(PROVIDERS.opencode.headerStyle, 'opencode');
+      for (const entry of providerCatalog()) {
+        assert.strictEqual(entry.headerStyle, entry.id === 'opencode' ? 'opencode' : 'default');
+      }
+    });
+
+    it('the HTTP catalog bases resolve to their /chat/completions paths', () => {
+      assert.strictEqual(
+        completionsUrl(PROVIDERS.google.defaultBaseUrl!).href,
+        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      );
+      assert.strictEqual(
+        completionsUrl(PROVIDERS.mistral.defaultBaseUrl!).href,
+        'https://api.mistral.ai/v1/chat/completions',
+      );
+      assert.strictEqual(
+        completionsUrl(PROVIDERS.opencode.defaultBaseUrl!).href,
+        'https://opencode.ai/zen/v1/chat/completions',
+      );
     });
   });
 

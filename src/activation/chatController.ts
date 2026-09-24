@@ -710,6 +710,7 @@ export class ChatController {
         roundBound: resolveRoundBound(this.deps.roundBound()),
         signal: this.abort.signal,
         onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
+        sessionId,
       });
       await this.renderConversation(transcript.path);
     } catch (err) {

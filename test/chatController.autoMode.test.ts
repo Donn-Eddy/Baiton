@@ -100,9 +100,12 @@ class FakeWebview implements ChatWebview {
 class FakeModelClient implements ModelClient {
   public readonly queue: CompletionResult[] = [];
   public readonly requests: Array<{ role: string; content: string }[]> = [];
+  /** The `sessionId` each request carried, in completion order. */
+  public readonly sessionIds: Array<string | undefined> = [];
 
-  public async complete(req: { messages: { role: string; content: string }[] }): Promise<CompletionResult> {
+  public async complete(req: { messages: { role: string; content: string }[]; sessionId?: string }): Promise<CompletionResult> {
     this.requests.push(req.messages);
+    this.sessionIds.push(req.sessionId);
     const next = this.queue.shift();
     return next ?? { content: 'done', tool_calls: [] };
   }
@@ -591,5 +594,20 @@ describe('ChatController auto mode', () => {
     const card = webview.last('showIntervention')!.intervention;
     assert.strictEqual(card.escalation!.command, 'python scripts/seed.py --db dev');
     assert.strictEqual(card.escalation!.summary, 'Executor wants to run Bash');
+  });
+
+  it('threads the controller session id through every tool-loop completion', async () => {
+    startSend();
+    // Auto mode is off, so the ask pends; approve it the way the view would.
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');
+    const card = webview.last('showIntervention')!.intervention;
+    await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'approved' } });
+    await awaitRunEnd();
+
+    // Rounds 1 and 2 ran in one send, so two completions; both carried the same
+    // live session id the controller had allocated for the chat.
+    const [first, second] = client.sessionIds;
+    assert.ok(first !== undefined, 'completion carries a sessionId');
+    assert.strictEqual(second, first, 'the same session id reuses across rounds');
   });
 });

@@ -91,6 +91,7 @@ function makeDeps(
       }),
     roundBound: overrides.roundBound ?? DEFAULT_ROUND_BOUND,
     signal: overrides.signal ?? new AbortController().signal,
+    ...(overrides.sessionId !== undefined ? { sessionId: overrides.sessionId } : {}),
   };
   return { deps, appended, calls };
 }
@@ -329,6 +330,31 @@ describe('runToolLoop', () => {
     assert.strictEqual((client as ScriptedClient).requests.length, 1);
     const last = appended[appended.length - 1];
     assert.deepStrictEqual(last, { role: 'assistant', content: STOPPED_NOTICE });
+  });
+
+  it('threads sessionId onto every completion when the dep is supplied', async () => {
+    const client = new ScriptedClient([
+      toolCallCompletion('call_s', 'read_file', '{}'),
+      finalCompletion('done'),
+    ]);
+    const { deps } = makeDeps({ client, sessionId: 's-1' });
+
+    await runToolLoop([{ role: 'user', content: 'go' }], deps);
+
+    for (const req of (client as ScriptedClient).requests) {
+      assert.strictEqual(req.sessionId, 's-1');
+    }
+    assert.strictEqual((client as ScriptedClient).requests.length, 2);
+  });
+
+  it('omits the sessionId key from the request when the dep is not supplied', async () => {
+    const client = new ScriptedClient([finalCompletion('done')]);
+    const { deps } = makeDeps({ client });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    const req = (client as ScriptedClient).requests[0];
+    assert.strictEqual('sessionId' in req, false);
   });
 
   it('keeps history and the persisted transcript in sync as it appends', async () => {

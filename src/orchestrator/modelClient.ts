@@ -362,7 +362,10 @@ export function shapeGeminiMessages(messages: ChatMessage[]): WireMessage[] {
         tool_calls: m.tool_calls.map(toGeminiWireToolCall),
       });
       // Drain each call's tool responses right after this turn, in call order
-      // (transcript order for repeats of the same id).
+      // (transcript order for repeats of the same id). The drain is destructive:
+      // a tool_call_id repeated across two assistant turns answers only its
+      // first requester, so the reused tool results are not re-emitted after the
+      // second turn — a duplicate shape that Gemini rejects.
       for (const call of m.tool_calls) {
         for (const tool of buckets.get(call.id) ?? []) {
           out.push({
@@ -371,6 +374,7 @@ export function shapeGeminiMessages(messages: ChatMessage[]): WireMessage[] {
             content: tool.content ?? '',
           });
         }
+        buckets.delete(call.id);
       }
       continue;
     }
