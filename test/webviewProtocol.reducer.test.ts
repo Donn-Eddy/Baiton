@@ -13,9 +13,12 @@ import {
   InterventionView,
   ConversationItem,
   SessionItem,
+  ProviderGroup,
+  WebviewToHost,
   escalatedInterventionView,
   normalizeEscalation,
 } from '../src/orchestrator/webviewProtocol';
+import type { ModelSelection } from '../src/orchestrator/providers';
 
 describe('webview protocol reducer', () => {
   const rec = (
@@ -594,6 +597,108 @@ describe('interventions', () => {
 
     const off = reduce(on, { type: 'setAutoMode', enabled: false });
     assert.strictEqual(off.autoMode, false);
+  });
+
+  describe('provider selection', () => {
+    const rec = (
+      role: RenderRecord['role'],
+      content: string,
+    ): RenderRecord => ({ role, content });
+    const groups: ProviderGroup[] = [
+      { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }] },
+      {
+        id: 'opencode',
+        label: 'OpenCode Go',
+        enabled: false,
+        reason: 'Set an API key for OpenCode Go to use it.',
+        models: [],
+      },
+    ];
+
+    it('a fresh state has no providers and no selection', () => {
+      const seed = initialWebviewState();
+      assert.deepStrictEqual(seed.providers, []);
+      assert.strictEqual(seed.selection, null);
+    });
+
+    it('setProviders sets the groups and the selection', () => {
+      const selection: ModelSelection = { provider: 'google', model: 'gemini-2.5-pro' };
+      const next = reduce(initialWebviewState(), { type: 'setProviders', groups, selection });
+
+      assert.deepStrictEqual(next.providers, groups);
+      // Copied, not aliased, mirroring the setConversations test.
+      assert.notStrictEqual(next.providers, groups);
+      assert.deepStrictEqual(next.selection, { provider: 'google', model: 'gemini-2.5-pro' });
+    });
+
+    it('setProviders with a null selection clears the active pair', () => {
+      const seeded: WebviewState = {
+        ...initialWebviewState(),
+        providers: groups,
+        selection: { provider: 'google', model: 'gemini-2.5-pro' },
+      };
+      const next = reduce(seeded, { type: 'setProviders', groups, selection: null });
+
+      assert.strictEqual(next.selection, null);
+    });
+
+    it('setProviders replaces the previous groups', () => {
+      const first = reduce(initialWebviewState(), {
+        type: 'setProviders',
+        groups,
+        selection: { provider: 'google', model: 'gemini-2.5-pro' },
+      });
+      const replacement: ProviderGroup[] = [
+        { id: 'mistral', label: 'Mistral AI', enabled: true, models: [{ id: 'mistral-large-latest' }] },
+      ];
+      const next = reduce(first, {
+        type: 'setProviders',
+        groups: replacement,
+        selection: { provider: 'mistral', model: 'mistral-large-latest' },
+      });
+
+      assert.deepStrictEqual(next.providers, replacement);
+      assert.deepStrictEqual(next.selection, { provider: 'mistral', model: 'mistral-large-latest' });
+    });
+
+    it('setProviders leaves the rest of the state alone', () => {
+      const seed: WebviewState = {
+        ...initialWebviewState(),
+        conversations: [{ id: 'workspace', label: 'Workspace' }],
+        activeId: 'workspace',
+        records: [rec('user', 'hi')],
+        busy: true,
+        autoMode: true,
+        empty: { endpoint: 'http://x', model: 'm' },
+      };
+      const next = reduce(seed, { type: 'setProviders', groups, selection: null });
+
+      assert.deepStrictEqual(next.conversations, [{ id: 'workspace', label: 'Workspace' }]);
+      assert.strictEqual(next.activeId, 'workspace');
+      assert.deepStrictEqual(next.records, [rec('user', 'hi')]);
+      assert.strictEqual(next.busy, true);
+      assert.strictEqual(next.autoMode, true);
+      assert.strictEqual(next.activeSessionId, '');
+      assert.deepStrictEqual(next.empty, { endpoint: 'http://x', model: 'm' });
+    });
+
+    it('setProviders does not mutate its input state', () => {
+      const seed: WebviewState = { ...initialWebviewState() };
+      const clone: WebviewState = JSON.parse(JSON.stringify(seed));
+      const snapshot = JSON.stringify(groups);
+
+      reduce(seed, { type: 'setProviders', groups, selection: null });
+
+      assert.deepStrictEqual(seed, clone, 'the input state is unchanged');
+      assert.strictEqual(JSON.stringify(groups), snapshot, 'the input groups are unchanged');
+    });
+
+    it('selectModel carries the provider and the model', () => {
+      const msg: WebviewToHost = { type: 'selectModel', provider: 'mistral', model: 'codestral-latest' };
+      assert.strictEqual(msg.type, 'selectModel');
+      assert.strictEqual(msg.provider, 'mistral');
+      assert.strictEqual(msg.model, 'codestral-latest');
+    });
   });
 
   describe('escalated cards', () => {

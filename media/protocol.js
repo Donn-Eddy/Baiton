@@ -22,6 +22,8 @@
       records: [],
       busy: false,
       autoMode: false,
+      providers: [],
+      selection: null,
     };
   }
 
@@ -146,6 +148,11 @@
         return Object.assign({}, state, { busy: msg.busy });
       case 'setEmptyState':
         return Object.assign({}, state, { empty: { endpoint: msg.endpoint, model: msg.model } });
+      case 'setProviders':
+        return Object.assign({}, state, {
+          providers: msg.groups.slice(),
+          selection: msg.selection,
+        });
       default:
         // Unknown message: leave the state unchanged rather than throwing in the
         // webview. The typed union in the TypeScript source guards this at the

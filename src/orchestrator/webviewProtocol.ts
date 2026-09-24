@@ -14,9 +14,32 @@
  */
 
 import type { InterventionAnswer, InterventionKind, InterventionOption } from './interventions';
+import type { ModelSelection, ProviderId } from './providers';
 
 /** The fix action an inline error message can offer (Req 13). */
 export type FixAction = 'openSettings' | 'setApiKey';
+
+/** One model offered under a provider group in the Chat dropdown. */
+export interface ProviderModelItem {
+  /** The model id sent back with `selectModel` (e.g. 'gemini-2.5-pro'). */
+  id: string;
+  /** Optional display text; the webview falls back to `id` when absent. */
+  label?: string;
+}
+
+/** One <optgroup> in the Provider & Model dropdown, in catalog order. */
+export interface ProviderGroup {
+  /** The provider id (`'copilot' | 'google' | 'opencode' | 'mistral' | 'openai'`). */
+  id: ProviderId;
+  /** The human label rendered as the group's optgroup label. */
+  label: string;
+  /** False when the provider cannot be used yet (no key, no endpoint, Copilot absent). */
+  enabled: boolean;
+  /** Why the group is disabled; present only when `enabled` is false. */
+  reason?: string;
+  /** The models offered under this group; empty for a disabled provider. */
+  models: ProviderModelItem[];
+}
 
 /** A message the host sends to the webview to update its rendered state. */
 export type HostToWebview =
@@ -38,6 +61,11 @@ export type HostToWebview =
   | { type: 'setBusy'; busy: boolean }
   /** Show the empty state with the configured endpoint and model values. */
   | { type: 'setEmptyState'; endpoint: string | null; model: string | null }
+  /**
+   * Replace the Provider & Model dropdown: the ordered provider groups and
+   * the active selection, or `null` when no provider/model is chosen yet.
+   */
+  | { type: 'setProviders'; groups: ProviderGroup[]; selection: ModelSelection | null }
   /**
    * Append a fragment of streamed assistant text. Grows the trailing streaming
    * assistant record, or starts one when the last record is not streaming.
@@ -80,6 +108,8 @@ export type WebviewToHost =
   | { type: 'deleteSession'; sessionId: string }
   /** The user picked a conversation in the selector. */
   | { type: 'selectConversation'; conversationId: string }
+  /** The user picked a provider/model pair in the dropdown. */
+  | { type: 'selectModel'; provider: ProviderId; model: string }
   /** The user triggered the fix action on an inline error message. */
   | { type: 'triggerFix'; action: FixAction }
   /** The user answered an intervention card. */
@@ -230,6 +260,10 @@ export interface WebviewState {
   busy: boolean;
   /** Whether Auto mode is on: safe asks are auto-approved, the rest escalate. */
   autoMode: boolean;
+  /** The provider groups rendered in the Provider & Model dropdown. */
+  providers: ProviderGroup[];
+  /** The active provider/model pair, or null when none is chosen. */
+  selection: ModelSelection | null;
   /** The inline error currently shown, if any. */
   error?: { message: string; action?: FixAction };
   /** The empty-state descriptor, if the conversation has no messages. */
@@ -251,6 +285,8 @@ export function initialWebviewState(): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
+    providers: [],
+    selection: null,
   };
 }
 
@@ -280,6 +316,7 @@ export function initialWebviewState(): WebviewState {
  *   session id.
  * - `showError` sets the inline error; `setBusy` toggles the busy flag.
  * - `setEmptyState` sets the empty-state descriptor.
+ * - `setProviders` replaces the provider groups and the active selection.
  */
 export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
   switch (msg.type) {
@@ -386,6 +423,8 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
       return { ...state, busy: msg.busy };
     case 'setEmptyState':
       return { ...state, empty: { endpoint: msg.endpoint, model: msg.model } };
+    case 'setProviders':
+      return { ...state, providers: [...msg.groups], selection: msg.selection };
     default:
       // Exhaustiveness guard: every HostToWebview variant is handled above, so
       // `msg` is `never` here. Assigning it proves the switch is exhaustive.
