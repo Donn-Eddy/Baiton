@@ -23,6 +23,7 @@ function fake() {
 
 export const window = {
   showInputBox: (options) => fake().window.showInputBox(options),
+  showQuickPick: (items, options) => fake().window.showQuickPick(items, options),
   showInformationMessage: (message, ...args) => fake().window.showInformationMessage(message, ...args),
   showWarningMessage: (message, ...args) => fake().window.showWarningMessage(message, ...args),
   showErrorMessage: (message, ...args) => fake().window.showErrorMessage(message, ...args),

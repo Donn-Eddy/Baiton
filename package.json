@@ -79,6 +79,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.setProviderApiKey",
+        "title": "Set Provider API Key",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.openConfigPanel",
         "title": "Open Config Panel",
         "category": "Baiton"
@@ -186,6 +191,10 @@
         },
         {
           "command": "baiton.setOrchestratorApiKey",
+          "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.setProviderApiKey",
           "when": "baiton.activated"
         }
       ],

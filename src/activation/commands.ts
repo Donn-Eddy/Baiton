@@ -24,8 +24,9 @@
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
  *     as an alias of the new Open Chat command.
- *   - `baiton.setOrchestratorApiKey` — store the orchestrator API key in
- *     SecretStorage (Req 17).
+ *   - `baiton.setProviderApiKey` — pick a provider and set or clear its API
+ *     key in SecretStorage; `baiton.setOrchestratorApiKey` is kept as an
+ *     alias of it for existing key bindings (Req 17).
  *   - The Spec_Explorer tree view (with its filesystem watcher) whose inline
  *     actions forward to the same `baiton.plan/execute/review/replan/stop/
  *     approve` commands with `[slug, todoId]` / `[slug]` (Req 2, 5, 6, 18.4).
@@ -121,7 +122,7 @@ import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
 import { planPath } from './specLister';
-import { setOrchestratorApiKey } from './setApiKey';
+import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
 import { revealConfigPanel } from './openConfigPanelView';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
@@ -146,6 +147,7 @@ export const COMMANDS = {
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
+  setProviderApiKey: 'baiton.setProviderApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
 } as const;
 
@@ -293,6 +295,9 @@ export function registerCommands(
   surface: Surface,
 ): CommandSurface {
   const disposables: vscode.Disposable[] = [];
+  // One-time migration of the pre-multi-provider single-key secret into the
+  // `openai` slot; gated by a globalState flag so it runs at most once.
+  void migrateLegacyApiKey(context.secrets, context.globalState);
   const { workspace } = activation;
   /**
    * Accessor for the live configuration. The config object is replaced wholesale
@@ -676,8 +681,12 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(COMMANDS.chat, () => openChat()),
     vscode.commands.registerCommand(COMMANDS.openChat, () => openChat()),
+    vscode.commands.registerCommand(COMMANDS.setProviderApiKey, () =>
+      setProviderApiKey(context.secrets),
+    ),
+    // Kept as an alias so existing key bindings and the README keep working.
     vscode.commands.registerCommand(COMMANDS.setApiKey, () =>
-      setOrchestratorApiKey(context.secrets),
+      setProviderApiKey(context.secrets),
     ),
   );
 
@@ -1624,7 +1633,7 @@ function readOrchestratorConfig(): OrchestratorConfig {
  */
 function triggerFix(action: 'openSettings' | 'setApiKey'): void {
   if (action === 'setApiKey') {
-    void vscode.commands.executeCommand(COMMANDS.setApiKey);
+    void vscode.commands.executeCommand(COMMANDS.setProviderApiKey);
     return;
   }
   void vscode.commands.executeCommand(
