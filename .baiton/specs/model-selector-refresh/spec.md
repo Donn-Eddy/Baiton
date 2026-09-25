@@ -1,12 +1,12 @@
 ---
 version: 1
 name: model-selector-refresh
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 1c225fa5931f455b22f5d2970177a8ab3c623d9a
+branch: baiton/model-selector-refresh
+approved_rev: d3c2518d802317f5b765cacdb44fe55ffa24ba9ecd633df587b9cf4b5524ffd4
 ---
 
 # OVERVIEW
