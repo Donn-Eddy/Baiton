@@ -326,12 +326,21 @@ export class ClaudeAdapter implements Adapter {
 
   /**
    * Race `promise` against `signal`: resolves `undefined` on the signal's
-   * `abort` event, else resolves `promise`'s value (or `undefined` when
-   * `promise` rejects). The `abort` listener is ALWAYS removed, and the losing
-   * promise's rejection is consumed here, so no unhandled rejection ever
-   * escapes to unrelated suites.
+   * `abort` event (or immediately when the signal is already aborted on entry
+   * — a fetcher may abort synchronously, and no event will fire again), else
+   * resolves `promise`'s value (or `undefined` when `promise` rejects). The
+   * `abort` listener is ALWAYS removed, and the losing promise's rejection is
+   * consumed here, so no unhandled rejection ever escapes to unrelated suites.
    */
   private raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
+    if (signal?.aborted === true) {
+      // The signal completed before this race began (an injected fetcher can
+      // abort synchronously): no `abort` EVENT will ever fire again, so no
+      // listener is installed — the promise is merely consumed so a losing
+      // rejection can never be unhandled, and the caller resolves undefined.
+      promise.catch(() => undefined);
+      return Promise.resolve(undefined);
+    }
     if (signal === undefined) {
       return promise;
     }

@@ -876,6 +876,22 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
     assert.strictEqual(Object.prototype.hasOwnProperty.call(appended, 'custom'), false);
   });
 
+  it('a fetcher that aborts the ctx signal synchronously and never settles resolves undefined promptly', async () => {
+    // Regression (T04 review): the abort can complete INSIDE the fetch call,
+    // before raceAbort subscribes — no abort event ever fires then, so the
+    // race must check signal.aborted itself instead of hanging forever.
+    const controller = new AbortController();
+    const abortAndHang = (): Promise<Result<ModelsDevFeed, string>> => {
+      controller.abort();
+      return new Promise(() => undefined);
+    };
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: abortAndHang });
+    const started = Date.now();
+    const caps = await adapter.discoverModels(ctx({ signal: controller.signal }));
+    assert.strictEqual(caps, undefined);
+    assert.ok(Date.now() - started < 2000, 'the synchronously-aborted race must not hang until the timeout');
+  });
+
   it('the registry wires discoverModels for claude only, and the old constructor forms still compile', () => {
     assert.strictEqual(typeof createAdapterRegistry().require('claude').discoverModels, 'function');
     assert.strictEqual(typeof createAdapterRegistry().require('antigravity').discoverModels, 'undefined');
