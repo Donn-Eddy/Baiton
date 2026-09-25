@@ -63,7 +63,7 @@ Unit tests cover: feed parsing from fixture; catalog store stale/preserve semant
 # TODOS
 
 - [done] T01 Add host-free model catalog core: snapshot types, stale-aware CatalogStore with memento persistence, and preserve-existing merge helper (files: src/orchestrator/modelCatalog.ts, src/orchestrator/index.ts, test/modelCatalog.test.ts)
-- [executing] T02 Add models.dev feed client parsing https://models.dev/api.json?type=all into generic provider/model records with injected fetch and fixture tests (files: src/orchestrator/modelsDev.ts, test/fixtures/modelsDev.sample.json, test/modelsDev.test.ts)
+- [executed] T02 Add models.dev feed client parsing https://models.dev/api.json?type=all into generic provider/model records with injected fetch and fixture tests (files: src/orchestrator/modelsDev.ts, test/fixtures/modelsDev.sample.json, test/modelsDev.test.ts)
 - [pending] T03 Extend the adapter boundary with an optional discoverModels seam and make agentCapabilities overlay discovered snapshots while keeping antigravity unchanged (after T01; files: src/adapter/adapter.ts, src/adapter/index.ts, src/adapter/antigravity.ts, test/adapter.index.test.ts)
 - [pending] T04 Implement Claude model discovery from the models.dev anthropic provider with the curated list as fallback so current models such as claude-opus-5-5 appear (after T02, T03; files: src/adapter/claude.ts, test/adapter.claude.test.ts)
 - [pending] T05 Implement Codex model discovery through `codex app-server` JSON-RPC (initialize, initialized, model/list) including supported reasoning efforts (after T03; files: src/adapter/codex.ts, test/adapter.codex.test.ts)
