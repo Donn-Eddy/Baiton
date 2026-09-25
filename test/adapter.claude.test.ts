@@ -3,10 +3,32 @@ import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ClaudeAdapter, claudeSystemPromptFlags } from '../src/adapter/claude';
+import {
+  ANTHROPIC_PROVIDER_ID,
+  CLAUDE_EFFORTS,
+  CLAUDE_MODEL_ID_PREFIX,
+  CLAUDE_MODELS,
+  CLAUDE_REQUIRED_MODEL,
+  ClaudeAdapter,
+  ClaudeFeedFetcher,
+  claudeModelsFromFeed,
+  claudeSystemPromptFlags,
+} from '../src/adapter/claude';
 import { createAdapterRegistry, AskRelayDescriptor } from '../src/adapter';
-import { AGENT_BINARY } from '../src/adapter/adapter';
-import type { LaunchRequest } from '../src/adapter/adapter';
+import {
+  AGENT_BINARY,
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
+  capabilitiesToCatalogFetch,
+} from '../src/adapter/adapter';
+import type {
+  AgentCapabilities,
+  DiscoveryContext,
+  LaunchRequest,
+} from '../src/adapter/adapter';
+import type { FeedProvider, ModelsDevFeed } from '../src/orchestrator/modelsDev';
+import { parseModelsDevFeed } from '../src/orchestrator/modelsDev';
+import { err, isOk, ok } from '../src/model/result';
+import type { Result } from '../src/model/result';
 import {
   ACCEPT_EDITS_MODE,
   CLAUDE_RELAY_HOOK_MATCHER,
@@ -562,4 +584,304 @@ describe('ClaudeAdapter ask-relay hook wiring', function () {
       },
     );
   }).timeout(4000);
+});
+
+describe('claudeModelsFromFeed (model-selector-refresh T04)', () => {
+  // test/fixtures/modelsDev.sample.json is read untyped (fs + JSON.parse, not
+  // resolveJsonModule import) like test/modelsDev.test.ts does.
+  const fixtureText = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
+
+  /** Parse untyped feed JSON, failing loudly; narrows to the parsed feed. */
+  function requireFeed(raw: unknown): ModelsDevFeed {
+    const result = parseModelsDevFeed(raw);
+    if (!isOk(result)) {
+      throw new Error(`feed failed to parse: ${result.error}`);
+    }
+    return result.value;
+  }
+
+  /** A synthetic FeedProvider with the given feed-order models. */
+  function providerOf(id: string, models: { id: string; name?: string }[]): FeedProvider {
+    return {
+      id,
+      name: id,
+      env: [],
+      models: models.map((m) => ({
+        id: m.id,
+        name: m.name ?? m.id,
+        reasoning: false,
+        toolCall: false,
+        attachment: false,
+      })),
+    };
+  }
+
+  const fixtureFeed = requireFeed(JSON.parse(fixtureText));
+
+  it('yields the fixture claude ids in feed order, including claude-opus-5-5 (absent from the curated list)', () => {
+    const entries = claudeModelsFromFeed(fixtureFeed);
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.id),
+      ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    );
+    assert.ok(
+      !(CLAUDE_MODELS as readonly string[]).includes('claude-opus-5-5'),
+      'claude-opus-5-5 must be absent from the curated CLAUDE_MODELS so this proves discovery adds it',
+    );
+  });
+
+  it('carries provider: anthropic and the fixture names as labels on every fixture entry', () => {
+    const entries = claudeModelsFromFeed(fixtureFeed);
+    assert.deepStrictEqual(entries.map((entry) => entry.provider), [
+      ANTHROPIC_PROVIDER_ID,
+      ANTHROPIC_PROVIDER_ID,
+      ANTHROPIC_PROVIDER_ID,
+    ]);
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.label),
+      ['Claude Opus 5.5', 'Claude Sonnet 5', 'Claude Haiku 4.5'],
+    );
+    for (const entry of entries) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, 'efforts'), false);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, 'defaultEffort'), false);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, 'custom'), false);
+    }
+  });
+
+  it('an entry whose name equals its id carries NO label own key', () => {
+    const entries = claudeModelsFromFeed([providerOf('anthropic', [{ id: 'claude-sonnet-5' }])]);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'label'), false);
+  });
+
+  it('drops non-claude- ids of the anthropic provider and Claude-looking ids of other providers', () => {
+    const feed: ModelsDevFeed = [
+      providerOf('anthropic', [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }, { id: 'some-other-model' }]),
+      providerOf('opencode', [{ id: 'claude-sonnet-5', name: 'impostor' }, { id: 'anthropic/claude-sonnet-5' }]),
+    ];
+    assert.deepStrictEqual(
+      claudeModelsFromFeed(feed).map((entry) => entry.id),
+      ['claude-sonnet-5'],
+    );
+    // The fixture's opencode zen model is claude-prefixed too and must not leak.
+    const fixtureIds = claudeModelsFromFeed(fixtureFeed).map((entry) => entry.id);
+    assert.ok(!fixtureIds.some((id) => id.endsWith('-zen')));
+  });
+
+  it('a feed with no anthropic provider, and an anthropic provider with no models, both yield []', () => {
+    assert.deepStrictEqual(claudeModelsFromFeed([providerOf('google', [{ id: 'gemini-x' }])]), []);
+    assert.deepStrictEqual(claudeModelsFromFeed([providerOf('anthropic', [])]), []);
+  });
+
+  it('a duplicated id in an array-shaped provider block is emitted once (first occurrence wins)', () => {
+    const feed = requireFeed({
+      anthropic: {
+        id: 'anthropic',
+        models: [
+          { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+          { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 duplicate' },
+        ],
+      },
+    });
+    const entries = claudeModelsFromFeed(feed);
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.id),
+      ['claude-sonnet-5'],
+    );
+    assert.strictEqual(entries[0].label, 'Claude Sonnet 5');
+  });
+
+  it('provider id matching is case/whitespace tolerant', () => {
+    const entries = claudeModelsFromFeed([providerOf('Anthropic ', [{ id: 'claude-sonnet-5' }])]);
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.id),
+      ['claude-sonnet-5'],
+    );
+  });
+
+  it('trims blank model ids and keeps the CLAUDE_MODEL_ID_PREFIX contract', () => {
+    const feed = requireFeed({
+      anthropic: {
+        id: 'anthropic',
+        models: [{ id: '  claude-sonnet-5  ', name: 'Claude Sonnet 5' }, { id: '   ', name: 'blank' }],
+      },
+    });
+    assert.deepStrictEqual(
+      claudeModelsFromFeed(feed).map((entry) => entry.id),
+      ['claude-sonnet-5'],
+    );
+    assert.strictEqual(CLAUDE_MODEL_ID_PREFIX, 'claude-');
+  });
+});
+
+describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
+  /** The parsed checked-in fixture feed. */
+  const fixtureFeed: ModelsDevFeed = (() => {
+    const result = parseModelsDevFeed(
+      JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8')),
+    );
+    assert.strictEqual(result.ok, true, 'the checked-in fixture feed must parse');
+    return (result as { value: ModelsDevFeed }).value;
+  })();
+
+  /** Build a DiscoveryContext with sensible defaults overridable per test. */
+  function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+    return { timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS, ...overrides };
+  }
+
+  /** A recording fake fetcher resolving the fixed result; returns it plus the recorded calls. */
+  function fakeFetcher(result: Result<ModelsDevFeed, string>): {
+    fetcher: ClaudeFeedFetcher;
+    calls: { timeoutMs: number }[];
+  } {
+    const calls: { timeoutMs: number }[] = [];
+    const fetcher: ClaudeFeedFetcher = async (options) => {
+      calls.push({ timeoutMs: options.timeoutMs });
+      return result;
+    };
+    return { fetcher, calls };
+  }
+
+  it('with ctx.feed resolves the fixture models with no network call and no provenance keys', async () => {
+    const { fetcher, calls } = fakeFetcher(ok(fixtureFeed));
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fetcher });
+    const caps = await adapter.discoverModels(ctx({ feed: fixtureFeed }));
+
+    assert.ok(caps !== undefined, 'a good feed must resolve capabilities');
+    assert.deepStrictEqual([...caps.models], ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5']);
+    assert.deepStrictEqual([...caps.efforts], [...CLAUDE_EFFORTS]);
+    assert.ok(caps.modelEntries !== undefined && caps.modelEntries.length === 3);
+    assert.deepStrictEqual(
+      caps.modelEntries.map((entry) => entry.id),
+      ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    );
+    for (const key of ['source', 'stale', 'staleReason', 'fetchedAt', 'modelLink']) {
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(caps, key),
+        false,
+        `capabilities must carry no own ${key} key`,
+      );
+    }
+    assert.strictEqual(calls.length, 0, 'ctx.feed must make the fetcher never be called');
+  });
+
+  it('capabilitiesToCatalogFetch round-trips the resolved capabilities into the CatalogFetch shape', async () => {
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fakeFetcher(ok(fixtureFeed)).fetcher });
+    const caps = (await adapter.discoverModels(ctx({ feed: fixtureFeed }))) as AgentCapabilities;
+    const entries = caps.modelEntries as readonly { id: string; provider?: string; label?: string }[];
+    const roundTripped = capabilitiesToCatalogFetch(caps);
+    assert.deepStrictEqual(
+      roundTripped.models.map((entry) => entry.id),
+      entries.map((entry) => entry.id),
+    );
+    assert.deepStrictEqual(roundTripped.efforts, ['low', 'medium', 'high']);
+  });
+
+  it('without ctx.feed the injected fetcher is called exactly once with the clamped timeoutMs', async () => {
+    const { fetcher, calls } = fakeFetcher(ok(fixtureFeed));
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fetcher });
+    const caps = await adapter.discoverModels(ctx());
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].timeoutMs, DEFAULT_DISCOVERY_TIMEOUT_MS);
+    assert.deepStrictEqual([...(caps as AgentCapabilities).models], [
+      'claude-opus-5-5',
+      'claude-sonnet-5',
+      'claude-haiku-4-5',
+    ]);
+
+    const narrow = fakeFetcher(ok(fixtureFeed));
+    await new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: narrow.fetcher }).discoverModels(ctx({ timeoutMs: 25 }));
+    assert.strictEqual(narrow.calls.length, 1);
+    assert.strictEqual(narrow.calls[0].timeoutMs, 25);
+
+    const wide = fakeFetcher(ok(fixtureFeed));
+    await new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: wide.fetcher }).discoverModels(ctx({ timeoutMs: 60_000 }));
+    assert.strictEqual(wide.calls.length, 1);
+    assert.strictEqual(wide.calls[0].timeoutMs, DEFAULT_DISCOVERY_TIMEOUT_MS);
+  });
+
+  it('a failed fetch resolves undefined and the error message reaches the log sink', async () => {
+    const logged: string[] = [];
+    const { fetcher } = fakeFetcher(err('models.dev request timed out after 10ms'));
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fetcher });
+    const caps = await adapter.discoverModels(ctx({ log: (message) => logged.push(message) }));
+    assert.strictEqual(caps, undefined);
+    assert.ok(
+      logged.some((message) => message.includes('models.dev request timed out after 10ms')),
+      `expected the fetch error in the log sink: ${JSON.stringify(logged)}`,
+    );
+  });
+
+  it('a throwing fetcher, and one returning a rejected promise, both resolve undefined (never throw)', async () => {
+    const throwing = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, {
+      fetchFeed: (() => {
+        throw new Error('boom');
+      }) as unknown as ClaudeFeedFetcher,
+    });
+    assert.strictEqual(await throwing.discoverModels(ctx()), undefined);
+
+    const rejecting = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, {
+      fetchFeed: async () => {
+        throw new Error('rejected');
+      },
+    });
+    assert.strictEqual(await rejecting.discoverModels(ctx()), undefined);
+  });
+
+  it('a feed without anthropic, and an anthropic block of only non-claude- ids, resolve undefined', async () => {
+    const noAnthropicFeed: ModelsDevFeed = [
+      { id: 'google', name: 'google', env: [], models: [{ id: 'gemini-x', name: 'Gemini X', reasoning: false, toolCall: false, attachment: false }] },
+    ];
+    const noClaudeFeed: ModelsDevFeed = [
+      { id: 'anthropic', name: 'anthropic', env: [], models: [{ id: 'some-other-model', name: 'o', reasoning: false, toolCall: false, attachment: false }] },
+    ];
+    const a = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fakeFetcher(ok(noAnthropicFeed)).fetcher });
+    assert.strictEqual(await a.discoverModels(ctx()), undefined);
+    const b = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fakeFetcher(ok(noClaudeFeed)).fetcher });
+    assert.strictEqual(await b.discoverModels(ctx()), undefined);
+  });
+
+  it('an already-aborted signal resolves undefined and never calls the fetcher', async () => {
+    const { fetcher, calls } = fakeFetcher(ok(fixtureFeed));
+    const controller = new AbortController();
+    controller.abort();
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fetcher });
+    const caps = await adapter.discoverModels(ctx({ signal: controller.signal }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(calls.length, 0);
+  });
+
+  it('a never-settling fetch plus a mid-flight abort resolves undefined promptly', async () => {
+    const never = () => new Promise<{ ok: true; value: ModelsDevFeed }>(() => undefined);
+    const controller = new AbortController();
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: never as unknown as ClaudeFeedFetcher });
+    setTimeout(() => controller.abort(), 0);
+    const started = Date.now();
+    const caps = await adapter.discoverModels(ctx({ signal: controller.signal }));
+    assert.strictEqual(caps, undefined);
+    assert.ok(Date.now() - started < 2000, 'the aborted call must not hang until the timeout');
+  });
+
+  it('a feed omitting claude-sonnet-5 still ends with CLAUDE_REQUIRED_MODEL, exactly once and equal to CLAUDE_MODELS[0]', async () => {
+    const feed: ModelsDevFeed = [
+      { id: 'anthropic', name: 'anthropic', env: [], models: [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5', reasoning: false, toolCall: false, attachment: false }] },
+    ];
+    const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed: fakeFetcher(ok(feed)).fetcher });
+    const caps = (await adapter.discoverModels(ctx({ feed }))) as AgentCapabilities;
+    assert.ok(caps !== undefined);
+    assert.strictEqual([...caps.models].filter((id) => id === CLAUDE_REQUIRED_MODEL).length, 1);
+    assert.strictEqual(caps.models[caps.models.length - 1], CLAUDE_REQUIRED_MODEL);
+    assert.strictEqual(CLAUDE_REQUIRED_MODEL, CLAUDE_MODELS[0]);
+    const appended = caps.modelEntries![caps.modelEntries!.length - 1];
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(appended, 'custom'), false);
+  });
+
+  it('the registry wires discoverModels for claude only, and the old constructor forms still compile', () => {
+    assert.strictEqual(typeof createAdapterRegistry().require('claude').discoverModels, 'function');
+    assert.strictEqual(typeof createAdapterRegistry().require('antigravity').discoverModels, 'undefined');
+    // Additive-parameter compile guarantees: both older call sites construct.
+    const defaultsOnly = new ClaudeAdapter();
+    const modeOnly = new ClaudeAdapter(DEFAULT_PERMISSION_MODE);
+    assert.strictEqual(defaultsOnly.launch(req()).shellPath, modeOnly.launch(req()).shellPath);
+  });
 });
