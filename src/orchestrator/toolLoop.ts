@@ -55,6 +55,8 @@ export interface ToolLoopDeps {
    * the complete assistant message once the completion resolves.
    */
   onDelta?: DeltaListener;
+  /** The chat session id, forwarded to every completion so provider headers stay stable for a conversation. */
+  sessionId?: string;
 }
 
 /** Serializes a tool result into the `content` of its answering `tool` message. */
@@ -92,6 +94,7 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
         tools: deps.tools,
         signal: deps.signal,
         ...(deps.onDelta !== undefined ? { onDelta: deps.onDelta } : {}),
+        ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
       });
     } catch (err) {
       // An abort surfaces as a rejected completion; treat it as a stop (Req 14.7).

@@ -313,6 +313,115 @@ an audit trace you can read. Its default is off.
 Which asks can reach these cards at all depends on the per-adapter relay,
 documented in **Harness ask relay (per-adapter probe findings)** below.
 
+### Providers and models
+
+The orchestrator chat talks to one of five inference providers, chosen per
+workspace in the Chat view's **Provider & Model** dropdown. The whole catalog —
+ids, order, labels, base URLs, secret key names and built-in model lists —
+lives in `src/orchestrator/providers.ts`; the host side that owns one client
+per provider and delegates each completion to the active one is
+`ProviderRouter` in `src/activation/providerRouter.ts`. Switching providers
+changes the model used by the chat, by the tool loop and by Auto mode's
+stage-(b) evaluator at once, and changes nothing on disk: transcripts
+(`.baiton/chat/<id>.jsonl`, `.baiton/specs/<slug>/chat/<id>.jsonl`) are
+untouched by a switch.
+
+| Provider | Id | API key | Models |
+| --- | --- | --- | --- |
+| GitHub Copilot | `copilot` | none — runs in-window on your Copilot subscription | enumerated live from `vscode.lm.selectChatModels({ vendor: 'copilot' })` |
+| Google AI Studio | `google` | `baiton.orchestrator.key.google` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, against `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| OpenCode Go | `opencode` | `baiton.orchestrator.key.opencode` | `grok-code`, `qwen3-coder`, `kimi-k2`, `claude-sonnet-4-5`, `gpt-5-codex`, against `https://opencode.ai/zen/v1` |
+| Mistral AI | `mistral` | `baiton.orchestrator.key.mistral` | `mistral-large-latest`, `mistral-medium-latest`, `mistral-small-latest`, `codestral-latest`, `devstral-medium-latest`, against `https://api.mistral.ai/v1` |
+| OpenAI / Custom | `openai` | `baiton.orchestrator.key.openai` | whatever `baiton.orchestrator.model` names, against `baiton.orchestrator.endpoint` |
+
+The base URLs above are prefixes: the client appends `/chat/completions` and a
+trailing slash is stripped first, so do not append the path yourself.
+
+#### Per-provider API keys
+
+Each keyed provider has one API key in VS Code SecretStorage under
+`baiton.orchestrator.key.<provider>`; GitHub Copilot needs none.
+**Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) quick-picks the
+keyed providers in catalog order (each row showing `API key set` /
+`No API key set`), then takes the value in a masked input. A non-empty submit
+stores the trimmed value and confirms without ever showing it; an empty submit
+clears an existing key, or reports that nothing changed when none was stored;
+dismissing either box changes nothing and says nothing; a storage failure
+leaves the previous value untouched and reports an error.
+
+**Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) stays
+registered as an alias so existing key bindings keep working. The
+pre-multi-provider single secret `baiton.orchestrator.apiKey` is migrated once
+into the `openai` slot (`migrateLegacyApiKey` in `src/activation/setApiKey.ts`,
+gated by the `baiton.orchestrator.keyMigrated` flag in `globalState`), so an
+already-configured setup keeps working with nothing to re-enter; the legacy
+secret is never deleted and is no longer read.
+
+#### The Provider & Model dropdown
+
+A `<select>` at the top of the Chat view, with one `<optgroup>` per provider
+in catalog order. A provider with no key (or Copilot when it is unavailable)
+renders as a disabled group whose options are disabled too, and a **Set API
+key…** link appears beside the dropdown whenever at least one group is
+disabled; its tooltip lists each disabled provider's reason — the exact
+strings are `providerNeedsKeyReason(id)` ("Set an API key for <label> to use
+it."), `PROVIDER_NEEDS_ENDPOINT_REASON` ("Set baiton.orchestrator.endpoint to
+use OpenAI / Custom.") and `COPILOT_UNAVAILABLE_REASON` ("GitHub Copilot is
+not available in this window. Install and sign in to GitHub Copilot Chat."),
+all in `src/orchestrator/providers.ts`. The host is authoritative exactly as
+the Auto-mode toggle is: picking a model posts `selectModel` and the dropdown
+repaints only when the host echoes `setProviders` back. A selection whose
+model no longer appears renders as a disabled `<provider> / <model>
+(unavailable)` placeholder, and the dropdown is disabled while a run is in
+flight or while no enabled provider offers a model.
+
+The selection is remembered per workspace in `workspaceState` under
+`baiton.orchestrator.selection` (`MODEL_SELECTION_KEY`), not in
+`settings.json` — the same arrangement as `baiton.chat.autoMode`. The Chat
+view's empty state shows the active **provider** and **model** instead of the
+endpoint URL.
+
+#### GitHub Copilot in-window mode
+
+Copilot runs through the in-process `vscode.lm` API
+(`src/orchestrator/copilotClient.ts`), so no API key, no endpoint and no
+network configuration of Baiton's is involved: access rides on the user's
+Copilot subscription. Models are enumerated live with
+`vscode.lm.selectChatModels({ vendor: 'copilot' })`, so the group is empty and
+disabled when Copilot Chat is not installed or is signed out. The first
+request raises VS Code's own consent dialog, justified with "Baiton runs the
+orchestrator chat and its tools through your Copilot subscription." Tool
+calling is full: `ToolSpec`s map to `LanguageModelChatTool`s, streamed text
+parts reach the chat as deltas, tool-call parts come back as `tool_calls`, and
+**Stop** cancels through a `CancellationTokenSource`. A missing model or a
+refused/blocked request maps onto the same error classes as the HTTP clients
+(`MissingConfigError('model')`, `UnreachableEndpointError`), so the inline
+error banner and its fix action behave unchanged; `MissingConfigError('apiKey')`
+is never raised for Copilot.
+
+#### Gemini tool chaining
+
+Google's OpenAI-compatible translation rejects (or silently truncates) three
+shapes the unified transcript can produce, which is why a multi-step tool loop
+used to stall until a new user message arrived. Requests to `google` therefore
+go through the `gemini` wire dialect (`shapeGeminiMessages` in
+`src/orchestrator/modelClient.ts`): an assistant turn carrying `tool_calls`
+omits `content` entirely when it would be empty or whitespace; every `tool`
+message is re-attached directly after the assistant turn that requested its
+`tool_call_id` and carries exactly `role`, `tool_call_id` and `content`;
+tool-call `arguments` are sanitised to a JSON object string. Orphan tool
+messages are dropped, and a `tool_call_id` reused across two assistant turns
+is drained onto its first requester only. The shaping is on the wire only —
+the transcript on disk is unchanged — so multi-step tool calls chain without
+user intervention.
+
+#### OpenCode Go request headers
+
+Every OpenCode request carries `user-agent: baiton/<extension version>` and
+`x-opencode-session: <uuid>`, where the uuid is minted once per chat session
+id (threaded through as `CompletionRequest.sessionId`) and stays stable for
+the whole conversation.
+
 ### The config panel
 
 The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
@@ -483,14 +592,32 @@ The state table above is the thing that decides which relay each adapter uses: t
   moves keyboard focus to the Chat view.
 - **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
   container and moves keyboard focus to the Configuration view.
-- **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — prompts
-  for the orchestrator API key with a masked input and stores it securely in VS
-  Code SecretStorage.
+- **Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) — picks one of
+  the keyed providers, then sets or clears its API key with a masked input,
+  stored in VS Code SecretStorage under `baiton.orchestrator.key.<provider>`.
+- **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — an
+  alias for **Baiton: Set Provider API Key**, kept so existing key bindings
+  keep working.
 
 ## Settings
 
-Besides the endpoint, model, streaming and round-bound settings, the
-orchestrator accepts `baiton.orchestrator.maxTokens`: the maximum number of
-tokens it asks the model to generate per completion, sent as `max_tokens`. It
-defaults to `0`, which leaves `max_tokens` off the request entirely so the
-endpoint's own default applies.
+- `baiton.orchestrator.endpoint` — base URL of the OpenAI-compatible
+  chat-completions endpoint used by the **OpenAI / Custom** provider. It does
+  not affect the other four providers, whose base URLs come from the provider
+  catalog (`src/orchestrator/providers.ts`).
+- `baiton.orchestrator.model` — the model id offered under **OpenAI /
+  Custom**. The other providers list their own models (Copilot enumerates its
+  own live).
+- `baiton.orchestrator.streaming` — stream assistant text into the chat as it
+  is generated; disable if the endpoint does not support server-sent events.
+- `baiton.orchestrator.maxTokens` — the maximum number of tokens asked for per
+  completion, sent as `max_tokens`. It defaults to `0`, which leaves
+  `max_tokens` off the request entirely so the endpoint's own default applies.
+- `baiton.orchestrator.roundBound` — the maximum number of model completions
+  in one orchestrator tool-loop run; unset, non-positive or below-1 values
+  fall back to 20.
+
+Deliberately **not** settings: API keys live in SecretStorage (see
+**Per-provider API keys** above) and the active provider/model lives in
+`workspaceState` under `baiton.orchestrator.selection` — see
+**Providers and models**.

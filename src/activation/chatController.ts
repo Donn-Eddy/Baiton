@@ -41,6 +41,13 @@
  *  - map {@link MissingConfigError} (by `.missing`) and
  *    {@link UnreachableEndpointError} to inline messages with the correct fix
  *    action, leaving the transcript unchanged on a fix action (Req 13.1–13.4);
+ *    a missing API key of the active provider names that provider and its fix
+ *    opens that provider's key prompt directly;
+ *  - post the Provider & Model dropdown (`setProviders`) on refresh and on
+ *    every router selection change, and show the active provider + model in
+ *    the empty state ("not configured" when nothing is selected);
+ *  - switch the active provider/model on `selectModel` for the next turn only,
+ *    leaving the transcript and the rendered conversation untouched;
  *  - show the empty state with the configured endpoint and model (indicating
  *    "not configured" for each unset one) and a Set API Key action (Req 13.5).
  */
@@ -58,6 +65,7 @@ import {
   interventionTranscriptRecord,
   interventionUpdate,
   phaseFor,
+  providerInfo,
   readTranscript,
   pendingToolRecord,
   PendingAskRegistry,
@@ -84,7 +92,10 @@ import type {
   InterventionEscalation,
   InterventionView,
   ModelClient,
+  ModelSelection,
   OrchestratorPhase,
+  ProviderGroup,
+  ProviderId,
   PermissionRequest,
   RenderRecord,
   ToolResult,
@@ -127,9 +138,28 @@ export interface OrchestratorConfig {
 /**
  * The fix-action sink the controller invokes when the user triggers an inline
  * error's fix. `openSettings` opens the relevant Baiton settings; `setApiKey`
- * invokes the Set Orchestrator API Key command (Req 13.1–13.4).
+ * invokes the Set Orchestrator API Key command (Req 13.1–13.4). `setApiKey`
+ * with a provider opens that provider's key prompt directly; without one it
+ * opens the provider quick-pick.
  */
-export type TriggerFix = (action: FixAction) => void | Promise<void>;
+export type TriggerFix = (action: FixAction, provider?: ProviderId) => void | Promise<void>;
+
+/** One provider's availability as the router reports it (see ProviderRouter.availability). */
+export interface ProviderAvailabilityView {
+  id: ProviderId;
+  label: string;
+  enabled: boolean;
+  reason?: string;
+  models: readonly string[];
+}
+
+/** The provider selection seam: the host binds it to the ProviderRouter. */
+export interface ProviderSource {
+  availability(): Promise<ProviderAvailabilityView[]>;
+  getSelection(): ModelSelection | undefined;
+  select(value: unknown): Promise<boolean>;
+  onDidChangeSelection(listener: (s: ModelSelection | undefined) => void): { dispose(): void };
+}
 
 /**
  * The seams the controller depends on, all injected so the controller stays
@@ -171,6 +201,12 @@ export interface ChatControllerDeps {
   config: OrchestratorConfig;
   /** Invoked on an inline-error fix action (Req 13.4). */
   triggerFix: TriggerFix;
+  /**
+   * The provider selection seam the host binds to the ProviderRouter. Absent,
+   * the controller posts no `setProviders`, `selectModel` is a no-op, and a
+   * missing API key surfaces with the generic wording as before.
+   */
+  providers?: ProviderSource;
   /** Surfaces a contained failure (e.g. a transcript-write error) to the log. */
   log(message: string): void;
   /**
@@ -274,6 +310,9 @@ export class ChatController {
   /** Scope keys whose legacy `chat.jsonl` migration has already been attempted. */
   private readonly migrated = new Set<string>();
 
+  /** The selection-change subscription from the last `start()`, disposed on `dispose()`/restart. */
+  private selectionSub: { dispose(): void } | undefined;
+
   constructor(deps: ChatControllerDeps) {
     this.deps = deps;
     this.sessions =
@@ -294,7 +333,41 @@ export class ChatController {
    */
   public start(): void {
     this.deps.webview.onMessage((msg) => void this.handle(msg));
+    this.selectionSub?.dispose();
+    this.selectionSub = this.deps.providers?.onDidChangeSelection(() => { void this.postProviders(); });
     void this.refresh();
+  }
+
+  /**
+   * Unwire the provider-selection subscription the last `start()` registered,
+   * so the host can release the view without leaving duplicate posts behind.
+   */
+  public dispose(): void {
+    this.selectionSub?.dispose();
+    this.selectionSub = undefined;
+  }
+
+  /**
+   * Post the Provider & Model dropdown state; a no-op without the seam.
+   */
+  private async postProviders(): Promise<void> {
+    const source = this.deps.providers;
+    if (source === undefined) {
+      return;
+    }
+    try {
+      const entries = await source.availability();
+      const groups: ProviderGroup[] = entries.map((e) => ({
+        id: e.id,
+        label: e.label,
+        enabled: e.enabled,
+        ...(e.reason !== undefined ? { reason: e.reason } : {}),
+        models: e.models.map((id) => ({ id })),
+      }));
+      this.deps.webview.post({ type: 'setProviders', groups, selection: source.getSelection() ?? null });
+    } catch (err) {
+      this.deps.log(`Baiton chat: could not list the providers: ${describe(err)}`);
+    }
   }
 
   /**
@@ -350,8 +423,11 @@ export class ChatController {
       case 'selectConversation':
         this.onSelectConversation(msg.conversationId);
         return;
+      case 'selectModel':
+        await this.onSelectModel(msg.provider, msg.model);
+        return;
       case 'triggerFix':
-        await this.deps.triggerFix(msg.action);
+        await this.deps.triggerFix(msg.action, msg.provider);
         return;
       case 'answerIntervention':
         await this.onAnswerIntervention(msg.id, msg.answer);
@@ -381,6 +457,30 @@ export class ChatController {
       await this.deps.autoModeMemory?.set(enabled);
     } catch (err) {
       this.deps.log(`Baiton chat: could not remember the Auto-mode setting: ${describe(err)}`);
+    }
+  }
+
+  /**
+   * The user picked a provider/model pair in the dropdown. The switch applies
+   * to the next completion only: the router resolves the provider per
+   * `complete()` call, so nothing is re-wired, no transcript is read, written
+   * or re-rendered, and no session is created.
+   */
+  private async onSelectModel(provider: ProviderId, model: string): Promise<void> {
+    const source = this.deps.providers;
+    if (source === undefined) {
+      return;
+    }
+    let ok = false;
+    try {
+      ok = await source.select({ provider, model });
+    } catch (err) {
+      this.deps.log(`Baiton chat: could not switch the model: ${describe(err)}`);
+    }
+    if (!ok) {
+      // Rejected or threw: repaint the dropdown from the unchanged selection so
+      // the view cannot drift from the host.
+      await this.postProviders();
     }
   }
 
@@ -710,6 +810,7 @@ export class ChatController {
         roundBound: resolveRoundBound(this.deps.roundBound()),
         signal: this.abort.signal,
         onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
+        sessionId,
       });
       await this.renderConversation(transcript.path);
     } catch (err) {
@@ -790,6 +891,7 @@ export class ChatController {
     await this.migrate(scope);
     this.conversations = await this.buildConversationItems();
     this.deps.webview.post({ type: 'setAutoMode', enabled: this.autoMode });
+    await this.postProviders();
     this.deps.webview.post({ type: 'setConversations', items: this.conversations });
     this.deps.webview.post({ type: 'setActive', conversationId: this.activeConversationId() });
     const listed = await this.postSessions(scope);
@@ -1024,10 +1126,12 @@ export class ChatController {
   private surfaceError(err: unknown): void {
     if (err instanceof MissingConfigError) {
       const action: FixAction = err.missing === 'apiKey' ? 'setApiKey' : 'openSettings';
+      const provider = err.missing === 'apiKey' ? this.deps.providers?.getSelection()?.provider : undefined;
       this.deps.webview.post({
         type: 'showError',
-        message: missingConfigMessage(err.missing),
+        message: provider !== undefined ? missingProviderKeyMessage(provider) : missingConfigMessage(err.missing),
         action,
+        ...(provider !== undefined ? { provider } : {}),
       });
       return;
     }
@@ -1108,6 +1212,13 @@ function describeAnswer(answer: InterventionAnswer | undefined): string {
     case 'text':
       return `answered: ${answer.text}`;
   }
+}
+
+/**
+ * The inline message naming the provider whose API key is missing.
+ */
+function missingProviderKeyMessage(provider: ProviderId): string {
+  return `The ${providerInfo(provider).label} API key is not configured.`;
 }
 
 /** The inline message naming the missing configuration value (Req 13.1, 13.2). */

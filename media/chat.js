@@ -20,7 +20,12 @@
  * choice is posted back with `answerIntervention`, a resolved card shows the
  * decision as a durable inline record. The composer control row also carries
  * an Auto-mode toggle immediately left of Stop that reflects `state.autoMode`,
- * stays enabled while busy, and posts `setAutoMode`.
+ * stays enabled while busy, and posts `setAutoMode`. The composer also carries
+ * the grouped Provider & Model dropdown: one <optgroup> per provider in catalog
+ * order, with disabled groups for providers without a key; picking an enabled
+ * model posts `selectModel` and the view repaints when the host echoes
+ * `setProviders` back (it never writes `state.selection` itself). The empty
+ * state shows the active provider + model rather than an endpoint URL.
  *
  * The input box characters survive hide/show because they are persisted to the
  * webview state via acquireVsCodeApi().setState (Req 16.5) — retained across
@@ -42,9 +47,11 @@
   const errorFix = /** @type {HTMLButtonElement} */ (document.getElementById('error-fix'));
   const transcriptEl = /** @type {HTMLElement} */ (document.getElementById('transcript'));
   const emptyState = /** @type {HTMLElement} */ (document.getElementById('empty-state'));
-  const emptyEndpoint = /** @type {HTMLElement} */ (document.getElementById('empty-endpoint'));
+  const emptyProvider = /** @type {HTMLElement} */ (document.getElementById('empty-provider'));
   const emptyModel = /** @type {HTMLElement} */ (document.getElementById('empty-model'));
   const emptySetKey = /** @type {HTMLButtonElement} */ (document.getElementById('empty-set-key'));
+  const modelSelect = /** @type {HTMLSelectElement} */ (document.getElementById('model-select'));
+  const modelSetKey = /** @type {HTMLButtonElement} */ (document.getElementById('model-set-key'));
   const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
   const sendBtn = /** @type {HTMLButtonElement} */ (document.getElementById('send'));
   const stopBtn = /** @type {HTMLButtonElement} */ (document.getElementById('stop'));
@@ -79,6 +86,10 @@
   // The signature the session list DOM was last built from; the list is rebuilt
   // only when it changes, so clicking a row does not clobber focus.
   let renderedSessionSignature = null;
+  // The signature the provider dropdown DOM was last built from; the <select>
+  // is rebuilt only when it changes so opening/keyboard-navigating it is not
+  // clobbered by an unrelated re-render (a stream delta, a tool update).
+  let renderedProviderSignature = null;
   // Set when the host replaced the whole conversation: that render always snaps
   // to the bottom, whatever the previous scroll position was.
   let forceScrollToBottom = true;
@@ -723,6 +734,133 @@
     }
   }
 
+  /** The catalog label of a provider id, falling back to the raw id. */
+  function providerLabel(id) {
+    for (let i = 0; i < state.providers.length; i++) {
+      if (state.providers[i].id === id) {
+        return state.providers[i].label;
+      }
+    }
+    return id;
+  }
+
+  /** Signature of everything the dropdown DOM depends on. */
+  function providerSignature() {
+    const groups = state.providers
+      .map(function (g) {
+        return [
+          g.id,
+          g.label,
+          g.enabled ? '1' : '0',
+          g.reason || '',
+          (g.models || [])
+            .map(function (m) {
+              return m.id + '\u0002' + (m.label || '');
+            })
+            .join('\u0001'),
+        ].join('\u0001');
+      })
+      .join('\u0000');
+    const sel = state.selection ? state.selection.provider + '\u0001' + state.selection.model : '';
+    return groups + '\u0003' + sel + '\u0003' + (state.busy ? '1' : '0');
+  }
+
+  /**
+   * The Provider & Model dropdown is a pure projection of `state.providers`
+   * and `state.selection` (the same discipline as the Auto-mode toggle): the
+   * change handler never writes `state.selection` locally, it posts
+   * `selectModel` and repaints when the host echoes `setProviders` back
+   * through the reducer. One <optgroup> per provider, in the order the host
+   * sent them — the webview never sorts or filters them. A disabled group
+   * carries its reason as a disabled option so the user always sees why it is
+   * unavailable (a disabled <optgroup> alone renders inconsistently across
+   * platforms).
+   */
+  function renderProviders() {
+    const signature = providerSignature();
+    if (signature !== renderedProviderSignature) {
+      renderedProviderSignature = signature;
+      modelSelect.textContent = '';
+      let matched = null;
+      state.providers.forEach(function (group) {
+        const og = document.createElement('optgroup');
+        og.label = group.label;
+        if (!group.enabled) {
+          og.disabled = true;
+          if (group.reason) {
+            og.title = group.reason;
+          }
+          const note = document.createElement('option');
+          note.value = '';
+          note.disabled = true;
+          note.textContent = group.reason || 'Unavailable';
+          og.appendChild(note);
+        } else if (!group.models || group.models.length === 0) {
+          const none = document.createElement('option');
+          none.value = '';
+          none.disabled = true;
+          none.textContent = 'No models available';
+          og.appendChild(none);
+        } else {
+          group.models.forEach(function (model) {
+            const opt = document.createElement('option');
+            opt.value = group.id + '/' + model.id;
+            opt.dataset.provider = group.id;
+            opt.dataset.model = model.id;
+            opt.textContent = model.label || model.id;
+            if (
+              state.selection &&
+              state.selection.provider === group.id &&
+              state.selection.model === model.id
+            ) {
+              opt.selected = true;
+              matched = opt;
+            }
+            og.appendChild(opt);
+          });
+        }
+        modelSelect.appendChild(og);
+      });
+      // No option matches the active selection (or nothing is selected yet):
+      // show a disabled placeholder at the top rather than silently selecting
+      // some other provider's model.
+      if (matched === null) {
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        placeholder.textContent = state.selection
+          ? providerLabel(state.selection.provider) + ' / ' + state.selection.model + ' (unavailable)'
+          : 'Select a model…';
+        modelSelect.insertBefore(placeholder, modelSelect.firstChild || null);
+      } else {
+        modelSelect.value = matched.value;
+      }
+      // The 'Set API key…' affordance appears whenever at least one provider
+      // is disabled; it reuses the existing triggerFix/setApiKey protocol
+      // message.
+      const blocked = state.providers.filter(function (g) {
+        return !g.enabled;
+      });
+      if (blocked.length > 0) {
+        modelSetKey.classList.add('visible');
+        modelSetKey.title = blocked
+          .map(function (g) {
+            return g.reason || g.label + ' is unavailable.';
+          })
+          .join(' ');
+      } else {
+        modelSetKey.classList.remove('visible');
+        modelSetKey.title = '';
+      }
+    }
+    // Enablement is cheap and must follow busy even when the DOM is reused.
+    const anyEnabled = state.providers.some(function (g) {
+      return g.enabled && g.models && g.models.length > 0;
+    });
+    modelSelect.disabled = state.busy || !anyEnabled;
+  }
+
   /** A short relative time such as "5m ago", "2h ago", "3d ago", else a date. */
   function relativeTime(value) {
     const then = typeof value === 'number' ? value : Date.parse(String(value));
@@ -824,9 +962,15 @@
         errorFix.textContent =
           state.error.action === 'setApiKey' ? 'Set Orchestrator API Key' : 'Open Baiton Settings';
         errorFix.dataset.action = state.error.action;
+        if (state.error.provider) {
+          errorFix.dataset.provider = state.error.provider;
+        } else {
+          delete errorFix.dataset.provider;
+        }
       } else {
         errorFix.style.display = 'none';
         delete errorFix.dataset.action;
+        delete errorFix.dataset.provider;
       }
       errorBanner.classList.add('visible');
     } else {
@@ -836,8 +980,11 @@
 
   function renderEmptyState() {
     if (state.empty) {
-      emptyEndpoint.textContent = state.empty.endpoint || 'not configured';
-      emptyModel.textContent = state.empty.model || 'not configured';
+      emptyProvider.textContent = state.selection
+        ? providerLabel(state.selection.provider)
+        : 'not configured';
+      emptyModel.textContent =
+        (state.selection && state.selection.model) || state.empty.model || 'not configured';
       emptyState.classList.add('visible');
       transcriptEl.style.display = 'none';
     } else {
@@ -879,6 +1026,7 @@
 
   function render() {
     renderSelector();
+    renderProviders();
     renderSessions();
     renderError();
     renderEmptyState();
@@ -996,10 +1144,40 @@
     vscode.postMessage({ type: 'selectConversation', conversationId: selectEl.value });
   });
 
+  modelSelect.addEventListener('change', function () {
+    const opt = modelSelect.options[modelSelect.selectedIndex];
+    const provider = opt && opt.dataset ? opt.dataset.provider : undefined;
+    const model = opt && opt.dataset ? opt.dataset.model : undefined;
+    if (!provider || !model) {
+      // A disabled placeholder/reason row: repaint from state rather than
+      // posting a bogus selection.
+      renderedProviderSignature = null;
+      renderProviders();
+      return;
+    }
+    if (
+      state.selection &&
+      state.selection.provider === provider &&
+      state.selection.model === model
+    ) {
+      return;
+    }
+    vscode.postMessage({ type: 'selectModel', provider: provider, model: model });
+  });
+
+  modelSetKey.addEventListener('click', function () {
+    vscode.postMessage({ type: 'triggerFix', action: 'setApiKey' });
+  });
+
   errorFix.addEventListener('click', function () {
     const action = errorFix.dataset.action;
     if (action) {
-      vscode.postMessage({ type: 'triggerFix', action: action });
+      const provider = errorFix.dataset.provider;
+      vscode.postMessage(
+        provider
+          ? { type: 'triggerFix', action: action, provider: provider }
+          : { type: 'triggerFix', action: action },
+      );
     }
   });
 

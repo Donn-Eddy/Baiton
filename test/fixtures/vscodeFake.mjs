@@ -23,6 +23,7 @@ function fake() {
 
 export const window = {
   showInputBox: (options) => fake().window.showInputBox(options),
+  showQuickPick: (items, options) => fake().window.showQuickPick(items, options),
   showInformationMessage: (message, ...args) => fake().window.showInformationMessage(message, ...args),
   showWarningMessage: (message, ...args) => fake().window.showWarningMessage(message, ...args),
   showErrorMessage: (message, ...args) => fake().window.showErrorMessage(message, ...args),
@@ -86,4 +87,130 @@ export const ViewColumn = {
   One: 1,
   Two: 2,
   Three: 3,
+};
+
+// --- Language-model surface (copilotClient tests) ---------------------------
+// Host interactions delegate to `fake()`; these value classes are concrete
+// exports, like Disposable/Uri/ViewColumn above.
+
+/** The roles usable in `LanguageModelChatMessage` (no system role in vscode.lm). */
+export const LanguageModelChatMessageRole = { User: 1, Assistant: 2 };
+
+/** A piece of assistant text, or one message content part. */
+export class LanguageModelTextPart {
+  constructor(value) {
+    this.value = value;
+  }
+}
+
+/** The model's request to call a tool. */
+export class LanguageModelToolCallPart {
+  constructor(callId, name, input) {
+    this.callId = callId;
+    this.name = name;
+    this.input = input;
+  }
+}
+
+/** A tool result; only ever carried by a User message. */
+export class LanguageModelToolResultPart {
+  constructor(callId, content) {
+    this.callId = callId;
+    this.content = content;
+  }
+}
+
+/** One chat message; string content is normalised to a text part array. */
+export class LanguageModelChatMessage {
+  constructor(role, content, name) {
+    this.role = role;
+    this.content =
+      typeof content === 'string' ? [new LanguageModelTextPart(content)] : content;
+    this.name = name;
+  }
+  static User(content, name) {
+    return new LanguageModelChatMessage(LanguageModelChatMessageRole.User, content, name);
+  }
+  static Assistant(content, name) {
+    return new LanguageModelChatMessage(LanguageModelChatMessageRole.Assistant, content, name);
+  }
+}
+
+/** Whether the model may optionally (Auto) or must (Required) use tools. */
+export const LanguageModelChatToolMode = { Auto: 1, Required: 2 };
+
+/** The error `vscode.lm` rejects with; identified by its `code`, not instanceof. */
+export class LanguageModelError extends Error {
+  constructor(code, message) {
+    super(message ?? code);
+    this.name = 'LanguageModelError';
+    this.code = code;
+  }
+  static NotFound(m) {
+    return new LanguageModelError('NotFound', m);
+  }
+  static NoPermissions(m) {
+    return new LanguageModelError('NoPermissions', m);
+  }
+  static Blocked(m) {
+    return new LanguageModelError('Blocked', m);
+  }
+}
+
+/** A real working cancellation token source, so abort paths are testable. */
+export class CancellationTokenSource {
+  #cancelled = false;
+  #listeners = [];
+  #disposed = false;
+
+  /** Whether cancellation has been requested. */
+  get isCancellationRequested() {
+    return this.#cancelled;
+  }
+
+  /** Whether `dispose()` has run. */
+  get disposed() {
+    return this.#disposed;
+  }
+
+  /** The token itself. */
+  get token() {
+    const source = this;
+    return {
+      get isCancellationRequested() {
+        return source.isCancellationRequested;
+      },
+      onCancellationRequested(cb) {
+        if (source.#cancelled) {
+          cb();
+        } else {
+          source.#listeners.push(cb);
+        }
+        return { dispose() {} };
+      },
+    };
+  }
+
+  /** Fire every listener once. */
+  cancel() {
+    if (this.#cancelled) {
+      return;
+    }
+    this.#cancelled = true;
+    for (const cb of this.#listeners) {
+      cb();
+    }
+    this.#listeners = [];
+  }
+
+  /** Mark disposed and drop the listeners. */
+  dispose() {
+    this.#disposed = true;
+    this.#listeners = [];
+  }
+}
+
+/** Model selection, delegating so each test supplies its own model list. */
+export const lm = {
+  selectChatModels: (selector) => fake().lm.selectChatModels(selector),
 };

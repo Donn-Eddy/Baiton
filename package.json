@@ -79,6 +79,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.setProviderApiKey",
+        "title": "Set Provider API Key",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.openConfigPanel",
         "title": "Open Config Panel",
         "category": "Baiton"
@@ -187,6 +192,10 @@
         {
           "command": "baiton.setOrchestratorApiKey",
           "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.setProviderApiKey",
+          "when": "baiton.activated"
         }
       ],
       "view/item/context": [
@@ -283,17 +292,17 @@
         "baiton.orchestrator.endpoint": {
           "type": "string",
           "default": "",
-          "description": "Base URL of the OpenAI-compatible chat-completions endpoint the orchestrator uses."
+          "description": "Base URL of the OpenAI-compatible chat-completions endpoint used by the 'OpenAI / Custom' orchestrator provider. The other providers (GitHub Copilot, Google AI Studio, OpenCode Go, Mistral AI) use their own built-in endpoints and ignore this setting."
         },
         "baiton.orchestrator.model": {
           "type": "string",
           "default": "",
-          "description": "Model identifier the orchestrator requests."
+          "description": "Model identifier offered under the 'OpenAI / Custom' orchestrator provider. The other providers list their own models in the Chat view's Provider & Model dropdown and ignore this setting."
         },
         "baiton.orchestrator.streaming": {
           "type": "boolean",
           "default": true,
-          "description": "Stream assistant text into the chat as it is generated. Disable if the orchestrator endpoint does not support streaming (server-sent events) responses."
+          "description": "Stream assistant text into the chat as it is generated. Disable if the orchestrator endpoint does not support streaming (server-sent events) responses. Applies to the HTTP providers; GitHub Copilot always streams through vscode.lm."
         },
         "baiton.orchestrator.maxTokens": {
           "type": "integer",

@@ -22,6 +22,8 @@
       records: [],
       busy: false,
       autoMode: false,
+      providers: [],
+      selection: null,
     };
   }
 
@@ -141,11 +143,16 @@
       case 'setActiveSession':
         return Object.assign({}, state, { activeSessionId: msg.sessionId });
       case 'showError':
-        return Object.assign({}, state, { error: { message: msg.message, action: msg.action } });
+        return Object.assign({}, state, { error: { message: msg.message, action: msg.action, provider: msg.provider } });
       case 'setBusy':
         return Object.assign({}, state, { busy: msg.busy });
       case 'setEmptyState':
         return Object.assign({}, state, { empty: { endpoint: msg.endpoint, model: msg.model } });
+      case 'setProviders':
+        return Object.assign({}, state, {
+          providers: msg.groups.slice(),
+          selection: msg.selection,
+        });
       default:
         // Unknown message: leave the state unchanged rather than throwing in the
         // webview. The typed union in the TypeScript source guards this at the

@@ -31,6 +31,10 @@
  * 14. A relayed escalation posts a pending card and is audited.
  * 15. A shell escalation carries the raw command, and a failed gate's summary
  *     names the run's role.
+ * 16. Provider selection and Auto mode — the first refresh echoes
+ *     `setAutoMode` and posts `setProviders` with the active selection, a
+ *     model switch while a gated run is in flight leaves the pending card and
+ *     whose records untouched, and flipping Auto mode posts no `setProviders`.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -41,10 +45,14 @@ import type {
   AutoModeGate,
   AutoModeMemory,
   ChatWebview,
+  ProviderAvailabilityView,
+  ProviderSource,
 } from '../src/activation/chatController';
 import {
+  COPILOT_UNAVAILABLE_REASON,
   createInterventionSeam,
   PendingAskRegistry,
+  providerNeedsKeyReason,
   readTranscript,
   systemClock,
   toRenderRecords,
@@ -60,6 +68,7 @@ import type {
   InterventionRequest,
   InterventionSeam,
   ModelClient,
+  ModelSelection,
   PermissionRequest,
   RenderRecord,
   ToolRegistry,
@@ -100,11 +109,50 @@ class FakeWebview implements ChatWebview {
 class FakeModelClient implements ModelClient {
   public readonly queue: CompletionResult[] = [];
   public readonly requests: Array<{ role: string; content: string }[]> = [];
+  /** The `sessionId` each request carried, in completion order. */
+  public readonly sessionIds: Array<string | undefined> = [];
 
-  public async complete(req: { messages: { role: string; content: string }[] }): Promise<CompletionResult> {
+  public async complete(req: { messages: { role: string; content: string }[]; sessionId?: string }): Promise<CompletionResult> {
     this.requests.push(req.messages);
+    this.sessionIds.push(req.sessionId);
     const next = this.queue.shift();
     return next ?? { content: 'done', tool_calls: [] };
+  }
+}
+
+/** A fake ProviderRouter bound as the controller's provider seam. */
+class FakeProviders implements ProviderSource {
+  public entries: ProviderAvailabilityView[] = [
+    { id: 'copilot', label: 'GitHub Copilot', enabled: false, reason: COPILOT_UNAVAILABLE_REASON, models: [] },
+    { id: 'google', label: 'Google AI Studio', enabled: true, models: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
+    { id: 'mistral', label: 'Mistral AI', enabled: false, reason: providerNeedsKeyReason('mistral'), models: ['mistral-large-latest'] },
+  ];
+  public selection: ModelSelection | undefined = { provider: 'google', model: 'gemini-2.5-pro' };
+  public success = true;
+  private readonly listeners = new Set<(s: ModelSelection | undefined) => void>();
+
+  public async availability(): Promise<ProviderAvailabilityView[]> {
+    return this.entries;
+  }
+
+  public getSelection(): ModelSelection | undefined {
+    return this.selection;
+  }
+
+  public async select(value: unknown): Promise<boolean> {
+    if (!this.success) {
+      return false;
+    }
+    this.selection = value as ModelSelection;
+    for (const l of [...this.listeners]) {
+      l(this.selection);
+    }
+    return true;
+  }
+
+  public onDidChangeSelection(l: (s: ModelSelection | undefined) => void): { dispose(): void } {
+    this.listeners.add(l);
+    return { dispose: () => { this.listeners.delete(l); } };
   }
 }
 
@@ -124,6 +172,7 @@ describe('ChatController auto mode', () => {
   let gateResult: AutoModeOutcome | (() => Promise<AutoModeOutcome>);
   /** Every `set` call the fake autoModeMemory received. */
   let memorySets: boolean[];
+  let providers: FakeProviders;
   let cleanup: (() => void) | undefined;
 
   /** The permission ask the fake tool raises by default. */
@@ -154,6 +203,7 @@ describe('ChatController auto mode', () => {
     gateCalls = [];
     gateResult = { kind: 'approve', stage: 'allow-list', rationale: 'unused here' };
     memorySets = [];
+    providers = new FakeProviders();
     let remembered = options.persistedAuto === true;
     askRegistry = new PendingAskRegistry({
       ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
@@ -208,6 +258,7 @@ describe('ChatController auto mode', () => {
       askRegistry,
       autoGate,
       autoModeMemory,
+      providers,
     });
     present = (ask) => controller.presentIntervention(ask);
   }
@@ -591,5 +642,75 @@ describe('ChatController auto mode', () => {
     const card = webview.last('showIntervention')!.intervention;
     assert.strictEqual(card.escalation!.command, 'python scripts/seed.py --db dev');
     assert.strictEqual(card.escalation!.summary, 'Executor wants to run Bash');
+  });
+
+  it('threads the controller session id through every tool-loop completion', async () => {
+    startSend();
+    // Auto mode is off, so the ask pends; approve it the way the view would.
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');
+    const card = webview.last('showIntervention')!.intervention;
+    await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'approved' } });
+    await awaitRunEnd();
+
+    // Rounds 1 and 2 ran in one send, so two completions; both carried the same
+    // live session id the controller had allocated for the chat.
+    const [first, second] = client.sessionIds;
+    assert.ok(first !== undefined, 'completion carries a sessionId');
+    assert.strictEqual(second, first, 'the same session id reuses across rounds');
+  });
+
+  describe('provider selection and Auto mode', () => {
+    it('the first refresh posts both the Auto echo and setProviders with the active selection', async () => {
+      buildHarness({ persistedAuto: true });
+      controller.start();
+      await waitFor(
+        () => webview.all('setAutoMode').length >= 1 && webview.all('setProviders').length >= 1,
+        'the first refresh to post both states',
+      );
+      assert.strictEqual(webview.all('setAutoMode')[0].enabled, true);
+      const providersIndex = webview.posts.findIndex((m) => m.type === 'setProviders');
+      const autoIndex = webview.posts.findIndex((m) => m.type === 'setAutoMode');
+      assert.ok(autoIndex < providersIndex, 'the Auto echo keeps its place ahead of the dropdown');
+      assert.deepStrictEqual(webview.last('setProviders')!.selection, {
+        provider: 'google',
+        model: 'gemini-2.5-pro',
+      });
+    });
+
+    it('switching the model while a gated run is in flight leaves the card and records untouched', async () => {
+      gateResult = { kind: 'escalate', summary: 'Planner wants to read a file.' };
+      await startSendWithAutoOn();
+      await waitFor(() => webview.all('showIntervention').length === 1, 'the pending escalated card');
+      const card = webview.last('showIntervention')!.intervention;
+      const filesBefore = fs.readFileSync(transcriptFile(), 'utf8');
+
+      await webview.send({ type: 'selectModel', provider: 'mistral', model: 'mistral-large-latest' });
+      await waitFor(
+        () => webview.last('setProviders')?.selection?.model === 'mistral-large-latest',
+        'the dropdown to repaint with the new selection',
+      );
+
+      assert.strictEqual(
+        webview.all('showIntervention').filter((m) => m.intervention.auto === true).length,
+        0,
+        'no auto-settled card appeared',
+      );
+      assert.strictEqual(webview.all('resolveIntervention').length, 0, 'the ask was not settled');
+      assert.strictEqual(webview.last('showIntervention')!.intervention.status, 'pending');
+      assert.strictEqual(webview.last('showIntervention')!.intervention.id, card.id);
+      const records = await interventionRecords();
+      assert.strictEqual(records.length, 1, 'exactly the escalated card is recorded');
+      assert.strictEqual(records[0].intervention!.status, 'pending');
+      assert.strictEqual(fs.readFileSync(transcriptFile(), 'utf8').length, filesBefore.length);
+    });
+
+    it('flipping Auto mode posts no setProviders', async () => {
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      const before = webview.all('setProviders').length;
+      await webview.send({ type: 'setAutoMode', enabled: true });
+      await webview.send({ type: 'setAutoMode', enabled: false });
+      assert.strictEqual(webview.all('setProviders').length, before, 'the toggles are independent');
+    });
   });
 });

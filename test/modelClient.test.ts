@@ -7,10 +7,15 @@ import {
   UnreachableEndpointError,
   ModelClientConfig,
   ChatMessage,
+  ToolCall,
   ToolSpec,
   completionsUrl,
   resolveMaxTokens,
   SseCompletionParser,
+  shapeGeminiMessages,
+  sanitizeToolArguments,
+  geminiDialect,
+  openCodeExtraHeaders,
 } from '../src/orchestrator/modelClient';
 
 /**
@@ -35,6 +40,7 @@ import {
 /** A record of one request the mock server received, body already parsed. */
 interface CapturedRequest {
   authorization: string | undefined;
+  headers: http.IncomingHttpHeaders;
   body: unknown;
 }
 
@@ -64,7 +70,7 @@ async function startMockServer(
       } catch {
         parsed = raw;
       }
-      captured.push({ authorization: req.headers.authorization, body: parsed });
+      captured.push({ authorization: req.headers.authorization, headers: req.headers, body: parsed });
       const { status = 200, headers = { 'content-type': 'application/json' }, body } = responder(parsed);
       res.writeHead(status, headers);
       res.end(body);
@@ -702,6 +708,372 @@ describe('OpenAiModelClient', () => {
       assert.deepStrictEqual(result.tool_calls, [
         { id: 'call_a', name: 'read_file', arguments: '{"path":"x"}' },
         { id: 'call_b', name: 'read_file', arguments: '{"path":"y"}' },
+      ]);
+    });
+  });
+
+  describe('extraHeaders', () => {
+    let mock: MockServer;
+    afterEach(async () => {
+      await mock.close();
+    });
+
+    const respond = () => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) });
+
+    it('sends provider extras with lowercased names', async () => {
+      mock = await startMockServer(respond);
+      const client = new OpenAiModelClient(
+        makeConfig(mock.url, {
+          extraHeaders: () => ({ 'User-Agent': 'baiton/9.9.9', 'x-opencode-session': 'abc' }),
+        }),
+      );
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      assert.strictEqual(mock.captured[0].headers['user-agent'], 'baiton/9.9.9');
+      assert.strictEqual(mock.captured[0].headers['x-opencode-session'], 'abc');
+    });
+
+    it('never lets extras clobber authorization, content-type or content-length', async () => {
+      mock = await startMockServer(respond);
+      const client = new OpenAiModelClient(
+        makeConfig(mock.url, {
+          extraHeaders: () => ({
+            authorization: 'Bearer evil',
+            'content-type': 'text/plain',
+            'content-length': '0',
+          }),
+        }),
+      );
+      const result = await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      assert.strictEqual(mock.captured[0].headers.authorization, 'Bearer test-key');
+      assert.strictEqual(mock.captured[0].headers['content-type'], 'application/json');
+      assert.strictEqual(result.content, 'ok');
+    });
+
+    it('sends the base headers unchanged when the provider returns undefined', async () => {
+      mock = await startMockServer(respond);
+      const client = new OpenAiModelClient(makeConfig(mock.url, { extraHeaders: () => undefined }));
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      assert.strictEqual(mock.captured[0].headers.authorization, 'Bearer test-key');
+      assert.strictEqual(mock.captured[0].headers['content-type'], 'application/json');
+      assert.strictEqual(mock.captured[0].headers['user-agent'], undefined);
+    });
+
+    it('passes the live CompletionRequest to the provider', async () => {
+      mock = await startMockServer(respond);
+      let received: { sessionId?: string; messages: ChatMessage[] } | undefined;
+      const messages: ChatMessage[] = [{ role: 'user', content: 'who' }];
+      const client = new OpenAiModelClient(
+        makeConfig(mock.url, {
+          extraHeaders: (req) => {
+            received = req;
+            return {};
+          },
+        }),
+      );
+      await client.complete({ messages, tools: [], signal: liveSignal(), sessionId: 's-7' });
+      assert.strictEqual(received!.sessionId, 's-7');
+      assert.deepStrictEqual(received!.messages, messages);
+    });
+  });
+
+  describe('sessionId', () => {
+    let mock: MockServer;
+    afterEach(async () => {
+      await mock.close();
+    });
+
+    it('is never serialised into the request body', async () => {
+      mock = await startMockServer(() => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }));
+      const client = new OpenAiModelClient(makeConfig(mock.url));
+      await client.complete({
+        messages: SAMPLE_MESSAGES,
+        tools: [],
+        signal: liveSignal(),
+        sessionId: 's-1',
+      });
+      assert.ok(!('sessionId' in (mock.captured[0].body as object)));
+    });
+  });
+
+  describe('openCodeExtraHeaders', () => {
+    let mock: MockServer;
+    afterEach(async () => {
+      await mock.close();
+    });
+
+    const respond = () => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) });
+
+    const withCountingUuids = (
+      url: string,
+    ): OpenAiModelClient => {
+      let n = 0;
+      return new OpenAiModelClient(
+        makeConfig(url, {
+          extraHeaders: openCodeExtraHeaders({
+            version: '0.0.1',
+            newSessionId: () => `uuid-${n++}`,
+          }),
+        }),
+      );
+    };
+
+    it('reuses one uuid across completions with the same sessionId', async () => {
+      mock = await startMockServer(respond);
+      const client = withCountingUuids(mock.url);
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal(), sessionId: 's-1' });
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal(), sessionId: 's-1' });
+      assert.strictEqual(mock.captured[0].headers['x-opencode-session'], 'uuid-0');
+      assert.strictEqual(mock.captured[1].headers['x-opencode-session'], 'uuid-0');
+    });
+
+    it('mints different uuids for different sessionIds', async () => {
+      mock = await startMockServer(respond);
+      const client = withCountingUuids(mock.url);
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal(), sessionId: 's-1' });
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal(), sessionId: 's-2' });
+      assert.strictEqual(mock.captured[0].headers['x-opencode-session'], 'uuid-0');
+      assert.strictEqual(mock.captured[1].headers['x-opencode-session'], 'uuid-1');
+    });
+
+    it('shares one stable uuid across completions with no sessionId', async () => {
+      mock = await startMockServer(respond);
+      const client = withCountingUuids(mock.url);
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      assert.strictEqual(mock.captured[0].headers['x-opencode-session'], 'uuid-0');
+      assert.strictEqual(mock.captured[1].headers['x-opencode-session'], 'uuid-0');
+    });
+
+    it('sends user-agent baiton/<version> exactly', async () => {
+      mock = await startMockServer(respond);
+      const client = withCountingUuids(mock.url);
+      await client.complete({ messages: SAMPLE_MESSAGES, tools: [], signal: liveSignal() });
+      assert.strictEqual(mock.captured[0].headers['user-agent'], 'baiton/0.0.1');
+    });
+  });
+
+  describe('openAiDialect (default)', () => {
+    let mock: MockServer;
+    afterEach(async () => {
+      await mock.close();
+    });
+
+    it('keeps today\u2019s byte-for-byte payload on tool_calls turns', async () => {
+      mock = await startMockServer(() => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }));
+      const client = new OpenAiModelClient(makeConfig(mock.url));
+      await client.complete({
+        messages: [
+          { role: 'user', content: 'go' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              { id: 'call_1', name: 'read_file', arguments: 'not json' },
+            ],
+          },
+        ],
+        tools: [],
+        signal: liveSignal(),
+      });
+      const sent = mock.captured[0].body as { messages: Array<Record<string, unknown>> };
+      assert.deepStrictEqual(sent.messages[1], {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read_file', arguments: 'not json' },
+          },
+        ],
+      });
+    });
+  });
+
+  describe('geminiDialect', () => {
+    const toolCall = (id: string, args = '{}'): ToolCall => ({
+      id,
+      name: 'read_file',
+      arguments: args,
+    });
+    const wireCall = (id: string, args = '{}'): unknown => ({
+      id,
+      type: 'function',
+      function: { name: 'read_file', arguments: args },
+    });
+
+    it('omits the content key on an assistant tool_calls turn with empty content', () => {
+      const [out] = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('c1')] },
+      ]);
+      assert.strictEqual(Object.keys(out).includes('content'), false);
+      assert.strictEqual(out.role, 'assistant');
+      assert.ok(Array.isArray(out.tool_calls));
+    });
+
+    it('omits the content key on whitespace-only assistant content', () => {
+      const [out] = shapeGeminiMessages([
+        { role: 'assistant', content: '   ', tool_calls: [toolCall('c1')] },
+      ]);
+      assert.strictEqual(Object.keys(out).includes('content'), false);
+    });
+
+    it('preserves non-empty assistant content untrimmed', () => {
+      const [out] = shapeGeminiMessages([
+        { role: 'assistant', content: ' hi ', tool_calls: [toolCall('c1')] },
+      ]);
+      assert.strictEqual(out.content, ' hi ');
+    });
+
+    it('freezes the tool message keys, dropping strays and defaulting content', () => {
+      const out = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('c1')] },
+        {
+          role: 'tool',
+          content: undefined as unknown as string,
+          tool_call_id: 'c1',
+          tool_calls: [toolCall('c2')], // stray — must be dropped
+        } as ChatMessage,
+      ]);
+      const toolMsg = out[1];
+      assert.deepStrictEqual([...Object.keys(toolMsg)].sort(), ['content', 'role', 'tool_call_id']);
+      assert.strictEqual(toolMsg.content, '');
+      assert.strictEqual('tool_calls' in toolMsg, false);
+    });
+
+    it('reattaches a detached tool message right after its assistant turn', () => {
+      const out = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('c1')] },
+        { role: 'user', content: 'meanwhile' },
+        { role: 'tool', content: 'data', tool_call_id: 'c1' },
+      ]);
+      assert.deepStrictEqual(out, [
+        { role: 'assistant', tool_calls: [wireCall('c1')] },
+        { role: 'tool', tool_call_id: 'c1', content: 'data' },
+        { role: 'user', content: 'meanwhile' },
+      ]);
+    });
+
+    it('drops orphan tool messages', () => {
+      const out = shapeGeminiMessages([
+        { role: 'user', content: 'q' },
+        { role: 'tool', content: 'data', tool_call_id: 'missing' },
+      ]);
+      assert.deepStrictEqual(out, [{ role: 'user', content: 'q' }]);
+    });
+
+    it('emits two tool messages in call order for a two-call assistant turn', () => {
+      const out = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('c1'), toolCall('c2')] },
+        { role: 'tool', content: 'second', tool_call_id: 'c2' },
+        { role: 'tool', content: 'first', tool_call_id: 'c1' },
+      ]);
+      assert.deepStrictEqual(out, [
+        { role: 'assistant', tool_calls: [wireCall('c1'), wireCall('c2')] },
+        { role: 'tool', tool_call_id: 'c1', content: 'first' },
+        { role: 'tool', tool_call_id: 'c2', content: 'second' },
+      ]);
+    });
+
+    it('sanitizes tool arguments', () => {
+      assert.deepStrictEqual(
+        [
+          sanitizeToolArguments('{"a":1}'),
+          sanitizeToolArguments(''),
+          sanitizeToolArguments('not json'),
+          sanitizeToolArguments('null'),
+          sanitizeToolArguments('[1]'),
+          sanitizeToolArguments('"x"'),
+          sanitizeToolArguments('3'),
+        ],
+        ['{"a":1}', '{}', '{}', '{}', '{}', '{}', '{}'],
+      );
+    });
+
+    it('sends the shaped messages end-to-end through the mock server', async () => {
+      const mock = await startMockServer(() => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }));
+      try {
+        const client = new OpenAiModelClient(makeConfig(mock.url, { dialect: geminiDialect }));
+        await client.complete({
+          messages: [
+            { role: 'user', content: 'go' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'call_1', name: 'read_file', arguments: 'not json' }],
+            },
+          ],
+          tools: [],
+          signal: liveSignal(),
+        });
+        const sent = mock.captured[0].body as { messages: Array<Record<string, unknown>> };
+        assert.deepStrictEqual(sent.messages, [
+          { role: 'user', content: 'go' },
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+            ],
+          },
+        ]);
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+
+  describe('shapeGeminiMessages multi-round chaining', () => {
+    const toolCall = (id: string, args = '{}'): ToolCall => ({ id, name: 'read_file', arguments: args });
+    const wireCall = (id: string, args = '{}'): unknown => ({
+      id,
+      type: 'function',
+      function: { name: 'read_file', arguments: args },
+    });
+
+    it('shapes a two-round chain into the exact alternating order with no empty content on either tool-call turn', () => {
+      const out = shapeGeminiMessages([
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('r1')] },
+        { role: 'tool', content: 'first result', tool_call_id: 'r1' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('r2')] },
+        { role: 'tool', content: 'second result', tool_call_id: 'r2' },
+        { role: 'assistant', content: 'all done', tool_calls: undefined } as ChatMessage,
+      ]);
+      assert.deepStrictEqual(out, [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', tool_calls: [wireCall('r1')] },
+        { role: 'tool', tool_call_id: 'r1', content: 'first result' },
+        { role: 'assistant', tool_calls: [wireCall('r2')] },
+        { role: 'tool', tool_call_id: 'r2', content: 'second result' },
+        { role: 'assistant', content: 'all done' },
+      ]);
+      // Neither tool-call assistant turn emitted an empty `content` key.
+      for (const msg of out) {
+        if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+          assert.ok(!('content' in msg) || msg.content! !== '');
+        }
+      }
+    });
+
+    it('drains tool results destructively: a repeated tool_call_id emits its results once, after the first requester', () => {
+      const out = shapeGeminiMessages([
+        { role: 'assistant', content: '', tool_calls: [toolCall('dup')] },
+        { role: 'tool', content: 'only once', tool_call_id: 'dup' },
+        { role: 'assistant', content: '', tool_calls: [toolCall('dup')] },
+        { role: 'tool', content: 'never repeated', tool_call_id: 'dup' },
+      ]);
+      // Every buffered result of the repeated id is consumed by the first
+      // requester; nothing is re-emitted after the second turn, where a
+      // duplicate tool shape would be rejected by Gemini.
+      assert.deepStrictEqual(out, [
+        { role: 'assistant', tool_calls: [wireCall('dup')] },
+        { role: 'tool', tool_call_id: 'dup', content: 'only once' },
+        { role: 'tool', tool_call_id: 'dup', content: 'never repeated' },
+        { role: 'assistant', tool_calls: [wireCall('dup')] },
       ]);
     });
   });

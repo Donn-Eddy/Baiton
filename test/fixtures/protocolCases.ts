@@ -1,6 +1,7 @@
 import type {
   HostToWebview,
   InterventionView,
+  ProviderGroup,
   WebviewState,
 } from '../../src/orchestrator/webviewProtocol';
 
@@ -33,6 +34,8 @@ export function seed(over: Partial<WebviewState> = {}): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
+    providers: [],
+    selection: null,
     ...over,
   };
 }
@@ -40,6 +43,11 @@ export function seed(over: Partial<WebviewState> = {}): WebviewState {
 /** A minimal pending intervention card, overridable per field. */
 export function ask(over: Partial<InterventionView> = {}): InterventionView {
   return { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'pending', ...over };
+}
+
+/** A minimal provider group, overridable per field. */
+export function group(over: Partial<ProviderGroup> = {}): ProviderGroup {
+  return { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }], ...over };
 }
 
 const cases: ProtocolCase[] = [];
@@ -402,6 +410,124 @@ cases.push({
       }),
     },
     { type: 'resolveIntervention', id: 'a1', answer: { kind: 'declined', reason: 'not now' } },
+  ],
+});
+
+// (37) setProviders with the full provider list in catalog order and an active selection
+cases.push({
+  name: 'setProviders sets groups and the active selection',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [
+        group({ id: 'copilot', label: 'GitHub Copilot', models: [{ id: 'gpt-4o', label: 'GPT-4o' }] }),
+        group(),
+        group({
+          id: 'opencode',
+          label: 'OpenCode Go',
+          enabled: false,
+          reason: 'Set an API key for OpenCode Go to use it.',
+          models: [],
+        }),
+        group({ id: 'mistral', label: 'Mistral AI' }),
+        group({
+          id: 'openai',
+          label: 'OpenAI / Custom',
+          enabled: false,
+          reason: 'Set baiton.orchestrator.endpoint to use OpenAI / Custom.',
+          models: [],
+        }),
+      ],
+      selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    },
+  ],
+});
+
+// (38) setProviders with no selection chosen yet
+cases.push({
+  name: 'setProviders with a null selection',
+  messages: [{ type: 'setProviders', groups: [group()], selection: null }],
+});
+
+// (39) setProviders clears the dropdown when no provider is available
+cases.push({
+  name: 'setProviders with no groups at all',
+  messages: [{ type: 'setProviders', groups: [], selection: null }],
+});
+
+// (40) setProviders replaces a previously set provider list and selection
+cases.push({
+  name: 'setProviders replaces a previously set list',
+  state: seed({
+    providers: [group({ id: 'mistral', label: 'Mistral AI' })],
+    selection: { provider: 'mistral', model: 'mistral-large-latest' },
+  }),
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [group({ id: 'copilot', label: 'GitHub Copilot' })],
+      selection: { provider: 'copilot', model: 'gpt-4o' },
+    },
+  ],
+});
+
+// (41) setProviders leaves records, busy and auto mode untouched
+cases.push({
+  name: 'setProviders keeps records, busy and auto mode',
+  state: seed({ records: [{ role: 'user', content: 'hi' }], busy: true, autoMode: true }),
+  messages: [
+    { type: 'setProviders', groups: [group()], selection: { provider: 'google', model: 'gemini-2.5-pro' } },
+  ],
+});
+
+// (42) multi-message sequence interleaving provider updates with the empty state and streaming
+cases.push({
+  name: 'interleaved setProviders, empty state and streaming',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [
+        group({
+          id: 'copilot',
+          label: 'GitHub Copilot',
+          enabled: false,
+          reason: 'Sign in to GitHub Copilot to use it.',
+          models: [],
+        }),
+      ],
+      selection: null,
+    },
+    { type: 'setEmptyState', endpoint: null, model: null },
+    { type: 'streamDelta', text: 'hel' },
+    {
+      type: 'setProviders',
+      groups: [group()],
+      selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    },
+  ],
+});
+
+// (43) showError with a provider-scoped key action
+cases.push({
+  name: 'showError with a provider-scoped key action',
+  messages: [
+    {
+      type: 'showError',
+      message: 'The Google AI Studio API key is not configured.',
+      action: 'setApiKey',
+      provider: 'google',
+    },
+  ],
+});
+
+// (44) showError replaces a provider-scoped error with a plain one: the
+// `provider` key is cleared (present-undefined) rather than carried over
+cases.push({
+  name: 'showError replaces a provider-scoped error with a plain one',
+  state: seed(),
+  messages: [
+    { type: 'showError', message: 'a', action: 'setApiKey', provider: 'mistral' },
+    { type: 'showError', message: 'b' },
   ],
 });
 

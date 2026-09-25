@@ -1,7 +1,9 @@
 // Orchestrator (model client, tool registry, guard) — tasks 12 & 13.
 export * from './modelClient';
+export * from './copilotClient';
 export * from './guard';
 export * from './seams';
+export * from './providers';
 export * from './interventions';
 export * from './autoMode';
 export * from './toolServices';

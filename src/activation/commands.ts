@@ -24,8 +24,13 @@
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
  *     as an alias of the new Open Chat command.
- *   - `baiton.setOrchestratorApiKey` — store the orchestrator API key in
- *     SecretStorage (Req 17).
+ *   - `baiton.setProviderApiKey` — set or clear one provider's API key in
+ *     SecretStorage (pre-selecting the provider named by its argument, or
+ *     picking through a quick-pick); the Chat view's inline "Set API key…"
+ *     fix opens the same prompt pre-selected on the provider that failed, and
+ *     storing/clearing a key refreshes the Provider & Model dropdown;
+ *     `baiton.setOrchestratorApiKey` is kept as an alias of it for existing
+ *     key bindings (Req 17).
  *   - The Spec_Explorer tree view (with its filesystem watcher) whose inline
  *     actions forward to the same `baiton.plan/execute/review/replan/stop/
  *     approve` commands with `[slug, todoId]` / `[slug]` (Req 2, 5, 6, 18.4).
@@ -75,7 +80,6 @@ import {
   decideAsk,
   GuardContext,
   MAX_SCRIPT_CHARS,
-  OpenAiModelClient,
   askFromPermission,
   assembleToolSpecs,
   scriptPathCandidates,
@@ -121,7 +125,11 @@ import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
 import { planPath } from './specLister';
-import { setOrchestratorApiKey } from './setApiKey';
+import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
+import { ProviderRouter } from './providerRouter';
+import type { ProviderSettings } from './providerRouter';
+import { isProviderId } from '../orchestrator/providers';
+import type { ProviderId } from '../orchestrator/providers';
 import { revealConfigPanel } from './openConfigPanelView';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
@@ -146,6 +154,7 @@ export const COMMANDS = {
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
+  setProviderApiKey: 'baiton.setProviderApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
 } as const;
 
@@ -293,6 +302,10 @@ export function registerCommands(
   surface: Surface,
 ): CommandSurface {
   const disposables: vscode.Disposable[] = [];
+  // One-time migration of the pre-multi-provider single-key secret into the
+  // `openai` slot; the router's first availability read must see it, so the
+  // init below is chained onto it rather than racing it.
+  const legacyMigration = migrateLegacyApiKey(context.secrets, context.globalState);
   const { workspace } = activation;
   /**
    * Accessor for the live configuration. The config object is replaced wholesale
@@ -477,7 +490,37 @@ export function registerCommands(
       },
     },
   });
-  const modelClient = buildModelClient(context);
+  // The provider router replaces the single OpenAI client: it owns one client
+  // per provider, resolves the active ModelSelection, and itself implements
+  // ModelClient, so the ChatController, the tool loop and the Auto-mode gate
+  // all follow a provider switch with no re-wiring.
+  const orchCfg = () => vscode.workspace.getConfiguration(SETTINGS_NS);
+  const providerSettings: ProviderSettings = {
+    getEndpoint: () => orchCfg().get<string>('orchestrator.endpoint') || undefined,
+    getModel: () => orchCfg().get<string>('orchestrator.model') || undefined,
+    isStreaming: () => orchCfg().get<boolean>('orchestrator.streaming') ?? true,
+    getMaxTokens: () => orchCfg().get('orchestrator.maxTokens'),
+  };
+  const router = new ProviderRouter({
+    secrets: context.secrets,
+    workspaceState: context.workspaceState,
+    settings: providerSettings,
+    // `src/activation/` may import the host; the router's `lm` surface is the
+    // real namespace here and a fake in its unit test.
+    lm: vscode,
+    version: extensionVersion(context),
+    log: (message) => surface.log(message),
+  });
+  // Restore the persisted selection (or pick the first usable provider) once
+  // the legacy key has landed in the `openai` slot, then fire one change so a
+  // Chat view that resolved first repaints its dropdown.
+  void legacyMigration.then(() => router.init()).then(() => router.refresh());
+
+  // One entry point for key management: the palette commands, and the Chat
+  // view's inline "Set API key…" fix (which names the provider that failed).
+  // A stored/cleared key refreshes availability, which repaints the dropdown.
+  const promptProviderKey = (provider?: ProviderId): Promise<void> =>
+    setProviderApiKey(context.secrets, provider, () => router.refresh());
 
   // Assemble the tool definitions advertised to the model, validating every
   // registered tool's `description` (Req 10.3, 10.5). If assembly is rejected —
@@ -598,7 +641,7 @@ export function registerCommands(
       opts.context === undefined
         ? undefined
         : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => specStore.readSpec(slug));
-    return decideAsk(gateAsk, agentAllowList(agent, role, runId), modelClient, {
+    return decideAsk(gateAsk, agentAllowList(agent, role, runId), router, {
       role,
       runId,
       signal: opts.signal,
@@ -607,7 +650,7 @@ export function registerCommands(
   };
   const chatController = new ChatController({
     webview: chatWebview,
-    client: modelClient,
+    client: router,
     registry,
     toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
@@ -616,7 +659,8 @@ export function registerCommands(
     specsDir,
     roundBound: () => readRoundBound(),
     config: readOrchestratorConfig(),
-    triggerFix: (action) => triggerFix(action),
+    providers: router,
+    triggerFix: (action, provider) => triggerFix(action, provider, promptProviderKey),
     log: (message) => surface.log(message),
     confirmDelete: async (message: string) =>
       (await vscode.window.showWarningMessage(message, { modal: true }, 'Delete')) === 'Delete',
@@ -667,6 +711,9 @@ export function registerCommands(
       ChatWebviewProvider.registration,
     ),
     chatWebview,
+    // The controller owns the selection subscription it took in start(); a
+    // deactivate releases it with everything else.
+    new vscode.Disposable(() => chatController.dispose()),
   );
 
   // The legacy `baiton.chat` command now reveals the Chat_View rather than
@@ -676,9 +723,11 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(COMMANDS.chat, () => openChat()),
     vscode.commands.registerCommand(COMMANDS.openChat, () => openChat()),
-    vscode.commands.registerCommand(COMMANDS.setApiKey, () =>
-      setOrchestratorApiKey(context.secrets),
+    vscode.commands.registerCommand(COMMANDS.setProviderApiKey, (arg?: unknown) =>
+      promptProviderKey(isProviderId(arg) ? arg : undefined),
     ),
+    // Kept as an alias so existing key bindings and the README keep working.
+    vscode.commands.registerCommand(COMMANDS.setApiKey, () => promptProviderKey()),
   );
 
   // --- spec explorer tree provider + active-spec tracking (Req 2, 6, 7) ---
@@ -1619,12 +1668,18 @@ function readOrchestratorConfig(): OrchestratorConfig {
 
 /**
  * Handle an inline-error fix action from the Chat_View (Req 13.4):
- * `openSettings` opens the Baiton orchestrator settings; `setApiKey` invokes
- * the Set Orchestrator API Key command.
+ * `openSettings` opens the Baiton orchestrator settings; `setApiKey` opens
+ * the per-provider key prompt — pre-selecting the provider the failing
+ * completion named, or falling back to the provider quick-pick when the
+ * error carried none.
  */
-function triggerFix(action: 'openSettings' | 'setApiKey'): void {
+function triggerFix(
+  action: 'openSettings' | 'setApiKey',
+  provider: ProviderId | undefined,
+  promptProviderKey: (provider?: ProviderId) => Promise<void>,
+): void {
   if (action === 'setApiKey') {
-    void vscode.commands.executeCommand(COMMANDS.setApiKey);
+    void promptProviderKey(provider);
     return;
   }
   void vscode.commands.executeCommand(
@@ -1667,19 +1722,11 @@ function todoArgs(
 }
 
 /**
- * Build the OpenAI-compatible model client, reading the endpoint/model from
- * settings and the API key from SecretStorage (Req 7.3, 7.4). Streaming is used
- * when the setting advertises it (Req 7.2).
+ * The extension version, rendered as `baiton/<version>` in the OpenCode User-Agent.
  */
-function buildModelClient(context: vscode.ExtensionContext): OpenAiModelClient {
-  const cfg = () => vscode.workspace.getConfiguration(SETTINGS_NS);
-  return new OpenAiModelClient({
-    getEndpoint: () => cfg().get<string>('orchestrator.endpoint') || undefined,
-    getModel: () => cfg().get<string>('orchestrator.model') || undefined,
-    getApiKey: () => Promise.resolve(context.secrets.get('baiton.orchestrator.apiKey')),
-    isStreaming: () => cfg().get<boolean>('orchestrator.streaming') ?? true,
-    getMaxTokens: () => cfg().get('orchestrator.maxTokens'),
-  });
+function extensionVersion(context: vscode.ExtensionContext): string {
+  const raw = (context.extension?.packageJSON as { version?: unknown } | undefined)?.version;
+  return typeof raw === 'string' && raw.length > 0 ? raw : '0.0.0';
 }
 
 /** Resolve the per-role model + effort from the loaded config (adapter `--model`). */

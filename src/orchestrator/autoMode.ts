@@ -1046,7 +1046,10 @@ function message(err: unknown): string {
  * {@link ModelClient} (tool-free — the model never acts here), and parse the
  * reply. Any failure — a missing configuration, an unreachable endpoint, an
  * abort, anything thrown — is caught and becomes an escalation. There is no
- * path on which a failure approves.
+ * path on which a failure approves. Deliberately no `sessionId` is threaded
+ * into this completion (unlike the tool loop): evaluateAsk is a one-shot,
+ * tool-free evaluation with no conversation to key a per-session provider
+ * header on, and `EvaluateOptions` carries no session id.
  */
 export async function evaluateAsk(
   ask: AutoModeAsk,
