@@ -1,12 +1,13 @@
 ---
 version: 1
 name: multi-provider-orchestrator
-status: approved
+status: pr
 mode: manual
 base: main
 base_commit: be39dc5726ea67f47328c4f73615c6114decf111
 branch: baiton/multi-provider-orchestrator
 approved_rev: ad28ef4d33a4c462fc55ac45213ef866e0d897d4b2d9fd83f65e3627c087aca7
+pr: https://github.com/Donn-Eddy/Baiton/pull/6
 ---
 
 # OVERVIEW
