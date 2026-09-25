@@ -22,13 +22,13 @@
       "effort": "medium"
     },
     "reviewer": {
-      "agent": "codex",
-      "model": "gpt-5.6-terra",
+      "agent": "antigravity",
+      "model": "gemini-3.8-flash",
       "effort": "medium"
     },
     "pr-writer": {
-      "agent": "claude",
-      "model": "claude-haiku-4-5",
+      "agent": "codex",
+      "model": "gpt-5.6-terra",
       "effort": "medium"
     }
   },
