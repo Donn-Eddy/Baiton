@@ -280,6 +280,29 @@ describe('orchestrator/modelsDev', () => {
       assert.match((result as { error: string }).error, /timed out after 10ms/);
     });
 
+    it('a body that stays pending until the deadline reports the timeout', async function () {
+      this.timeout(2000);
+      // fetch resolves headers immediately but `text()` only rejects when the
+      // deadline aborts it — the streaming-body timeout case.
+      const hangingBodyFetch: FeedFetch = async (url, init) => {
+        void url;
+        return {
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((resolve, reject) => {
+              init.signal.addEventListener('abort', () => {
+                reject(new Error('aborted while reading body'));
+              });
+              void resolve;
+            }),
+        };
+      };
+      const result = await fetchModelsDev(opts(hangingBodyFetch, { timeoutMs: 10 }));
+      assert.strictEqual(result.ok, false);
+      assert.match((result as { error: string }).error, /timed out after 10ms/);
+    });
+
     it('missing global fetch resolves to a runtime error without throwing', async () => {
       const globalAny = globalThis as { fetch?: unknown };
       const original = globalAny.fetch;

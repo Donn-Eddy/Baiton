@@ -377,6 +377,9 @@ export async function fetchModelsDev(options: FetchModelsDevOptions = {}): Promi
     try {
       text = await response.text();
     } catch (error) {
+      if (controller.signal.aborted) {
+        return err(`models.dev request timed out after ${timeoutMs}ms`);
+      }
       return err(`models.dev request failed: ${errorMessage(error)}`);
     }
     let parsed: unknown;
