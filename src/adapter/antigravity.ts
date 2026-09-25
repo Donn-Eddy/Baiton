@@ -39,6 +39,13 @@ export const ANTIGRAVITY_ACCEPT_EDITS_MODE = 'accept-edits';
  * when agy adds a model. The catalogue's keys are also the model dropdown
  * the config panel offers for antigravity (see `agentCapabilities()`), with
  * "Other…" for anything newer.
+ *
+ * This curated catalogue is authoritative: the antigravity adapter implements
+ * no `Adapter.discoverModels`, `AGENT_CATALOG_SOURCE` has no `antigravity`
+ * entry, and `agentCapabilities(snapshots)` therefore never overlays
+ * refreshed models onto it — because `antigravityModelFlags` maps model+effort
+ * to agy's suffixed ids and a discovered id list could not carry that mapping.
+ * Refresh it by hand from `agy models`.
  */
 export const ANTIGRAVITY_MODELS: Readonly<Record<string, readonly string[]>> = {
   'gemini-3.8-flash': ['low', 'medium', 'high'],
@@ -388,6 +395,9 @@ export class AntigravityAdapter implements Adapter {
    * so Baiton's journal `sessionId` is not resumable with it.
    */
   readonly acceptsSessionId = false;
+
+  // No `discoverModels`: see ANTIGRAVITY_MODELS — the curated catalogue plus
+  // `antigravityModelFlags` stays the sole source of agy model/effort options.
 
   /**
    * Run `agy --version` and report readiness (Requirements 14.2–14.4). A

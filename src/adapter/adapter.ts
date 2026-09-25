@@ -1,4 +1,6 @@
 import type { Role } from '../model/role';
+import type { CatalogFetch, CatalogSourceId, ModelEntry, SnapshotSource } from '../orchestrator/modelCatalog';
+import type { ModelsDevFeed } from '../orchestrator/modelsDev';
 
 /**
  * The adapter boundary. An adapter owns only a CLI's launch arguments per role,
@@ -21,6 +23,51 @@ export const AGENT_BINARY: Record<AgentId, string> = {
 };
 
 /**
+ * The per-source ceiling an adapter's `discoverModels` must respect when
+ * `ctx.timeoutMs` is not narrower; the discovery service (later todo) owns the
+ * real budget.
+ */
+export const DEFAULT_DISCOVERY_TIMEOUT_MS = 8_000;
+
+/**
+ * The context one `discoverModels` call runs in.
+ *
+ * Discovery is best-effort, timeboxed and must never throw: a failed or
+ * unfinished discovery resolves `undefined` and the consumer keeps the
+ * curated builtin list.
+ */
+export interface DiscoveryContext {
+  /** Hard wall-clock budget for this one call. */
+  readonly timeoutMs: number;
+  /**
+   * Aborts the call early (window teardown / a newer refresh);
+   * implementations must stop work and resolve `undefined`.
+   */
+  readonly signal?: AbortSignal;
+  /** Absolute workspace root for CLI-based discovery (`codex app-server`, `opencode serve`). */
+  readonly cwd?: string;
+  /**
+   * The models.dev feed already fetched in this refresh, so the claude
+   * adapter derives its list without a second network call.
+   */
+  readonly feed?: ModelsDevFeed;
+  /** Diagnostic sink; absent means discard. */
+  readonly log?: (message: string) => void;
+}
+
+/**
+ * Which {@link CatalogSourceId} an agent's models come from.
+ *
+ * `antigravity` is deliberately ABSENT — its curated `ANTIGRAVITY_MODELS`
+ * catalogue and `antigravityModelFlags` mapping are never overlaid.
+ */
+export const AGENT_CATALOG_SOURCE: Readonly<Partial<Record<AgentId, CatalogSourceId>>> = {
+  claude: 'claude',
+  codex: 'codex',
+  opencode: 'opencode',
+};
+
+/**
  * Capability descriptor for an agent CLI in the configuration panel (T10).
  *
  * An empty list means free text (no dropdown, no membership check).
@@ -32,6 +79,111 @@ export interface AgentCapabilities {
   readonly models: readonly string[];
   readonly efforts: readonly string[];
   readonly modelLink?: string;
+  /** Rich per-model detail behind `models` (per-model efforts, defaultEffort, provider, custom). Same order/length as `models` when present. */
+  readonly modelEntries?: readonly ModelEntry[];
+  /** Where this list came from in this window; absent means the curated builtin table with no refresh applied. */
+  readonly source?: SnapshotSource;
+  /** True when the last refresh for this agent's source failed and the list is last-known-good. */
+  readonly stale?: boolean;
+  /** Human-readable reason; present only with `stale: true`. */
+  readonly staleReason?: string;
+  /** ISO-8601 time of the last SUCCESSFUL fetch for this agent's source. */
+  readonly fetchedAt?: string;
+}
+
+/** Optional metadata layered on top of the entries by {@link capabilitiesFromEntries}. */
+export interface CapabilitiesFromEntriesOptions {
+  /** The capability-level efforts; falls back to the union of the entries' own efforts. */
+  readonly efforts?: readonly string[];
+  /** Optional documentation URL carried through as `modelLink`. */
+  readonly modelLink?: string;
+  /** Where this list came from in this window. */
+  readonly source?: SnapshotSource;
+  /** True when the list is last-known-good after a failed refresh. */
+  readonly stale?: boolean;
+  /** Human-readable reason; present only with `stale: true`. */
+  readonly staleReason?: string;
+  /** ISO-8601 time of the last successful fetch. */
+  readonly fetchedAt?: string;
+}
+
+/**
+ * Build {@link AgentCapabilities} from per-model {@link ModelEntry} records.
+ *
+ * `models` is the entries' ids in order, `efforts` the explicit `options.efforts`
+ * when given, else the de-duplicated first-seen union of every entry's own
+ * `efforts`, else `[]`; `modelEntries` is a fresh copy of the entries. Optional
+ * metadata is added CONDITIONALLY (never written as an explicit `undefined`
+ * own key), matching the `normalizeModelEntry` style in
+ * src/orchestrator/modelCatalog.ts. Pure: never throws, never mutates the input.
+ */
+export function capabilitiesFromEntries(
+  entries: readonly ModelEntry[],
+  options?: CapabilitiesFromEntriesOptions,
+): AgentCapabilities {
+  const caps: {
+    models: readonly string[];
+    efforts: readonly string[];
+    modelLink?: string;
+    modelEntries?: readonly ModelEntry[];
+    source?: SnapshotSource;
+    stale?: boolean;
+    staleReason?: string;
+    fetchedAt?: string;
+  } = {
+    models: entries.map((entry) => entry.id),
+    efforts: options?.efforts ?? unionEntryEfforts(entries),
+  };
+  if (options?.modelLink !== undefined) {
+    caps.modelLink = options.modelLink;
+  }
+  if (entries.length > 0) {
+    caps.modelEntries = [...entries];
+  }
+  if (options?.source !== undefined) {
+    caps.source = options.source;
+  }
+  if (options?.stale !== undefined) {
+    caps.stale = options.stale;
+  }
+  if (options?.staleReason !== undefined) {
+    caps.staleReason = options.staleReason;
+  }
+  if (options?.fetchedAt !== undefined) {
+    caps.fetchedAt = options.fetchedAt;
+  }
+  return caps;
+}
+
+/** The de-duplicated first-seen union of every entry's own `efforts`, or `[]`. */
+function unionEntryEfforts(entries: readonly ModelEntry[]): readonly string[] {
+  const union: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    for (const effort of entry.efforts ?? []) {
+      if (!seen.has(effort)) {
+        seen.add(effort);
+        union.push(effort);
+      }
+    }
+  }
+  return union;
+}
+
+/**
+ * Bridge an {@link AgentCapabilities} back to the payload the discovery
+ * service hands to `CatalogStore.applyResult`: `models` is the rich
+ * `modelEntries` when present, else the plain ids; `efforts` is set only when
+ * the capability's efforts are non-empty. Pure.
+ */
+export function capabilitiesToCatalogFetch(caps: AgentCapabilities): CatalogFetch {
+  const fetch: { models: readonly ModelEntry[]; efforts?: readonly string[] } = {
+    models: caps.modelEntries ?? caps.models.map((id) => ({ id })),
+  };
+  if (caps.efforts.length > 0) {
+    fetch.efforts = [...caps.efforts];
+  }
+  return fetch;
 }
 
 /**
@@ -132,6 +284,20 @@ export interface Adapter {
    * the adapter does not understand. Adapters without such a relay omit it.
    */
   relayFiles?(relay: AskRelayDescriptor): RelayFile[];
+
+  /**
+   * Optional discovery of the agent's model list, resolving the agent's
+   * freshly discovered models/efforts as an {@link AgentCapabilities}, or
+   * `undefined` when discovery is unavailable or failed — never a rejection:
+   * any internal error resolves `undefined`, which simply means "keep the
+   * curated builtin list". Implementations MUST honour `ctx.signal` (stop
+   * work and resolve `undefined` once aborted) and finish within
+   * `ctx.timeoutMs`, tearing down any child process or socket they started;
+   * and they MUST NOT read secrets — only model ids and labels leave the
+   * host. No adapter implements it yet (the per-CLI implementations land in
+   * later todos, and antigravity never will — see `AGENT_CATALOG_SOURCE`).
+   */
+  discoverModels?(ctx: DiscoveryContext): Promise<AgentCapabilities | undefined>;
 }
 
 /** One file an adapter's native ask relay needs written before launch. */
