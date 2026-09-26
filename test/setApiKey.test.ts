@@ -168,9 +168,39 @@ let API_KEY_SAVE_FAILED_MESSAGE: string;
 // The provider catalog is host-free and statically importable.
 import {
   LEGACY_API_KEY_SECRET,
+  providerCatalog,
   providerInfo,
   providerSecretKey,
 } from '../src/orchestrator/providers';
+import type { ProviderInfo } from '../src/orchestrator/providers';
+
+/**
+ * A stand-in for a models.dev-derived catalog entry: keyed, `source: 'feed'`,
+ * and absent from the builtin catalog, so it exercises the generic key slot.
+ */
+function feedEntry(id: string, label: string): ProviderInfo {
+  return {
+    id,
+    label,
+    defaultBaseUrl: `https://api.${id}.test/v1`,
+    requiresKey: true,
+    usesSettings: false,
+    models: [`${id}-model`],
+    dialect: 'openai',
+    headerStyle: 'default',
+    source: 'feed',
+  };
+}
+
+/** The four builtin keyed provider labels, in catalog order. */
+function builtinKeyedLabels(): string[] {
+  return [
+    providerInfo('google').label,
+    providerInfo('opencode').label,
+    providerInfo('mistral').label,
+    providerInfo('openai').label,
+  ];
+}
 
 /** Cast the SecretStorage fake to the type the handler expects. */
 function asSecrets(fake: FakeSecretStorage): import('vscode').SecretStorage {
@@ -639,6 +669,191 @@ describe('setProviderApiKey onChanged notification', () => {
     assert.deepStrictEqual(vscodeFake.messages, [
       { kind: 'info', message: providerKeySavedMessage('Mistral AI') },
     ]);
+  });
+});
+
+describe('setProviderApiKey catalog-driven quick pick', () => {
+  /** The extended catalog the host would pass once the feed has landed. */
+  const extendedCatalog = (): readonly ProviderInfo[] => [
+    ...providerCatalog(),
+    feedEntry('deepseek', 'DeepSeek'),
+    feedEntry('cerebras', 'Cerebras'),
+  ];
+
+  before(async () => {
+    const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
+    setProviderApiKey = mod.setProviderApiKey;
+  });
+
+  beforeEach(() => {
+    vscodeFake = makeVscodeFake();
+    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
+  });
+
+  it('offers the hidden feed providers too, in catalog order, still without copilot', async () => {
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), undefined, undefined, {
+      catalog: extendedCatalog,
+    });
+
+    const items = vscodeFake.lastQuickPickItems!;
+    assert.deepStrictEqual(
+      items.map((i) => i.label),
+      [...builtinKeyedLabels(), 'DeepSeek', 'Cerebras'],
+    );
+    assert.ok(items.every((i) => i.label !== 'GitHub Copilot'), 'no GitHub Copilot item');
+  });
+
+  it('choosing a hidden provider stores under the generic per-provider key', async () => {
+    vscodeFake.quickPickResult = { label: 'DeepSeek', id: 'deepseek' };
+    vscodeFake.inputResult = '  dk-abc  ';
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), undefined, undefined, {
+      catalog: extendedCatalog,
+    });
+
+    assert.strictEqual(secrets.storeCalls.length, 1);
+    assert.strictEqual(secrets.storeCalls[0].key, 'baiton.orchestrator.key.deepseek');
+    assert.strictEqual(secrets.storeCalls[0].key, providerSecretKey('deepseek'));
+    assert.strictEqual(secrets.storeCalls[0].value, 'dk-abc');
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('DeepSeek') },
+    ]);
+    assert.ok(!vscodeFake.messages[0].message.includes('dk-abc'));
+  });
+
+  it('descriptions reflect stored keys for feed providers too', async () => {
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.cerebras', 'cb-key');
+
+    await setProviderApiKey(asSecrets(secrets), undefined, undefined, {
+      catalog: extendedCatalog,
+    });
+
+    const items = vscodeFake.lastQuickPickItems!;
+    const byLabel = new Map(items.map((i) => [i.label, i.description]));
+    assert.strictEqual(byLabel.get('Cerebras'), PROVIDER_KEY_SET_DETAIL);
+    assert.strictEqual(byLabel.get('DeepSeek'), PROVIDER_KEY_MISSING_DETAIL);
+  });
+
+  it('no credential value ever reaches the quick-pick items', async () => {
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.deepseek', 'super-secret-value');
+
+    await setProviderApiKey(asSecrets(secrets), undefined, undefined, {
+      catalog: extendedCatalog,
+    });
+
+    assert.ok(
+      !JSON.stringify(vscodeFake.lastQuickPickItems).includes('super-secret-value'),
+      'the pick items must carry only ids, labels and a set/not-set marker',
+    );
+  });
+
+  it('an explicit feed provider id skips the pick and prompts with the feed label', async () => {
+    vscodeFake.inputResult = 'dk';
+    const secrets = new FakeSecretStorage();
+    const calls: string[] = [];
+
+    await setProviderApiKey(
+      asSecrets(secrets),
+      'deepseek',
+      (id) => {
+        calls.push(id);
+      },
+      { catalog: extendedCatalog },
+    );
+
+    assert.strictEqual(vscodeFake.quickPickCalls, 0);
+    assert.strictEqual(vscodeFake.inputBoxCalls, 1);
+    assert.ok((vscodeFake.lastInputOptions?.prompt ?? '').includes('DeepSeek'));
+    assert.strictEqual(secrets.values.get('baiton.orchestrator.key.deepseek'), 'dk');
+    assert.deepStrictEqual(calls, ['deepseek']);
+  });
+
+  it('an id absent from the catalog degrades to a label equal to the id', async () => {
+    vscodeFake.inputResult = 'gh-key';
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), 'ghost-provider', undefined, {
+      catalog: extendedCatalog,
+    });
+
+    assert.strictEqual(secrets.values.get('baiton.orchestrator.key.ghost-provider'), 'gh-key');
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('ghost-provider') },
+    ]);
+  });
+
+  it('a throwing catalog supplier falls back to the builtin catalog', async () => {
+    const secrets = new FakeSecretStorage();
+
+    await setProviderApiKey(asSecrets(secrets), undefined, undefined, {
+      catalog: () => {
+        throw new Error('boom');
+      },
+    });
+
+    assert.deepStrictEqual(
+      vscodeFake.lastQuickPickItems!.map((i) => i.label),
+      builtinKeyedLabels(),
+    );
+  });
+
+  it('an undefined / empty / keyless catalog falls back to the builtin catalog', async () => {
+    const suppliers: Array<() => readonly ProviderInfo[] | undefined> = [
+      () => undefined,
+      () => [],
+      () => [providerCatalog()[0]], // copilot alone: keyless, so not offerable
+    ];
+
+    for (const catalog of suppliers) {
+      vscodeFake = makeVscodeFake();
+      (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
+      const secrets = new FakeSecretStorage();
+
+      await setProviderApiKey(asSecrets(secrets), undefined, undefined, { catalog });
+
+      assert.deepStrictEqual(
+        vscodeFake.lastQuickPickItems!.map((i) => i.label),
+        builtinKeyedLabels(),
+      );
+    }
+  });
+
+  it('a rejecting SecretStorage read leaves the pick showing, all marked unset', async () => {
+    const secrets = new FakeSecretStorage();
+    const throwing = asSecrets(secrets);
+    (throwing as unknown as { get: () => Promise<string> }).get = () =>
+      Promise.reject(new Error('boom'));
+
+    await setProviderApiKey(throwing, undefined, undefined, { catalog: extendedCatalog });
+
+    assert.strictEqual(vscodeFake.quickPickCalls, 1);
+    const items = vscodeFake.lastQuickPickItems!;
+    assert.strictEqual(items.length, 6);
+    assert.ok(
+      items.every((i) => i.description === PROVIDER_KEY_MISSING_DETAIL),
+      'an unreadable slot reads as "no key set"',
+    );
+  });
+
+  it('the catalog is read at call time, not hoisted at the first call', async () => {
+    const feedExtra: ProviderInfo[] = [];
+    const catalog = (): readonly ProviderInfo[] => [...providerCatalog(), ...feedExtra];
+
+    await setProviderApiKey(asSecrets(new FakeSecretStorage()), undefined, undefined, { catalog });
+    assert.strictEqual(vscodeFake.lastQuickPickItems!.length, 4);
+
+    feedExtra.push(feedEntry('baseten', 'Baseten'));
+    vscodeFake = makeVscodeFake();
+    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
+
+    await setProviderApiKey(asSecrets(new FakeSecretStorage()), undefined, undefined, { catalog });
+    assert.strictEqual(vscodeFake.lastQuickPickItems!.length, 5);
+    assert.strictEqual(vscodeFake.lastQuickPickItems![4].label, 'Baseten');
   });
 });
 

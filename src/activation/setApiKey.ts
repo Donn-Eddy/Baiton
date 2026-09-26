@@ -14,6 +14,13 @@
  *    "no value provided" message is shown (Req 17.6).
  *  - Write failure: any previously stored key is left unchanged and an error
  *    message is shown (Req 17.7).
+ *
+ * The per-provider half of this module ({@link setProviderApiKey}) applies the
+ * same rules to one provider's `baiton.orchestrator.key.<id>` slot, and offers
+ * the keyed providers of the *live* catalog — the builtins plus every
+ * models.dev-derived provider — so a provider the Chat dropdown hides can still
+ * be given a key. Only ids, labels and a set/not-set marker ever reach the
+ * quick pick; no stored value does.
  */
 import * as vscode from 'vscode';
 import {
@@ -22,7 +29,7 @@ import {
   providerInfo,
   providerSecretKey,
 } from '../orchestrator/providers';
-import type { ProviderId } from '../orchestrator/providers';
+import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
 
 /**
  * The SecretStorage key under which the orchestrator API key is stored. This is
@@ -140,14 +147,55 @@ async function notifyChanged(
   }
 }
 
+/** Extra, optional wiring for {@link setProviderApiKey}. */
+export interface SetProviderApiKeyOptions {
+  /**
+   * The live provider catalog to offer, read at call time so a models.dev
+   * refresh that landed after activation is picked up. Host glue passes
+   * `() => providerCatalog(feed)`. Absent, throwing, undefined-returning or
+   * carrying no keyed provider all fall back to the builtin catalog, so the
+   * command works in an offline window exactly as before.
+   */
+  catalog?: () => readonly ProviderInfo[] | undefined;
+}
+
+/** True when `info` is a provider the quick pick can set a key for. */
+function isKeyedProvider(info: ProviderInfo): boolean {
+  return info.requiresKey === true && providerSecretKey(info.id) !== undefined;
+}
+
+/**
+ * The catalog to offer: the injected live catalog when it yields at least one
+ * keyed provider, else the builtin catalog. Never throws — a supplier that
+ * throws is treated as "no live catalog".
+ */
+function resolveCatalog(options?: SetProviderApiKeyOptions): readonly ProviderInfo[] {
+  let live: readonly ProviderInfo[] | undefined;
+  try {
+    live = options?.catalog?.();
+  } catch {
+    live = undefined;
+  }
+  if (live !== undefined && live.some(isKeyedProvider)) {
+    return live;
+  }
+  return providerCatalog();
+}
+
 /**
  * Prompt for and manage one provider's API key.
  *
  * The provider is taken from the optional `providerId` argument (the seam the
  * Chat webview's "Set API key…" action uses) or, when omitted, through a quick
- * pick over the keyed providers in catalog order — `copilot` is excluded since
- * it needs no key. Each quick-pick item's `description` reflects whether a key
- * is currently stored.
+ * pick over the keyed providers of the *live* catalog — the builtins plus every
+ * models.dev-derived provider — in catalog order. `copilot` and any keyless or
+ * unkeyable feed entry are excluded since they need no key. Providers the Chat
+ * dropdown hides are offered here too, so they can be configured *before* they
+ * can appear there. Each quick-pick item carries only an id, a label and a
+ * `description` reflecting whether a key is currently stored: no part of a
+ * stored value ever reaches the pick. When no catalog supplier is given — or it
+ * throws, yields `undefined`, or yields nothing keyable — the pick degrades to
+ * the builtin catalog, so an offline window behaves exactly as before.
  *
  * Ending behaviours:
  *  - Dismissed pick or cancelled input: no message, no store/delete.
@@ -172,22 +220,33 @@ async function notifyChanged(
  *   provider availability. Never invoked on cancel, on the empty-submit-with-
  *   nothing-stored path, or on a store/delete failure; a throwing/rejecting
  *   callback is contained.
+ * @param options Optional extra wiring; see {@link SetProviderApiKeyOptions}.
  */
 export async function setProviderApiKey(
   secrets: vscode.SecretStorage,
   providerId?: ProviderId,
   onChanged?: (id: ProviderId) => void | Promise<void>,
+  options?: SetProviderApiKeyOptions,
 ): Promise<void> {
-  const candidates = providerCatalog().filter((p) => p.requiresKey);
+  const catalog = resolveCatalog(options);
+  const candidates = catalog.filter(isKeyedProvider);
 
   let picked: ProviderId;
   if (providerId !== undefined && providerSecretKey(providerId) !== undefined) {
     picked = providerId;
   } else {
     // Read every existing key before showing the pick so descriptions are
-    // consistent within one offering.
-    const detailKeys = candidates.map((p) => providerSecretKey(p.id)!);
-    const stored = await Promise.all(detailKeys.map((key) => secrets.get(key)));
+    // consistent within one offering. A live catalog makes this dozens of
+    // reads, so one rejecting slot must not kill the command.
+    const stored = await Promise.all(
+      candidates.map(async (info) => {
+        try {
+          return await secrets.get(providerSecretKey(info.id)!);
+        } catch {
+          return undefined; // an unreadable slot reads as "no key set"
+        }
+      }),
+    );
     const items = candidates.map((info, i) => ({
       label: info.label,
       description:
@@ -200,6 +259,8 @@ export async function setProviderApiKey(
       title: PROVIDER_PICK_TITLE,
       placeHolder: PROVIDER_PICK_TITLE,
       ignoreFocusOut: true,
+      // The live catalog can be long; filtering by "API key set" is useful.
+      matchOnDescription: true,
     });
     if (choice === undefined) {
       return;
@@ -208,7 +269,9 @@ export async function setProviderApiKey(
   }
 
   const key = providerSecretKey(picked)!;
-  const label = providerInfo(picked).label;
+  // Resolved from the offered catalog so a feed provider gets its feed label;
+  // an id absent from the catalog degrades to a label equal to the id.
+  const label = providerInfo(picked, catalog).label;
 
   const input = await vscode.window.showInputBox({
     prompt: providerKeyPrompt(label),
