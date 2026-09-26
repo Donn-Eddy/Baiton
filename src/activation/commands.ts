@@ -131,6 +131,11 @@ import type { ProviderSettings } from './providerRouter';
 import { isProviderId } from '../orchestrator/providers';
 import type { ProviderId } from '../orchestrator/providers';
 import { revealConfigPanel } from './openConfigPanelView';
+// The window's model catalog seams. This closes an `extension -> activation ->
+// commands -> extension` import cycle, which is harmless under tsc's CommonJS
+// output because both accessors are called only inside closures, never at
+// module evaluation time.
+import { getModelCatalogStore, getModelDiscovery } from '../extension';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
@@ -510,12 +515,29 @@ export function registerCommands(
     // real namespace here and a fake in its unit test.
     lm: vscode,
     version: extensionVersion(context),
+    // The live model catalog: models come from the `models.dev` snapshot the
+    // discovery service refreshes, with its stale flag, and the provider list
+    // from the last parsed feed. Read per call — a refresh that lands after
+    // activation must be picked up without rebuilding the router.
+    catalog: {
+      snapshot: () => getModelCatalogStore()?.get('models.dev'),
+      feed: () => getModelDiscovery()?.feed(),
+    },
     log: (message) => surface.log(message),
   });
   // Restore the persisted selection (or pick the first usable provider) once
   // the legacy key has landed in the `openai` slot, then fire one change so a
   // Chat view that resolved first repaints its dropdown.
   void legacyMigration.then(() => router.init()).then(() => router.refresh());
+
+  // A landed catalog refresh changes which providers exist and which models
+  // they offer, so re-read availability; refresh() never rejects.
+  const catalogSub = getModelDiscovery()?.onDidChange(() => {
+    void router.refresh();
+  });
+  if (catalogSub !== undefined) {
+    disposables.push(new vscode.Disposable(() => catalogSub.dispose()));
+  }
 
   // One entry point for key management: the palette commands, and the Chat
   // view's inline "Set API key…" fix (which names the provider that failed).
