@@ -203,6 +203,16 @@ export interface RegisterConfigPanelDeps {
   resolveBaitonDir(): string | undefined;
   agentIds: readonly string[];
   capabilities?: Readonly<Record<string, AgentCapabilities>>;
+  /**
+   * The live capability table and its change event (model-selector-refresh T08).
+   * The caller wires these to `agentCapabilities(store.table())` and
+   * `discovery.onDidChange(...)`. Both are optional: with neither passed the
+   * panel keeps today's static behaviour, which is why `src/extension.ts` needs
+   * no change here — it builds the `CatalogStore`/`ModelDiscoveryService` AFTER
+   * calling `registerConfigPanel`, so that wiring is a separate step.
+   */
+  getCapabilities?(): Readonly<Record<string, AgentCapabilities>>;
+  onDidChangeCapabilities?(listener: () => void): vscode.Disposable;
   log(message: string): void;
   applyConfig?(
     baitonDir: string,
@@ -263,6 +273,14 @@ export function registerConfigPanel(deps: RegisterConfigPanelDeps): vscode.Dispo
       baitonDir,
       agentIds: deps.agentIds,
       capabilities: deps.capabilities,
+      // Spread conditionally so the getCapabilities -> capabilities -> agentCapabilities()
+      // precedence is preserved for callers that pass neither.
+      ...(deps.getCapabilities !== undefined
+        ? { getCapabilities: () => deps.getCapabilities!() }
+        : {}),
+      ...(deps.onDidChangeCapabilities !== undefined
+        ? { onDidChangeCapabilities: (listener: () => void) => deps.onDidChangeCapabilities!(listener) }
+        : {}),
       confirmReset: async (message: string) => {
         const choice = await vscode.window.showWarningMessage(message, { modal: true }, 'Reset');
         return choice === 'Reset';

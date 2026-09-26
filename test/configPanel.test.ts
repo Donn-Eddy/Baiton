@@ -1,8 +1,10 @@
 import * as assert from 'assert';
 import {
+  AgentStaleness,
   ConfigFieldError,
   ConfigForm,
   ConfigFormOptions,
+  agentStaleness,
   applyFormToDocument,
   configFormOptions,
   formFromConfig,
@@ -511,6 +513,108 @@ describe('config panel core (config-panel T03)', () => {
       };
 
       assert.deepStrictEqual(roundTripped, expected);
+    });
+  });
+
+  describe('stale metadata and agentStaleness (model-selector-refresh T08)', () => {
+    const FETCHED_AT = '2026-01-02T03:04:05.000Z';
+
+    it('configFormOptions copies source/stale/staleReason/fetchedAt alongside models/efforts/modelLink', () => {
+      const result = configFormOptions(AGENTS, {
+        ...CAPABILITIES,
+        claude: {
+          models: ['claude-opus-5-5'],
+          efforts: ['low', 'high'],
+          modelLink: 'https://example.invalid/models',
+          source: 'live',
+          stale: true,
+          staleReason: 'models.dev unreachable',
+          fetchedAt: FETCHED_AT,
+        },
+      });
+
+      assert.deepStrictEqual(result.byAgent.claude, {
+        models: ['claude-opus-5-5'],
+        efforts: ['low', 'high'],
+        modelLink: 'https://example.invalid/models',
+        source: 'live',
+        stale: true,
+        staleReason: 'models.dev unreachable',
+        fetchedAt: FETCHED_AT,
+      });
+    });
+
+    it('a capability without the metadata yields an entry with exactly the old keys', () => {
+      const result = configFormOptions(AGENTS, CAPABILITIES);
+      const keys = Object.keys(result.byAgent.claude);
+      for (const added of ['source', 'stale', 'staleReason', 'fetchedAt']) {
+        assert.strictEqual(keys.includes(added), false, `unexpected key ${added}`);
+      }
+      assert.deepStrictEqual(keys.sort(), ['efforts', 'models'].sort());
+    });
+
+    it('agentStaleness returns {} for the curated builtins', () => {
+      assert.deepStrictEqual(agentStaleness(configFormOptions(AGENTS, CAPABILITIES).byAgent), {});
+      assert.deepStrictEqual(agentStaleness(agentCapabilities()), {});
+    });
+
+    it('agentStaleness reports a stale agent, a fresh one, and omits an absent reason', () => {
+      const staleness = agentStaleness({
+        stale: {
+          models: ['m1'],
+          efforts: [],
+          stale: true,
+          staleReason: 'network down',
+          fetchedAt: FETCHED_AT,
+        },
+        fresh: { models: ['m2'], efforts: [], stale: false, fetchedAt: FETCHED_AT },
+        reasonless: { models: ['m3'], efforts: [], stale: true },
+        untouched: { models: ['m4'], efforts: [] },
+      });
+
+      const expected: Record<string, AgentStaleness> = {
+        stale: { stale: true, reason: 'network down', fetchedAt: FETCHED_AT },
+        fresh: { stale: false, fetchedAt: FETCHED_AT },
+        reasonless: { stale: true },
+      };
+      assert.deepStrictEqual(staleness, expected);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(staleness.reasonless, 'reason'), false);
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(staleness.reasonless, 'fetchedAt'),
+        false,
+      );
+    });
+
+    it('agentStaleness does not mutate its input', () => {
+      const input = {
+        claude: { models: ['m1'], efforts: ['low'], stale: true, staleReason: 'boom' },
+      };
+      const before = clone(input);
+      agentStaleness(input);
+      assert.deepStrictEqual(input, before);
+    });
+
+    it('a refreshed list that dropped the configured model and effort still round-trips', () => {
+      const form = validForm();
+      form.roles.planner.agent = 'claude';
+      form.roles.planner.model = 'claude-opus-5';
+      form.roles.planner.effort = 'ultra';
+
+      const refreshed = {
+        ...CAPABILITIES,
+        claude: {
+          models: ['claude-sonnet-5'],
+          efforts: ['low', 'medium', 'high'],
+          source: 'live' as const,
+          stale: false,
+          fetchedAt: FETCHED_AT,
+        },
+      };
+
+      const result = configFormOptions(AGENTS, refreshed, form);
+      assert.ok(result.byAgent.claude.models.includes('claude-opus-5'));
+      assert.ok(result.byAgent.claude.efforts.includes('ultra'));
+      assert.deepStrictEqual(validateConfigForm(form, result), []);
     });
   });
 });
