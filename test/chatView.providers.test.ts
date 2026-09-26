@@ -5,8 +5,10 @@ import * as vm from 'vm';
 import { HostToWebview, ProviderGroup } from '../src/orchestrator/webviewProtocol';
 
 /**
- * Fake-DOM unit tests for the Provider & Model dropdown projection added to
- * `media/chat.js` by multi-provider-orchestrator T08.
+ * Fake-DOM unit tests for the provider-first model selection in
+ * `media/chat.js` — the Provider & Model dropdown added by
+ * multi-provider-orchestrator T08, split into two selects by
+ * model-selector-refresh T14.
  *
  * `media/chat.js` and `media/protocol.js` are plain scripts (neither is
  * compiled or linted by the toolchain), so they are executed inside one `vm`
@@ -297,7 +299,9 @@ const ELEMENT_IDS: Array<[string, string]> = [
   ['auto-mode', 'button'],
   ['new-chat', 'button'],
   ['session-list', 'div'],
+  ['provider-select', 'select'],
   ['model-select', 'select'],
+  ['model-stale', 'span'],
   ['model-set-key', 'button'],
 ];
 
@@ -371,7 +375,12 @@ function plainClone(value: unknown): unknown {
 }
 
 
-/** The five provider groups in catalog order; the five-providers scenario. */
+/**
+ * The configured provider groups in host order — the router now posts only
+ * providers that are configured, so every group is enabled. One builtin id, one
+ * feed-derived id, a `custom` model, and one group whose catalog snapshot went
+ * stale.
+ */
 function providerFixture(): ProviderGroup[] {
   return [
     {
@@ -384,182 +393,266 @@ function providerFixture(): ProviderGroup[] {
       ],
     },
     {
-      id: 'google',
-      label: 'Google Gemini',
-      enabled: false,
-      reason: 'Set a Gemini API key in Baiton settings.',
-      models: [],
+      id: 'anthropic',
+      label: 'Anthropic',
+      enabled: true,
+      models: [
+        { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+        { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', custom: true },
+      ],
     },
     {
       id: 'opencode',
       label: 'OpenCode Zen',
-      enabled: false,
-      reason: 'OpenCode Zen is not reachable.',
-      models: [],
-    },
-    {
-      id: 'mistral',
-      label: 'Mistral',
       enabled: true,
-      models: [{ id: 'mistral-large', label: 'Mistral Large' }],
-    },
-    {
-      id: 'openai',
-      label: 'OpenAI',
-      enabled: false,
-      reason: 'OpenAI is not configured.',
-      models: [],
+      stale: true,
+      staleReason: 'models.dev fetch failed: ETIMEDOUT',
+      models: [{ id: 'zen-coder', label: 'Zen Coder' }],
     },
   ];
 }
 
-describe('chat view provider dropdown (multi-provider-orchestrator T08)', () => {
-  it('seed paint: no selectable option and no Set API key affordance', () => {
+/** The same list with one group shown as configured-but-unusable. */
+function withDisabled(): ProviderGroup[] {
+  return providerFixture().map((g) =>
+    g.id === 'opencode'
+      ? { ...g, enabled: false, reason: 'OpenCode Zen is not reachable.', models: [] }
+      : g,
+  );
+}
+
+/** The index of the provider option carrying this id. */
+function providerIndex(select: FakeEl, id: string): number {
+  const index = select.options.findIndex((o) => o.dataset.provider === id);
+  assert.ok(index >= 0, `provider option ${id} exists`);
+  return index;
+}
+
+describe('chat view provider-first model selector (model-selector-refresh T14)', () => {
+  it('seed paint: a disabled placeholder in each select, no Set API key, no stale badge', () => {
     const view = loadChatView();
-    const select = view.ids['model-select'];
-    const setKey = view.ids['model-set-key'];
-    // With no providers at all the rebuild still inserts the disabled
-    // "Select a model…" placeholder — so "no options" here means no
-    // selectable model option.
-    assert.strictEqual(select.options.length, 1);
-    assert.strictEqual(select.options[0].disabled, true);
-    assert.strictEqual(select.options[0].selected, true);
-    assert.strictEqual(setKey.classList.contains('visible'), false);
+    const providers = view.ids['provider-select'];
+    const models = view.ids['model-select'];
+    assert.strictEqual(providers.options.length, 1);
+    assert.strictEqual(providers.options[0].disabled, true);
+    assert.strictEqual(providers.options[0].selected, true);
+    assert.strictEqual(models.options.length, 1);
+    assert.strictEqual(models.options[0].disabled, true);
+    assert.strictEqual(models.options[0].selected, true);
+    assert.strictEqual(view.ids['model-set-key'].classList.contains('visible'), false);
+    assert.strictEqual(view.ids['model-stale'].textContent, '');
+    assert.strictEqual(view.ids['model-stale'].classList.contains('visible'), false);
   });
 
-  it('setProviders renders one optgroup per group in host order, disabled groups muted', () => {
+  it('setProviders lists the posted groups in host order and only the chosen provider models', () => {
     const view = loadChatView();
     view.send({ type: 'setProviders', groups: providerFixture(), selection: null });
-    const select = view.ids['model-select'];
-    const groups = select.children.filter((c) => c.tagName === 'OPTGROUP');
-    assert.strictEqual(groups.length, 5);
+    const providers = view.ids['provider-select'];
     assert.deepStrictEqual(
-      groups.map((g) => g.label),
-      ['GitHub Copilot', 'Google Gemini', 'OpenCode Zen', 'Mistral', 'OpenAI'],
+      providers.options.map((o) => o.value),
+      ['copilot', 'anthropic', 'opencode'],
     );
-    // Disabled groups: disabled=true plus one disabled option carrying the reason.
-    const reasons: Record<string, string> = {
-      'Google Gemini': 'Set a Gemini API key in Baiton settings.',
-      'OpenCode Zen': 'OpenCode Zen is not reachable.',
-      OpenAI: 'OpenAI is not configured.',
-    };
-    for (const g of groups) {
-      if (g.disabled) {
-        const notes = g.children.filter((c) => c.tagName === 'OPTION');
-        assert.strictEqual(notes.length, 1, g.label);
-        assert.strictEqual(notes[0].disabled, true);
-        assert.strictEqual(
-          notes[0].textContent,
-          reasons[g.label],
-          'option text must be the group reason',
-        );
-        assert.ok(notes[0].textContent.length > 0);
-      }
-    }
-    assert.strictEqual(groups[0].children.length, 2, 'copilot offers its models');
+    assert.deepStrictEqual(
+      providers.options.map((o) => o.textContent),
+      ['GitHub Copilot', 'Anthropic', 'OpenCode Zen'],
+    );
+
+    const models = view.ids['model-select'];
+    assert.strictEqual(
+      models.children.filter((c) => c.tagName === 'OPTGROUP').length,
+      0,
+      'the model select carries no optgroups',
+    );
+    // The first configured provider with models is chosen, so only its models
+    // are offered; a provider the host omitted appears in neither select.
+    assert.deepStrictEqual(
+      models.options.filter((o) => !o.disabled).map((o) => o.value),
+      ['copilot/gpt-5', 'copilot/claude-sonnet-4'],
+    );
+    assert.strictEqual(
+      providers.options.some((o) => o.value === 'mistral'),
+      false,
+    );
   });
 
-  it('the option matching the selection is selected, with value provider/model', () => {
+  it('a selection drives both selects', () => {
     const view = loadChatView();
     view.send({
       type: 'setProviders',
       groups: providerFixture(),
-      selection: { provider: 'copilot', model: 'claude-sonnet-4' },
+      selection: { provider: 'anthropic', model: 'claude-opus-5-5' },
     });
-    const select = view.ids['model-select'];
-    const selected = select.options.find((o) => o.selected);
-    assert.ok(selected, 'an option is selected');
-    assert.strictEqual(selected.dataset.provider, 'copilot');
-    assert.strictEqual(selected.dataset.model, 'claude-sonnet-4');
-    assert.strictEqual(select.value, 'copilot/claude-sonnet-4');
-    assert.strictEqual(select.selectedIndex, select.options.indexOf(selected));
+    assert.strictEqual(view.ids['provider-select'].value, 'anthropic');
+    const models = view.ids['model-select'];
+    const selected = models.options.find((o) => o.selected);
+    assert.ok(selected, 'a model option is selected');
+    assert.strictEqual(selected.value, 'anthropic/claude-opus-5-5');
+    assert.strictEqual(selected.dataset.provider, 'anthropic');
+    assert.strictEqual(selected.dataset.model, 'claude-opus-5-5');
+    assert.strictEqual(models.value, 'anthropic/claude-opus-5-5');
   });
 
-  it('a selection no option matches (or null) inserts a selected disabled placeholder at index 0', () => {
-    const view = loadChatView();
-    view.send({
-      type: 'setEmptyState',
-      endpoint: null,
-      model: 'gpt-5',
-    });
-    view.send({
-      type: 'setProviders',
-      groups: providerFixture(),
-      selection: { provider: 'openai', model: 'gpt-4.1' },
-    });
-    const select = view.ids['model-select'];
-    const placeholder = select.options[0];
-    assert.strictEqual(placeholder.disabled, true);
-    assert.strictEqual(placeholder.selected, true);
-    assert.strictEqual(placeholder.textContent, 'OpenAI / gpt-4.1 (unavailable)');
-    assert.strictEqual(select.selectedIndex, 0);
-    assert.strictEqual(view.posted.length, 0, 'repainting never posts');
-
-    const fresh = loadChatView();
-    fresh.send({ type: 'setProviders', groups: providerFixture(), selection: null });
-    assert.strictEqual(fresh.ids['model-select'].options[0].textContent, 'Select a model…');
-    assert.strictEqual(fresh.ids['model-select'].options[0].selected, true);
-    assert.strictEqual(fresh.posted.length, 0);
-  });
-
-  it('picking an enabled model posts selectModel exactly; other fires post nothing', () => {
+  it('changing the provider repaints the models and posts nothing; picking a model posts once', () => {
     const view = loadChatView();
     view.send({ type: 'setProviders', groups: providerFixture(), selection: null });
-    const select = view.ids['model-select'];
-    const mistral = select.options.findIndex(
-      (o) => o.dataset.provider === 'mistral' && o.dataset.model === 'mistral-large',
-    );
-    assert.ok(mistral >= 0, 'mistral option is flattened into the select');
-    select.selectedIndex = mistral;
-    select.fire('change', {});
-    assert.deepStrictEqual(view.posted.map(plainClone), [
-      { type: 'selectModel', provider: 'mistral', model: 'mistral-large' },
-    ]);
+    const providers = view.ids['provider-select'];
+    const models = view.ids['model-select'];
 
-    // A disabled reason row: repaint, not a post.
-    const google = select.options.findIndex((o) => o.dataset.provider === undefined);
-    assert.ok(google >= 0);
-    select.selectedIndex = google;
-    select.fire('change', {});
-    assert.strictEqual(view.posted.length, 1);
+    providers.selectedIndex = providerIndex(providers, 'opencode');
+    providers.fire('change', {});
+    assert.deepStrictEqual(
+      models.options.filter((o) => !o.disabled).map((o) => o.value),
+      ['opencode/zen-coder'],
+    );
+    assert.strictEqual(view.posted.length, 0, 'picking a provider posts nothing');
+
+    models.selectedIndex = models.options.findIndex((o) => o.value === 'opencode/zen-coder');
+    models.fire('change', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [
+      { type: 'selectModel', provider: 'opencode', model: 'zen-coder' },
+    ]);
 
     // Re-picking the already-active pair: nothing.
     view.send({
       type: 'setProviders',
       groups: providerFixture(),
-      selection: { provider: 'mistral', model: 'mistral-large' },
+      selection: { provider: 'opencode', model: 'zen-coder' },
     });
-    select.fire('change', {});
+    models.fire('change', {});
     assert.strictEqual(view.posted.length, 1);
   });
 
-  it('the Set API key affordance is visible only while a group is disabled and posts triggerFix', () => {
+  it('a disabled model row repaints rather than posting', () => {
+    const view = loadChatView();
+    view.send({ type: 'setProviders', groups: withDisabled(), selection: null });
+    const providers = view.ids['provider-select'];
+    const models = view.ids['model-select'];
+    const disabled = providers.options[providerIndex(providers, 'opencode')];
+    assert.strictEqual(disabled.disabled, true);
+    assert.strictEqual(disabled.title, 'OpenCode Zen is not reachable.');
+
+    providers.selectedIndex = providerIndex(providers, 'opencode');
+    providers.fire('change', {});
+    assert.strictEqual(models.options.length, 2, 'the reason row plus the placeholder');
+    assert.strictEqual(
+      models.options.some((o) => o.textContent === 'OpenCode Zen is not reachable.'),
+      true,
+    );
+    models.selectedIndex = models.options.findIndex(
+      (o) => o.textContent === 'OpenCode Zen is not reachable.',
+    );
+    models.fire('change', {});
+    assert.strictEqual(view.posted.length, 0);
+  });
+
+  it('custom values stay visible, selected and postable', () => {
+    // A model flagged custom keeps the suffix but posts its bare id.
     const view = loadChatView();
     view.send({ type: 'setProviders', groups: providerFixture(), selection: null });
+    const providers = view.ids['provider-select'];
+    const models = view.ids['model-select'];
+    providers.selectedIndex = providerIndex(providers, 'anthropic');
+    providers.fire('change', {});
+    const custom = models.options.find((o) => o.dataset.model === 'claude-sonnet-5');
+    assert.ok(custom);
+    assert.strictEqual(custom.textContent, 'Claude Sonnet 5 (custom)');
+    models.selectedIndex = models.options.indexOf(custom);
+    models.fire('change', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [
+      { type: 'selectModel', provider: 'anthropic', model: 'claude-sonnet-5' },
+    ]);
+
+    // A selection whose model is absent from the group: appended, selectable.
+    const missingModel = loadChatView();
+    missingModel.send({
+      type: 'setProviders',
+      groups: providerFixture(),
+      selection: { provider: 'copilot', model: 'gpt-4.1' },
+    });
+    const mm = missingModel.ids['model-select'];
+    const appended = mm.options[mm.options.length - 1];
+    assert.strictEqual(appended.textContent, 'gpt-4.1 (custom)');
+    assert.strictEqual(appended.disabled, false);
+    assert.strictEqual(appended.selected, true);
+    assert.strictEqual(mm.value, 'copilot/gpt-4.1');
+    assert.strictEqual(missingModel.posted.length, 0);
+
+    // A selection whose provider is absent from the groups: leading option.
+    const missingProvider = loadChatView();
+    missingProvider.send({
+      type: 'setProviders',
+      groups: providerFixture(),
+      selection: { provider: 'mystery', model: 'm1' },
+    });
+    const mp = missingProvider.ids['provider-select'];
+    assert.strictEqual(mp.options[0].value, 'mystery');
+    assert.strictEqual(mp.options[0].textContent, 'mystery (custom)');
+    assert.strictEqual(mp.options[0].dataset.custom, '1');
+    assert.strictEqual(mp.options[0].selected, true);
+    assert.strictEqual(mp.value, 'mystery');
+    assert.strictEqual(missingProvider.ids['model-select'].value, 'mystery/m1');
+    assert.strictEqual(missingProvider.posted.length, 0);
+  });
+
+  it('the stale badge follows the chosen provider', () => {
+    const view = loadChatView();
+    view.send({
+      type: 'setProviders',
+      groups: providerFixture(),
+      selection: { provider: 'opencode', model: 'zen-coder' },
+      refreshedAt: '2026-09-25T10:00:00.000Z',
+    });
+    const badge = view.ids['model-stale'];
+    assert.strictEqual(badge.classList.contains('visible'), true);
+    assert.ok(badge.textContent.startsWith('stale — showing last known models'));
+    assert.ok(badge.textContent.includes('2026-09-25T10:00:00.000Z'));
+    assert.strictEqual(badge.title, 'models.dev fetch failed: ETIMEDOUT');
+
+    // Switching to a fresh provider clears text, class and the title attribute.
+    const providers = view.ids['provider-select'];
+    providers.selectedIndex = providerIndex(providers, 'copilot');
+    providers.fire('change', {});
+    assert.strictEqual(badge.textContent, '');
+    assert.strictEqual(badge.classList.contains('visible'), false);
+    assert.strictEqual(badge.getAttribute('title'), null);
+  });
+
+  it('the Set API key affordance tracks unusable providers and posts triggerFix', () => {
+    const view = loadChatView();
     const setKey = view.ids['model-set-key'];
+    view.send({ type: 'setProviders', groups: providerFixture(), selection: null });
+    assert.strictEqual(setKey.classList.contains('visible'), false, 'all configured');
+    assert.strictEqual(setKey.title, '');
+
+    view.send({ type: 'setProviders', groups: withDisabled(), selection: null });
     assert.strictEqual(setKey.classList.contains('visible'), true);
     assert.ok(setKey.title.length > 0);
+
+    // Configured providers that offer no model at all: still a way in.
+    const modelless = providerFixture().map((g) => ({ ...g, models: [] }));
+    view.send({ type: 'setProviders', groups: modelless, selection: null });
+    assert.strictEqual(setKey.classList.contains('visible'), true);
+    assert.ok(setKey.title.length > 0);
+
     setKey.fire('click', {});
     assert.deepStrictEqual(view.posted.map(plainClone), [
       { type: 'triggerFix', action: 'setApiKey' },
     ]);
-
-    // All groups enabled: the affordance disappears (without posting again).
-    const all = providerFixture().map((g) => ({ ...g, enabled: true, reason: undefined }));
-    view.send({ type: 'setProviders', groups: all, selection: null });
-    assert.strictEqual(setKey.classList.contains('visible'), false);
-    assert.strictEqual(setKey.title, '');
   });
 
-  it('setBusy disables model-select while true and re-enables it after', () => {
+  it('setBusy disables both selects while true and re-enables them after', () => {
     const view = loadChatView();
     view.send({ type: 'setProviders', groups: providerFixture(), selection: null });
-    const select = view.ids['model-select'];
-    assert.strictEqual(select.disabled, false, 'enabled models exist');
+    const providers = view.ids['provider-select'];
+    const models = view.ids['model-select'];
+    assert.strictEqual(providers.disabled, false);
+    assert.strictEqual(models.disabled, false, 'enabled models exist');
     view.send({ type: 'setBusy', busy: true });
-    assert.strictEqual(select.disabled, true);
+    assert.strictEqual(providers.disabled, true);
+    assert.strictEqual(models.disabled, true);
     view.send({ type: 'setBusy', busy: false });
-    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(providers.disabled, false);
+    assert.strictEqual(models.disabled, false);
   });
 
   it('the empty state shows the provider label and model, falling back when unselected', () => {

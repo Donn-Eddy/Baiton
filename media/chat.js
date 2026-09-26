@@ -21,11 +21,17 @@
  * decision as a durable inline record. The composer control row also carries
  * an Auto-mode toggle immediately left of Stop that reflects `state.autoMode`,
  * stays enabled while busy, and posts `setAutoMode`. The composer also carries
- * the grouped Provider & Model dropdown: one <optgroup> per provider in catalog
- * order, with disabled groups for providers without a key; picking an enabled
- * model posts `selectModel` and the view repaints when the host echoes
- * `setProviders` back (it never writes `state.selection` itself). The empty
- * state shows the active provider + model rather than an endpoint URL.
+ * the provider-first model selection: a provider select followed by a model
+ * select. Only the configured providers the host posts arrive, in host order
+ * (the webview never sorts or filters them); the model select lists just the
+ * chosen provider's models, a stale badge appears when that provider's catalog
+ * snapshot is no longer known current, and a provider or model kept from a
+ * persisted selection but absent from the feed still renders, marked
+ * `(custom)`, so it stays selectable. Picking a provider only repaints the
+ * model list; picking a model posts `selectModel` and the view repaints when
+ * the host echoes `setProviders` back — neither change handler ever writes
+ * `state.selection` itself. The empty state shows the active provider + model
+ * rather than an endpoint URL.
  *
  * The input box characters survive hide/show because they are persisted to the
  * webview state via acquireVsCodeApi().setState (Req 16.5) — retained across
@@ -50,7 +56,9 @@
   const emptyProvider = /** @type {HTMLElement} */ (document.getElementById('empty-provider'));
   const emptyModel = /** @type {HTMLElement} */ (document.getElementById('empty-model'));
   const emptySetKey = /** @type {HTMLButtonElement} */ (document.getElementById('empty-set-key'));
+  const providerSelect = /** @type {HTMLSelectElement} */ (document.getElementById('provider-select'));
   const modelSelect = /** @type {HTMLSelectElement} */ (document.getElementById('model-select'));
+  const staleBadge = /** @type {HTMLElement} */ (document.getElementById('model-stale'));
   const modelSetKey = /** @type {HTMLButtonElement} */ (document.getElementById('model-set-key'));
   const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
   const sendBtn = /** @type {HTMLButtonElement} */ (document.getElementById('send'));
@@ -90,6 +98,14 @@
   // is rebuilt only when it changes so opening/keyboard-navigating it is not
   // clobbered by an unrelated re-render (a stream delta, a tool update).
   let renderedProviderSignature = null;
+  // Which provider the provider select currently shows. A webview-only UI
+  // concern: the host stays authoritative for `state.selection`, so this is
+  // never posted and never folded back into the state.
+  let providerChoice = null;
+  // The `provider\u0001model` key `providerChoice` was last synced from, so an
+  // unrelated `setProviders` echo does not revert the user's provider pick
+  // while a real host-side selection change still wins.
+  let lastSelectionKey = null;
   // Set when the host replaced the whole conversation: that render always snaps
   // to the bottom, whatever the previous scroll position was.
   let forceScrollToBottom = true;
@@ -734,17 +750,59 @@
     }
   }
 
-  /** The catalog label of a provider id, falling back to the raw id. */
-  function providerLabel(id) {
+  /** The posted group with this provider id, or undefined. */
+  function groupById(id) {
     for (let i = 0; i < state.providers.length; i++) {
       if (state.providers[i].id === id) {
-        return state.providers[i].label;
+        return state.providers[i];
       }
     }
-    return id;
+    return undefined;
   }
 
-  /** Signature of everything the dropdown DOM depends on. */
+  /** The catalog label of a provider id, falling back to the raw id. */
+  function providerLabel(id) {
+    const group = groupById(id);
+    return group ? group.label : id;
+  }
+
+  /**
+   * Keep `providerChoice` in step with the host without losing the user's own
+   * provider pick. A changed selection key means the host chose for us and
+   * always wins; otherwise the existing pick survives the echo, and only a
+   * choice that no longer exists falls back.
+   */
+  function syncProviderChoice() {
+    const selKey = state.selection
+      ? state.selection.provider + '\u0001' + state.selection.model
+      : '';
+    if (selKey !== lastSelectionKey) {
+      lastSelectionKey = selKey;
+      if (state.selection) {
+        providerChoice = state.selection.provider;
+      }
+    }
+    const known =
+      providerChoice !== null &&
+      (groupById(providerChoice) !== undefined ||
+        (state.selection && state.selection.provider === providerChoice));
+    if (!known) {
+      if (state.selection) {
+        providerChoice = state.selection.provider;
+        return;
+      }
+      for (let i = 0; i < state.providers.length; i++) {
+        const g = state.providers[i];
+        if (g.enabled && g.models && g.models.length > 0) {
+          providerChoice = g.id;
+          return;
+        }
+      }
+      providerChoice = state.providers.length > 0 ? state.providers[0].id : '';
+    }
+  }
+
+  /** Signature of everything the two selects and the stale badge depend on. */
   function providerSignature() {
     const groups = state.providers
       .map(function (g) {
@@ -753,74 +811,141 @@
           g.label,
           g.enabled ? '1' : '0',
           g.reason || '',
+          g.stale ? '1' : '0',
+          g.staleReason || '',
           (g.models || [])
             .map(function (m) {
-              return m.id + '\u0002' + (m.label || '');
+              return m.id + '\u0002' + (m.label || '') + '\u0002' + (m.custom ? '1' : '0');
             })
             .join('\u0001'),
         ].join('\u0001');
       })
       .join('\u0000');
     const sel = state.selection ? state.selection.provider + '\u0001' + state.selection.model : '';
-    return groups + '\u0003' + sel + '\u0003' + (state.busy ? '1' : '0');
+    return (
+      groups +
+      '\u0003' +
+      sel +
+      '\u0003' +
+      (state.busy ? '1' : '0') +
+      '\u0003' +
+      (providerChoice || '') +
+      '\u0003' +
+      (state.refreshedAt || '')
+    );
   }
 
   /**
-   * The Provider & Model dropdown is a pure projection of `state.providers`
-   * and `state.selection` (the same discipline as the Auto-mode toggle): the
-   * change handler never writes `state.selection` locally, it posts
-   * `selectModel` and repaints when the host echoes `setProviders` back
-   * through the reducer. One <optgroup> per provider, in the order the host
-   * sent them — the webview never sorts or filters them. A disabled group
-   * carries its reason as a disabled option so the user always sees why it is
-   * unavailable (a disabled <optgroup> alone renders inconsistently across
-   * platforms).
+   * The provider-first model selection is a pure projection of
+   * `state.providers` and `state.selection` (the same discipline as the
+   * Auto-mode toggle): neither change handler writes `state.selection`
+   * locally, the model handler posts `selectModel` and the view repaints when
+   * the host echoes `setProviders` back through the reducer. The provider
+   * select lists the posted groups in host order — only configured providers
+   * arrive, and the webview never sorts or filters them — and the model select
+   * lists just the chosen provider's models, with no optgroups at all. A
+   * provider or model carried over from a persisted selection but missing from
+   * the feed is still rendered, marked `(custom)`, so it stays selectable.
    */
   function renderProviders() {
+    syncProviderChoice();
     const signature = providerSignature();
     if (signature !== renderedProviderSignature) {
       renderedProviderSignature = signature;
-      modelSelect.textContent = '';
-      let matched = null;
+
+      // ----- Provider select --------------------------------------------
+      providerSelect.textContent = '';
       state.providers.forEach(function (group) {
-        const og = document.createElement('optgroup');
-        og.label = group.label;
-        if (!group.enabled) {
-          og.disabled = true;
-          if (group.reason) {
-            og.title = group.reason;
-          }
+        const opt = document.createElement('option');
+        opt.value = group.id;
+        opt.dataset.provider = group.id;
+        opt.textContent = group.label;
+        if (group.enabled === false) {
+          // Shown but unusable: keep it visible and say why.
+          opt.disabled = true;
+          opt.title = group.reason || '';
+        }
+        providerSelect.appendChild(opt);
+      });
+      if (state.selection && groupById(state.selection.provider) === undefined) {
+        // A persisted provider that vanished from the feed stays selectable.
+        const custom = document.createElement('option');
+        custom.value = state.selection.provider;
+        custom.dataset.provider = state.selection.provider;
+        custom.dataset.custom = '1';
+        custom.textContent = state.selection.provider + ' (custom)';
+        providerSelect.insertBefore(custom, providerSelect.firstChild || null);
+      }
+      if (state.providers.length === 0 && !state.selection) {
+        const none = document.createElement('option');
+        none.value = '';
+        none.disabled = true;
+        none.selected = true;
+        none.textContent = 'Select a provider…';
+        providerSelect.appendChild(none);
+      }
+      providerSelect.value = providerChoice || '';
+      if (!providerSelect.value && providerSelect.options.length > 0) {
+        providerSelect.options[0].selected = true;
+      }
+
+      // ----- Model select -----------------------------------------------
+      modelSelect.textContent = '';
+      const chosen = groupById(providerChoice);
+      let matched = null;
+      if (chosen === undefined) {
+        // No group for the chosen provider. A provider carried over from the
+        // selection is covered by the `(custom)` model option below, and with
+        // nothing chosen at all the placeholder alone says so; anything else is
+        // a provider that simply cannot offer models.
+        if (providerChoice && !(state.selection && state.selection.provider === providerChoice)) {
           const note = document.createElement('option');
           note.value = '';
           note.disabled = true;
-          note.textContent = group.reason || 'Unavailable';
-          og.appendChild(note);
-        } else if (!group.models || group.models.length === 0) {
-          const none = document.createElement('option');
-          none.value = '';
-          none.disabled = true;
-          none.textContent = 'No models available';
-          og.appendChild(none);
-        } else {
-          group.models.forEach(function (model) {
-            const opt = document.createElement('option');
-            opt.value = group.id + '/' + model.id;
-            opt.dataset.provider = group.id;
-            opt.dataset.model = model.id;
-            opt.textContent = model.label || model.id;
-            if (
-              state.selection &&
-              state.selection.provider === group.id &&
-              state.selection.model === model.id
-            ) {
-              opt.selected = true;
-              matched = opt;
-            }
-            og.appendChild(opt);
-          });
+          note.textContent = 'Unavailable';
+          modelSelect.appendChild(note);
         }
-        modelSelect.appendChild(og);
-      });
+      } else if (chosen.enabled === false) {
+        const note = document.createElement('option');
+        note.value = '';
+        note.disabled = true;
+        note.textContent = chosen.reason ? chosen.reason : 'Unavailable';
+        modelSelect.appendChild(note);
+      } else if (!chosen.models || chosen.models.length === 0) {
+        const none = document.createElement('option');
+        none.value = '';
+        none.disabled = true;
+        none.textContent = 'No models available';
+        modelSelect.appendChild(none);
+      } else {
+        chosen.models.forEach(function (model) {
+          const opt = document.createElement('option');
+          opt.value = chosen.id + '/' + model.id;
+          opt.dataset.provider = chosen.id;
+          opt.dataset.model = model.id;
+          opt.textContent = (model.label || model.id) + (model.custom === true ? ' (custom)' : '');
+          if (
+            state.selection &&
+            state.selection.provider === chosen.id &&
+            state.selection.model === model.id
+          ) {
+            opt.selected = true;
+            matched = opt;
+          }
+          modelSelect.appendChild(opt);
+        });
+      }
+      if (matched === null && state.selection && state.selection.provider === providerChoice) {
+        // A model no longer in the refreshed list stays visible and re-postable.
+        const custom = document.createElement('option');
+        custom.value = providerChoice + '/' + state.selection.model;
+        custom.dataset.provider = providerChoice;
+        custom.dataset.model = state.selection.model;
+        custom.textContent = state.selection.model + ' (custom)';
+        custom.selected = true;
+        modelSelect.appendChild(custom);
+        matched = custom;
+      }
       // No option matches the active selection (or nothing is selected yet):
       // show a disabled placeholder at the top rather than silently selecting
       // some other provider's model.
@@ -836,29 +961,68 @@
       } else {
         modelSelect.value = matched.value;
       }
-      // The 'Set API key…' affordance appears whenever at least one provider
-      // is disabled; it reuses the existing triggerFix/setApiKey protocol
-      // message.
+
+      // ----- Stale badge ------------------------------------------------
+      // textContent only — never HTML.
+      if (chosen && chosen.stale === true) {
+        let text = 'stale — showing last known models';
+        if (typeof state.refreshedAt === 'string' && state.refreshedAt !== '') {
+          text += ' (last updated ' + state.refreshedAt + ')';
+        }
+        staleBadge.textContent = text;
+        if (typeof chosen.staleReason === 'string' && chosen.staleReason !== '') {
+          staleBadge.title = chosen.staleReason;
+        } else {
+          staleBadge.removeAttribute('title');
+        }
+        staleBadge.classList.add('visible');
+      } else {
+        staleBadge.textContent = '';
+        staleBadge.classList.remove('visible');
+        staleBadge.removeAttribute('title');
+      }
+
+      // ----- Set API key affordance -------------------------------------
+      // The host normally posts only configured providers, so a disabled group
+      // is rare; without the second condition a user with no configured
+      // provider at all would have no way into the key prompt from here. It
+      // reuses the existing triggerFix/setApiKey protocol message.
       const blocked = state.providers.filter(function (g) {
         return !g.enabled;
       });
-      if (blocked.length > 0) {
+      const noneUsable =
+        state.providers.length > 0 &&
+        !state.providers.some(function (g) {
+          return g.enabled && g.models && g.models.length > 0;
+        });
+      if (blocked.length > 0 || noneUsable) {
         modelSetKey.classList.add('visible');
-        modelSetKey.title = blocked
-          .map(function (g) {
-            return g.reason || g.label + ' is unavailable.';
-          })
-          .join(' ');
+        modelSetKey.title =
+          blocked.length > 0
+            ? blocked
+                .map(function (g) {
+                  return g.reason || g.label + ' is unavailable.';
+                })
+                .join(' ')
+            : 'No provider is configured yet. Set an API key to enable one.';
       } else {
         modelSetKey.classList.remove('visible');
         modelSetKey.title = '';
       }
     }
     // Enablement is cheap and must follow busy even when the DOM is reused.
-    const anyEnabled = state.providers.some(function (g) {
-      return g.enabled && g.models && g.models.length > 0;
-    });
-    modelSelect.disabled = state.busy || !anyEnabled;
+    providerSelect.disabled =
+      state.busy ||
+      providerSelect.options.length === 0 ||
+      (providerSelect.options.length === 1 && providerSelect.options[0].disabled);
+    let anyModel = false;
+    for (let i = 0; i < modelSelect.options.length; i++) {
+      if (!modelSelect.options[i].disabled) {
+        anyModel = true;
+        break;
+      }
+    }
+    modelSelect.disabled = state.busy || !anyModel;
   }
 
   /** A short relative time such as "5m ago", "2h ago", "3d ago", else a date. */
@@ -1144,9 +1308,21 @@
     vscode.postMessage({ type: 'selectConversation', conversationId: selectEl.value });
   });
 
+  providerSelect.addEventListener('change', function () {
+    // Picking a provider posts nothing: it only repaints the model list, so one
+    // user action (picking a model) still produces exactly one `selectModel`.
+    const opt = providerSelect.options[providerSelect.selectedIndex];
+    const provider = (opt && opt.dataset && opt.dataset.provider) || providerSelect.value;
+    if (typeof provider === 'string' && provider !== '') {
+      providerChoice = provider;
+    }
+    renderedProviderSignature = null;
+    renderProviders();
+  });
+
   modelSelect.addEventListener('change', function () {
     const opt = modelSelect.options[modelSelect.selectedIndex];
-    const provider = opt && opt.dataset ? opt.dataset.provider : undefined;
+    const provider = (opt && opt.dataset && opt.dataset.provider) || providerChoice;
     const model = opt && opt.dataset ? opt.dataset.model : undefined;
     if (!provider || !model) {
       // A disabled placeholder/reason row: repaint from state rather than
