@@ -734,7 +734,6 @@ export class CodexAdapter implements Adapter {
       const entries: ModelEntry[] | undefined = await new Promise<ModelEntry[] | undefined>((resolve) => {
         let buffer = '';
         let settled = false;
-        let timer: NodeJS.Timeout | undefined;
         let abortListener: (() => void) | undefined;
 
         // Single idempotent settle path: clears the timer, detaches the abort
@@ -744,9 +743,7 @@ export class CodexAdapter implements Adapter {
             return;
           }
           settled = true;
-          if (timer !== undefined) {
-            clearTimeout(timer);
-          }
+          clearTimeout(timer);
           if (abortListener !== undefined) {
             ctx.signal?.removeEventListener('abort', abortListener);
           }
@@ -765,6 +762,15 @@ export class CodexAdapter implements Adapter {
           }
           resolve(result);
         };
+
+        // The hard wall-clock timebox; unref'd so a stray timer can never hold
+        // the host process open. Never invoked before `timer` is initialized:
+        // every settle path is asynchronous (or, for a throwing write, runs
+        // after this line below).
+        const timer = setTimeout(() => {
+          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after ${timeoutMs}ms`);
+        }, timeoutMs);
+        timer.unref?.();
 
         const writeMessage = (message: unknown): void => {
           try {
@@ -861,11 +867,6 @@ export class CodexAdapter implements Adapter {
         child.on('close', () => {
           finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} closed before the model list arrived`);
         });
-
-        timer = setTimeout(() => {
-          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after ${timeoutMs}ms`);
-        }, timeoutMs);
-        timer.unref?.();
 
         if (ctx.signal !== undefined) {
           ctx.signal.addEventListener('abort', onAbort);

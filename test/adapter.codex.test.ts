@@ -18,6 +18,7 @@ import {
   CODEX_APP_SERVER_MODEL_LIST_METHOD,
   CODEX_APP_SERVER_INITIALIZE_ID,
   CODEX_APP_SERVER_MODEL_LIST_ID,
+  CODEX_APP_SERVER_CLIENT_INFO,
   codexModelsFromAppServer,
   codexPermissionFlags,
   codexEffortFlags,
@@ -63,7 +64,7 @@ import { shellQuote } from '../src/adapter/permissions';
  *   codex's own prompt;
  * - the `codex app-server` discovery handshake (T05): the three-message
  *   JSON-RPC framing over JSONL, the tolerant `codexModelsFromAppServer`
- *   payload parser, and the never-reject capabilitity mapping of
+ *   payload parser, and the never-reject capability mapping of
  *   `discoverModels` (every failure path resolves `undefined` and the fake
  *   child is always killed).
  */
@@ -855,5 +856,662 @@ describe('CodexAdapter native ask relay (probe findings, codex 0.155.1)', () => 
         .behavior,
       'allow',
     );
+  });
+});
+
+/**
+ * The `model/list` payload parser (model-selector-refresh T05) is pure and
+ * total, and deliberately tolerant of the loosely-pinned `codex app-server`
+ * response shape: an unrecognised field is ignored rather than failing the
+ * whole refresh, so it degrades to `[]`/fewer fields instead of throwing.
+ */
+describe('codexModelsFromAppServer (model-selector-refresh T05)', () => {
+  it('parses the {models:[…]} shape with ids, labels, per-model efforts and defaults', () => {
+    const entries = codexModelsFromAppServer({
+      models: [
+        {
+          id: 'gpt-6-astra',
+          displayName: 'GPT-6 Astra',
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium',
+        },
+        {
+          id: 'gpt-5-codex',
+          supportedReasoningEfforts: ['minimal', 'low', 'medium', 'high'],
+          defaultReasoningEffort: 'low',
+        },
+      ],
+    });
+    assert.deepStrictEqual(entries, [
+      { id: 'gpt-6-astra', label: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium' },
+      { id: 'gpt-5-codex', efforts: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'low' },
+    ]);
+  });
+
+  it('parses an {items:[…]} object and a bare array too', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ items: [{ id: 'a' }, 'b'] }),
+      [{ id: 'a' }, { id: 'b' }],
+    );
+    assert.deepStrictEqual(
+      codexModelsFromAppServer([{ id: ' a ' }, { model: ' m ' }, { slug: ' s ' }]),
+      [{ id: 'a' }, { id: 'm' }, { id: 's' }],
+    );
+  });
+
+  it('trims ids, skips blank and unusable items (numbers, null, no-id objects)', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ models: ['  a  ', '   ', { id: ' \t ' }, { name: 'no id here' }, 42, null, { id: 'b' }] }),
+      [{ id: 'a' }, { id: 'b' }],
+    );
+  });
+
+  it('a duplicate id keeps the first entry (including its label)', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ models: [{ id: 'a', name: 'First' }, { id: ' a ', name: 'Second' }] }),
+      [{ id: 'a', label: 'First' }],
+    );
+  });
+
+  it('displayName/name become label ONLY when they differ from the id', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({
+        models: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b-nice' }, { id: 'c', displayName: 'c' }, { id: 'd' }],
+      }),
+      [{ id: 'a' }, { id: 'b', label: 'b-nice' }, { id: 'c' }, { id: 'd' }],
+    );
+  });
+
+  it('supports string and object elements of supportedReasoningEfforts, dropping blanks/dups and keeping order', () => {
+    const entries = codexModelsFromAppServer({
+      models: [
+        { id: 'strings', supportedReasoningEfforts: [' medium ', '', 'high', 'low', 'medium', 'none', 'xhigh'] },
+        { id: 'objects', supportedReasoningEfforts: [{ effort: 'low' }, { id: 'medium' }, { name: 'high ' }, { effort: '  ' }, { effort: 'low' }, {}] },
+        { id: 'empty', supportedReasoningEfforts: [] },
+        { id: 'missing' },
+      ],
+    });
+    assert.deepStrictEqual(entries, [
+      { id: 'strings', efforts: ['medium', 'high', 'low', 'none', 'xhigh'] },
+      { id: 'objects', efforts: ['low', 'medium', 'high'] },
+      { id: 'empty' },
+      { id: 'missing' },
+    ]);
+  });
+
+  it('drops a defaultEffort absent from a non-empty efforts list; keeps it when efforts are empty/absent/membership-holding', () => {
+    const entries = codexModelsFromAppServer({
+      models: [
+        { id: 'drop', supportedReasoningEfforts: ['low'], defaultReasoningEffort: 'high' },
+        { id: 'keep', defaultReasoningEffort: 'low' },
+        { id: 'alias', supportedReasoningEfforts: [], defaultEffort: 'high' },
+        { id: 'member', supportedReasoningEfforts: ['low', 'high'], defaultEffort: ' high ' },
+      ],
+    });
+    assert.deepStrictEqual(entries, [
+      { id: 'drop', efforts: ['low'] },
+      { id: 'keep', defaultEffort: 'low' },
+      { id: 'alias', defaultEffort: 'high' },
+      { id: 'member', efforts: ['low', 'high'], defaultEffort: 'high' },
+    ]);
+  });
+
+  it('yields [] for unrecognised payloads: undefined, null, number, string, empty object, non-array models', () => {
+    assert.deepStrictEqual(codexModelsFromAppServer(undefined), []);
+    assert.deepStrictEqual(codexModelsFromAppServer(null), []);
+    assert.deepStrictEqual(codexModelsFromAppServer(42), []);
+    assert.deepStrictEqual(codexModelsFromAppServer('x'), []);
+    assert.deepStrictEqual(codexModelsFromAppServer({}), []);
+    assert.deepStrictEqual(codexModelsFromAppServer({ models: 'nope' }), []);
+  });
+
+  it('never writes an own undefined key on any entry', () => {
+    const entries = codexModelsFromAppServer({
+      models: [
+        { id: 'a', name: 'a', supportedReasoningEfforts: [], defaultEffort: undefined },
+        { id: 'b', displayName: 'B' },
+        'c',
+      ],
+    });
+    assert.strictEqual(entries.length, 3);
+    for (const entry of entries) {
+      for (const key of Object.keys(entry)) {
+        assert.ok(Object.prototype.hasOwnProperty.call(entry, key));
+        assert.notStrictEqual(
+          (entry as unknown as Record<string, unknown>)[key],
+          undefined,
+          `own key ${key} must never carry an undefined value`,
+        );
+      }
+    }
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'label'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'efforts'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'defaultEffort'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[1], 'defaultEffort'), false);
+  });
+
+  it('never mutates the payload it parses (frozen and snapshot-checked)', () => {
+    const payload = {
+      models: [
+        { id: 'a', name: 'A', supportedReasoningEfforts: ['low', 'low'], defaultReasoningEffort: 'medium' },
+        'b',
+      ],
+    };
+    const before = JSON.stringify(payload);
+    // 'medium' is not a member of the model's non-empty ['low'] list, so the
+    // parser drops the defaultEffort the response tried to select.
+    assert.deepStrictEqual(codexModelsFromAppServer(payload), [
+      { id: 'a', label: 'A', efforts: ['low'] },
+      { id: 'b' },
+    ]);
+    assert.strictEqual(JSON.stringify(payload), before);
+
+    const frozen = Object.freeze({
+      models: Object.freeze([Object.freeze({ id: 'c', displayName: Object.freeze(['C']), name: 'c' })]),
+    });
+    assert.deepStrictEqual(codexModelsFromAppServer(frozen), [{ id: 'c' }]);
+  });
+});
+
+/**
+ * `discoverModels` (model-selector-refresh T05) drives one fake
+ * `codex app-server` child (injected via `new CodexAdapter({ spawnAppServer
+ * })`, the `fakeFetcher` pattern of test/adapter.claude.test.ts): no
+ * `child_process` monkey-patching, no real spawn. It pins the JSONL framing,
+ * the three-message handshake, the per-model effort mapping and union, the
+ * never-reject contract on every failure path, and the always-kill teardown.
+ */
+describe('CodexAdapter.discoverModels (model-selector-refresh T05)', () => {
+  /** The `model/list` result the happy script answers with. */
+  const DISCOVERED_RESULT = {
+    models: [
+      {
+        id: 'gpt-6-astra',
+        displayName: 'GPT-6 Astra',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5-codex',
+        supportedReasoningEfforts: ['minimal', 'low', 'medium', 'high'],
+        defaultReasoningEffort: 'low',
+      },
+    ],
+  };
+
+  /** Build a DiscoveryContext with sensible defaults overridable per test. */
+  function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+    return { timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS, ...overrides };
+  }
+
+  /** The emit surface a test script drives against the running fake. */
+  interface FakeApi {
+    stdout(chunk: string | Buffer): void;
+    reply(message: unknown): void;
+    error(error: unknown): void;
+    exit(code: number | null): void;
+    close(code: number | null): void;
+  }
+
+  /** The script callbacks a fake app-server exposes to each test. */
+  type AppServerScript = {
+    onLine?: (line: unknown, api: FakeApi) => void;
+    onSpawn?: (api: FakeApi) => void;
+  };
+
+  /**
+   * Build the fake spawner/child over plain listener arrays: `stdin.write`
+   * records the chunk into `writes` and hands each parsed line to
+   * `script.onLine`; `api.*` deliveries reach the adapter asynchronously
+   * (`setImmediate`), so the adapter's promise wiring is exercised.
+   */
+  function fakeAppServer(script: AppServerScript): {
+    spawner: CodexAppServerSpawner;
+    calls: Array<{ cwd?: string }>;
+    writes: string[];
+    api: FakeApi;
+    kills: () => number;
+  } {
+    const calls: Array<{ cwd?: string }> = [];
+    const writes: string[] = [];
+    const stdoutListeners: Array<(chunk: Buffer | string) => void> = [];
+    const stderrListeners: Array<(chunk: Buffer | string) => void> = [];
+    const errorListeners: Array<(...args: unknown[]) => void> = [];
+    const exitListeners: Array<(...args: unknown[]) => void> = [];
+    const closeListeners: Array<(...args: unknown[]) => void> = [];
+    let killCount = 0;
+
+    const api: FakeApi = {
+      stdout(chunk: string | Buffer): void {
+        setImmediate(() => {
+          for (const listener of stdoutListeners) {
+            listener(chunk);
+          }
+        });
+      },
+      reply(message: unknown): void {
+        api.stdout(`${JSON.stringify(message)}\n`);
+      },
+      error(error: unknown): void {
+        setImmediate(() => {
+          for (const listener of errorListeners) {
+            listener(error);
+          }
+        });
+      },
+      exit(code: number | null): void {
+        setImmediate(() => {
+          for (const listener of exitListeners) {
+            listener(code, null);
+          }
+        });
+      },
+      close(code: number | null): void {
+        setImmediate(() => {
+          for (const listener of closeListeners) {
+            listener(code, null);
+          }
+        });
+      },
+    };
+
+    const child: CodexAppServerProcess = {
+      stdin: {
+        write(chunk: string): unknown {
+          writes.push(chunk);
+          for (const line of chunk.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed.length === 0) {
+              continue;
+            }
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(trimmed);
+            } catch {
+              continue;
+            }
+            script.onLine?.(parsed, api);
+          }
+          return true;
+        },
+        end(): unknown {
+          return undefined;
+        },
+      },
+      stdout: {
+        on(event: 'data', listener: (chunk: Buffer | string) => void): unknown {
+          if (event === 'data') {
+            stdoutListeners.push(listener);
+          }
+          return child;
+        },
+      },
+      stderr: {
+        on(event: 'data', listener: (chunk: Buffer | string) => void): unknown {
+          if (event === 'data') {
+            stderrListeners.push(listener);
+          }
+          return child;
+        },
+      },
+      on(event: 'error' | 'exit' | 'close', listener: (...args: unknown[]) => void): unknown {
+        if (event === 'error') {
+          errorListeners.push(listener);
+        } else if (event === 'exit') {
+          exitListeners.push(listener);
+        } else {
+          closeListeners.push(listener);
+        }
+        return child;
+      },
+      kill(): unknown {
+        killCount += 1;
+        return true;
+      },
+    };
+
+    return {
+      spawner: (options) => {
+        calls.push({ cwd: options?.cwd });
+        setImmediate(() => script.onSpawn?.(api));
+        return child;
+      },
+      calls,
+      writes,
+      api,
+      kills: () => killCount,
+    };
+  }
+
+  /**
+   * The default happy script: answers `initialize` with `{}` and
+   * `model/list` with {@link DISCOVERED_RESULT}; the `initialized`
+   * notification (no id) is recorded via `writes` and never answered.
+   */
+  function happyScript(): AppServerScript {
+    return {
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (message.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, result: DISCOVERED_RESULT });
+        }
+      },
+    };
+  }
+
+  /** The writes of a fake handle, each asserted newline-terminated and parsed. */
+  function parsedWrites(fake: { writes: string[] }): unknown[] {
+    return fake.writes.map((chunk) => {
+      assert.ok(
+        chunk.endsWith('\n'),
+        `every written chunk must be newline-terminated: ${JSON.stringify(chunk)}`,
+      );
+      return JSON.parse(chunk) as unknown;
+    });
+  }
+
+  it('happy path: resolves ids with per-model efforts, the union efforts, and the exact three-message handshake', async () => {
+    const fake = fakeAppServer(happyScript());
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined, 'a good handshake must resolve capabilities');
+    assert.deepStrictEqual([...caps.models], ['gpt-6-astra', 'gpt-5-codex']);
+    assert.ok(caps.modelEntries !== undefined && caps.modelEntries.length === 2);
+    assert.deepStrictEqual([...caps.modelEntries], [
+      { id: 'gpt-6-astra', label: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium' },
+      { id: 'gpt-5-codex', efforts: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'low' },
+    ]);
+    // The first-seen union of the returned levels.
+    assert.deepStrictEqual([...caps.efforts], ['low', 'medium', 'high', 'xhigh', 'minimal']);
+    for (const key of ['source', 'stale', 'staleReason', 'fetchedAt', 'modelLink']) {
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(caps, key),
+        false,
+        `capabilities must carry no own ${key} key`,
+      );
+    }
+    assert.deepStrictEqual(parsedWrites(fake), [
+      { jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, method: CODEX_APP_SERVER_INITIALIZE_METHOD, params: { clientInfo: CODEX_APP_SERVER_CLIENT_INFO } },
+      { jsonrpc: '2.0', method: CODEX_APP_SERVER_INITIALIZED_NOTIFICATION, params: {} },
+      { jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, method: CODEX_APP_SERVER_MODEL_LIST_METHOD, params: {} },
+    ]);
+    assert.ok(fake.kills() >= 1);
+    // A late exit after the settlement is a no-op: the result must not change.
+    fake.api.exit(0);
+    assert.deepStrictEqual([...caps.models], ['gpt-6-astra', 'gpt-5-codex']);
+  });
+
+  it('capabilitiesToCatalogFetch round-trips the ids and the union efforts', async () => {
+    const fake = fakeAppServer(happyScript());
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined);
+    const fetch = capabilitiesToCatalogFetch(caps);
+    assert.deepStrictEqual(fetch.models.map((entry) => entry.id), ['gpt-6-astra', 'gpt-5-codex']);
+    assert.deepStrictEqual([...(fetch.efforts ?? [])], ['low', 'medium', 'high', 'xhigh', 'minimal']);
+  });
+
+  it('models with no supportedReasoningEfforts fall the capability efforts back to CODEX_EFFORTS', async () => {
+    const fake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (message.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, result: { models: [{ id: 'm-a' }, { id: 'm-b' }] } });
+        }
+      },
+    });
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined);
+    assert.deepStrictEqual([...caps.efforts], [...CODEX_EFFORTS]);
+    assert.deepStrictEqual([...caps.models], ['m-a', 'm-b']);
+    assert.notDeepStrictEqual([...caps.models], [...CODEX_MODELS]);
+  });
+
+  it('forwards ctx.cwd to the spawner', async () => {
+    const fake = fakeAppServer(happyScript());
+    await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx({ cwd: '/repo/workspace' }));
+    assert.deepStrictEqual(fake.calls, [{ cwd: '/repo/workspace' }]);
+  });
+
+  it('reframes split chunks (one as a Buffer), blank lines, non-JSON lines, notifications and unknown-id requests', async () => {
+    const modelListReply = {
+      jsonrpc: '2.0',
+      id: CODEX_APP_SERVER_MODEL_LIST_ID,
+      result: { models: [{ id: 'gpt-6-astra' }, 'gpt-5-codex'] },
+    };
+    const replyLine = `${JSON.stringify(modelListReply)}\n`;
+    const splitAt = 24; // deliberately cuts the JSON mid-line
+    const fake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        }
+        // The model/list request is NOT answered here: its response arrives
+        // as the split raw chunks queued from onSpawn.
+      },
+      onSpawn(api) {
+        api.stdout('\n');
+        api.stdout('not json\n');
+        api.stdout(`${JSON.stringify({ jsonrpc: '2.0', method: 'server/progress', params: {} })}\n`);
+        api.stdout(`${JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'ping', params: {} })}\n`);
+        api.stdout(Buffer.from(replyLine.slice(0, splitAt)));
+        api.stdout(replyLine.slice(splitAt));
+        api.stdout('   \n');
+      },
+    });
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined, 'the split model/list response must still resolve');
+    assert.deepStrictEqual([...caps.models], ['gpt-6-astra', 'gpt-5-codex']);
+    // No reply for the notification or the unknown-id request: exactly three writes.
+    assert.strictEqual(fake.writes.length, 3);
+  });
+
+  it('an initialize JSON-RPC error resolves undefined, writes no model/list request, and kills the child', async () => {
+    const fake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, error: { code: -32600, message: 'bad' } });
+        }
+      },
+    });
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(fake.writes.length, 1);
+    assert.ok(fake.kills() >= 1);
+  });
+
+  it('a model/list JSON-RPC error resolves undefined, kills the child, and logs a non-empty reason', async () => {
+    const logs: string[] = [];
+    const fake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (message.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, error: { code: -32000, message: 'nope' } });
+        }
+      },
+    });
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(
+      ctx({ log: (message) => logs.push(message) }),
+    );
+    assert.strictEqual(caps, undefined);
+    assert.ok(fake.kills() >= 1);
+    assert.ok(logs.length > 0 && logs.every((message) => message.length > 0), `expected logged reasons: ${JSON.stringify(logs)}`);
+  });
+
+  it('a missing binary (ENOENT error) resolves undefined and logs that codex app-server was not found on PATH', async () => {
+    const logs: string[] = [];
+    const fake = fakeAppServer({
+      onSpawn(api) {
+        api.error(Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }));
+      },
+    });
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(
+      ctx({ log: (message) => logs.push(message) }),
+    );
+    assert.strictEqual(caps, undefined);
+    assert.ok(fake.kills() >= 1);
+    assert.ok(
+      logs.includes(`${AGENT_BINARY.codex} ${CODEX_APP_SERVER_SUBCOMMAND} was not found on PATH`),
+      `expected the PATH-missing reason, got ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('an early exit (and separately an early close) resolves undefined without rejecting', async () => {
+    const exitFake = fakeAppServer({ onSpawn: (api) => api.exit(1) });
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: exitFake.spawner }).discoverModels(ctx()),
+      undefined,
+    );
+    assert.ok(exitFake.kills() >= 1);
+
+    const closeFake = fakeAppServer({ onSpawn: (api) => api.close(0) });
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: closeFake.spawner }).discoverModels(ctx()),
+      undefined,
+    );
+    assert.ok(closeFake.kills() >= 1);
+  });
+
+  it('a never-replying child times out (killed exactly once) and logs the timeout reason', async () => {
+    const logs: string[] = [];
+    const fake = fakeAppServer({}); // onSpawn/onLine both absent: nothing ever replies
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(
+      ctx({ timeoutMs: 30, log: (message) => logs.push(message) }),
+    );
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(fake.kills(), 1);
+    assert.ok(
+      logs.some((message) => message.includes(`${AGENT_BINARY.codex} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after 30ms`)),
+      `expected the timeout reason, got ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('the timeout clamp: timeoutMs 0 still spawns and succeeds; timeoutMs 60_000 does not break an immediate reply', async () => {
+    // 0 must clamp UP to DEFAULT_DISCOVERY_TIMEOUT_MS rather than race a 0ms
+    // timer against the responses.
+    const zeroFake = fakeAppServer(happyScript());
+    const zeroCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: zeroFake.spawner }).discoverModels(
+      ctx({ timeoutMs: 0 }),
+    );
+    assert.ok(zeroCaps !== undefined, 'timeoutMs 0 must clamp up to the default and still succeed');
+    assert.strictEqual(zeroFake.calls.length, 1);
+    assert.ok(zeroFake.kills() >= 1);
+
+    // 60_000 is capped by the DEFAULT_DISCOVERY_TIMEOUT_MS ceiling; the
+    // ceiling itself cannot be observed without an 8s wait, so pin the
+    // clamped timer by an immediate reply still succeeding with kills, not a
+    // timeout kill-failure.
+    const fastFake = fakeAppServer(happyScript());
+    const fastCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fastFake.spawner }).discoverModels(
+      ctx({ timeoutMs: 60_000 }),
+    );
+    assert.ok(fastCaps !== undefined);
+    assert.ok(fastFake.kills() >= 1);
+  });
+
+  it('an already-aborted signal spawns no process; a mid-flight abort resolves undefined and kills the child', async () => {
+    const stopped = new AbortController();
+    stopped.abort();
+    const alreadyFake = fakeAppServer(happyScript());
+    const alreadyCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: alreadyFake.spawner }).discoverModels(
+      ctx({ signal: stopped.signal }),
+    );
+    assert.strictEqual(alreadyCaps, undefined);
+    assert.strictEqual(alreadyFake.calls.length, 0, 'an aborted refresh must start no process');
+
+    const midflight = new AbortController();
+    const midFake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+          setImmediate(() => midflight.abort());
+        }
+        // Never answers model/list: the abort lands mid-handshake.
+      },
+    });
+    const midCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: midFake.spawner }).discoverModels(
+      ctx({ signal: midflight.signal }),
+    );
+    assert.strictEqual(midCaps, undefined);
+    assert.strictEqual(midFake.writes.length, 3, 'initialize, initialized and model/list were already written');
+    assert.ok(midFake.kills() >= 1);
+  });
+
+  it('a synchronously-throwing spawner and a throwing stdin.write both resolve undefined', async () => {
+    const throwingSpawner: CodexAppServerSpawner = () => {
+      throw new Error('spawn refused');
+    };
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: throwingSpawner }).discoverModels(ctx({ timeoutMs: 30 })),
+      undefined,
+    );
+
+    const brokenChild: CodexAppServerProcess = {
+      stdin: {
+        write(): unknown {
+          throw new Error('EPIPE');
+        },
+        end(): unknown {
+          return undefined;
+        },
+      },
+      stdout: {
+        on(): unknown {
+          return undefined;
+        },
+      },
+      on(): unknown {
+        return undefined;
+      },
+      kill(): unknown {
+        return undefined;
+      },
+    };
+    const brokenSpawner: CodexAppServerSpawner = () => brokenChild;
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: brokenSpawner }).discoverModels(ctx({ timeoutMs: 30 })),
+      undefined,
+    );
+  });
+
+  it('an empty discovered list resolves undefined so agentCapabilities() keeps the curated CODEX_MODELS list', async () => {
+    const fake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (message.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, result: { models: [] } });
+        }
+      },
+    });
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx()),
+      undefined,
+    );
+  });
+
+  it('the registry wires discoverModels for codex (not antigravity), and the no-arg constructor still works', () => {
+    assert.strictEqual(typeof createAdapterRegistry().require('codex').discoverModels, 'function');
+    assert.strictEqual(createAdapterRegistry().require('antigravity').discoverModels, undefined);
+
+    // The additive, optional constructor parameter keeps every no-arg call
+    // site (src/adapter/index.ts, the launch property test, engineFacade
+    // resume) compiling and behaving identically.
+    const adapter = new CodexAdapter();
+    const launchSpec = adapter.launch(req({ model: 'gpt-6-astra' }));
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.codex);
+    assert.ok(findPair(launchSpec.shellArgs, '--model', 'gpt-6-astra') >= 0);
+    assert.ok(findPair(launchSpec.shellArgs, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0);
+    const attachSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    assert.strictEqual(attachSpec.shellPath, AGENT_BINARY.codex);
+    assert.strictEqual(attachSpec.shellArgs[0], 'resume');
   });
 });
