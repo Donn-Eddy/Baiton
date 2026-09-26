@@ -106,4 +106,55 @@ describe('config panel browser mirror (config-panel T09)', () => {
     mirror.validateConfigForm(formClone1, multiErrorCase.options);
     assert.deepStrictEqual(formClone1, formClone2, 'Mirror validateConfigForm mutated input form');
   });
+
+  it('the mirror block stays DOM-free', () => {
+    // loadConfigMirror() evaluates media/config.js with `window` as its only
+    // global — no `document`, no `acquireVsCodeApi`. This is the guard that
+    // T09's option-sync and stale rendering went in BELOW the
+    // `acquireVsCodeApi` early return.
+    assert.doesNotThrow(() => {
+      const reloaded = loadConfigMirror();
+      assert.strictEqual(typeof reloaded.validateConfigForm, 'function');
+    });
+  });
+
+  it('refresh metadata on a capability does not change validation in either implementation', () => {
+    const roles = {} as ConfigForm['roles'];
+    for (const role of ROLES) {
+      roles[role] = { agent: 'claude', model: 'claude-sonnet-5', effort: 'high' };
+    }
+    const form: ConfigForm = {
+      roles,
+      limits: { plan_review_rounds: '1', exec_attempts: '3', stall_notice_minutes: '10' },
+      git: { remote: 'origin', base: 'main' },
+    };
+
+    const plain: ConfigFormOptions = {
+      agents: ['claude'],
+      byAgent: { claude: { models: ['claude-sonnet-5'], efforts: ['high'] } },
+    };
+    const withMetadata: ConfigFormOptions = {
+      agents: ['claude'],
+      byAgent: {
+        claude: {
+          models: ['claude-sonnet-5'],
+          efforts: ['high'],
+          source: 'cached',
+          stale: true,
+          staleReason: 'fetch failed',
+          fetchedAt: '2026-09-01T00:00:00.000Z',
+        },
+      },
+    };
+
+    const tsPlain = validateConfigForm(form, plain);
+    const tsMeta = validateConfigForm(form, withMetadata);
+    const jsPlain = mirror.validateConfigForm(form, plain);
+    const jsMeta = mirror.validateConfigForm(form, withMetadata);
+
+    assert.deepStrictEqual(tsMeta, tsPlain, 'TS validator reacted to refresh metadata');
+    assert.deepStrictEqual(jsMeta, jsPlain, 'Mirror validator reacted to refresh metadata');
+    assert.deepStrictEqual(jsPlain, tsPlain, 'Mirror and TS disagree without metadata');
+    assert.deepStrictEqual(jsMeta, tsMeta, 'Mirror and TS disagree with metadata');
+  });
 });
