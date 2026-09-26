@@ -5,11 +5,20 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   CodexAdapter,
+  CODEX_MODELS,
+  CODEX_EFFORTS,
   CODEX_READ_ONLY_SANDBOX,
   CODEX_WORKSPACE_WRITE_SANDBOX,
   CODEX_ASK_FOR_APPROVAL,
   CODEX_EFFORT_CONFIG_KEY,
   CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY,
+  CODEX_APP_SERVER_SUBCOMMAND,
+  CODEX_APP_SERVER_INITIALIZE_METHOD,
+  CODEX_APP_SERVER_INITIALIZED_NOTIFICATION,
+  CODEX_APP_SERVER_MODEL_LIST_METHOD,
+  CODEX_APP_SERVER_INITIALIZE_ID,
+  CODEX_APP_SERVER_MODEL_LIST_ID,
+  codexModelsFromAppServer,
   codexPermissionFlags,
   codexEffortFlags,
   codexSystemPromptFlags,
@@ -23,8 +32,10 @@ import {
   codexAskRelayHookConfig,
   codexRelayFlags,
 } from '../src/adapter/codex';
-import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
-import { AGENT_BINARY } from '../src/adapter/adapter';
+import type { CodexAppServerProcess, CodexAppServerSpawner } from '../src/adapter/codex';
+import type { AgentCapabilities, AskRelayDescriptor, DiscoveryContext, LaunchRequest } from '../src/adapter/adapter';
+import { AGENT_BINARY, DEFAULT_DISCOVERY_TIMEOUT_MS, capabilitiesToCatalogFetch } from '../src/adapter/adapter';
+import { createAdapterRegistry } from '../src/adapter/index';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 import { askRelayDescriptor, parseAsk } from '../src/engine/askRelay';
@@ -49,7 +60,12 @@ import { shellQuote } from '../src/adapter/permissions';
  *   `resume --last` branch;
  * - the native ask relay: the `--dangerously-bypass-hook-trust` + inline
  *   `-c hooks.PermissionRequest=[…]` argv and the hook script's fallback to
- *   codex's own prompt.
+ *   codex's own prompt;
+ * - the `codex app-server` discovery handshake (T05): the three-message
+ *   JSON-RPC framing over JSONL, the tolerant `codexModelsFromAppServer`
+ *   payload parser, and the never-reject capabilitity mapping of
+ *   `discoverModels` (every failure path resolves `undefined` and the fake
+ *   child is always killed).
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
