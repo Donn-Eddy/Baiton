@@ -626,7 +626,10 @@ describe('ProviderRouter.select', () => {
       null,
       7,
       {},
-      { provider: 'nope', model: 'x' },
+      // An unknown provider id is no longer malformed: the catalog is open to
+      // models.dev-derived ids, so `normalizeModelSelection` keeps it and the
+      // router reports it as custom/stale instead of dropping it here.
+      { provider: '', model: 'x' },
       { provider: 'google', model: '   ' },
     ];
     for (const bad of bads) {

@@ -1,19 +1,39 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
+  BUILTIN_PROVIDER_IDS,
+  FEED_PROVIDER_DENY,
   LEGACY_API_KEY_SECRET,
   MODEL_SELECTION_KEY,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_SECRET_KEY_PREFIX,
   ModelSelection,
+  ProviderInfo,
+  buildProviderCatalog,
   defaultModelFor,
+  findProviderInfo,
   isProviderId,
+  isProviderIdLike,
   normalizeModelSelection,
   providerCatalog,
   providerInfo,
+  providerNeedsKeyReason,
   providerSecretKey,
+  providersFromFeed,
 } from '../src/orchestrator/providers';
+import { parseModelsDevFeed } from '../src/orchestrator/modelsDev';
+import type { FeedProvider, ModelsDevFeed } from '../src/orchestrator/modelsDev';
 import { completionsUrl } from '../src/orchestrator/modelClient';
+
+/** The models.dev fixture feed, loaded the same way test/modelsDev.test.ts does. */
+function sampleFeed(): ModelsDevFeed {
+  const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
+  const result = parseModelsDevFeed(JSON.parse(text));
+  assert.ok(result.ok, 'fixture feed must parse');
+  return result.value;
+}
 
 describe('orchestrator/providers', () => {
   describe('catalog shape', () => {
@@ -94,6 +114,20 @@ describe('orchestrator/providers', () => {
     it('rejects unknown values', () => {
       for (const value of ['', 'OPENAI', 'gemini', 'anthropic', undefined, null, 42, {}]) {
         assert.strictEqual(isProviderId(value), false);
+      }
+    });
+  });
+
+  describe('isProviderIdLike', () => {
+    it('accepts any non-blank string id, builtin or not', () => {
+      for (const value of ['anthropic', 'deepinfra', 'copilot']) {
+        assert.strictEqual(isProviderIdLike(value), true);
+      }
+    });
+
+    it('rejects blank strings and non-strings', () => {
+      for (const value of ['', '   ', undefined, null, 42, {}, []]) {
+        assert.strictEqual(isProviderIdLike(value), false);
       }
     });
   });
@@ -239,7 +273,9 @@ describe('orchestrator/providers', () => {
         42,
         [],
         {},
-        { provider: 'nope', model: 'x' },
+        { provider: '', model: 'x' },
+        { provider: '   ', model: 'x' },
+        { provider: 5, model: 'x' },
         { provider: 'google' },
         { provider: 'google', model: '' },
         { provider: 'google', model: '   ' },
@@ -251,6 +287,20 @@ describe('orchestrator/providers', () => {
       }
     });
 
+    it('accepts a provider absent from the builtin catalog', () => {
+      assert.deepStrictEqual(normalizeModelSelection({ provider: 'anthropic', model: 'claude-opus-5-5' }), {
+        provider: 'anthropic',
+        model: 'claude-opus-5-5',
+      });
+    });
+
+    it('trims the provider', () => {
+      assert.deepStrictEqual(normalizeModelSelection({ provider: '  google  ', model: 'x' }), {
+        provider: 'google',
+        model: 'x',
+      });
+    });
+
     it('round-trips every catalog default model', () => {
       for (const id of PROVIDER_IDS) {
         const model = defaultModelFor(id);
@@ -258,6 +308,196 @@ describe('orchestrator/providers', () => {
           continue;
         }
         assert.deepStrictEqual(normalizeModelSelection({ provider: id, model }), { provider: id, model });
+      }
+    });
+  });
+
+  describe('builtin vocabulary', () => {
+    it('BUILTIN_PROVIDER_IDS is PROVIDER_IDS', () => {
+      assert.deepStrictEqual([...BUILTIN_PROVIDER_IDS], [...PROVIDER_IDS]);
+    });
+  });
+
+  describe('providersFromFeed', () => {
+    it('derives one entry per fixture provider, in feed order', () => {
+      const feed = sampleFeed();
+      const entries = providersFromFeed(feed);
+      assert.deepStrictEqual(
+        entries.map((entry) => entry.id),
+        feed.map((provider) => provider.id),
+      );
+      assert.strictEqual(entries.length, 8);
+    });
+
+    it('maps anthropic through unchanged', () => {
+      const anthropic = providersFromFeed(sampleFeed()).find((entry) => entry.id === 'anthropic') as ProviderInfo;
+      assert.ok(anthropic);
+      assert.strictEqual(anthropic.label, 'Anthropic');
+      assert.strictEqual(anthropic.defaultBaseUrl, 'https://api.anthropic.com/v1');
+      assert.strictEqual(anthropic.requiresKey, true);
+      assert.strictEqual(anthropic.usesSettings, false);
+      assert.strictEqual(anthropic.dialect, 'openai');
+      assert.strictEqual(anthropic.headerStyle, 'default');
+      assert.strictEqual(anthropic.source, 'feed');
+      assert.deepStrictEqual([...(anthropic.env ?? [])], ['ANTHROPIC_API_KEY']);
+      assert.strictEqual(anthropic.models[0], 'claude-opus-5-5');
+    });
+
+    it('applies the per-id trait overrides', () => {
+      const entries = providersFromFeed(sampleFeed());
+      const google = entries.find((entry) => entry.id === 'google') as ProviderInfo;
+      assert.strictEqual(google.dialect, 'gemini');
+      assert.strictEqual(google.defaultBaseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai/');
+      const opencode = entries.find((entry) => entry.id === 'opencode') as ProviderInfo;
+      assert.strictEqual(opencode.headerStyle, 'opencode');
+    });
+
+    it('skips entries with no api, no models, a blank id, or a denied id', () => {
+      const model = { id: 'm', name: 'm', reasoning: false, toolCall: false, attachment: false };
+      const base: FeedProvider = { id: 'ok', name: 'OK', api: 'https://example.com/v1', env: [], models: [model] };
+      const feed: ModelsDevFeed = [
+        base,
+        { ...base, id: 'no-api', api: undefined },
+        { ...base, id: 'no-models', models: [] },
+        { ...base, id: '   ' },
+        { ...base, id: 'copilot' },
+        { ...base, id: 'github-copilot' },
+      ];
+      assert.deepStrictEqual(
+        providersFromFeed(feed).map((entry) => entry.id),
+        ['ok'],
+      );
+      for (const denied of FEED_PROVIDER_DENY) {
+        assert.strictEqual(
+          providersFromFeed([{ ...base, id: denied }]).length,
+          0,
+          `${denied} must be skipped`,
+        );
+      }
+    });
+
+    it('never throws on malformed entries', () => {
+      const malformed = [null, undefined, 42, 'nope', {}, { id: 'x' }, { id: 'y', api: 5, models: 'no' }];
+      assert.doesNotThrow(() => providersFromFeed(malformed as unknown as ModelsDevFeed));
+      assert.strictEqual(providersFromFeed(malformed as unknown as ModelsDevFeed).length, 0);
+    });
+  });
+
+  describe('buildProviderCatalog', () => {
+    it('with no feed it is today’s builtin catalog', () => {
+      assert.deepStrictEqual(buildProviderCatalog(), providerCatalog());
+      assert.deepStrictEqual(
+        buildProviderCatalog().map((entry) => entry.id),
+        [...PROVIDER_IDS],
+      );
+      assert.deepStrictEqual(buildProviderCatalog([]), providerCatalog());
+    });
+
+    it('merges the feed into unique ids, copilot first and openai last', () => {
+      const catalog = buildProviderCatalog(sampleFeed());
+      const ids = catalog.map((entry) => entry.id);
+      assert.strictEqual(new Set(ids).size, ids.length, `duplicate ids: ${ids.join(', ')}`);
+      assert.strictEqual(ids[0], 'copilot');
+      assert.strictEqual(ids[ids.length - 1], 'openai');
+      for (const id of ['anthropic', 'deepinfra', 'cerebras', 'baseten', 'deepseek']) {
+        assert.ok(ids.includes(id), `missing feed provider ${id}`);
+      }
+    });
+
+    it('keeps builtin host traits but takes the feed’s model lists', () => {
+      const catalog = buildProviderCatalog(sampleFeed());
+      for (const id of ['google', 'mistral', 'opencode'] as const) {
+        assert.strictEqual(catalog.filter((entry) => entry.id === id).length, 1, `${id} appears twice`);
+        const entry = catalog.find((item) => item.id === id) as ProviderInfo;
+        assert.strictEqual(entry.label, PROVIDERS[id].label);
+        assert.strictEqual(entry.dialect, PROVIDERS[id].dialect);
+        assert.strictEqual(entry.headerStyle, PROVIDERS[id].headerStyle);
+        assert.strictEqual(entry.defaultBaseUrl, PROVIDERS[id].defaultBaseUrl);
+      }
+      const google = catalog.find((entry) => entry.id === 'google') as ProviderInfo;
+      assert.ok(google.models.includes('gemini-2.5-pro'));
+      const opencode = catalog.find((entry) => entry.id === 'opencode') as ProviderInfo;
+      assert.ok(!opencode.models.includes('claude-sonnet-4-5'), 'opencode must stop advertising the stale model');
+      assert.deepStrictEqual([...opencode.models], ['grok-code', 'gpt-oss-120b-zen', 'claude-sonnet-5-zen']);
+    });
+
+    it('every feed-derived base URL is an https /chat/completions prefix', () => {
+      for (const entry of buildProviderCatalog(sampleFeed())) {
+        if (entry.defaultBaseUrl === undefined) {
+          continue;
+        }
+        assert.strictEqual(new URL(entry.defaultBaseUrl).protocol, 'https:');
+        assert.ok(completionsUrl(entry.defaultBaseUrl).href.endsWith('/chat/completions'));
+      }
+    });
+  });
+
+  describe('unknown ids degrade gracefully', () => {
+    it('findProviderInfo matches the builtins or the given catalog', () => {
+      assert.strictEqual(findProviderInfo('anthropic'), undefined);
+      const catalog = buildProviderCatalog(sampleFeed());
+      assert.strictEqual(findProviderInfo('anthropic', catalog)?.label, 'Anthropic');
+      assert.strictEqual(findProviderInfo('', catalog), undefined);
+      assert.strictEqual(findProviderInfo('nope', catalog), undefined);
+    });
+
+    it('providerInfo synthesises a fallback instead of throwing', () => {
+      const info = providerInfo('anthropic');
+      assert.strictEqual(info.id, 'anthropic');
+      assert.strictEqual(info.label, 'anthropic');
+      assert.strictEqual(info.requiresKey, true);
+      assert.strictEqual(info.usesSettings, false);
+      assert.deepStrictEqual([...info.models], []);
+      assert.strictEqual(info.dialect, 'openai');
+      assert.strictEqual(info.headerStyle, 'default');
+      assert.strictEqual(info.source, 'custom');
+    });
+
+    it('inherited object members cannot be smuggled in', () => {
+      for (const id of ['__proto__', 'constructor', 'toString']) {
+        const info = providerInfo(id);
+        assert.strictEqual(info.id, id);
+        assert.strictEqual(info.label, id);
+        assert.strictEqual(info.source, 'custom');
+        assert.deepStrictEqual([...info.models], []);
+        assert.strictEqual(findProviderInfo(id), undefined);
+      }
+    });
+
+    it('providerNeedsKeyReason names the id, or the feed label with a catalog', () => {
+      assert.strictEqual(providerNeedsKeyReason('anthropic'), 'Set an API key for anthropic to use it.');
+      assert.strictEqual(
+        providerNeedsKeyReason('anthropic', buildProviderCatalog(sampleFeed())),
+        'Set an API key for Anthropic to use it.',
+      );
+    });
+
+    it('defaultModelFor resolves against the given catalog only', () => {
+      assert.strictEqual(defaultModelFor('anthropic', buildProviderCatalog(sampleFeed())), 'claude-opus-5-5');
+      assert.strictEqual(defaultModelFor('anthropic'), undefined);
+    });
+  });
+
+  describe('legacy secret-key compatibility', () => {
+    it('every builtin but copilot keeps prefix + id', () => {
+      for (const id of PROVIDER_IDS) {
+        if (id === 'copilot') {
+          continue;
+        }
+        assert.strictEqual(providerSecretKey(id), 'baiton.orchestrator.key.' + id);
+      }
+      assert.strictEqual(providerSecretKey('copilot'), undefined);
+    });
+
+    it('a feed id gets a key of the same shape', () => {
+      assert.strictEqual(providerSecretKey('anthropic'), 'baiton.orchestrator.key.anthropic');
+    });
+
+    it('blank ids get no key, and no key is the legacy secret', () => {
+      assert.strictEqual(providerSecretKey(''), undefined);
+      assert.strictEqual(providerSecretKey('   '), undefined);
+      for (const entry of buildProviderCatalog(sampleFeed())) {
+        assert.notStrictEqual(providerSecretKey(entry.id), LEGACY_API_KEY_SECRET);
       }
     });
   });

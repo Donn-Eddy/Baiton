@@ -9,15 +9,51 @@
  * consume this same contract — like src/orchestrator/webviewProtocol.ts.
  */
 
-/** One orchestrator inference provider, keyed by its stable id. */
-export type ProviderId = 'copilot' | 'google' | 'opencode' | 'mistral' | 'openai';
+import type { ModelsDevFeed, FeedProvider } from './modelsDev';
 
-/** Dropdown order, top to bottom. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['copilot', 'google', 'opencode', 'mistral', 'openai'] as const;
+/**
+ * One orchestrator inference provider, keyed by its stable id.
+ *
+ * Any non-empty provider id: a builtin ({@link BuiltinProviderId}), a
+ * models.dev-derived id, or a persisted id whose provider has since vanished
+ * from the feed. Membership is validated at the router, never at parse time —
+ * see {@link normalizeModelSelection}.
+ */
+export type ProviderId = string;
 
-/** True when `value` is one of the known {@link ProviderId} strings. */
-export function isProviderId(value: unknown): value is ProviderId {
-  return typeof value === 'string' && (PROVIDER_IDS as readonly string[]).includes(value);
+/** The providers this build ships without any feed: the offline/builtin base. */
+export type BuiltinProviderId = 'copilot' | 'google' | 'opencode' | 'mistral' | 'openai';
+
+/** The builtin vocabulary, in dropdown order. */
+export const BUILTIN_PROVIDER_IDS: readonly BuiltinProviderId[] = [
+  'copilot',
+  'google',
+  'opencode',
+  'mistral',
+  'openai',
+] as const;
+
+/** Dropdown order, top to bottom. Same value and order as {@link BUILTIN_PROVIDER_IDS}. */
+export const PROVIDER_IDS = BUILTIN_PROVIDER_IDS;
+
+/**
+ * True when `value` is one of the builtin provider ids.
+ *
+ * Deliberately narrow: src/activation/commands.ts uses it to decide whether a
+ * command argument names a provider, so an arbitrary string must not pass. The
+ * open check is {@link isProviderIdLike}.
+ */
+export function isProviderId(value: unknown): value is BuiltinProviderId {
+  return typeof value === 'string' && (BUILTIN_PROVIDER_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * True when `value` could be any provider id at all — a string that trims to
+ * non-empty. This is the open check used by {@link normalizeModelSelection}: a
+ * feed-derived or vanished provider id is still a usable selection.
+ */
+export function isProviderIdLike(value: unknown): value is ProviderId {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 /** One catalog entry: how a provider is labelled, reached and keyed. */
@@ -38,6 +74,12 @@ export interface ProviderInfo {
   dialect: DialectId;
   /** Extra headers added to every request; `opencode` adds User-Agent and x-opencode-session. */
   headerStyle: HeaderStyleId;
+  /** Where the entry came from; a missing value is treated as `'builtin'`. */
+  readonly source?: 'builtin' | 'feed' | 'custom';
+  /** Environment variables the provider reads, carried through from the feed. */
+  readonly env?: readonly string[];
+  /** The provider's documentation URL, carried through from the feed. */
+  readonly doc?: string;
 }
 
 /** Which wire shaping a provider's OpenAI-compatible payload needs. */
@@ -55,14 +97,19 @@ export type DialectId = 'openai' | 'gemini';
 export type HeaderStyleId = 'default' | 'opencode';
 
 /**
- * The provider catalog, one record per {@link ProviderId}.
+ * The builtin provider catalog, one record per {@link BuiltinProviderId}.
+ *
+ * This is the offline base and the legacy-id compatibility set: when the
+ * models.dev feed is unavailable the catalog still offers exactly these five
+ * providers, and the legacy ids `google`/`mistral`/`opencode` keep their
+ * `baiton.orchestrator.key.<id>` secrets.
  *
  * Base URLs are the prefix `completionsUrl()` (src/orchestrator/modelClient.ts)
  * appends `/chat/completions` to: `normalizeBase` strips every trailing slash
  * first, so the Google base's trailing slash is harmless rather than required —
  * do not add `/chat/completions` by hand.
  */
-export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
+export const PROVIDERS: Readonly<Record<BuiltinProviderId, ProviderInfo>> = {
   // Enumerated at runtime through `vscode.lm.selectChatModels({ vendor: 'copilot' })`;
   // the catalog deliberately carries no model ids and needs no API key or HTTP base.
   copilot: {
@@ -129,25 +176,228 @@ export const PROVIDERS: Readonly<Record<ProviderId, ProviderInfo>> = {
   },
 };
 
-/** The catalog entry of `id`; callers never index {@link PROVIDERS} by hand. */
-export function providerInfo(id: ProviderId): ProviderInfo {
-  return PROVIDERS[id];
+// --- per-id traits the feed cannot tell us -----------------------------------
+//
+// The models.dev feed describes providers generically; these maps carry the
+// handful of host behaviours it does not know about. Everything absent from a
+// map takes the default.
+
+/** Providers whose payloads need non-default wire shaping; everything else is `'openai'`. */
+export const PROVIDER_DIALECTS: Readonly<Record<string, DialectId>> = {
+  // Google rejects OpenAI-style tool chaining without the gemini shaping.
+  google: 'gemini',
+};
+
+/** Providers needing extra request headers; everything else is `'default'`. */
+export const PROVIDER_HEADER_STYLES: Readonly<Record<string, HeaderStyleId>> = {
+  // The hosted OpenCode gateway wants User-Agent + x-opencode-session.
+  opencode: 'opencode',
+};
+
+/** Base URLs that must win over the feed's `api`. */
+export const PROVIDER_BASE_URL_OVERRIDES: Readonly<Record<string, string>> = {
+  // The feed's `api` for google is `https://generativelanguage.googleapis.com/v1beta`,
+  // the NATIVE Gemini base. `completionsUrl()` appends `/chat/completions`, so
+  // we need the OpenAI-compatible base instead.
+  google: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+};
+
+/** Feed ids that would duplicate the non-HTTP builtin Copilot path. */
+export const FEED_PROVIDER_DENY: readonly string[] = ['copilot', 'github-copilot'];
+
+/** True when `record` carries `key` as its own (not inherited) property. */
+function hasOwn(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-/** Catalog entries in dropdown order. */
-export function providerCatalog(): readonly ProviderInfo[] {
-  return PROVIDER_IDS.map((id) => PROVIDERS[id]);
+/** The de-duplicated, non-blank model ids of one feed provider, in feed order. */
+function feedModelIds(provider: FeedProvider): readonly string[] {
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const model of models) {
+    const id = typeof model?.id === 'string' ? model.id.trim() : '';
+    if (id.length === 0 || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Catalog entries derived from one models.dev feed, in feed order.
+ *
+ * Total and never throws, whatever a {@link FeedProvider} contains. A feed
+ * provider is skipped when its id trims to empty, its id is in
+ * {@link FEED_PROVIDER_DENY}, it discloses no `api` (so it is not reachable over
+ * an OpenAI-compatible HTTP base) or it lists no usable models.
+ */
+export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] {
+  const providers = Array.isArray(feed) ? feed : [];
+  const out: ProviderInfo[] = [];
+  for (const provider of providers) {
+    if (provider === null || typeof provider !== 'object') {
+      continue;
+    }
+    const id = typeof provider.id === 'string' ? provider.id.trim() : '';
+    if (id.length === 0 || FEED_PROVIDER_DENY.includes(id)) {
+      continue;
+    }
+    const api = typeof provider.api === 'string' ? provider.api.trim() : '';
+    if (api.length === 0) {
+      continue;
+    }
+    const models = feedModelIds(provider);
+    if (models.length === 0) {
+      continue;
+    }
+    const label = typeof provider.name === 'string' && provider.name.trim().length > 0 ? provider.name : id;
+    const entry: ProviderInfo & { env?: readonly string[]; doc?: string } = {
+      id,
+      label,
+      defaultBaseUrl: hasOwn(PROVIDER_BASE_URL_OVERRIDES, id) ? PROVIDER_BASE_URL_OVERRIDES[id] : api,
+      requiresKey: true,
+      usesSettings: false,
+      models,
+      dialect: hasOwn(PROVIDER_DIALECTS, id) ? (PROVIDER_DIALECTS[id] as DialectId) : 'openai',
+      headerStyle: hasOwn(PROVIDER_HEADER_STYLES, id) ? (PROVIDER_HEADER_STYLES[id] as HeaderStyleId) : 'default',
+      source: 'feed',
+      env: Array.isArray(provider.env) ? provider.env : [],
+    };
+    if (typeof provider.doc === 'string' && provider.doc.length > 0) {
+      entry.doc = provider.doc;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * The full catalog in dropdown order: builtins, then feed-only providers,
+ * `openai` (OpenAI / Custom) last.
+ *
+ * With no feed (or an empty one) this is exactly today's five builtin entries,
+ * same order and same object identities, so an offline window behaves as
+ * before. For an id present in both sets the builtin entry wins on label, base
+ * URL, key policy, dialect and header style — those encode host behaviour the
+ * feed does not know about — while the FEED wins on `models`, so `google` stops
+ * being pinned to a stale hard-coded list. Ids are never duplicated.
+ */
+export function buildProviderCatalog(feed?: ModelsDevFeed): readonly ProviderInfo[] {
+  const builtins = PROVIDER_IDS.map((id) => PROVIDERS[id]);
+  const fromFeed = feed === undefined ? [] : providersFromFeed(feed);
+  if (fromFeed.length === 0) {
+    return builtins;
+  }
+  const byId = new Map<string, ProviderInfo>();
+  for (const entry of fromFeed) {
+    if (!byId.has(entry.id)) {
+      byId.set(entry.id, entry);
+    }
+  }
+
+  const out: ProviderInfo[] = [];
+  const emitted = new Set<string>();
+  for (const builtin of builtins) {
+    if (builtin.id === 'openai') {
+      continue; // always last
+    }
+    const feedEntry = byId.get(builtin.id);
+    if (feedEntry === undefined) {
+      out.push(builtin);
+    } else {
+      const merged: ProviderInfo & { env?: readonly string[]; doc?: string } = {
+        ...builtin,
+        models: feedEntry.models,
+        source: 'builtin',
+        env: feedEntry.env ?? [],
+      };
+      if (feedEntry.doc !== undefined) {
+        merged.doc = feedEntry.doc;
+      }
+      out.push(merged);
+    }
+    emitted.add(builtin.id);
+  }
+  for (const entry of fromFeed) {
+    if (emitted.has(entry.id) || entry.id === 'openai') {
+      continue;
+    }
+    emitted.add(entry.id);
+    out.push(entry);
+  }
+  out.push(PROVIDERS.openai);
+  return out;
+}
+
+/**
+ * The catalog entry of `id`, or undefined when `id` is unknown or blank.
+ * Exact, case-sensitive match against `catalog` when given, else against the
+ * builtin record. Callers who need real membership use this rather than
+ * {@link providerInfo}.
+ */
+export function findProviderInfo(id: ProviderId, catalog?: readonly ProviderInfo[]): ProviderInfo | undefined {
+  if (typeof id !== 'string' || id.length === 0) {
+    return undefined;
+  }
+  if (catalog !== undefined) {
+    return catalog.find((entry) => entry.id === id);
+  }
+  return hasOwn(PROVIDERS, id) ? PROVIDERS[id as BuiltinProviderId] : undefined;
+}
+
+/**
+ * The catalog entry of `id`; callers never index {@link PROVIDERS} by hand.
+ *
+ * Always returns an entry: an unknown id (a persisted selection whose provider
+ * has left the feed, say) yields a freshly synthesised `source: 'custom'`
+ * fallback rather than throwing. This is the graceful-degradation path — use
+ * {@link findProviderInfo} when real membership is what matters.
+ */
+export function providerInfo(id: ProviderId, catalog?: readonly ProviderInfo[]): ProviderInfo {
+  const found = findProviderInfo(id, catalog);
+  if (found !== undefined) {
+    return found;
+  }
+  return {
+    id,
+    label: id,
+    requiresKey: true,
+    usesSettings: false,
+    models: [],
+    dialect: 'openai',
+    headerStyle: 'default',
+    source: 'custom',
+  };
+}
+
+/** Catalog entries in dropdown order; with a feed, {@link buildProviderCatalog}. */
+export function providerCatalog(feed?: ModelsDevFeed): readonly ProviderInfo[] {
+  return buildProviderCatalog(feed);
 }
 
 /** Prefix of every per-provider SecretStorage key. */
 export const PROVIDER_SECRET_KEY_PREFIX = 'baiton.orchestrator.key.';
 
 /**
- * The SecretStorage key holding `id`'s API key, or undefined for a provider
- * that needs none (`copilot`).
+ * The SecretStorage key holding `id`'s API key, or undefined for a blank id or
+ * a builtin provider that needs none (`copilot`).
+ *
+ * This is the legacy-key compatibility guarantee: `google`/`opencode`/`mistral`/
+ * `openai` keep resolving to `baiton.orchestrator.key.<id>` exactly as before,
+ * and a feed-derived provider gets a key of the same shape.
  */
 export function providerSecretKey(id: ProviderId): string | undefined {
-  return PROVIDERS[id].requiresKey ? `${PROVIDER_SECRET_KEY_PREFIX}${id}` : undefined;
+  if (typeof id !== 'string' || id.trim().length === 0) {
+    return undefined;
+  }
+  const builtin = hasOwn(PROVIDERS, id) ? PROVIDERS[id as BuiltinProviderId] : undefined;
+  if (builtin !== undefined && !builtin.requiresKey) {
+    return undefined;
+  }
+  return `${PROVIDER_SECRET_KEY_PREFIX}${id}`;
 }
 
 /**
@@ -167,23 +417,28 @@ export interface ModelSelection {
 /** `workspaceState` key the active selection is persisted under. */
 export const MODEL_SELECTION_KEY = 'baiton.orchestrator.selection';
 
-/** The first built-in model for `id`, or undefined when the catalog lists none. */
-export function defaultModelFor(id: ProviderId): string | undefined {
-  return PROVIDERS[id].models[0];
+/** The first model listed for `id`, or undefined when the catalog lists none. */
+export function defaultModelFor(id: ProviderId, catalog?: readonly ProviderInfo[]): string | undefined {
+  return findProviderInfo(id, catalog)?.models[0];
 }
 
 /**
  * Read an untrusted value (a `workspaceState` blob written by an older
  * build, or a webview `selectModel` payload) as a {@link ModelSelection}.
- * Returns undefined for anything that is not an object with a known
- * `provider` and a non-empty string `model`. Pure; never throws.
+ * Returns undefined for anything that is not an object with a non-blank string
+ * `provider` and a non-empty string `model`; the provider is trimmed. Pure;
+ * never throws.
+ *
+ * Catalog membership is deliberately NOT checked here: a persisted selection
+ * whose provider or model is no longer in the catalog is preserved and reported
+ * as custom/stale by the router, never dropped at parse time.
  */
 export function normalizeModelSelection(value: unknown): ModelSelection | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
   }
   const raw = value as Record<string, unknown>;
-  if (!isProviderId(raw['provider'])) {
+  if (!isProviderIdLike(raw['provider'])) {
     return undefined;
   }
   if (typeof raw['model'] !== 'string') {
@@ -193,7 +448,7 @@ export function normalizeModelSelection(value: unknown): ModelSelection | undefi
   if (model.length === 0) {
     return undefined;
   }
-  return { provider: raw['provider'], model };
+  return { provider: raw['provider'].trim(), model };
 }
 
 // --- availability vocabulary (multi-provider orchestrator) ------------------
@@ -205,9 +460,12 @@ export function normalizeModelSelection(value: unknown): ModelSelection | undefi
 // text. The module stays import-free — these are strings and pure functions
 // only, no `vscode` and no modelClient dependency.
 
-/** The user-facing reason shown when provider `id` has no API key stored. */
-export function providerNeedsKeyReason(id: ProviderId): string {
-  return `Set an API key for ${PROVIDERS[id].label} to use it.`;
+/**
+ * The user-facing reason shown when provider `id` has no API key stored. An id
+ * absent from the resolved catalog names itself rather than throwing.
+ */
+export function providerNeedsKeyReason(id: ProviderId, catalog?: readonly ProviderInfo[]): string {
+  return `Set an API key for ${providerInfo(id, catalog).label} to use it.`;
 }
 
 /** The user-facing reason shown when `openai` has no `baiton.orchestrator.endpoint`. */
