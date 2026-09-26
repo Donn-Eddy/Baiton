@@ -25,20 +25,41 @@ export interface ProviderModelItem {
   id: string;
   /** Optional display text; the webview falls back to `id` when absent. */
   label?: string;
+  /**
+   * True when this model id came from the active/preserved selection rather
+   * than the refreshed catalog; the view marks it "(custom)".
+   */
+  custom?: boolean;
+  /**
+   * The reasoning-effort levels this model accepts, when the source reports
+   * them; absent means the provider exposes none.
+   */
+  efforts?: string[];
 }
 
-/** One <optgroup> in the Provider & Model dropdown, in catalog order. */
+/** One provider offered in the Provider & Model selection, in catalog order. */
 export interface ProviderGroup {
-  /** The provider id (`'copilot' | 'google' | 'opencode' | 'mistral' | 'openai'`). */
+  /** The provider id; builtin (`copilot`, `openai`, …) or feed-derived. */
   id: ProviderId;
   /** The human label rendered as the group's optgroup label. */
   label: string;
-  /** False when the provider cannot be used yet (no key, no endpoint, Copilot absent). */
+  /**
+   * False when the provider cannot be used yet (no key, no endpoint, Copilot
+   * absent). The host posts only configured providers, so this is normally
+   * true; it is kept for a group the host chooses to show as unusable.
+   */
   enabled: boolean;
   /** Why the group is disabled; present only when `enabled` is false. */
   reason?: string;
   /** The models offered under this group; empty for a disabled provider. */
   models: ProviderModelItem[];
+  /**
+   * True when the catalog snapshot backing `models` is no longer known
+   * current; the view shows a stale badge.
+   */
+  stale?: boolean;
+  /** Why the snapshot is stale; present only with `stale: true`. */
+  staleReason?: string;
 }
 
 /** A message the host sends to the webview to update its rendered state. */
@@ -66,10 +87,18 @@ export type HostToWebview =
   /** Show the empty state with the configured endpoint and model values. */
   | { type: 'setEmptyState'; endpoint: string | null; model: string | null }
   /**
-   * Replace the Provider & Model dropdown: the ordered provider groups and
-   * the active selection, or `null` when no provider/model is chosen yet.
+   * Replace the Provider & Model selection: the ordered provider groups — the
+   * host posts only the configured providers — and the active selection, or
+   * `null` when no provider/model is chosen yet. `refreshedAt` is the ISO-8601
+   * time of the most recent successful catalog fetch backing these groups;
+   * absent when no group is catalog-backed.
    */
-  | { type: 'setProviders'; groups: ProviderGroup[]; selection: ModelSelection | null }
+  | {
+      type: 'setProviders';
+      groups: ProviderGroup[];
+      selection: ModelSelection | null;
+      refreshedAt?: string;
+    }
   /**
    * Append a fragment of streamed assistant text. Grows the trailing streaming
    * assistant record, or starts one when the last record is not streaming.
@@ -272,6 +301,11 @@ export interface WebviewState {
   providers: ProviderGroup[];
   /** The active provider/model pair, or null when none is chosen. */
   selection: ModelSelection | null;
+  /**
+   * ISO-8601 time of the most recent successful catalog fetch backing the
+   * provider groups; absent when no group is catalog-backed.
+   */
+  refreshedAt?: string;
   /** The inline error currently shown, if any. */
   error?: { message: string; action?: FixAction; provider?: ProviderId };
   /** The empty-state descriptor, if the conversation has no messages. */
@@ -324,7 +358,8 @@ export function initialWebviewState(): WebviewState {
  *   session id.
  * - `showError` sets the inline error; `setBusy` toggles the busy flag.
  * - `setEmptyState` sets the empty-state descriptor.
- * - `setProviders` replaces the provider groups and the active selection.
+ * - `setProviders` replaces the provider groups, the active selection and the
+ *   catalog refresh time.
  */
 export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
   switch (msg.type) {
@@ -432,7 +467,7 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
     case 'setEmptyState':
       return { ...state, empty: { endpoint: msg.endpoint, model: msg.model } };
     case 'setProviders':
-      return { ...state, providers: [...msg.groups], selection: msg.selection };
+      return { ...state, providers: [...msg.groups], selection: msg.selection, refreshedAt: msg.refreshedAt };
     default:
       // Exhaustiveness guard: every HostToWebview variant is handled above, so
       // `msg` is `never` here. Assigning it proves the switch is exhaustive.

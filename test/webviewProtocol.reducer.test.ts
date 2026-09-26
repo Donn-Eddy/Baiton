@@ -14,6 +14,7 @@ import {
   ConversationItem,
   SessionItem,
   ProviderGroup,
+  ProviderModelItem,
   WebviewToHost,
   escalatedInterventionView,
   normalizeEscalation,
@@ -700,6 +701,94 @@ describe('interventions', () => {
       assert.strictEqual(msg.type, 'selectModel');
       assert.strictEqual(msg.provider, 'mistral');
       assert.strictEqual(msg.model, 'codestral-latest');
+    });
+
+    it('selectModel carries a feed-derived provider id', () => {
+      const msg: WebviewToHost = { type: 'selectModel', provider: 'cerebras', model: 'qwen-3-coder' };
+      assert.strictEqual(msg.type, 'selectModel');
+      assert.strictEqual(msg.provider, 'cerebras');
+      assert.strictEqual(msg.model, 'qwen-3-coder');
+    });
+
+    it('setProviders stores refreshedAt', () => {
+      const next = reduce(initialWebviewState(), {
+        type: 'setProviders',
+        groups,
+        selection: { provider: 'google', model: 'gemini-2.5-pro' },
+        refreshedAt: '2026-09-26T10:00:00.000Z',
+      });
+
+      assert.strictEqual(next.refreshedAt, '2026-09-26T10:00:00.000Z');
+    });
+
+    it('setProviders without refreshedAt clears the previous value', () => {
+      const seeded: WebviewState = {
+        ...initialWebviewState(),
+        providers: groups,
+        selection: { provider: 'google', model: 'gemini-2.5-pro' },
+        refreshedAt: '2026-09-01T00:00:00.000Z',
+      };
+      const next = reduce(seeded, { type: 'setProviders', groups, selection: null });
+
+      assert.strictEqual(next.refreshedAt, undefined);
+      // The own key must stay present: media/protocol.js mirrors the same
+      // unconditional assignment, and deepStrictEqual tells the two apart.
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(next, 'refreshedAt'), true);
+    });
+
+    it('a fresh state has no refreshedAt key', () => {
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(initialWebviewState(), 'refreshedAt'),
+        false,
+      );
+    });
+
+    it("setProviders keeps a group's stale markers and a model's custom/efforts flags", () => {
+      const models: ProviderModelItem[] = [
+        { id: 'a' },
+        { id: 'b', custom: true, efforts: ['low', 'high'] },
+      ];
+      const input: ProviderGroup[] = [
+        {
+          id: 'google',
+          label: 'Google AI Studio',
+          enabled: true,
+          stale: true,
+          staleReason: 'models.dev fetch failed: timeout',
+          models,
+        },
+      ];
+      const next = reduce(initialWebviewState(), {
+        type: 'setProviders',
+        groups: input,
+        selection: { provider: 'google', model: 'b' },
+      });
+
+      assert.deepStrictEqual(next.providers, input);
+      // Copied, not aliased, mirroring the assertion above.
+      assert.notStrictEqual(next.providers, input);
+    });
+
+    it('setProviders accepts a feed-derived provider id', () => {
+      const input: ProviderGroup[] = [
+        {
+          id: 'deepinfra',
+          label: 'DeepInfra',
+          enabled: true,
+          models: [{ id: 'deepseek-ai/DeepSeek-V3' }],
+        },
+      ];
+      const next = reduce(initialWebviewState(), {
+        type: 'setProviders',
+        groups: input,
+        selection: { provider: 'deepinfra', model: 'deepseek-ai/DeepSeek-V3' },
+      });
+
+      assert.deepStrictEqual(next.providers, input);
+      assert.deepStrictEqual(next.selection, {
+        provider: 'deepinfra',
+        model: 'deepseek-ai/DeepSeek-V3',
+      });
     });
   });
 

@@ -152,6 +152,7 @@
         return Object.assign({}, state, {
           providers: msg.groups.slice(),
           selection: msg.selection,
+          refreshedAt: msg.refreshedAt,
         });
       default:
         // Unknown message: leave the state unchanged rather than throwing in the
