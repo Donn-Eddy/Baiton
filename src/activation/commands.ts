@@ -156,6 +156,7 @@ export const COMMANDS = {
   setApiKey: 'baiton.setOrchestratorApiKey',
   setProviderApiKey: 'baiton.setProviderApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
+  refreshModels: 'baiton.refreshModels',
 } as const;
 
 /**

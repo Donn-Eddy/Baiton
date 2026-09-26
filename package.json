@@ -89,6 +89,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.refreshModels",
+        "title": "Refresh Model Lists",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.approve",
         "title": "Approve Spec",
         "category": "Baiton"
