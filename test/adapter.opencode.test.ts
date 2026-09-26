@@ -2,13 +2,28 @@ import * as assert from 'assert';
 import {
   OpencodeAdapter,
   OPENCODE_CONFIG_ENV,
+  OPENCODE_SERVER_ENV_VAR,
   isOpencodeSessionId,
+  mergeOpencodeModelSources,
   opencodeAgentFlags,
   opencodeConfigEnv,
+  opencodeModelsFromApi,
+  opencodeModelsFromCliOutput,
+  parseOpencodeServerUrl,
 } from '../src/adapter/opencode';
-import type { OpencodeAgentDefinition } from '../src/adapter/opencode';
-import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
-import { AGENT_BINARY } from '../src/adapter/adapter';
+import type {
+  OpencodeAdapterOptions,
+  OpencodeAgentDefinition,
+  OpencodeModelsCli,
+  OpencodeServerStarter,
+} from '../src/adapter/opencode';
+import type { AskRelayDescriptor, DiscoveryContext, LaunchRequest } from '../src/adapter/adapter';
+import {
+  AGENT_BINARY,
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
+  capabilitiesToCatalogFetch,
+} from '../src/adapter/adapter';
+import type { FeedFetch, FeedResponse } from '../src/orchestrator/modelsDev';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 import { askRelayDescriptor } from '../src/engine/askRelay';
@@ -472,5 +487,607 @@ describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
   it('is unaffected by an unknown protocol, exactly as it is by file-v1', () => {
     const future = { ...relay, protocol: 'file-v2' } as unknown as AskRelayDescriptor;
     assert.deepStrictEqual(adapter.launch(req({ relay: future })), adapter.launch(req()));
+  });
+});
+
+/**
+ * Model discovery (model-selector-refresh T06). The parsers are pure, so they
+ * are pinned directly; `discoverModels` is driven through the three injected
+ * seams (`startServer`, `fetchModels`, `runModelsCli`) so no `opencode serve`
+ * child is ever spawned and no socket is ever opened by this file.
+ */
+describe('opencodeModelsFromApi (model-selector-refresh T06)', () => {
+  it('reads a bare array of strings', () => {
+    assert.deepStrictEqual(opencodeModelsFromApi(['anthropic/claude-sonnet-5', 'openai/gpt-6']), [
+      { id: 'anthropic/claude-sonnet-5', provider: 'anthropic' },
+      { id: 'openai/gpt-6', provider: 'openai' },
+    ]);
+  });
+
+  it('reads a bare array of objects with id/name', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi([{ id: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5' }]),
+      [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'anthropic' }],
+    );
+  });
+
+  it('reads a providers array of buckets and prefixes the provider id', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi({
+        providers: [
+          { id: 'anthropic', models: [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }] },
+        ],
+      }),
+      [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'anthropic' }],
+    );
+  });
+
+  it('reads a `models` array and an `items` array', () => {
+    assert.deepStrictEqual(opencodeModelsFromApi({ models: ['a/b'] }), [
+      { id: 'a/b', provider: 'a' },
+    ]);
+    assert.deepStrictEqual(opencodeModelsFromApi({ items: ['c/d'] }), [
+      { id: 'c/d', provider: 'c' },
+    ]);
+  });
+
+  it('reads a provider-keyed map under `providers`, with models as an array', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi({ providers: { openai: { models: [{ id: 'gpt-6' }] } } }),
+      [{ id: 'openai/gpt-6', provider: 'openai' }],
+    );
+  });
+
+  it('reads a provider-keyed map whose models are themselves a map keyed by model id', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi({
+        providers: { openai: { models: { 'gpt-6': { name: 'GPT-6' } } } },
+      }),
+      [{ id: 'openai/gpt-6', label: 'GPT-6', provider: 'openai' }],
+    );
+  });
+
+  it('reads a provider-keyed map at the top level (no providers wrapper)', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi({
+        anthropic: { models: { 'claude-sonnet-5': {} } },
+        openai: { models: ['gpt-6'] },
+      }),
+      [
+        { id: 'anthropic/claude-sonnet-5', provider: 'anthropic' },
+        { id: 'openai/gpt-6', provider: 'openai' },
+      ],
+    );
+  });
+
+  it('never double-prefixes an id that already contains a slash', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi({ providers: { openai: { models: ['openai/gpt-6'] } } }),
+      [{ id: 'openai/gpt-6', provider: 'openai' }],
+    );
+  });
+
+  it('omits a label equal to the emitted id', () => {
+    assert.deepStrictEqual(opencodeModelsFromApi([{ id: 'a/b', name: 'a/b' }]), [
+      { id: 'a/b', provider: 'a' },
+    ]);
+  });
+
+  it('collapses duplicates first-wins and skips blank/idless items', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromApi([
+        { id: 'a/b', name: 'First' },
+        { id: 'a/b', name: 'Second' },
+        '   ',
+        {},
+        42,
+        null,
+      ]),
+      [{ id: 'a/b', label: 'First', provider: 'a' }],
+    );
+  });
+
+  it('returns [] for every unrecognised payload', () => {
+    for (const payload of [null, undefined, 42, 'gpt', {}, { models: 'nope' }, true]) {
+      assert.deepStrictEqual(opencodeModelsFromApi(payload), []);
+    }
+  });
+
+  it('never emits efforts or defaultEffort (opencode effort is free-text --variant)', () => {
+    const entries = opencodeModelsFromApi({
+      providers: { openai: { models: [{ id: 'gpt-6', supportedReasoningEfforts: ['low'] }] } },
+    });
+    assert.strictEqual(entries.length, 1);
+    assert.ok(!('efforts' in entries[0]!));
+    assert.ok(!('defaultEffort' in entries[0]!));
+  });
+
+  it('is pure: the input is untouched', () => {
+    const payload = { providers: { openai: { models: [{ id: 'gpt-6', name: 'GPT-6' }] } } };
+    const pristine = JSON.parse(JSON.stringify(payload));
+    opencodeModelsFromApi(payload);
+    assert.deepStrictEqual(payload, pristine);
+  });
+});
+
+describe('opencodeModelsFromCliOutput (model-selector-refresh T06)', () => {
+  it('reads a realistic multi-line listing in order', () => {
+    const stdout = [
+      'Available models:',
+      '',
+      '  anthropic/claude-sonnet-5   Claude Sonnet 5 (recommended)',
+      '  \u001B[1manthropic/claude-opus-5\u001B[0m',
+      '  * openai/gpt-6',
+      '  • google/gemini-3-pro',
+      '',
+    ].join('\n');
+
+    assert.deepStrictEqual(
+      opencodeModelsFromCliOutput(stdout).map((entry) => entry.id),
+      [
+        'anthropic/claude-sonnet-5',
+        'anthropic/claude-opus-5',
+        'openai/gpt-6',
+        'google/gemini-3-pro',
+      ],
+    );
+  });
+
+  it('sets provider from the id half before the slash', () => {
+    assert.deepStrictEqual(opencodeModelsFromCliOutput('openai/gpt-6\n'), [
+      { id: 'openai/gpt-6', provider: 'openai' },
+    ]);
+  });
+
+  it('drops tokens that are not provider/model', () => {
+    const stdout = ['Models', 'gpt-6', 'a/b/c', 'https://opencode.ai/docs', 'ok/fine'].join('\n');
+    assert.deepStrictEqual(
+      opencodeModelsFromCliOutput(stdout).map((entry) => entry.id),
+      ['ok/fine'],
+    );
+  });
+
+  it('collapses duplicates and returns [] for empty output', () => {
+    assert.deepStrictEqual(
+      opencodeModelsFromCliOutput('a/b\na/b\n').map((entry) => entry.id),
+      ['a/b'],
+    );
+    assert.deepStrictEqual(opencodeModelsFromCliOutput(''), []);
+  });
+});
+
+describe('mergeOpencodeModelSources (model-selector-refresh T06)', () => {
+  const api = [{ id: 'a/b', label: 'A B' }, { id: 'c/d' }];
+  const cli = [{ id: 'c/d', provider: 'c' }, { id: 'e/f', provider: 'e' }];
+
+  it('keeps the API order first and appends only CLI-only ids', () => {
+    assert.deepStrictEqual(mergeOpencodeModelSources(api, cli), [
+      { id: 'a/b', label: 'A B' },
+      { id: 'c/d' },
+      { id: 'e/f', provider: 'e' },
+    ]);
+  });
+
+  it('falls back to the CLI verbatim with no API entries', () => {
+    assert.deepStrictEqual(mergeOpencodeModelSources([], cli), cli);
+  });
+
+  it('keeps the API verbatim with no CLI entries', () => {
+    assert.deepStrictEqual(mergeOpencodeModelSources(api, []), api);
+  });
+
+  it('mutates neither input', () => {
+    const apiCopy = JSON.parse(JSON.stringify(api));
+    const cliCopy = JSON.parse(JSON.stringify(cli));
+    mergeOpencodeModelSources(api, cli);
+    assert.deepStrictEqual(api, apiCopy);
+    assert.deepStrictEqual(cli, cliCopy);
+  });
+});
+
+describe('parseOpencodeServerUrl (model-selector-refresh T06)', () => {
+  it('extracts the ephemeral URL from a realistic serve banner', () => {
+    assert.strictEqual(
+      parseOpencodeServerUrl('opencode server listening on http://127.0.0.1:52341\n'),
+      'http://127.0.0.1:52341',
+    );
+  });
+
+  it('strips a trailing slash', () => {
+    assert.strictEqual(parseOpencodeServerUrl('url: http://127.0.0.1:52341/'), 'http://127.0.0.1:52341');
+  });
+
+  it('returns undefined when no URL appeared', () => {
+    assert.strictEqual(parseOpencodeServerUrl('starting server...\n'), undefined);
+  });
+});
+
+describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
+  /** A provider-keyed `/api/model` payload the happy path answers with. */
+  const API_PAYLOAD = {
+    providers: {
+      anthropic: { models: [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }] },
+      openai: { models: ['gpt-6'] },
+    },
+  };
+
+  /** A `opencode models` listing that overlaps the API and adds one id. */
+  const CLI_STDOUT = ['anthropic/claude-sonnet-5', 'google/gemini-3-pro'].join('\n');
+
+  /** Build a DiscoveryContext with sensible defaults overridable per test. */
+  function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+    return { timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS, ...overrides };
+  }
+
+  /** A starter recording its calls and disposals; resolves the given base URL. */
+  function fakeServer(baseUrl: string | null = 'http://127.0.0.1:52341') {
+    const calls: Array<{ cwd?: string; timeoutMs: number }> = [];
+    const disposals: string[] = [];
+    const starter: OpencodeServerStarter = async (options) => {
+      calls.push({ cwd: options.cwd, timeoutMs: options.timeoutMs });
+      if (baseUrl === null) {
+        return undefined;
+      }
+      return {
+        baseUrl,
+        dispose: () => {
+          disposals.push(baseUrl);
+        },
+      };
+    };
+    return { starter, calls, disposals };
+  }
+
+  /** A `FeedFetch` recording its URLs and answering with a structural FeedResponse. */
+  function fakeFetch(handler: (url: string) => Promise<FeedResponse> | FeedResponse) {
+    const urls: string[] = [];
+    const fetch: FeedFetch = async (url) => {
+      urls.push(url);
+      return handler(url);
+    };
+    return { fetch, urls };
+  }
+
+  /** A body-carrying 200 response. */
+  function okResponse(body: string): FeedResponse {
+    return { ok: true, status: 200, text: async () => body };
+  }
+
+  /** A CLI runner recording its calls and resolving `stdout`. */
+  function fakeCli(stdout: string | undefined) {
+    const calls: Array<{ cwd?: string; timeoutMs: number }> = [];
+    const runModelsCli: OpencodeModelsCli = async (options) => {
+      calls.push({ cwd: options.cwd, timeoutMs: options.timeoutMs });
+      return stdout;
+    };
+    return { runModelsCli, calls };
+  }
+
+  const savedEnv = process.env[OPENCODE_SERVER_ENV_VAR];
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env[OPENCODE_SERVER_ENV_VAR];
+    } else {
+      process.env[OPENCODE_SERVER_ENV_VAR] = savedEnv;
+    }
+  });
+
+  it('GETs exactly <baseUrl>/api/model and returns the merged list with empty efforts', async () => {
+    const server = fakeServer();
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const cli = fakeCli(CLI_STDOUT);
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: cli.runModelsCli,
+    });
+
+    const caps = await adapter.discoverModels(ctx({ cwd: '/ws' }));
+
+    assert.deepStrictEqual(fetcher.urls, ['http://127.0.0.1:52341/api/model']);
+    assert.ok(caps !== undefined);
+    assert.deepStrictEqual(caps.models, [
+      'anthropic/claude-sonnet-5',
+      'openai/gpt-6',
+      'google/gemini-3-pro',
+    ]);
+    assert.deepStrictEqual(caps.efforts, []);
+    assert.strictEqual(caps.modelEntries?.[0]?.label, 'Claude Sonnet 5');
+    assert.strictEqual(server.calls[0]?.cwd, '/ws');
+    assert.strictEqual(cli.calls[0]?.cwd, '/ws');
+  });
+
+  it('stamps no provenance and no modelLink (CatalogStore/overlayCapabilities own those)', async () => {
+    const server = fakeServer();
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+
+    const caps = await adapter.discoverModels(ctx());
+    assert.ok(caps !== undefined);
+    for (const key of ['source', 'stale', 'staleReason', 'fetchedAt', 'modelLink']) {
+      assert.ok(!(key in caps), `${key} must not be an own key`);
+    }
+  });
+
+  it('disposes the started server exactly once on success', async () => {
+    const server = fakeServer();
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+    await adapter.discoverModels(ctx());
+    assert.deepStrictEqual(server.disposals, ['http://127.0.0.1:52341']);
+  });
+
+  it('disposes the started server exactly once on fetch failure and on abort', async () => {
+    const failing = fakeServer();
+    const failingAdapter = new OpencodeAdapter(undefined, {
+      startServer: failing.starter,
+      fetchModels: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+    });
+    await failingAdapter.discoverModels(ctx());
+    assert.strictEqual(failing.disposals.length, 1);
+
+    const aborting = fakeServer();
+    const controller = new AbortController();
+    const abortingAdapter = new OpencodeAdapter(undefined, {
+      startServer: async (options) => {
+        const handle = await aborting.starter(options);
+        controller.abort();
+        return handle;
+      },
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+    });
+    assert.strictEqual(await abortingAdapter.discoverModels(ctx({ signal: controller.signal })), undefined);
+    assert.strictEqual(aborting.disposals.length, 1);
+  });
+
+  it('never spawns when serverBaseUrl is given, and never kills that server', async () => {
+    const server = fakeServer();
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+      serverBaseUrl: 'http://127.0.0.1:4096',
+    });
+
+    await adapter.discoverModels(ctx());
+    assert.deepStrictEqual(server.calls, []);
+    assert.deepStrictEqual(server.disposals, []);
+    assert.deepStrictEqual(fetcher.urls, ['http://127.0.0.1:4096/api/model']);
+  });
+
+  it('never spawns when OPENCODE_SERVER holds an http URL', async () => {
+    process.env[OPENCODE_SERVER_ENV_VAR] = 'http://127.0.0.1:7777';
+    const server = fakeServer();
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+
+    await adapter.discoverModels(ctx());
+    assert.deepStrictEqual(server.calls, []);
+    assert.deepStrictEqual(server.disposals, []);
+    assert.deepStrictEqual(fetcher.urls, ['http://127.0.0.1:7777/api/model']);
+  });
+
+  it('ignores a non-http OPENCODE_SERVER value and starts a server instead', async () => {
+    process.env[OPENCODE_SERVER_ENV_VAR] = 'not-a-url';
+    const server = fakeServer();
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+
+    await adapter.discoverModels(ctx());
+    assert.strictEqual(server.calls.length, 1);
+  });
+
+  const apiFailures: Array<[string, Partial<OpencodeAdapterOptions>]> = [
+    ['the starter resolves undefined', { startServer: fakeServer(null).starter }],
+    [
+      'fetch rejects',
+      {
+        fetchModels: async () => {
+          throw new Error('socket hang up');
+        },
+      },
+    ],
+    [
+      'the server answers HTTP 500',
+      { fetchModels: async () => ({ ok: false, status: 500, text: async () => '' }) },
+    ],
+    [
+      'text() rejects',
+      {
+        fetchModels: async () => ({
+          ok: true,
+          status: 200,
+          text: async () => {
+            throw new Error('stream closed');
+          },
+        }),
+      },
+    ],
+    ['the body is not JSON', { fetchModels: fakeFetch(() => okResponse('<html>nope')).fetch }],
+    [
+      'the body parses to an unrecognised shape',
+      { fetchModels: fakeFetch(() => okResponse('{"nope":1}')).fetch },
+    ],
+  ];
+
+  for (const [label, options] of apiFailures) {
+    it(`falls back to the CLI list when ${label}`, async () => {
+      const adapter = new OpencodeAdapter(undefined, {
+        startServer: fakeServer().starter,
+        fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+        runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+        ...options,
+      });
+
+      const caps = await adapter.discoverModels(ctx());
+      assert.deepStrictEqual(caps?.models, [
+        'anthropic/claude-sonnet-5',
+        'google/gemini-3-pro',
+      ]);
+    });
+  }
+
+  it('runs the CLI as a validation source even when the API succeeded', async () => {
+    const cli = fakeCli(CLI_STDOUT);
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer().starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: cli.runModelsCli,
+    });
+
+    const caps = await adapter.discoverModels(ctx());
+    assert.strictEqual(cli.calls.length, 1);
+    // API entries lead, the CLI-only id is appended, the overlap is not doubled.
+    assert.deepStrictEqual(caps?.models, [
+      'anthropic/claude-sonnet-5',
+      'openai/gpt-6',
+      'google/gemini-3-pro',
+    ]);
+  });
+
+  it('resolves undefined (never the curated list) when both sources are empty', async () => {
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer(null).starter,
+      fetchModels: fakeFetch(() => okResponse('{}')).fetch,
+      runModelsCli: fakeCli('no models configured').runModelsCli,
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx()), undefined);
+  });
+
+  it('makes no call at all when ctx.signal is already aborted', async () => {
+    const server = fakeServer();
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const cli = fakeCli(CLI_STDOUT);
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: cli.runModelsCli,
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    assert.strictEqual(await adapter.discoverModels(ctx({ signal: controller.signal })), undefined);
+    assert.deepStrictEqual(server.calls, []);
+    assert.deepStrictEqual(fetcher.urls, []);
+    assert.deepStrictEqual(cli.calls, []);
+  });
+
+  it('resolves undefined when the abort lands while the fetch is in flight', async () => {
+    const server = fakeServer();
+    const controller = new AbortController();
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: async () => {
+        controller.abort();
+        throw new Error('aborted');
+      },
+      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+    });
+
+    assert.strictEqual(await adapter.discoverModels(ctx({ signal: controller.signal })), undefined);
+    assert.strictEqual(server.disposals.length, 1);
+  });
+
+  it('resolves undefined rather than rejecting when the starter throws synchronously', async () => {
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: () => {
+        throw new Error('spawn exploded');
+      },
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx()), undefined);
+  });
+
+  it('resolves undefined rather than rejecting when the CLI runner rejects', async () => {
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer(null).starter,
+      fetchModels: fakeFetch(() => okResponse('{}')).fetch,
+      runModelsCli: async () => {
+        throw new Error('ENOENT');
+      },
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx()), undefined);
+  });
+
+  it('clamps a budget larger than the default and replaces a non-positive one', async () => {
+    for (const timeoutMs of [DEFAULT_DISCOVERY_TIMEOUT_MS * 10, 0, -5]) {
+      const server = fakeServer();
+      const cli = fakeCli(CLI_STDOUT);
+      const adapter = new OpencodeAdapter(undefined, {
+        startServer: server.starter,
+        fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+        runModelsCli: cli.runModelsCli,
+      });
+
+      await adapter.discoverModels(ctx({ timeoutMs }));
+      assert.ok(
+        (server.calls[0]?.timeoutMs ?? 0) > 0 &&
+          (server.calls[0]?.timeoutMs ?? 0) <= DEFAULT_DISCOVERY_TIMEOUT_MS,
+        `starter budget out of range for timeoutMs=${timeoutMs}`,
+      );
+      assert.ok(
+        (cli.calls[0]?.timeoutMs ?? 0) > 0 &&
+          (cli.calls[0]?.timeoutMs ?? 0) <= DEFAULT_DISCOVERY_TIMEOUT_MS,
+        `CLI budget out of range for timeoutMs=${timeoutMs}`,
+      );
+    }
+  });
+
+  it('round-trips through capabilitiesToCatalogFetch with no efforts key', async () => {
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer().starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+    });
+
+    const caps = await adapter.discoverModels(ctx());
+    const fetched = capabilitiesToCatalogFetch(caps!);
+    assert.deepStrictEqual(
+      fetched.models.map((entry) => entry.id),
+      ['anthropic/claude-sonnet-5', 'openai/gpt-6', 'google/gemini-3-pro'],
+    );
+    assert.ok(!('efforts' in fetched));
+  });
+
+  it('leaves launch() byte-identical whether or not discovery options were passed', () => {
+    const plain = new OpencodeAdapter();
+    const withDiscovery = new OpencodeAdapter(undefined, {
+      startServer: fakeServer().starter,
+      fetchModels: fakeFetch(() => okResponse('{}')).fetch,
+      runModelsCli: fakeCli('').runModelsCli,
+    });
+
+    assert.deepStrictEqual(withDiscovery.launch(req()), plain.launch(req()));
+    assert.deepStrictEqual(
+      withDiscovery.attach({ role: 'planner', runId: 'run-9', sessionId: 'ses_1' }),
+      plain.attach({ role: 'planner', runId: 'run-9', sessionId: 'ses_1' }),
+    );
+  });
+
+  it('still resolves session ids through the positional listSessions parameter', async () => {
+    const adapter = new OpencodeAdapter(async () => [{ id: 'ses_abc', title: 'session-abc' }], {
+      startServer: fakeServer().starter,
+    });
+    assert.strictEqual(await adapter.resolveSessionId('session-abc', '/ws'), 'ses_abc');
   });
 });
