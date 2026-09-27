@@ -6,7 +6,8 @@
  * brief context builder for spec-less runs, and the
  * run manifest store for spec-less runs (`.baiton/runs/<run-id>/run.json`) and
  * the run worktree lifecycle (`.baiton/worktrees/<run-id>/` create, merge and
- * remove).
+ * remove), and the spec-less run pipeline itself (plan -> execute -> review in
+ * the run's own worktree, plus the read-only investigate dispatch).
  */
 export * from './roleInstructions';
 export * from './brief';
@@ -24,5 +25,6 @@ export * from './recovery';
 export * from './specDraft';
 export * from './runStore';
 export * from './runWorktree';
+export * from './runPipeline';
 export * from './prTool';
 export * from './submitPr';
