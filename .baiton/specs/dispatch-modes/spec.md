@@ -1,12 +1,13 @@
 ---
 version: 1
 name: dispatch-modes
-status: approved
+status: pr
 mode: manual
 base: main
 base_commit: 5cf4285a193dd406b1d62eafb1e9e722aecd19aa
 branch: baiton/dispatch-modes
 approved_rev: aae9b7e96bc66907f8f6d49eca3e06a3a98bc4f94ae4ac317af2ff3df07f11f2
+pr: https://github.com/Donn-Eddy/Baiton/pull/10
 ---
 
 # OVERVIEW
