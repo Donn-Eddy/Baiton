@@ -334,7 +334,8 @@
     "test:unit": "mocha \"test/**/*.test.ts\" --ignore \"test/**/*.property.test.ts\"",
     "test:property": "mocha \"test/**/*.property.test.ts\"",
     "vscode:prepublish": "npm run package",
-    "package": "npm run copy:media && npm run compile"
+    "package": "npm run copy:media && npm run compile",
+    "package:verify": "node scripts/check-vsix.js"
   },
   "dependencies": {
     "ajv": "^8.17.1"

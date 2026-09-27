@@ -1337,3 +1337,142 @@ describe('model resolution', () => {
     );
   });
 });
+
+// --- SecretStorage fan-out -----------------------------------------------------
+
+/** A {@link FakeSecrets} that records every key `get` was asked for, in order. */
+class CountingSecrets extends FakeSecrets {
+  public readonly reads: string[] = [];
+
+  public override async get(key: string): Promise<string | undefined> {
+    this.reads.push(key);
+    return super.get(key);
+  }
+
+  /** How many times `key` was read. */
+  public readsOf(key: string): number {
+    return this.reads.filter((k) => k === key).length;
+  }
+}
+
+/**
+ * A {@link CountingSecrets} that also offers `onDidChange`, like the host's
+ * `vscode.SecretStorage`: `fire(key)` delivers one change event to every live
+ * subscriber, and `subscribers` exposes how many are still attached.
+ */
+class WatchedSecrets extends CountingSecrets {
+  public readonly subscribers = new Set<(e: { key: string }) => void>();
+
+  public onDidChange(listener: (e: { key: string }) => void): { dispose(): void } {
+    this.subscribers.add(listener);
+    return {
+      dispose: () => {
+        this.subscribers.delete(listener);
+      },
+    };
+  }
+
+  public fire(key: string): void {
+    for (const listener of [...this.subscribers]) {
+      listener({ key });
+    }
+  }
+}
+
+describe('ProviderRouter SecretStorage reads', () => {
+  /** Every secret key the fixture catalog's providers read (copilot has none). */
+  const keyedSecretKeys = (): string[] =>
+    buildProviderCatalog(fixtureFeed)
+      .map((info) => providerSecretKey(info.id))
+      .filter((key): key is string => key !== undefined);
+
+  function watchedHarness(): RouterHarness & { secrets: WatchedSecrets } {
+    const secrets = new WatchedSecrets();
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ secrets, lm: fakeLm([]), catalog });
+    return { ...h, secrets };
+  }
+
+  it('init() plus three refresh() calls read each keyed provider exactly once', async () => {
+    const h = watchedHarness();
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+
+    await h.router.init();
+    await h.router.refresh();
+    await h.router.refresh();
+    await h.router.refresh();
+
+    const keys = keyedSecretKeys();
+    assert.ok(keys.length > 5, 'the fixture feed widens the catalog past the builtins');
+    assert.strictEqual(h.secrets.reads.length, keys.length, 'one read per keyed provider in total');
+    for (const key of keys) {
+      assert.strictEqual(h.secrets.readsOf(key), 1, `${key} read once`);
+    }
+    assert.strictEqual(h.router.getSelection()?.provider, 'google');
+  });
+
+  it('a change event re-reads only the key it names', async () => {
+    const h = watchedHarness();
+    await h.router.init();
+    h.secrets.reads.length = 0;
+
+    const deepseekKey = providerSecretKey('deepseek')!;
+    h.secrets.values.set(deepseekKey, 'ds');
+    h.secrets.fire(deepseekKey);
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.secrets.reads, [deepseekKey], 'only the changed key is re-read');
+    assert.strictEqual(h.router.getSelection()?.provider, 'deepseek', 'the new key is seen');
+  });
+
+  it('forgetProviderKey() drops the memo even before the change event arrives', async () => {
+    const h = watchedHarness();
+    await h.router.init();
+    h.secrets.reads.length = 0;
+
+    h.secrets.values.set(providerSecretKey('mistral')!, 'm');
+    h.router.forgetProviderKey('mistral');
+    const enabled = await h.router.enabledProviders();
+
+    assert.deepStrictEqual(h.secrets.reads, [providerSecretKey('mistral')!]);
+    assert.ok(enabled.includes('mistral'));
+  });
+
+  it('a throwing read counts as "no key" and is not memoised, so the next call retries', async () => {
+    const h = watchedHarness();
+    const googleKey = providerSecretKey('google')!;
+    h.secrets.values.set(googleKey, 'g');
+    h.secrets.failGet = true;
+    assert.ok(!(await h.router.enabledProviders()).includes('google'));
+
+    h.secrets.failGet = false;
+    h.secrets.reads.length = 0;
+    const enabled = await h.router.enabledProviders();
+
+    assert.ok(enabled.includes('google'), 'the retried read sees the key');
+    assert.strictEqual(h.secrets.readsOf(googleKey), 1, 'the failed read was retried');
+  });
+
+  it('without onDidChange nothing is memoised: every availability() call reads again', async () => {
+    const secrets = new CountingSecrets();
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ secrets, lm: fakeLm([]), catalog });
+
+    await h.router.availability();
+    await h.router.availability();
+
+    assert.strictEqual(secrets.reads.length, 2 * keyedSecretKeys().length);
+  });
+
+  it('dispose() detaches from onDidChange and stops memoising', async () => {
+    const h = watchedHarness();
+    assert.strictEqual(h.secrets.subscribers.size, 1, 'subscribed at construction');
+
+    h.router.dispose();
+    assert.strictEqual(h.secrets.subscribers.size, 0, 'unsubscribed on dispose');
+
+    await h.router.availability();
+    await h.router.availability();
+    assert.strictEqual(h.secrets.reads.length, 2 * keyedSecretKeys().length);
+  });
+});

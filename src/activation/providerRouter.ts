@@ -12,7 +12,11 @@
  * next call. Availability (API keys in SecretStorage, the
  * `baiton.orchestrator.endpoint` setting, Copilot model enumeration) is
  * recomputed on every `availability()` call because keys and Copilot sign-in
- * change out of band, and `availability()` reports only the CONFIGURED
+ * change out of band — except that API-key PRESENCE is memoised per secret
+ * key when the injected storage offers `onDidChange` (the host's does), and
+ * dropped per key when that event fires, so a live catalog of hundreds of
+ * providers costs one SecretStorage read per key rather than one per key per
+ * call. `availability()` reports only the CONFIGURED
  * providers — the rest are behind {@link ProviderRouter.hiddenProviders}, each
  * carrying the reason it is unusable. The active {@link ModelSelection} round-trips through
  * `workspaceState` under the catalog's `MODEL_SELECTION_KEY`, listeners hear
@@ -80,10 +84,14 @@ export type MementoLikeIsHostSubset = MementoLike extends vscode.Memento
 
 /**
  * The subset of `vscode.SecretStorage` the router reads. Only `get` is
- * needed: the router never writes secrets.
+ * needed: the router never writes secrets. `onDidChange` is optional: when
+ * present the router memoises key presence and drops one key's entry each
+ * time the event names it; when absent every availability read goes to
+ * `get`, exactly as before the memo existed.
  */
 export interface SecretsLike {
   get(key: string): Thenable<string | undefined> | string | undefined;
+  onDidChange?(listener: (e: { key: string }) => void): { dispose(): void };
 }
 
 /**
@@ -226,6 +234,26 @@ function hasKey(value: string | undefined | null): boolean {
 }
 
 /**
+ * The first configured provider that offers at least one model, or undefined
+ * when no provider is currently usable. Walks an already computed
+ * `availability()` result in catalog order (builtins, then feed-only
+ * providers, `openai` last), which is already filtered to the configured ones
+ * and already carries each entry's models — so the caller's single
+ * availability read serves both its enabled check and this fallback.
+ */
+function firstUsableSelection(
+  available: readonly ProviderAvailability[],
+): ModelSelection | undefined {
+  for (const entry of available) {
+    const model = entry.models[0];
+    if (model !== undefined) {
+      return { provider: entry.id, model };
+    }
+  }
+  return undefined;
+}
+
+/**
  * The orchestrator's provider router: one client per provider, the active
  * {@link ModelSelection} persisted under `MODEL_SELECTION_KEY`, a change
  * event, availability enumeration, and the routing `complete()` every
@@ -250,9 +278,91 @@ export class ProviderRouter implements ModelClient {
   private readonly lastModel = new Map<ProviderId, string>();
   /** Selection listeners, fired once per real change. */
   private readonly listeners = new Set<(s: ModelSelection | undefined) => void>();
+  /**
+   * Memoised API-key presence per SecretStorage key, populated only while
+   * {@link secretsSub} exists (the storage can tell us when a key changes).
+   * A read that throws is never recorded, so the next call retries it.
+   */
+  private readonly keyPresence = new Map<string, boolean>();
+  /**
+   * Bumped on every invalidation, so a `get` that was in flight when a key
+   * changed does not record its (possibly stale) answer.
+   */
+  private secretsEpoch = 0;
+  /** The `secrets.onDidChange` subscription, when the storage offers one. */
+  private readonly secretsSub: { dispose(): void } | undefined;
+  /** Set by {@link dispose}: nothing is memoised once the subscription is gone. */
+  private disposed = false;
 
   constructor(config: ProviderRouterConfig) {
     this.config = config;
+    const secrets = config.secrets;
+    this.secretsSub =
+      typeof secrets.onDidChange === 'function'
+        ? secrets.onDidChange((e) => this.forgetSecret(e.key))
+        : undefined;
+  }
+
+  /**
+   * Drops the memoised presence of one SecretStorage key so the next
+   * availability read goes back to `secrets.get`. Driven by
+   * `secrets.onDidChange`; also reachable through {@link forgetProviderKey}.
+   */
+  private forgetSecret(key: string): void {
+    this.secretsEpoch++;
+    this.keyPresence.delete(key);
+  }
+
+  /**
+   * Drops the memoised key presence of provider `id`. The host calls this
+   * right after it stores or clears that provider's key and before
+   * {@link refresh}, so the refresh sees the new key even when the storage's
+   * own change event has not been delivered yet. A no-op for `copilot`.
+   */
+  public forgetProviderKey(id: ProviderId): void {
+    const key = providerSecretKey(id);
+    if (key !== undefined) {
+      this.forgetSecret(key);
+    }
+  }
+
+  /**
+   * Releases the `secrets.onDidChange` subscription and the key-presence
+   * memo. The router stays usable afterwards; it simply reads SecretStorage
+   * on every call again.
+   */
+  public dispose(): void {
+    this.secretsSub?.dispose();
+    this.keyPresence.clear();
+    this.secretsEpoch++;
+    this.disposed = true;
+  }
+
+  /**
+   * Whether `key` holds a usable API key (see {@link hasKey}), answered from
+   * {@link keyPresence} when memoised and otherwise read from SecretStorage
+   * and memoised — only while the change subscription is live, and only when
+   * no invalidation landed during the read. A read that throws counts as "no
+   * key", is logged under `label`, and is NOT memoised, so the next call
+   * retries it.
+   */
+  private async hasStoredKey(key: string, label: string): Promise<boolean> {
+    const cached = this.keyPresence.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const epoch = this.secretsEpoch;
+    try {
+      const present = hasKey(await this.config.secrets.get(key));
+      if (this.secretsSub !== undefined && !this.disposed && epoch === this.secretsEpoch) {
+        this.keyPresence.set(key, present);
+      }
+      return present;
+    } catch (err) {
+      // A SecretStorage read that throws counts as "no key"; never propagate.
+      this.config.log?.(`Baiton: reading the ${label} API key failed: ${describe(err)}`);
+      return false;
+    }
   }
 
   /**
@@ -335,7 +445,9 @@ export class ProviderRouter implements ModelClient {
       // Set before availability is read so `catalogEntries()` enumerates the
       // stored provider even when it is absent from both feed and snapshot.
       this.preserved = stored;
-      const enabled = await this.enabledProviders();
+      // ONE availability read serves both the enabled check and the fallback.
+      const available = await this.availability();
+      const enabled = available.map((a) => a.id);
       if (stored !== undefined && enabled.includes(stored.provider)) {
         // A configured persisted selection: restored as-is, no rewrite needed
         // (the stored blob already matches).
@@ -345,11 +457,11 @@ export class ProviderRouter implements ModelClient {
         // A real choice whose provider is unconfigured in this window: keep it
         // in memory, route through the fallback, and persist NOTHING so the
         // user's blob survives the reload.
-        this.selected = await this.firstUsableSelection();
+        this.selected = firstUsableSelection(available);
       } else {
         // Absent or malformed blob: fall back to the first enabled provider
         // whose first model exists, and persist it so the next window restores it.
-        const fallback = await this.firstUsableSelection();
+        const fallback = firstUsableSelection(available);
         if (fallback !== undefined) {
           this.selected = fallback;
           await this.config.workspaceState.update(MODEL_SELECTION_KEY, fallback);
@@ -370,23 +482,6 @@ export class ProviderRouter implements ModelClient {
   }
 
   /**
-   * The first configured provider that offers at least one model, or undefined
-   * when no provider is currently usable. Walks `availability()` in catalog
-   * order (builtins, then feed-only providers, `openai` last), which is
-   * already filtered to the configured ones and already carries each entry's
-   * models — so this costs exactly one availability read.
-   */
-  private async firstUsableSelection(): Promise<ModelSelection | undefined> {
-    for (const entry of await this.availability()) {
-      const model = entry.models[0];
-      if (model !== undefined) {
-        return { provider: entry.id, model };
-      }
-    }
-    return undefined;
-  }
-
-  /**
    * Re-reads availability after something outside the router changed it — an
    * API key stored or cleared, Copilot sign-in, a landed catalog refresh.
    *
@@ -404,7 +499,9 @@ export class ProviderRouter implements ModelClient {
    */
   public async refresh(): Promise<void> {
     try {
-      const enabled = await this.enabledProviders();
+      // ONE availability read serves both the enabled check and the fallback.
+      const available = await this.availability();
+      const enabled = available.map((a) => a.id);
       const preserved = this.preserved;
       if (preserved !== undefined && enabled.includes(preserved.provider)) {
         this.selected = preserved;
@@ -413,7 +510,7 @@ export class ProviderRouter implements ModelClient {
       } else {
         const active = this.selected;
         if (active === undefined || !enabled.includes(active.provider)) {
-          const next = await this.firstUsableSelection();
+          const next = firstUsableSelection(available);
           this.selected = next;
           if (next !== undefined) {
             this.lastModel.set(next.provider, next.model);
@@ -501,7 +598,8 @@ export class ProviderRouter implements ModelClient {
   /**
    * The CONFIGURED providers' availability, in catalog order, recomputed on
    * every call because keys, Copilot sign-in and the catalog itself change out
-   * of band.
+   * of band. API-key presence alone may come from the per-key memo, which
+   * `secrets.onDidChange` keeps current (see {@link SecretsLike}).
    *
    * "Configured" means: a keyed provider with a stored key, `openai` with both
    * a key and a `baiton.orchestrator.endpoint`, `copilot` when `vscode.lm`
@@ -662,14 +760,7 @@ export class ProviderRouter implements ModelClient {
       // Models come from the `baiton.orchestrator.model` setting: never stale.
       base = await this.openAiAvailability(info);
     } else {
-      const key = providerSecretKey(id)!;
-      let enabled = false;
-      try {
-        enabled = hasKey(await this.config.secrets.get(key));
-      } catch (err) {
-        // A SecretStorage read that throws counts as "no key"; never propagate.
-        this.config.log?.(`Baiton: reading the ${info.label} API key failed: ${describe(err)}`);
-      }
+      const enabled = await this.hasStoredKey(providerSecretKey(id)!, info.label);
       const resolved = this.modelsForInfo(info);
       fromSnapshot = resolved.fromSnapshot;
       base = {
@@ -738,13 +829,7 @@ export class ProviderRouter implements ModelClient {
    * `baiton.orchestrator.model` setting (one entry when set, none otherwise).
    */
   private async openAiAvailability(info: ProviderInfo): Promise<ProviderAvailability> {
-    const key = providerSecretKey('openai')!;
-    let hasApiKey = false;
-    try {
-      hasApiKey = hasKey(await this.config.secrets.get(key));
-    } catch (err) {
-      this.config.log?.(`Baiton: reading the ${info.label} API key failed: ${describe(err)}`);
-    }
+    const hasApiKey = await this.hasStoredKey(providerSecretKey('openai')!, info.label);
     if (!hasApiKey) {
       return {
         id: 'openai',
