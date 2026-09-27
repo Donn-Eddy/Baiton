@@ -495,10 +495,11 @@ describe('model selector refresh (T15 end to end)', () => {
     };
   }
 
-  /** The four `baiton.orchestrator.*` settings the router reads. */
+  /** The `baiton.orchestrator.*` settings the router reads. */
   function fakeSettings(overrides: Partial<ProviderSettings> = {}): ProviderSettings {
     return {
       getEndpoint: () => undefined,
+      getProviderEndpoint: () => undefined,
       getModel: () => undefined,
       isStreaming: () => false,
       getMaxTokens: () => undefined,

@@ -373,6 +373,27 @@ gated by the `baiton.orchestrator.keyMigrated` flag in `globalState`), so an
 already-configured setup keeps working with nothing to re-enter; the legacy
 secret is never deleted and is no longer read.
 
+#### Per-provider endpoints
+
+models.dev publishes no `api` URL for many providers (Deep Infra, Cerebras,
+Groq, xAI, Together AI, Perplexity, …). Those providers still appear in the
+catalog, with no base URL, and stay hidden from the dropdown until they have
+both a key and an endpoint. Baiton deliberately ships no table of guessed URLs
+for them: your API key is sent to whatever endpoint is configured, so you set
+it yourself.
+
+**Baiton: Set Provider Endpoint** (`baiton.setProviderEndpoint`) quick-picks
+every provider that needs an endpoint, plus any provider you have already set
+one for (each row showing `Endpoint set` / `No endpoint set`), then takes an
+`http://` or `https://` base URL (for example
+`https://api.deepinfra.com/v1/openai`; `/chat/completions` is appended for
+you). An empty submit clears the entry. Called with a provider id — as the
+Chat view's **Set Provider Endpoint** fix does when a completion fails for want
+of an endpoint — it skips the pick. Values are stored in the
+`baiton.orchestrator.endpoints` user setting (see **Settings**), and the
+dropdown refreshes as soon as that setting changes, whether through the command
+or a hand edit.
+
 #### The Provider & Model dropdown
 
 A pair of `<select>`s at the top of the Chat view: a **provider** select,
@@ -383,7 +404,9 @@ through **Baiton: Set Provider API Key**, which quick-picks every keyed
 provider in the live catalog, hidden ones included. A **Set API key…** link
 appears beside the selector whenever nothing usable is on offer; its tooltip
 carries the reasons — the exact strings are `providerNeedsKeyReason(id)` ("Set
-an API key for <label> to use it."), `PROVIDER_NEEDS_ENDPOINT_REASON` ("Set
+an API key for <label> to use it."), `providerNeedsEndpointReason(id)` ("Set an
+endpoint URL for <label> to use it (Baiton: Set Provider Endpoint)."; reported
+only once the key is set), `PROVIDER_NEEDS_ENDPOINT_REASON` ("Set
 baiton.orchestrator.endpoint to use OpenAI / Custom.") and
 `COPILOT_UNAVAILABLE_REASON` ("GitHub Copilot is not available in this window.
 Install and sign in to GitHub Copilot Chat."), all in
@@ -664,13 +687,25 @@ The state table above is the thing that decides which relay each adapter uses: t
 - **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — an
   alias for **Baiton: Set Provider API Key**, kept so existing key bindings
   keep working.
+- **Baiton: Set Provider Endpoint** (`baiton.setProviderEndpoint`) — picks a
+  provider that needs an endpoint (or already has one set), then sets or
+  clears its base URL in `baiton.orchestrator.endpoints`.
 
 ## Settings
 
 - `baiton.orchestrator.endpoint` — base URL of the OpenAI-compatible
-  chat-completions endpoint used by the **OpenAI / Custom** provider. It does
-  not affect the other four providers, whose base URLs come from the provider
-  catalog (`src/orchestrator/providers.ts`).
+  chat-completions endpoint used by the **OpenAI / Custom** provider. No other
+  provider reads it: the builtins and models.dev providers take their base URL
+  from the provider catalog (`src/orchestrator/providers.ts`), and anything
+  else is set per provider in `baiton.orchestrator.endpoints`.
+- `baiton.orchestrator.endpoints` — a map from provider id to an
+  OpenAI-compatible base URL, e.g.
+  `{ "deepinfra": "https://api.deepinfra.com/v1/openai" }`. Required for a
+  models.dev provider that publishes no URL; for any other provider (except
+  GitHub Copilot and OpenAI / Custom) it overrides the catalog URL, so it also
+  routes a provider through a proxy. User settings only (`application` scope):
+  the provider's API key is sent to this URL, so a workspace cannot redirect
+  it. Most easily edited with **Baiton: Set Provider Endpoint**.
 - `baiton.orchestrator.model` — the model id offered under **OpenAI /
   Custom**. The other providers list their own models (Copilot enumerates its
   own live).

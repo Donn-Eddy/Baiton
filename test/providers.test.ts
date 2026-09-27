@@ -20,6 +20,8 @@ import {
   normalizeModelSelection,
   providerCatalog,
   providerInfo,
+  providerNeedsEndpoint,
+  providerNeedsEndpointReason,
   providerNeedsKeyReason,
   providerSecretKey,
   providersFromFeed,
@@ -210,6 +212,32 @@ describe('orchestrator/providers', () => {
     });
   });
 
+  describe('providerNeedsEndpoint', () => {
+    it('no builtin needs one: copilot is not HTTP, openai uses settings, the rest have URLs', () => {
+      for (const entry of providerCatalog()) {
+        assert.strictEqual(providerNeedsEndpoint(entry), false, entry.id);
+      }
+    });
+
+    it('only keyed, non-settings, non-copilot providers without a base URL need one', () => {
+      const base: ProviderInfo = {
+        id: 'x',
+        label: 'X',
+        requiresKey: true,
+        usesSettings: false,
+        models: [],
+        dialect: 'openai',
+        headerStyle: 'default',
+        source: 'feed',
+      };
+      assert.strictEqual(providerNeedsEndpoint(base), true);
+      assert.strictEqual(providerNeedsEndpoint({ ...base, defaultBaseUrl: 'https://x.test/v1' }), false);
+      assert.strictEqual(providerNeedsEndpoint({ ...base, requiresKey: false }), false);
+      assert.strictEqual(providerNeedsEndpoint({ ...base, usesSettings: true }), false);
+      assert.strictEqual(providerNeedsEndpoint({ ...base, id: 'copilot' }), false);
+    });
+  });
+
   describe('shared key alias', () => {
     it('opencode-go reads the opencode slot', () => {
       assert.deepStrictEqual({ ...PROVIDER_SECRET_ALIAS }, { 'opencode-go': 'opencode' });
@@ -393,7 +421,7 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(opencodeGo.headerStyle, 'opencode');
     });
 
-    it('skips entries with no api, no models, a blank id, or a denied id', () => {
+    it('skips entries with no models, a blank id, or a denied id', () => {
       const model = { id: 'm', name: 'm', reasoning: false, toolCall: false, attachment: false };
       const base: FeedProvider = { id: 'ok', name: 'OK', api: 'https://example.com/v1', env: [], models: [model] };
       const feed: ModelsDevFeed = [
@@ -406,7 +434,7 @@ describe('orchestrator/providers', () => {
       ];
       assert.deepStrictEqual(
         providersFromFeed(feed).map((entry) => entry.id),
-        ['ok'],
+        ['ok', 'no-api'],
       );
       for (const denied of FEED_PROVIDER_DENY) {
         assert.strictEqual(
@@ -417,9 +445,34 @@ describe('orchestrator/providers', () => {
       }
     });
 
+    it('emits a provider with no api, with an undefined base URL that needs an endpoint', () => {
+      const entries = providersFromFeed(sampleFeed());
+      const deepinfra = entries.find((entry) => entry.id === 'deepinfra') as ProviderInfo;
+      assert.ok(deepinfra, 'deepinfra is no longer skipped');
+      assert.strictEqual(deepinfra.label, 'Deep Infra');
+      assert.strictEqual(deepinfra.defaultBaseUrl, undefined);
+      assert.strictEqual('defaultBaseUrl' in deepinfra, false, 'the key is absent, not set to undefined');
+      assert.strictEqual(deepinfra.requiresKey, true);
+      assert.strictEqual(deepinfra.source, 'feed');
+      assert.deepStrictEqual([...(deepinfra.env ?? [])], ['DEEPINFRA_API_KEY']);
+      assert.strictEqual(deepinfra.doc, 'https://deepinfra.com/models');
+      assert.ok(deepinfra.models.length > 0);
+      assert.strictEqual(providerNeedsEndpoint(deepinfra), true);
+      const cerebras = entries.find((entry) => entry.id === 'cerebras') as ProviderInfo;
+      assert.strictEqual(cerebras.defaultBaseUrl, undefined);
+      assert.strictEqual(providerNeedsEndpoint(cerebras), true);
+    });
+
+    it('a blank api is treated like a missing one', () => {
+      const model = { id: 'm', name: 'm', reasoning: false, toolCall: false, attachment: false };
+      const [entry] = providersFromFeed([{ id: 'blank', name: 'Blank', api: '   ', env: [], models: [model] }]);
+      assert.strictEqual(entry.defaultBaseUrl, undefined);
+    });
+
     it('never throws on malformed entries', () => {
       const malformed = [null, undefined, 42, 'nope', {}, { id: 'x' }, { id: 'y', api: 5, models: 'no' }];
       assert.doesNotThrow(() => providersFromFeed(malformed as unknown as ModelsDevFeed));
+      // `{ id: 'x' }` and `{ id: 'y', … }` carry no usable models, so nothing is emitted.
       assert.strictEqual(providersFromFeed(malformed as unknown as ModelsDevFeed).length, 0);
     });
   });
@@ -525,6 +578,17 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(
         providerNeedsKeyReason('anthropic', buildProviderCatalog(sampleFeed())),
         'Set an API key for Anthropic to use it.',
+      );
+    });
+
+    it('providerNeedsEndpointReason names the label and the command', () => {
+      assert.strictEqual(
+        providerNeedsEndpointReason('deepinfra', buildProviderCatalog(sampleFeed())),
+        'Set an endpoint URL for Deep Infra to use it (Baiton: Set Provider Endpoint).',
+      );
+      assert.strictEqual(
+        providerNeedsEndpointReason('nope'),
+        'Set an endpoint URL for nope to use it (Baiton: Set Provider Endpoint).',
       );
     });
 

@@ -41,11 +41,10 @@
   },
   "deepinfra": {
     "id": "deepinfra",
-    "name": "DeepInfra",
-    "api": "https://api.deepinfra.com/v1/openai",
-    "env": ["DEEPINFRA_TOKEN"],
-    "npm": "@ai-sdk/openai-compatible",
-    "doc": "https://deepinfra.com/docs",
+    "name": "Deep Infra",
+    "env": ["DEEPINFRA_API_KEY"],
+    "npm": "@ai-sdk/deepinfra",
+    "doc": "https://deepinfra.com/models",
     "models": {
       "deepseek-ai/DeepSeek-V3.2": {
         "id": "deepseek-ai/DeepSeek-V3.2",
@@ -66,10 +65,9 @@
   "cerebras": {
     "id": "cerebras",
     "name": "Cerebras",
-    "api": "https://api.cerebras.ai/v1",
     "env": ["CEREBRAS_API_KEY"],
-    "npm": "@ai-sdk/openai-compatible",
-    "doc": "https://inference-docs.cerebras.ai",
+    "npm": "@ai-sdk/cerebras",
+    "doc": "https://inference-docs.cerebras.ai/models/overview",
     "models": {
       "qwen-3-235b": {
         "id": "qwen-3-235b",

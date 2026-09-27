@@ -63,7 +63,13 @@ export interface ProviderInfo {
   id: ProviderId;
   /** Human label shown as the <optgroup> label in the Chat dropdown. */
   label: string;
-  /** Default OpenAI-compatible base URL, or undefined when the provider is not HTTP-based (`copilot`) or takes its base URL from settings (`openai`). */
+  /**
+   * Default OpenAI-compatible base URL, or undefined when the provider is not
+   * HTTP-based (`copilot`), takes its base URL from settings (`openai`), or is
+   * a feed provider whose models.dev entry discloses no `api` — the user must
+   * then supply one through `baiton.orchestrator.endpoints` (see
+   * {@link providerNeedsEndpoint}).
+   */
   defaultBaseUrl?: string;
   /** True when the provider needs an API key in SecretStorage before it can be used. */
   requiresKey: boolean;
@@ -251,8 +257,15 @@ function feedModelIds(provider: FeedProvider): readonly string[] {
  *
  * Total and never throws, whatever a {@link FeedProvider} contains. A feed
  * provider is skipped when its id trims to empty, its id is in
- * {@link FEED_PROVIDER_DENY}, it discloses no `api` (so it is not reachable over
- * an OpenAI-compatible HTTP base) or it lists no usable models.
+ * {@link FEED_PROVIDER_DENY} or it lists no usable models.
+ *
+ * A provider that discloses no `api` is still emitted, with `defaultBaseUrl`
+ * undefined. models.dev dropped `api` for many providers whose SDK package
+ * knows the URL (deepinfra, cerebras, groq, xai, …); skipping them hid real,
+ * OpenAI-compatible providers entirely. They now appear and ask for an
+ * endpoint instead ({@link providerNeedsEndpoint}). Known URLs are
+ * deliberately NOT pre-seeded here: the feed is the source of truth, and a
+ * guessed URL would silently send the user's key somewhere unverified.
  */
 export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] {
   const providers = Array.isArray(feed) ? feed : [];
@@ -266,18 +279,20 @@ export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] 
       continue;
     }
     const api = typeof provider.api === 'string' ? provider.api.trim() : '';
-    if (api.length === 0) {
-      continue;
-    }
     const models = feedModelIds(provider);
     if (models.length === 0) {
       continue;
     }
     const label = typeof provider.name === 'string' && provider.name.trim().length > 0 ? provider.name : id;
+    const baseUrl = hasOwn(PROVIDER_BASE_URL_OVERRIDES, id)
+      ? PROVIDER_BASE_URL_OVERRIDES[id]
+      : api.length > 0
+        ? api
+        : undefined;
     const entry: ProviderInfo & { env?: readonly string[]; doc?: string } = {
       id,
       label,
-      defaultBaseUrl: hasOwn(PROVIDER_BASE_URL_OVERRIDES, id) ? PROVIDER_BASE_URL_OVERRIDES[id] : api,
+      ...(baseUrl !== undefined ? { defaultBaseUrl: baseUrl } : {}),
       requiresKey: true,
       usesSettings: false,
       models,
@@ -508,6 +523,33 @@ export function providerNeedsKeyReason(id: ProviderId, catalog?: readonly Provid
 /** The user-facing reason shown when `openai` has no `baiton.orchestrator.endpoint`. */
 export const PROVIDER_NEEDS_ENDPOINT_REASON =
   'Set baiton.orchestrator.endpoint to use OpenAI / Custom.';
+
+/**
+ * True when `info` is an HTTP provider the catalog cannot reach on its own: it
+ * needs a key, is not the settings-backed `openai`, is not the non-HTTP
+ * `copilot`, and has no catalog base URL — typically a models.dev provider
+ * whose feed entry discloses no `api`. Such a provider becomes usable once the
+ * user sets its URL in `baiton.orchestrator.endpoints`. Pure; this says
+ * nothing about whether a user endpoint is already set.
+ */
+export function providerNeedsEndpoint(info: ProviderInfo): boolean {
+  return (
+    info.requiresKey === true &&
+    info.usesSettings !== true &&
+    info.id !== 'copilot' &&
+    info.defaultBaseUrl === undefined
+  );
+}
+
+/**
+ * The user-facing reason shown when provider `id` has a key but no endpoint to
+ * send it to (no catalog base URL and no `baiton.orchestrator.endpoints`
+ * entry). Names the command that fixes it; an id absent from `catalog` names
+ * itself.
+ */
+export function providerNeedsEndpointReason(id: ProviderId, catalog?: readonly ProviderInfo[]): string {
+  return `Set an endpoint URL for ${providerInfo(id, catalog).label} to use it (Baiton: Set Provider Endpoint).`;
+}
 
 /**
  * The user-facing reason shown when GitHub Copilot is unavailable in the
