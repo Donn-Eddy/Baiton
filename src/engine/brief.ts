@@ -13,7 +13,10 @@
  *
  * The schema and the stop instruction appear last (Req 11.3); the optional
  * context and ask-relay sections slot in ahead of the result path without
- * disturbing that. {@link buildBrief} composes
+ * disturbing that. The Role section carries the stage's instruction text, which
+ * for `investigate` is `INVESTIGATE_INSTRUCTION` rather than the reviewer's
+ * prose even though that stage is run by the `reviewer` role.
+ * {@link buildBrief} composes
  * this text as a pure function so it is directly testable; {@link writeBrief}
  * is the thin `fs` shell that persists it and returns the file path.
  */
@@ -79,7 +82,7 @@ export function buildBrief(input: BriefInput): string {
       : [];
   const sections = [
     // 1. Role instructions (first).
-    `# Role\n\n${roleInstructions(input.role)}`,
+    `# Role\n\n${roleInstructions(input.role, input.stage)}`,
     // 1b. Optional stage context (what to read), right after the role.
     ...context,
     // 1c. Optional ask-relay instructions (config-driven fallback agents),
