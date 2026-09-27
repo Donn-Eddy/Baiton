@@ -62,8 +62,8 @@ import type { ModelCatalogSnapshot, ModelEntry } from '../src/orchestrator/model
 /**
  * test/fixtures/modelsDev.sample.json read the way test/providers.test.ts and
  * test/modelsDev.test.ts read it: untyped `fs` + `JSON.parse`, then through the
- * real parser. Eight providers: anthropic, deepinfra, cerebras, baseten,
- * deepseek, google, mistral, opencode.
+ * real parser. Nine providers: anthropic, deepinfra, cerebras, baseten,
+ * deepseek, google, mistral, opencode (Zen), opencode-go.
  */
 const fixtureFeed: ModelsDevFeed = (() => {
   const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
@@ -492,7 +492,7 @@ describe('ProviderRouter.availability', () => {
     const hidden = await h.router.hiddenProviders();
     assert.deepStrictEqual(
       hidden.map((a) => a.id),
-      ['google', 'opencode', 'mistral', 'openai'],
+      ['google', 'opencode-go', 'opencode', 'mistral', 'openai'],
       'exactly the entries availability() omits, in catalog order',
     );
     for (const entry of hidden) {
@@ -537,7 +537,7 @@ describe('ProviderRouter.availability', () => {
     assert.strictEqual(hidden.some((a) => a.id === 'google'), false, 'and out of hiddenProviders()');
     assert.deepStrictEqual(
       hidden.map((a) => a.id),
-      ['copilot', 'opencode', 'mistral', 'openai'],
+      ['copilot', 'opencode-go', 'opencode', 'mistral', 'openai'],
       'the other providers do not flip',
     );
   });
@@ -683,6 +683,7 @@ describe('ProviderRouter catalog', () => {
 
     assert.deepStrictEqual(await h.router.enabledProviders(), [
       'google',
+      'opencode-go',
       'opencode',
       'mistral',
       'openai',
@@ -691,6 +692,36 @@ describe('ProviderRouter catalog', () => {
     const google = (await h.router.availability()).find((a) => a.id === 'google')!;
     assert.strictEqual(google.label, providerInfo('google').label);
     assert.strictEqual(providerSecretKey('google'), 'baiton.orchestrator.key.google');
+  });
+
+  it('one stored OpenCode key enables both OpenCode Go and OpenCode Zen, each with its own models', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    // The pre-split slot: a key saved before OpenCode Go existed.
+    h.secrets.values.set('baiton.orchestrator.key.opencode', 'oc-key');
+
+    const list = await h.router.availability();
+    assert.deepStrictEqual(list.map((a) => a.id), ['opencode-go', 'opencode']);
+    const go = list.find((a) => a.id === 'opencode-go')!;
+    const zen = list.find((a) => a.id === 'opencode')!;
+    assert.strictEqual(go.label, 'OpenCode Go');
+    assert.strictEqual(zen.label, 'OpenCode Zen');
+    assert.deepStrictEqual([...go.models], ['kimi-k2.7-code', 'glm-5.3', 'minimax-m3']);
+    assert.deepStrictEqual([...zen.models], ['grok-code', 'gpt-oss-120b-zen', 'claude-sonnet-5-zen']);
+
+    // Clearing the one key hides both again.
+    h.secrets.values.delete('baiton.orchestrator.key.opencode');
+    h.router.forgetProviderKey('opencode-go');
+    assert.deepStrictEqual((await h.router.availability()).map((a) => a.id), []);
+  });
+
+  it('the OpenCode Go client reads the shared key and targets the Go gateway', async () => {
+    const secrets = new FakeSecrets();
+    secrets.values.set('baiton.orchestrator.key.opencode', '  oc-key  ');
+    const config = providerClientConfig('opencode-go', makeDeps(secrets, makeSettings()));
+    assert.strictEqual(await config.getEndpoint(), 'https://opencode.ai/zen/go/v1');
+    assert.strictEqual(await config.getApiKey(), 'oc-key');
+    assert.ok(config.extraHeaders !== undefined, 'the OpenCode headers apply to Go too');
   });
 
   it('offline: a snapshot-only provider is still enumerated, with the synthesised label', async () => {
@@ -1381,10 +1412,20 @@ class WatchedSecrets extends CountingSecrets {
 
 describe('ProviderRouter SecretStorage reads', () => {
   /** Every secret key the fixture catalog's providers read (copilot has none). */
-  const keyedSecretKeys = (): string[] =>
-    buildProviderCatalog(fixtureFeed)
-      .map((info) => providerSecretKey(info.id))
-      .filter((key): key is string => key !== undefined);
+  /**
+   * Keyed catalog ENTRIES, counting aliased ids (`opencode-go` -> `opencode`)
+   * separately: with no memo every entry reads its slot, shared or not.
+   */
+  const keyedEntryCount = (): number =>
+    buildProviderCatalog(fixtureFeed).filter((info) => providerSecretKey(info.id) !== undefined).length;
+
+  const keyedSecretKeys = (): string[] => [
+    ...new Set(
+      buildProviderCatalog(fixtureFeed)
+        .map((info) => providerSecretKey(info.id))
+        .filter((key): key is string => key !== undefined),
+    ),
+  ];
 
   function watchedHarness(): RouterHarness & { secrets: WatchedSecrets } {
     const secrets = new WatchedSecrets();
@@ -1461,7 +1502,7 @@ describe('ProviderRouter SecretStorage reads', () => {
     await h.router.availability();
     await h.router.availability();
 
-    assert.strictEqual(secrets.reads.length, 2 * keyedSecretKeys().length);
+    assert.strictEqual(secrets.reads.length, 2 * keyedEntryCount());
   });
 
   it('dispose() detaches from onDidChange and stops memoising', async () => {
@@ -1473,6 +1514,6 @@ describe('ProviderRouter SecretStorage reads', () => {
 
     await h.router.availability();
     await h.router.availability();
-    assert.strictEqual(h.secrets.reads.length, 2 * keyedSecretKeys().length);
+    assert.strictEqual(h.secrets.reads.length, 2 * keyedEntryCount());
   });
 });

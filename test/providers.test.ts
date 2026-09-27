@@ -8,6 +8,7 @@ import {
   MODEL_SELECTION_KEY,
   PROVIDERS,
   PROVIDER_IDS,
+  PROVIDER_SECRET_ALIAS,
   PROVIDER_SECRET_KEY_PREFIX,
   ModelSelection,
   ProviderInfo,
@@ -38,7 +39,25 @@ function sampleFeed(): ModelsDevFeed {
 describe('orchestrator/providers', () => {
   describe('catalog shape', () => {
     it('PROVIDER_IDS is the exact dropdown order', () => {
-      assert.deepStrictEqual([...PROVIDER_IDS], ['copilot', 'google', 'opencode', 'mistral', 'openai']);
+      assert.deepStrictEqual([...PROVIDER_IDS], ['copilot', 'google', 'opencode-go', 'opencode', 'mistral', 'openai']);
+    });
+
+    it('ships exactly six builtins, OpenCode Go before OpenCode Zen', () => {
+      assert.strictEqual(PROVIDER_IDS.length, 6);
+      assert.deepStrictEqual(
+        providerCatalog().map((entry) => entry.label),
+        ['GitHub Copilot', 'Google AI Studio', 'OpenCode Go', 'OpenCode Zen', 'Mistral AI', 'OpenAI / Custom'],
+      );
+    });
+
+    it('OpenCode Go and OpenCode Zen point at their own gateways', () => {
+      assert.strictEqual(PROVIDERS['opencode-go'].defaultBaseUrl, 'https://opencode.ai/zen/go/v1');
+      assert.strictEqual(PROVIDERS.opencode.defaultBaseUrl, 'https://opencode.ai/zen/v1');
+      assert.strictEqual(PROVIDERS['opencode-go'].requiresKey, true);
+      assert.strictEqual(PROVIDERS['opencode-go'].usesSettings, false);
+      assert.strictEqual(PROVIDERS['opencode-go'].dialect, 'openai');
+      assert.ok(PROVIDERS['opencode-go'].models.includes('kimi-k2.7-code'));
+      assert.ok(PROVIDERS.opencode.models.includes('claude-sonnet-5'));
     });
 
     it('providerCatalog returns one entry per id, in dropdown order', () => {
@@ -81,10 +100,12 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(PROVIDERS.google.dialect, 'gemini');
     });
 
-    it('every entry carries a headerStyle: only opencode is non-default', () => {
+    it('every entry carries a headerStyle: only the two OpenCode gateways are non-default', () => {
       assert.strictEqual(PROVIDERS.opencode.headerStyle, 'opencode');
+      assert.strictEqual(PROVIDERS['opencode-go'].headerStyle, 'opencode');
       for (const entry of providerCatalog()) {
-        assert.strictEqual(entry.headerStyle, entry.id === 'opencode' ? 'opencode' : 'default');
+        const isOpenCode = entry.id === 'opencode' || entry.id === 'opencode-go';
+        assert.strictEqual(entry.headerStyle, isOpenCode ? 'opencode' : 'default');
       }
     });
 
@@ -100,6 +121,10 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(
         completionsUrl(PROVIDERS.opencode.defaultBaseUrl!).href,
         'https://opencode.ai/zen/v1/chat/completions',
+      );
+      assert.strictEqual(
+        completionsUrl(PROVIDERS['opencode-go'].defaultBaseUrl!).href,
+        'https://opencode.ai/zen/go/v1/chat/completions',
       );
     });
   });
@@ -171,7 +196,7 @@ describe('orchestrator/providers', () => {
     it('keyed providers get prefix + id, distinct and not the legacy key', () => {
       const keys: string[] = [];
       for (const id of PROVIDER_IDS) {
-        if (id === 'copilot') {
+        if (id === 'copilot' || Object.prototype.hasOwnProperty.call(PROVIDER_SECRET_ALIAS, id)) {
           continue;
         }
         const key = providerSecretKey(id) as string;
@@ -182,6 +207,20 @@ describe('orchestrator/providers', () => {
       for (const key of keys) {
         assert.notStrictEqual(key, LEGACY_API_KEY_SECRET);
       }
+    });
+  });
+
+  describe('shared key alias', () => {
+    it('opencode-go reads the opencode slot', () => {
+      assert.deepStrictEqual({ ...PROVIDER_SECRET_ALIAS }, { 'opencode-go': 'opencode' });
+      assert.strictEqual(providerSecretKey('opencode-go'), 'baiton.orchestrator.key.opencode');
+      assert.strictEqual(providerSecretKey('opencode-go'), providerSecretKey('opencode'));
+    });
+
+    it('non-aliased ids are unaffected, and inherited members are not aliases', () => {
+      assert.strictEqual(providerSecretKey('opencode'), 'baiton.orchestrator.key.opencode');
+      assert.strictEqual(providerSecretKey('mistral'), 'baiton.orchestrator.key.mistral');
+      assert.strictEqual(providerSecretKey('toString'), 'baiton.orchestrator.key.toString');
     });
   });
 
@@ -206,7 +245,7 @@ describe('orchestrator/providers', () => {
 
   describe('built-in model lists', () => {
     it('hosted providers carry non-empty, duplicate-free model ids', () => {
-      for (const id of ['google', 'opencode', 'mistral'] as const) {
+      for (const id of ['google', 'opencode-go', 'opencode', 'mistral'] as const) {
         const models = PROVIDERS[id].models;
         assert.ok(models.length > 0, `${id} has no models`);
         for (const model of models) {
@@ -326,7 +365,7 @@ describe('orchestrator/providers', () => {
         entries.map((entry) => entry.id),
         feed.map((provider) => provider.id),
       );
-      assert.strictEqual(entries.length, 8);
+      assert.strictEqual(entries.length, 9);
     });
 
     it('maps anthropic through unchanged', () => {
@@ -350,6 +389,8 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(google.defaultBaseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai/');
       const opencode = entries.find((entry) => entry.id === 'opencode') as ProviderInfo;
       assert.strictEqual(opencode.headerStyle, 'opencode');
+      const opencodeGo = entries.find((entry) => entry.id === 'opencode-go') as ProviderInfo;
+      assert.strictEqual(opencodeGo.headerStyle, 'opencode');
     });
 
     it('skips entries with no api, no models, a blank id, or a denied id', () => {
@@ -406,7 +447,7 @@ describe('orchestrator/providers', () => {
 
     it('keeps builtin host traits but takes the feed’s model lists', () => {
       const catalog = buildProviderCatalog(sampleFeed());
-      for (const id of ['google', 'mistral', 'opencode'] as const) {
+      for (const id of ['google', 'mistral', 'opencode', 'opencode-go'] as const) {
         assert.strictEqual(catalog.filter((entry) => entry.id === id).length, 1, `${id} appears twice`);
         const entry = catalog.find((item) => item.id === id) as ProviderInfo;
         assert.strictEqual(entry.label, PROVIDERS[id].label);
@@ -419,6 +460,21 @@ describe('orchestrator/providers', () => {
       const opencode = catalog.find((entry) => entry.id === 'opencode') as ProviderInfo;
       assert.ok(!opencode.models.includes('claude-sonnet-4-5'), 'opencode must stop advertising the stale model');
       assert.deepStrictEqual([...opencode.models], ['grok-code', 'gpt-oss-120b-zen', 'claude-sonnet-5-zen']);
+    });
+
+    it('gives OpenCode Go the feed’s Go models and OpenCode Zen the Zen models', () => {
+      const catalog = buildProviderCatalog(sampleFeed());
+      const go = catalog.find((entry) => entry.id === 'opencode-go') as ProviderInfo;
+      const zen = catalog.find((entry) => entry.id === 'opencode') as ProviderInfo;
+      assert.strictEqual(go.label, 'OpenCode Go');
+      assert.strictEqual(zen.label, 'OpenCode Zen');
+      assert.strictEqual(go.source, 'builtin');
+      assert.deepStrictEqual([...go.models], ['kimi-k2.7-code', 'glm-5.3', 'minimax-m3']);
+      assert.deepStrictEqual([...zen.models], ['grok-code', 'gpt-oss-120b-zen', 'claude-sonnet-5-zen']);
+      assert.strictEqual(go.doc, 'https://opencode.ai/docs/go');
+      assert.strictEqual(zen.doc, 'https://opencode.ai/docs/zen');
+      const ids = catalog.map((entry) => entry.id);
+      assert.strictEqual(ids.indexOf('opencode-go') + 1, ids.indexOf('opencode'), 'Go sits right above Zen');
     });
 
     it('every feed-derived base URL is an https /chat/completions prefix', () => {
@@ -479,9 +535,9 @@ describe('orchestrator/providers', () => {
   });
 
   describe('legacy secret-key compatibility', () => {
-    it('every builtin but copilot keeps prefix + id', () => {
+    it('every builtin but copilot (and the aliased opencode-go) keeps prefix + id', () => {
       for (const id of PROVIDER_IDS) {
-        if (id === 'copilot') {
+        if (id === 'copilot' || id === 'opencode-go') {
           continue;
         }
         assert.strictEqual(providerSecretKey(id), 'baiton.orchestrator.key.' + id);

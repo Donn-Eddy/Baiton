@@ -139,7 +139,7 @@ export interface ProviderRouterConfig {
   version: string;
   /**
    * The live model catalog. Absent means "no live catalog": the router then
-   * behaves exactly as before this seam existed — the five builtin entries in
+   * behaves exactly as before this seam existed — the six builtin entries in
    * their builtin order, with their builtin model lists.
    */
   catalog?: ModelCatalogSource;
@@ -285,6 +285,14 @@ export class ProviderRouter implements ModelClient {
    */
   private readonly keyPresence = new Map<string, boolean>();
   /**
+   * The in-flight presence read per SecretStorage key, shared while the memo
+   * is live. Two catalog entries can resolve to ONE slot (`opencode-go`
+   * aliases `opencode`, see `PROVIDER_SECRET_ALIAS`) and `computeAll` reads
+   * every entry concurrently, so without this both would hit SecretStorage
+   * before either memoised — breaking the one-read-per-key guarantee.
+   */
+  private readonly keyReads = new Map<string, Promise<boolean>>();
+  /**
    * Bumped on every invalidation, so a `get` that was in flight when a key
    * changed does not record its (possibly stale) answer.
    */
@@ -311,6 +319,7 @@ export class ProviderRouter implements ModelClient {
   private forgetSecret(key: string): void {
     this.secretsEpoch++;
     this.keyPresence.delete(key);
+    this.keyReads.delete(key);
   }
 
   /**
@@ -334,6 +343,7 @@ export class ProviderRouter implements ModelClient {
   public dispose(): void {
     this.secretsSub?.dispose();
     this.keyPresence.clear();
+    this.keyReads.clear();
     this.secretsEpoch++;
     this.disposed = true;
   }
@@ -351,6 +361,24 @@ export class ProviderRouter implements ModelClient {
     if (cached !== undefined) {
       return cached;
     }
+    if (this.secretsSub === undefined || this.disposed) {
+      return this.readStoredKey(key, label);
+    }
+    const pending = this.keyReads.get(key);
+    if (pending !== undefined) {
+      return pending;
+    }
+    const read = this.readStoredKey(key, label).finally(() => {
+      if (this.keyReads.get(key) === read) {
+        this.keyReads.delete(key);
+      }
+    });
+    this.keyReads.set(key, read);
+    return read;
+  }
+
+  /** One SecretStorage read behind {@link hasStoredKey}; memoises per its rules. */
+  private async readStoredKey(key: string, label: string): Promise<boolean> {
     const epoch = this.secretsEpoch;
     try {
       const present = hasKey(await this.config.secrets.get(key));
@@ -643,7 +671,7 @@ export class ProviderRouter implements ModelClient {
    * Every provider this window knows about, in dropdown order.
    *
    * The feed-merged catalog first ({@link buildProviderCatalog}; with no feed
-   * this is byte-identical to the five builtin entries), then — skipping ids
+   * this is byte-identical to the six builtin entries), then — skipping ids
    * already present — every distinct provider of the models.dev snapshot in
    * snapshot order, then the active and preserved selections' providers.
    *

@@ -317,15 +317,17 @@ documented in **Harness ask relay (per-adapter probe findings)** below.
 
 The orchestrator chat talks to one inference provider at a time, chosen per
 workspace in the Chat view's **Provider & Model** selector. The catalog is the
-builtin base — `copilot`, `google`, `opencode`, `mistral` and `openai`
-(OpenAI / Custom) — **plus every provider the models.dev feed lists**, assembled
+builtin base — `copilot`, `google`, `opencode-go` (OpenCode Go), `opencode`
+(OpenCode Zen), `mistral` and `openai` (OpenAI / Custom) — **plus every provider the models.dev feed lists**, assembled
 by `providersFromFeed` / `buildProviderCatalog` in
 `src/orchestrator/providers.ts`. A builtin id keeps its label, base URL, key
 policy, dialect and header style (host behaviour the feed does not know about)
 while the feed supplies its model list; feed-only ids (`anthropic`, `deepseek`,
 `cerebras`, …) are appended after the builtins, with `openai` always last. API
 keys stay at `baiton.orchestrator.key.<id>`, so existing `google`, `mistral`,
-`opencode` and `openai` secrets keep working unchanged. The host side that owns
+`opencode` and `openai` secrets keep working unchanged. OpenCode Go and OpenCode
+Zen are two gateways behind one OpenCode account, so `opencode-go` reads the
+`opencode` slot: one key enables both. The host side that owns
 one client per provider and delegates each completion to the active one is
 `ProviderRouter` in `src/activation/providerRouter.ts`. Switching providers
 changes the model used by the chat, by the tool loop and by Auto mode's
@@ -337,7 +339,8 @@ untouched by a switch.
 | --- | --- | --- | --- |
 | GitHub Copilot | `copilot` | none — runs in-window on your Copilot subscription | enumerated live from `vscode.lm.selectChatModels({ vendor: 'copilot' })` |
 | Google AI Studio | `google` | `baiton.orchestrator.key.google` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, against `https://generativelanguage.googleapis.com/v1beta/openai/` |
-| OpenCode Go | `opencode` | `baiton.orchestrator.key.opencode` | `grok-code`, `qwen3-coder`, `kimi-k2`, `claude-sonnet-4-5`, `gpt-5-codex`, against `https://opencode.ai/zen/v1` |
+| OpenCode Go | `opencode-go` | `baiton.orchestrator.key.opencode` (shared with OpenCode Zen) | `kimi-k2.7-code`, `qwen3.7-plus`, `glm-5.3`, `minimax-m3`, `deepseek-v4-pro`, `grok-4.7`, against `https://opencode.ai/zen/go/v1` ([docs](https://opencode.ai/docs/go)) |
+| OpenCode Zen | `opencode` | `baiton.orchestrator.key.opencode` | `claude-sonnet-5`, `gpt-5.5`, `gemini-3.5-flash`, `kimi-k2.7-code`, `qwen3-coder`, `grok-code`, against `https://opencode.ai/zen/v1` ([docs](https://opencode.ai/docs/zen)) |
 | Mistral AI | `mistral` | `baiton.orchestrator.key.mistral` | `mistral-large-latest`, `mistral-medium-latest`, `mistral-small-latest`, `codestral-latest`, `devstral-medium-latest`, against `https://api.mistral.ai/v1` |
 | OpenAI / Custom | `openai` | `baiton.orchestrator.key.openai` | whatever `baiton.orchestrator.model` names, against `baiton.orchestrator.endpoint` |
 
@@ -355,7 +358,8 @@ Each keyed provider has one API key in VS Code SecretStorage under
 `baiton.orchestrator.key.<provider>`; GitHub Copilot needs none.
 **Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) quick-picks the
 keyed providers in catalog order (each row showing `API key set` /
-`No API key set`), then takes the value in a masked input. A non-empty submit
+`No API key set`; providers sharing one key, such as OpenCode Go and OpenCode
+Zen, share one row), then takes the value in a masked input. A non-empty submit
 stores the trimmed value and confirms without ever showing it; an empty submit
 clears an existing key, or reports that nothing changed when none was stored;
 dismissing either box changes nothing and says nothing; a storage failure
@@ -438,9 +442,9 @@ is drained onto its first requester only. The shaping is on the wire only —
 the transcript on disk is unchanged — so multi-step tool calls chain without
 user intervention.
 
-#### OpenCode Go request headers
+#### OpenCode request headers
 
-Every OpenCode request carries `user-agent: baiton/<extension version>` and
+Every OpenCode request (Go and Zen alike) carries `user-agent: baiton/<extension version>` and
 `x-opencode-session: <uuid>`, where the uuid is minted once per chat session
 id (threaded through as `CompletionRequest.sessionId`) and stays stable for
 the whole conversation.

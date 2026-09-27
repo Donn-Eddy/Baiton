@@ -297,7 +297,7 @@
         "baiton.orchestrator.endpoint": {
           "type": "string",
           "default": "",
-          "description": "Base URL of the OpenAI-compatible chat-completions endpoint used by the 'OpenAI / Custom' orchestrator provider. The other providers (GitHub Copilot, Google AI Studio, OpenCode Go, Mistral AI) use their own built-in endpoints and ignore this setting."
+          "description": "Base URL of the OpenAI-compatible chat-completions endpoint used by the 'OpenAI / Custom' orchestrator provider. The other providers (GitHub Copilot, Google AI Studio, OpenCode Go, OpenCode Zen, Mistral AI) use their own built-in endpoints and ignore this setting."
         },
         "baiton.orchestrator.model": {
           "type": "string",

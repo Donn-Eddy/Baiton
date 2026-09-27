@@ -22,12 +22,13 @@ import type { ModelsDevFeed, FeedProvider } from './modelsDev';
 export type ProviderId = string;
 
 /** The providers this build ships without any feed: the offline/builtin base. */
-export type BuiltinProviderId = 'copilot' | 'google' | 'opencode' | 'mistral' | 'openai';
+export type BuiltinProviderId = 'copilot' | 'google' | 'opencode-go' | 'opencode' | 'mistral' | 'openai';
 
 /** The builtin vocabulary, in dropdown order. */
 export const BUILTIN_PROVIDER_IDS: readonly BuiltinProviderId[] = [
   'copilot',
   'google',
+  'opencode-go',
   'opencode',
   'mistral',
   'openai',
@@ -72,7 +73,7 @@ export interface ProviderInfo {
   models: readonly string[];
   /** The wire shaping applied to messages before serialisation; `gemini` fixes Google's tool-chaining rejections. */
   dialect: DialectId;
-  /** Extra headers added to every request; `opencode` adds User-Agent and x-opencode-session. */
+  /** Extra headers added to every request; `opencode` (both OpenCode gateways) adds User-Agent and x-opencode-session. */
   headerStyle: HeaderStyleId;
   /** Where the entry came from; a missing value is treated as `'builtin'`. */
   readonly source?: 'builtin' | 'feed' | 'custom';
@@ -100,9 +101,10 @@ export type HeaderStyleId = 'default' | 'opencode';
  * The builtin provider catalog, one record per {@link BuiltinProviderId}.
  *
  * This is the offline base and the legacy-id compatibility set: when the
- * models.dev feed is unavailable the catalog still offers exactly these five
+ * models.dev feed is unavailable the catalog still offers exactly these six
  * providers, and the legacy ids `google`/`mistral`/`opencode` keep their
- * `baiton.orchestrator.key.<id>` secrets.
+ * `baiton.orchestrator.key.<id>` secrets (`opencode-go` shares the `opencode`
+ * slot — see {@link PROVIDER_SECRET_ALIAS}).
  *
  * Base URLs are the prefix `completionsUrl()` (src/orchestrator/modelClient.ts)
  * appends `/chat/completions` to: `normalizeBase` strips every trailing slash
@@ -133,17 +135,34 @@ export const PROVIDERS: Readonly<Record<BuiltinProviderId, ProviderInfo>> = {
     dialect: 'gemini',
     headerStyle: 'default',
   },
-  // Base URL and model list follow the hosted Go gateway; the model ids are
-  // documented at OPENCODE_MODEL_DOC_URL (src/adapter/opencode.ts,
-  // 'https://opencode.ai/docs/go/'). Keep both here so a later correction is
-  // a one-line edit.
+  // OpenCode runs TWO hosted gateways that models.dev lists as separate
+  // providers with disjoint model sets: Go (the subscription tier, documented
+  // at https://opencode.ai/docs/go — the same page OPENCODE_MODEL_DOC_URL in
+  // src/adapter/opencode.ts points the CLI adapter at) and Zen (pay-as-you-go,
+  // https://opencode.ai/docs/zen). They used to be conflated under one
+  // `opencode` entry labelled "Go" but pointing at Zen, so the dropdown showed
+  // Zen's models under the Go label. The id `opencode` stays Zen because its
+  // base URL was always Zen's and the feed uses the same id for Zen.
+  //
+  // The model lists are only the offline fallback — a landed feed replaces
+  // them (see buildProviderCatalog) — taken from the live feed in 2026-09.
+  'opencode-go': {
+    id: 'opencode-go',
+    label: 'OpenCode Go',
+    defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
+    requiresKey: true,
+    usesSettings: false,
+    models: ['kimi-k2.7-code', 'qwen3.7-plus', 'glm-5.3', 'minimax-m3', 'deepseek-v4-pro', 'grok-4.7'],
+    dialect: 'openai',
+    headerStyle: 'opencode',
+  },
   opencode: {
     id: 'opencode',
-    label: 'OpenCode Go',
+    label: 'OpenCode Zen',
     defaultBaseUrl: 'https://opencode.ai/zen/v1',
     requiresKey: true,
     usesSettings: false,
-    models: ['grok-code', 'qwen3-coder', 'kimi-k2', 'claude-sonnet-4-5', 'gpt-5-codex'],
+    models: ['claude-sonnet-5', 'gpt-5.5', 'gemini-3.5-flash', 'kimi-k2.7-code', 'qwen3-coder', 'grok-code'],
     dialect: 'openai',
     headerStyle: 'opencode',
   },
@@ -190,8 +209,9 @@ export const PROVIDER_DIALECTS: Readonly<Record<string, DialectId>> = {
 
 /** Providers needing extra request headers; everything else is `'default'`. */
 export const PROVIDER_HEADER_STYLES: Readonly<Record<string, HeaderStyleId>> = {
-  // The hosted OpenCode gateway wants User-Agent + x-opencode-session.
+  // Both hosted OpenCode gateways (Zen and Go) want User-Agent + x-opencode-session.
   opencode: 'opencode',
+  'opencode-go': 'opencode',
 };
 
 /** Base URLs that must win over the feed's `api`. */
@@ -278,7 +298,7 @@ export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] 
  * The full catalog in dropdown order: builtins, then feed-only providers,
  * `openai` (OpenAI / Custom) last.
  *
- * With no feed (or an empty one) this is exactly today's five builtin entries,
+ * With no feed (or an empty one) this is exactly today's six builtin entries,
  * same order and same object identities, so an offline window behaves as
  * before. For an id present in both sets the builtin entry wins on label, base
  * URL, key policy, dialect and header style — those encode host behaviour the
@@ -382,12 +402,28 @@ export function providerCatalog(feed?: ModelsDevFeed): readonly ProviderInfo[] {
 export const PROVIDER_SECRET_KEY_PREFIX = 'baiton.orchestrator.key.';
 
 /**
+ * Provider ids that read ANOTHER provider's SecretStorage slot.
+ *
+ * OpenCode Go and OpenCode Zen are two gateways behind one OpenCode account:
+ * the same API key authenticates both, and the models.dev feed lists the same
+ * `OPENCODE_API_KEY` env var for each. Keying them separately would make the
+ * user paste one key twice and let the two copies drift, so `opencode-go`
+ * reuses the pre-existing `opencode` slot — which also means a key stored
+ * before the split lights up both groups with no migration.
+ */
+export const PROVIDER_SECRET_ALIAS: Readonly<Record<string, string>> = {
+  'opencode-go': 'opencode',
+};
+
+/**
  * The SecretStorage key holding `id`'s API key, or undefined for a blank id or
  * a builtin provider that needs none (`copilot`).
  *
  * This is the legacy-key compatibility guarantee: `google`/`opencode`/`mistral`/
  * `openai` keep resolving to `baiton.orchestrator.key.<id>` exactly as before,
- * and a feed-derived provider gets a key of the same shape.
+ * and a feed-derived provider gets a key of the same shape. An id listed in
+ * {@link PROVIDER_SECRET_ALIAS} resolves to its target's slot, so two ids can
+ * share one key.
  */
 export function providerSecretKey(id: ProviderId): string | undefined {
   if (typeof id !== 'string' || id.trim().length === 0) {
@@ -397,7 +433,8 @@ export function providerSecretKey(id: ProviderId): string | undefined {
   if (builtin !== undefined && !builtin.requiresKey) {
     return undefined;
   }
-  return `${PROVIDER_SECRET_KEY_PREFIX}${id}`;
+  const slot = hasOwn(PROVIDER_SECRET_ALIAS, id) ? PROVIDER_SECRET_ALIAS[id] : id;
+  return `${PROVIDER_SECRET_KEY_PREFIX}${slot}`;
 }
 
 /**
