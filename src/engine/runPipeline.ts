@@ -17,7 +17,9 @@
  *     and asks files land in `<worktree>/.baiton/runs/<launch-id>/`, so the role
  *     profiles' RELATIVE `.baiton/runs/<launch-id>/` grants still point at the
  *     directory the launcher wrote. An `investigate` launch has no `cwd` and so
- *     resolves under the main checkout.
+ *     resolves under the main checkout; such a run touches git only in `start()`
+ *     (to record the base branch and head) and reports its finding through the
+ *     `onFinding` sink.
  *
  * Nothing here ever reads or writes anything under `.baiton/specs/`: a spec-less
  * run has no spec and no todo, so the run id stands in for a todo id everywhere
@@ -130,6 +132,39 @@ export interface RunPipelineOutcome {
   commits: string[];
   /** A one-line, user-facing description of the ending. */
   message: string;
+  /**
+   * Present exactly when an `investigate` run completed (`state: 'answered'`).
+   * Every other ending, including a cancelled or failed investigate, leaves it
+   * undefined.
+   */
+  finding?: RunFinding;
+}
+
+/**
+ * The result of an `investigate` run, handed to the completion sink and
+ * carried on the run's outcome. It is deliberately richer than the manifest's
+ * `{ kind: 'finding', finding }` record: the chat's promote card (Bug / Quick /
+ * dismiss) needs the files and next steps as well as the one-line finding, and
+ * re-reading `finding.md` to recover them would parse prose back into data.
+ */
+export interface RunFinding {
+  runId: string;
+  /** Always 'investigate'; carried so a sink can switch on the mode alone. */
+  mode: RunMode;
+  /** The question the run was dispatched with (`manifest.statement`). */
+  question: string;
+  /** The files the dispatch named (`manifest.files`). */
+  questionFiles: string[];
+  /** The investigator's one-line finding. */
+  finding: string;
+  /** The files the investigator found the answer in. */
+  files: string[];
+  /** What the investigator suggests doing next. */
+  nextSteps: string[];
+  /** Repository-relative path of the rendered artifact: `.baiton/runs/<run-id>/finding.md`. */
+  findingPath: string;
+  /** The manifest as it stands once the run is `answered`. */
+  manifest: RunManifest;
 }
 
 /** The stage currently in flight for the active run. */
@@ -197,6 +232,15 @@ export interface RunPipelineDeps {
   newRunId?: (mode: RunMode) => string;
   newSessionId?: () => string;
   onComplete?: (outcome: RunPipelineOutcome) => void;
+  /**
+   * The finding sink: called exactly once per `investigate` run that completed,
+   * after the manifest is `answered` and `finding.md` exists on disk, and
+   * BEFORE `onComplete`. A cancelled, failed or non-completed investigate run
+   * never calls it. This is what the chat subscribes to in order to post the
+   * promote card; a throwing sink is swallowed (and reported through `report`)
+   * so a host failure can never turn an answered run into a failed one.
+   */
+  onFinding?: (finding: RunFinding) => void;
   /** Surfaces an invalid result.json / a refusal while the run stays open. */
   report?: (message: string) => void;
 }
@@ -433,14 +477,48 @@ class DefaultRunPipeline implements RunPipeline {
       return this.finishNonCompleted(runId, mode, result.outcome, 'investigate');
     }
 
-    const finding = (result.outcome.structured as InvestigateResult).finding;
-    return this.finishRun(
+    // The cast is sound because `awaitStageResult` resolves `completed` only for
+    // a result.json that validated against `investigateSchema`.
+    const investigated = result.outcome.structured as InvestigateResult;
+    const outcome = this.finishRun(
       runId,
       mode,
       'answered',
-      { kind: 'finding', finding },
+      { kind: 'finding', finding: investigated.finding },
       'investigation answered',
     );
+
+    // The manifest is read back AFTER finishRun, so the sink sees the run in
+    // its terminal `answered` state with its outcome and completedAt stamped. A
+    // manifest that cannot be read is not worth failing an answered run over:
+    // the finding is on disk either way, so the sink is simply skipped.
+    const read = this.deps.store.read(runId);
+    if (!read.ok) {
+      this.deps.report?.(
+        `the finding sink was skipped: the manifest for run ${runId} could not be read`,
+      );
+      return outcome;
+    }
+    const manifest = read.value;
+    const finding: RunFinding = {
+      runId,
+      mode,
+      question: manifest.statement,
+      questionFiles: [...manifest.files],
+      finding: investigated.finding,
+      files: [...investigated.files],
+      nextSteps: [...investigated.next_steps],
+      findingPath: `.baiton/runs/${runId}/finding.md`,
+      manifest,
+    };
+    try {
+      this.deps.onFinding?.(finding);
+    } catch (e) {
+      // A host sink's failure is not the run's failure: the finding is on disk
+      // and the manifest is answered either way.
+      this.deps.report?.(`the finding sink threw: ${describe(e)}`);
+    }
+    return { ...outcome, finding };
   }
 
   /** The `bug`/`quick`/`refactor` branch: plan -> execute -> review in the worktree. */
@@ -686,9 +764,20 @@ class DefaultRunPipeline implements RunPipeline {
 
     // 4. The drift anchors, recorded BEFORE the launch, against the worktree's
     //    own service for a build stage.
-    const git = input.runGit ?? this.deps.git;
-    const startHead = await safeHead(git);
-    const startBranch = await safeBranch(git);
+    // A read-only investigate run touches git exactly once, in `start()`, to
+    // record the base branch and head in the manifest. It has no worktree, no
+    // commit and no drift check, so the journal's anchors come from the
+    // manifest rather than from a fresh git call.
+    let startHead: string;
+    let startBranch: string;
+    if (stage === 'investigate') {
+      startHead = manifest.baseHead;
+      startBranch = manifest.baseBranch;
+    } else {
+      const git = input.runGit ?? this.deps.git;
+      startHead = await safeHead(git);
+      startBranch = await safeBranch(git);
+    }
 
     // 5. Launch. `cwd` is the run's worktree for a build stage and absent for
     //    `investigate`, which runs from the main checkout; either way the

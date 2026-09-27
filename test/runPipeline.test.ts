@@ -15,6 +15,7 @@ import { createRunStore, type RunStore } from '../src/engine/runStore';
 import {
   createRunPipeline,
   type LiveRunStage,
+  type RunFinding,
   type RunPipeline,
   type RunPipelineEvent,
   type RunPipelineOutcome,
@@ -180,6 +181,9 @@ class FakeGit implements GitWorktreeService {
   public currentBranchThrows = false;
   public addWorktreeThrows = false;
   public commitThrows = false;
+  /** How many times `head()`/`currentBranch()` were called, for the read-only proof. */
+  public headCalls = 0;
+  public currentBranchCalls = 0;
 
   async status(): Promise<GitStatus> {
     return { clean: true, changes: [] };
@@ -191,9 +195,11 @@ class FakeGit implements GitWorktreeService {
     return true;
   }
   async head(): Promise<string> {
+    this.headCalls += 1;
     return this.headSha;
   }
   async currentBranch(): Promise<string> {
+    this.currentBranchCalls += 1;
     if (this.currentBranchThrows) {
       throw new Error('not a git repository');
     }
@@ -316,6 +322,10 @@ interface Harness {
   events: RunPipelineEvent[];
   outcomes: RunPipelineOutcome[];
   reports: string[];
+  /** Every payload the `onFinding` sink received, in order. */
+  findings: RunFinding[];
+  /** How many run-scoped git services the pipeline asked for. */
+  createServiceCalls(): number;
   setSpecBusy(v: boolean): void;
   /** Wait until the n-th stage watcher exists, then deliver a result. */
   settle(index: number, json: string): Promise<void>;
@@ -344,6 +354,8 @@ function makeHarness(
   const events: RunPipelineEvent[] = [];
   const outcomes: RunPipelineOutcome[] = [];
   const reports: string[] = [];
+  const findings: RunFinding[] = [];
+  let createServiceCalls = 0;
   let specBusy = false;
 
   const pipeline = createRunPipeline({
@@ -357,10 +369,14 @@ function makeHarness(
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
     isSpecBusy: () => specBusy,
-    createService: () => worktreeGit,
+    createService: () => {
+      createServiceCalls += 1;
+      return worktreeGit;
+    },
     newRunId: () => options.newRunId ?? RUN_ID,
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
     onComplete: (o) => outcomes.push(o),
+    onFinding: (f) => findings.push(f),
     report: (m) => reports.push(m),
   });
   pipeline.onChange((e) => events.push(e));
@@ -380,6 +396,8 @@ function makeHarness(
     events,
     outcomes,
     reports,
+    findings,
+    createServiceCalls: () => createServiceCalls,
     setSpecBusy: (v) => {
       specBusy = v;
     },
@@ -682,21 +700,32 @@ describe('spec-less run pipeline (T07)', () => {
   });
 
   describe('an investigate run', () => {
-    it('runs one read-only stage from the main checkout and ends answered', async () => {
-      const runId = 'investigate-20260101-000000-aaaa';
-      const h = track(makeHarness({ newRunId: runId }));
+    const INVESTIGATE_RUN_ID = 'investigate-20260101-000000-aaaa';
+    const FINDING_TEXT = 'The bound is computed twice, in src/a.ts and src/b.ts.';
 
-      const started = await h.pipeline.start({
+    /** The `investigate` dispatch every case in this block starts from. */
+    function investigateRequest(): RunPipelineRequest {
+      return {
         mode: 'investigate',
         composerMode: 'investigate',
         explicitMode: true,
         statement: 'where is the bound computed?',
         files: ['src/a.ts'],
-      });
+      };
+    }
+
+    it('runs one read-only stage from the main checkout and ends answered', async () => {
+      const runId = INVESTIGATE_RUN_ID;
+      const h = track(makeHarness({ newRunId: runId }));
+
+      const started = await h.pipeline.start(investigateRequest());
       assert.ok(started.ok);
       if (!started.ok) {
         return;
       }
+      // Everything git the run is allowed to do happened inside `start()`.
+      const headCallsAtStart = h.mainGit.headCalls;
+      const branchCallsAtStart = h.mainGit.currentBranchCalls;
 
       await h.waitForWatcher(0);
       // No worktree at all, and the stage runs from the main checkout.
@@ -715,12 +744,38 @@ describe('spec-less run pipeline (T07)', () => {
       assert.strictEqual(outcome.state, 'answered');
       assert.deepStrictEqual(outcome.outcome, {
         kind: 'finding',
-        finding: 'The bound is computed twice, in src/a.ts and src/b.ts.',
+        finding: FINDING_TEXT,
       });
       assert.deepStrictEqual(outcome.commits, []);
       assert.ok(fs.existsSync(path.join(h.runDir(runId), 'finding.md')));
       assert.deepStrictEqual(h.worktreeGit.commits, [], 'an investigate run never commits');
       assert.deepStrictEqual(h.mainGit.commits, []);
+
+      // No worktree-bound git service, no git call after `start()`, and no
+      // cleanup of a worktree that never existed. `diff`/`findCommitByRunId`
+      // are throwing `boom` stubs, so the absence of a diff is enforced too.
+      assert.strictEqual(h.createServiceCalls(), 0, 'no run-scoped git service is created');
+      assert.strictEqual(h.mainGit.headCalls, headCallsAtStart, 'head() only in start()');
+      assert.strictEqual(
+        h.mainGit.currentBranchCalls,
+        branchCallsAtStart,
+        'currentBranch() only in start()',
+      );
+      assert.deepStrictEqual(h.mainGit.removeWorktreeCalls, []);
+      assert.deepStrictEqual(h.mainGit.deleteBranchCalls, []);
+
+      // The rendered finding artifact.
+      const rendered = fs.readFileSync(path.join(h.runDir(runId), 'finding.md'), 'utf8');
+      assert.ok(rendered.includes('# Finding '), rendered);
+      assert.ok(rendered.includes(FINDING_TEXT), rendered);
+      assert.ok(rendered.includes('## Files'), rendered);
+      assert.ok(rendered.includes('`src/b.ts`'), rendered);
+      assert.ok(rendered.includes('## Next steps'), rendered);
+
+      assert.ok(
+        !fs.existsSync(path.join(h.root, '.baiton', 'specs')),
+        'an investigate run must never create anything under .baiton/specs/',
+      );
 
       const manifest = h.store.read(runId);
       assert.ok(manifest.ok);
@@ -732,6 +787,193 @@ describe('spec-less run pipeline (T07)', () => {
           review: 0,
           investigate: 1,
         });
+      }
+
+      // One start/completion pair for the single investigate launch, anchored on
+      // the manifest's recorded base head rather than a fresh git call.
+      const entries = parseJournal(path.join(h.runDir(runId), 'runs.jsonl'));
+      assert.deepStrictEqual(
+        entries.map((e) => [e.runId, e.todoId, e.stage, e.attempt, e.result]),
+        [[`${runId}.investigate.1`, runId, 'investigate', 1, 'completed']],
+      );
+      assert.strictEqual(entries[0].startHead, 'a'.repeat(40));
+      assert.strictEqual(entries[0].commit, undefined);
+    });
+
+    it('hands the whole finding to the completion sink', async () => {
+      const runId = INVESTIGATE_RUN_ID;
+      const h = track(makeHarness({ newRunId: runId }));
+
+      const started = await h.pipeline.start(investigateRequest());
+      assert.ok(started.ok);
+      if (!started.ok) {
+        return;
+      }
+      await h.settle(0, INVESTIGATE_RESULT);
+      const outcome = await started.completed;
+
+      assert.strictEqual(h.findings.length, 1, 'the sink fired exactly once');
+      const finding = h.findings[0];
+      assert.strictEqual(finding.runId, runId);
+      assert.strictEqual(finding.mode, 'investigate');
+      assert.strictEqual(finding.question, 'where is the bound computed?');
+      assert.deepStrictEqual(finding.questionFiles, ['src/a.ts']);
+      assert.strictEqual(finding.finding, FINDING_TEXT);
+      assert.deepStrictEqual(finding.files, ['src/a.ts', 'src/b.ts']);
+      assert.deepStrictEqual(finding.nextSteps, ['unify the two computations']);
+      assert.strictEqual(finding.findingPath, `.baiton/runs/${runId}/finding.md`);
+      assert.strictEqual(finding.manifest.state, 'answered');
+
+      // The same payload reaches all three consumers.
+      assert.strictEqual(outcome.finding, finding, 'the completed promise carries it');
+      assert.strictEqual(h.outcomes[0].finding, finding, 'onComplete carries it');
+      const last = h.events[h.events.length - 1];
+      assert.strictEqual(last.kind, 'completed');
+      if (last.kind === 'completed') {
+        assert.strictEqual(last.outcome.finding, finding, 'the completed event carries it');
+      }
+    });
+
+    it('observes the answered manifest and finding.md from inside the sink', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-runpipe-'));
+      const runId = INVESTIGATE_RUN_ID;
+      const store = createRunStore({ workspaceRoot: root });
+      const adapter = new StubAdapter();
+      const watcherFactory = new StubWatcherFactory();
+      const order: string[] = [];
+      let findingOnDisk = false;
+      let stateInSink = '';
+
+      const pipeline = createRunPipeline({
+        workspaceRoot: root,
+        git: new FakeGit(),
+        store,
+        terminalHost: new StubTerminalHost(),
+        watcherFactory,
+        modelForRole: () => ({ model: 'stub-model' }),
+        adapterForRole: () => adapter,
+        newRunId: () => runId,
+        newSessionId: () => '11111111-1111-4111-8111-111111111111',
+        onFinding: (f) => {
+          order.push('onFinding');
+          findingOnDisk = fs.existsSync(path.join(root, '.baiton', 'runs', runId, 'finding.md'));
+          stateInSink = f.manifest.state;
+        },
+        onComplete: () => order.push('onComplete'),
+      });
+
+      try {
+        const started = await pipeline.start(investigateRequest());
+        assert.ok(started.ok);
+        if (!started.ok) {
+          return;
+        }
+        await waitUntil(() => watcherFactory.watchers.length > 0, 'the investigate watcher');
+        watcherFactory.watchers[0].emitResult(INVESTIGATE_RESULT);
+        await started.completed;
+
+        assert.deepStrictEqual(order, ['onFinding', 'onComplete'], 'the sink runs first');
+        assert.ok(findingOnDisk, 'finding.md already existed when the sink fired');
+        assert.strictEqual(stateInSink, 'answered');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('never calls the sink when the investigate stage is cancelled', async () => {
+      const runId = INVESTIGATE_RUN_ID;
+      const h = track(makeHarness({ newRunId: runId }));
+
+      const started = await h.pipeline.start(investigateRequest());
+      assert.ok(started.ok);
+      if (!started.ok) {
+        return;
+      }
+      await h.waitForWatcher(0);
+      assert.strictEqual(h.pipeline.cancel(), true);
+      await h.close(0, undefined);
+      const outcome = await started.completed;
+
+      assert.strictEqual(outcome.state, 'cancelled');
+      assert.deepStrictEqual(outcome.outcome, { kind: 'cancelled' });
+      assert.strictEqual(outcome.finding, undefined);
+      assert.match(outcome.message, /cancelled during investigate/);
+      assert.strictEqual(h.findings.length, 0, 'a cancelled investigate never reaches the sink');
+
+      const manifest = h.store.read(runId);
+      assert.ok(manifest.ok);
+      if (manifest.ok) {
+        assert.strictEqual(manifest.value.state, 'cancelled');
+      }
+      assert.ok(!fs.existsSync(path.join(h.runDir(runId), 'finding.md')));
+    });
+
+    it('fails the run when the investigate stage closes without a result', async () => {
+      const runId = INVESTIGATE_RUN_ID;
+      const h = track(makeHarness({ newRunId: runId }));
+
+      const started = await h.pipeline.start(investigateRequest());
+      assert.ok(started.ok);
+      if (!started.ok) {
+        return;
+      }
+      await h.close(0, 3);
+      const outcome = await started.completed;
+
+      assert.strictEqual(outcome.state, 'failed');
+      assert.strictEqual(outcome.outcome.kind, 'failed');
+      assert.match(outcome.message, /the investigate stage closed without a result \(exit 3\)/);
+      assert.strictEqual(outcome.finding, undefined);
+      assert.strictEqual(h.findings.length, 0);
+      assert.ok(!fs.existsSync(path.join(h.runDir(runId), 'finding.md')));
+    });
+
+    it('keeps the run answered when the finding sink throws', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-runpipe-'));
+      const runId = INVESTIGATE_RUN_ID;
+      const store = createRunStore({ workspaceRoot: root });
+      const adapter = new StubAdapter();
+      const watcherFactory = new StubWatcherFactory();
+      const reports: string[] = [];
+
+      const pipeline = createRunPipeline({
+        workspaceRoot: root,
+        git: new FakeGit(),
+        store,
+        terminalHost: new StubTerminalHost(),
+        watcherFactory,
+        modelForRole: () => ({ model: 'stub-model' }),
+        adapterForRole: () => adapter,
+        newRunId: () => runId,
+        newSessionId: () => '11111111-1111-4111-8111-111111111111',
+        onFinding: () => {
+          throw new Error('the chat panel was disposed');
+        },
+        report: (m) => reports.push(m),
+      });
+
+      try {
+        const started = await pipeline.start(investigateRequest());
+        assert.ok(started.ok);
+        if (!started.ok) {
+          return;
+        }
+        await waitUntil(() => watcherFactory.watchers.length > 0, 'the investigate watcher');
+        watcherFactory.watchers[0].emitResult(INVESTIGATE_RESULT);
+        const outcome = await started.completed;
+
+        assert.strictEqual(outcome.state, 'answered', 'a throwing sink cannot fail the run');
+        assert.deepStrictEqual(outcome.outcome, { kind: 'finding', finding: FINDING_TEXT });
+        assert.ok(outcome.finding !== undefined, 'the finding is still attached');
+        assert.match(reports.join('\n'), /finding sink threw/);
+
+        const manifest = store.read(runId);
+        assert.ok(manifest.ok);
+        if (manifest.ok) {
+          assert.strictEqual(manifest.value.state, 'answered');
+        }
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
       }
     });
   });
