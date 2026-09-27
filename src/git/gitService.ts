@@ -1,17 +1,24 @@
 /**
- * The concrete {@link GitService}, implemented by shelling out to `git` (design
+ * The concrete git service, implemented by shelling out to `git` (design
  * "Git service"). Every invocation runs `git` directly via `child_process`
  * with no intervening shell and with the repository working directory injected,
  * so the seam is testable against a temporary repo and safe from shell quoting.
  *
  * Read and mutating operations reject their promise on a non-zero git exit,
- * surfacing git's own stderr. The single exception is `resetWorkingTree`, which
- * returns a {@link Result} so the caller can halt the run before the next stage
- * when the reset fails (Req 15.5, 15.6).
+ * surfacing git's own stderr. The exceptions are `resetWorkingTree` and `merge`,
+ * which return a {@link Result} so the caller can halt the run before the next
+ * stage, or report a conflict as a named reason, instead of faulting (Req 15.5,
+ * 15.6).
  */
 import { execFile } from 'child_process';
 import { Result, err, ok } from '../model/result';
-import { GitChange, GitError, GitService, GitStatus } from './types';
+import {
+  GitChange,
+  GitError,
+  GitStatus,
+  GitWorktree,
+  GitWorktreeService,
+} from './types';
 
 /** The relative directory that scopes a spec's own changes (Req 16.1). */
 const SPEC_ROOT = '.baiton/specs';
@@ -24,14 +31,16 @@ interface GitRun {
 }
 
 /**
- * Constructs a {@link GitService} bound to `repoRoot`. The working directory is
- * injected so callers (and tests) can point the service at any repository.
+ * Constructs a {@link GitWorktreeService} bound to `repoRoot`. The working
+ * directory is injected so callers (and tests) can point the service at any
+ * repository — including a linked worktree, which is a repository working
+ * directory like any other.
  */
-export function createGitService(repoRoot: string): GitService {
+export function createGitService(repoRoot: string): GitWorktreeService {
   return new ShellGitService(repoRoot);
 }
 
-class ShellGitService implements GitService {
+class ShellGitService implements GitWorktreeService {
   constructor(private readonly repoRoot: string) {}
 
   async status(): Promise<GitStatus> {
@@ -142,6 +151,57 @@ class ShellGitService implements GitService {
     return out.trim();
   }
 
+  async addWorktree(dir: string, branch: string, fromCommit: string): Promise<void> {
+    // `-b` (not `-B`) is deliberate: an id collision must fail loudly rather
+    // than silently reset an existing branch to `fromCommit`.
+    await this.runOrThrow(['worktree', 'add', '-b', branch, dir, fromCommit]);
+  }
+
+  async listWorktrees(): Promise<readonly GitWorktree[]> {
+    const out = await this.runOrThrow(['worktree', 'list', '--porcelain']);
+    return parseWorktreeList(out);
+  }
+
+  async removeWorktree(dir: string, force = false): Promise<void> {
+    await this.runOrThrow(['worktree', 'remove', ...(force ? ['--force'] : []), dir]);
+  }
+
+  async deleteBranch(branch: string, force = false): Promise<void> {
+    await this.runOrThrow(['branch', force ? '-D' : '-d', branch]);
+  }
+
+  async branchHead(ref: string): Promise<string | undefined> {
+    // The non-throwing `run`, so a missing ref is `undefined` rather than a
+    // rejection (a caller comparing against a remembered sha must tolerate a
+    // branch that has since been deleted).
+    const result = await this.run(['rev-parse', '--verify', `${ref}^{commit}`]);
+    if (result.exitCode !== 0) {
+      return undefined;
+    }
+    const sha = result.stdout.trim();
+    return sha ? sha : undefined;
+  }
+
+  async merge(branch: string, message: string): Promise<Result<string, GitError>> {
+    // `--no-ff` guarantees a merge commit, so `message` is always recorded even
+    // when the base could fast-forward.
+    const args = ['merge', '--no-ff', '--no-edit', '-m', message, branch];
+    const result = await this.run(args);
+    if (result.exitCode !== 0) {
+      // Leave the tree as it was: without this a conflicted merge would keep the
+      // repository in merge state and misfire every later dirty-tree check. The
+      // abort's own exit code is ignored because it is non-zero when the merge
+      // failed before any merge state existed (e.g. an unknown branch).
+      await this.run(['merge', '--abort']);
+      return err(toGitError(args, result));
+    }
+    return ok(await this.head());
+  }
+
+  async isClean(): Promise<boolean> {
+    return (await this.status()).clean;
+  }
+
   private async runOrThrow(args: string[]): Promise<string> {
     const result = await this.run(args);
     if (result.exitCode !== 0) {
@@ -184,6 +244,57 @@ function parsePorcelain(output: string): GitChange[] {
   }
   return changes;
 }
+
+/**
+ * Parse `git worktree list --porcelain` output into structured worktrees,
+ * preserving git's order (the main worktree first). Records are separated by
+ * blank lines and carry one key per line: `worktree <path>` opens a record,
+ * `HEAD <sha>` and `branch refs/heads/<name>` fill it in, `bare` and `detached`
+ * simply leave `head`/`branch` unset, and `locked`/`prunable` (each optionally
+ * followed by a reason) raise their flag.
+ *
+ * The reported `dir` is whatever absolute path git prints, which is the realpath
+ * — it can differ from a symlinked input such as `/tmp` on macOS — so callers
+ * compare with `fs.realpathSync` rather than raw equality.
+ */
+function parseWorktreeList(output: string): GitWorktree[] {
+  const worktrees: GitWorktree[] = [];
+  for (const record of output.split(/\n\s*\n/)) {
+    let dir: string | undefined;
+    let head: string | undefined;
+    let branch: string | undefined;
+    let locked = false;
+    let prunable = false;
+    for (const line of record.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      const space = trimmed.indexOf(' ');
+      const key = space >= 0 ? trimmed.slice(0, space) : trimmed;
+      const value = space >= 0 ? trimmed.slice(space + 1) : '';
+      if (key === 'worktree') {
+        dir = value;
+      } else if (key === 'HEAD') {
+        head = value;
+      } else if (key === 'branch') {
+        branch = value.startsWith(HEADS_PREFIX) ? value.slice(HEADS_PREFIX.length) : value;
+      } else if (key === 'locked') {
+        locked = true;
+      } else if (key === 'prunable') {
+        prunable = true;
+      }
+    }
+    // A record with no `worktree` line is not a worktree (e.g. trailing output).
+    if (dir !== undefined) {
+      worktrees.push({ dir, head, branch, locked, prunable });
+    }
+  }
+  return worktrees;
+}
+
+/** The ref namespace git prints in a porcelain worktree `branch` line. */
+const HEADS_PREFIX = 'refs/heads/';
 
 /**
  * The path a porcelain entry refers to. Rename/copy entries are `old -> new`;

@@ -114,3 +114,83 @@ export interface GitService {
   /** The fetch URL of `remote` (`git remote get-url`), for PR provider detection. */
   remoteUrl(remote: string): Promise<string>;
 }
+
+/**
+ * One entry of `git worktree list --porcelain`: a working tree attached to this
+ * repository, either the main one or a linked run worktree (design "Git
+ * service", the run worktree design).
+ */
+export interface GitWorktree {
+  /**
+   * The worktree's directory, as the absolute path git reports. Git prints the
+   * realpath, which can differ from the path the worktree was created with when
+   * a parent is a symlink (e.g. `/tmp` on macOS), so callers compare with
+   * `fs.realpathSync` rather than raw string equality.
+   */
+  readonly dir: string;
+  /** The commit sha the worktree's HEAD points at; undefined for a bare entry. */
+  readonly head: string | undefined;
+  /**
+   * The checked-out branch's short name, with `refs/heads/` stripped; undefined
+   * when the worktree is detached or bare.
+   */
+  readonly branch: string | undefined;
+  /** True when git reports the worktree as locked. */
+  readonly locked: boolean;
+  /** True when git reports the worktree as prunable. */
+  readonly prunable: boolean;
+}
+
+/**
+ * The git service seam widened with the worktree and merge primitives a run
+ * needs: a run works in its own linked worktree on its own branch, and the
+ * result is merged back into the base branch and cleaned up (design "Git
+ * service", the run worktree design).
+ *
+ * The same convention as {@link GitService} holds: reads reject on an unexpected
+ * non-zero exit, the mutators `addWorktree`, `removeWorktree` and
+ * `deleteBranch` reject with a {@link GitError} like `createSpecBranch`,
+ * `checkout` and `commit`, and only `merge` returns a {@link Result}, because a
+ * conflict is an ordinary outcome the caller reports as a named reason rather
+ * than a fault (same rationale as `resetWorkingTree`, Req 15.6).
+ */
+export interface GitWorktreeService extends GitService {
+  /**
+   * Create a new worktree at `dir`, checked out on a NEW branch `branch`
+   * starting at `fromCommit`.
+   */
+  addWorktree(dir: string, branch: string, fromCommit: string): Promise<void>;
+  /**
+   * Every worktree of this repository, the main worktree first (git's own
+   * order).
+   */
+  listWorktrees(): Promise<readonly GitWorktree[]>;
+  /**
+   * Remove a worktree's registration and its directory. Without `force` git
+   * refuses a worktree carrying local modifications; `force` removes it anyway.
+   */
+  removeWorktree(dir: string, force?: boolean): Promise<void>;
+  /**
+   * Delete a local branch. Without `force` git refuses a branch that has not
+   * been merged.
+   */
+  deleteBranch(branch: string, force?: boolean): Promise<void>;
+  /**
+   * The commit sha `ref` resolves to, or undefined when the ref does not exist.
+   * Deliberately not a rejection: callers compare a base branch's head to a
+   * remembered sha and must tolerate a branch that has since been deleted.
+   */
+  branchHead(ref: string): Promise<string | undefined>;
+  /**
+   * Merge `branch` into the currently checked-out branch as a real merge commit,
+   * returning the new merge commit's sha. A failed merge is aborted, so the tree
+   * is left as it was.
+   */
+  merge(branch: string, message: string): Promise<Result<string, GitError>>;
+  /**
+   * True when the WHOLE working tree has no changes of any kind — the run
+   * pipeline's `dirty-tree` check, as opposed to the spec-scoped
+   * {@link GitService.isCleanExceptSpecFolder}.
+   */
+  isClean(): Promise<boolean>;
+}
