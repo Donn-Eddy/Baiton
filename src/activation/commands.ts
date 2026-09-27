@@ -143,6 +143,13 @@ const SETTINGS_NS = 'baiton';
 /** The Spec_Explorer tree view id contributed in `package.json` (task 14.1). */
 const SPEC_EXPLORER_VIEW_ID = 'baiton.specExplorer';
 
+/**
+ * Trailing debounce, in milliseconds, between the model-discovery service's
+ * last change event and the provider router's refresh: one discovery run
+ * fires once per applied source, and each refresh re-reads availability.
+ */
+const CATALOG_REFRESH_DEBOUNCE_MS = 250;
+
 /** The command ids contributed in `package.json`. */
 export const COMMANDS = {
   initialize: 'baiton.initialize',
@@ -525,32 +532,64 @@ export function registerCommands(
     },
     log: (message) => surface.log(message),
   });
+  // Releases the router's `secrets.onDidChange` subscription (its key-presence memo).
+  disposables.push(new vscode.Disposable(() => router.dispose()));
   // Restore the persisted selection (or pick the first usable provider) once
   // the legacy key has landed in the `openai` slot, then fire one change so a
   // Chat view that resolved first repaints its dropdown.
   void legacyMigration.then(() => router.init()).then(() => router.refresh());
 
   // A landed catalog refresh changes which providers exist and which models
-  // they offer, so re-read availability; refresh() never rejects.
+  // they offer, so re-read availability; refresh() never rejects. One
+  // discovery run fires several change events (one per applied source), so
+  // they are coalesced with a trailing debounce: the router refreshes once,
+  // CATALOG_REFRESH_DEBOUNCE_MS after the last event of the burst.
+  let catalogRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   const catalogSub = getModelDiscovery()?.onDidChange(() => {
-    void router.refresh();
+    if (catalogRefreshTimer !== undefined) {
+      clearTimeout(catalogRefreshTimer);
+    }
+    catalogRefreshTimer = setTimeout(() => {
+      catalogRefreshTimer = undefined;
+      void router.refresh();
+    }, CATALOG_REFRESH_DEBOUNCE_MS);
+    // Never keep the extension host alive just to repaint a dropdown.
+    catalogRefreshTimer.unref?.();
   });
   if (catalogSub !== undefined) {
     disposables.push(new vscode.Disposable(() => catalogSub.dispose()));
   }
+  disposables.push(
+    new vscode.Disposable(() => {
+      if (catalogRefreshTimer !== undefined) {
+        clearTimeout(catalogRefreshTimer);
+        catalogRefreshTimer = undefined;
+      }
+    }),
+  );
 
   // One entry point for key management: the palette commands, and the Chat
   // view's inline "Set API key…" fix (which names the provider that failed).
-  // A stored/cleared key refreshes availability, which repaints the dropdown.
+  // A stored/cleared key refreshes availability, which repaints the dropdown;
+  // the router's memo of that key is dropped first so the refresh cannot
+  // race SecretStorage's own change event.
   // Read at call time, off the same feed accessor the router uses, so the pick
   // offers every models.dev provider — including the ones the Chat dropdown
   // hides, which must be keyable before they can appear there.
   const providerCatalogNow = (): readonly ProviderInfo[] =>
     providerCatalog(getModelDiscovery()?.feed());
   const promptProviderKey = (provider?: ProviderId): Promise<void> =>
-    setProviderApiKey(context.secrets, provider, () => router.refresh(), {
-      catalog: providerCatalogNow,
-    });
+    setProviderApiKey(
+      context.secrets,
+      provider,
+      (changed) => {
+        router.forgetProviderKey(changed);
+        return router.refresh();
+      },
+      {
+        catalog: providerCatalogNow,
+      },
+    );
 
   // Assemble the tool definitions advertised to the model, validating every
   // registered tool's `description` (Req 10.3, 10.5). If assembly is rejected —
