@@ -315,24 +315,36 @@ documented in **Harness ask relay (per-adapter probe findings)** below.
 
 ### Providers and models
 
-The orchestrator chat talks to one of five inference providers, chosen per
-workspace in the Chat view's **Provider & Model** dropdown. The whole catalog —
-ids, order, labels, base URLs, secret key names and built-in model lists —
-lives in `src/orchestrator/providers.ts`; the host side that owns one client
-per provider and delegates each completion to the active one is
+The orchestrator chat talks to one inference provider at a time, chosen per
+workspace in the Chat view's **Provider & Model** selector. The catalog is the
+builtin base — `copilot`, `google`, `opencode`, `mistral` and `openai`
+(OpenAI / Custom) — **plus every provider the models.dev feed lists**, assembled
+by `providersFromFeed` / `buildProviderCatalog` in
+`src/orchestrator/providers.ts`. A builtin id keeps its label, base URL, key
+policy, dialect and header style (host behaviour the feed does not know about)
+while the feed supplies its model list; feed-only ids (`anthropic`, `deepseek`,
+`cerebras`, …) are appended after the builtins, with `openai` always last. API
+keys stay at `baiton.orchestrator.key.<id>`, so existing `google`, `mistral`,
+`opencode` and `openai` secrets keep working unchanged. The host side that owns
+one client per provider and delegates each completion to the active one is
 `ProviderRouter` in `src/activation/providerRouter.ts`. Switching providers
 changes the model used by the chat, by the tool loop and by Auto mode's
 stage-(b) evaluator at once, and changes nothing on disk: transcripts
 (`.baiton/chat/<id>.jsonl`, `.baiton/specs/<slug>/chat/<id>.jsonl`) are
 untouched by a switch.
 
-| Provider | Id | API key | Models |
+| Provider | Id | API key | Models (builtin / offline fallback) |
 | --- | --- | --- | --- |
 | GitHub Copilot | `copilot` | none — runs in-window on your Copilot subscription | enumerated live from `vscode.lm.selectChatModels({ vendor: 'copilot' })` |
 | Google AI Studio | `google` | `baiton.orchestrator.key.google` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, against `https://generativelanguage.googleapis.com/v1beta/openai/` |
 | OpenCode Go | `opencode` | `baiton.orchestrator.key.opencode` | `grok-code`, `qwen3-coder`, `kimi-k2`, `claude-sonnet-4-5`, `gpt-5-codex`, against `https://opencode.ai/zen/v1` |
 | Mistral AI | `mistral` | `baiton.orchestrator.key.mistral` | `mistral-large-latest`, `mistral-medium-latest`, `mistral-small-latest`, `codestral-latest`, `devstral-medium-latest`, against `https://api.mistral.ai/v1` |
 | OpenAI / Custom | `openai` | `baiton.orchestrator.key.openai` | whatever `baiton.orchestrator.model` names, against `baiton.orchestrator.endpoint` |
+
+The model lists above are the builtin, offline fallback. A configured
+provider's live list comes from the refreshed `models.dev` snapshot instead
+(see **Agent Model & Effort Discovery**), so `google` is no longer pinned to a
+hard-coded list and a feed-only provider gets its list the same way.
 
 The base URLs above are prefixes: the client appends `/chat/completions` and a
 trailing slash is stripped first, so do not append the path yourself.
@@ -359,21 +371,32 @@ secret is never deleted and is no longer read.
 
 #### The Provider & Model dropdown
 
-A `<select>` at the top of the Chat view, with one `<optgroup>` per provider
-in catalog order. A provider with no key (or Copilot when it is unavailable)
-renders as a disabled group whose options are disabled too, and a **Set API
-key…** link appears beside the dropdown whenever at least one group is
-disabled; its tooltip lists each disabled provider's reason — the exact
-strings are `providerNeedsKeyReason(id)` ("Set an API key for <label> to use
-it."), `PROVIDER_NEEDS_ENDPOINT_REASON` ("Set baiton.orchestrator.endpoint to
-use OpenAI / Custom.") and `COPILOT_UNAVAILABLE_REASON` ("GitHub Copilot is
-not available in this window. Install and sign in to GitHub Copilot Chat."),
-all in `src/orchestrator/providers.ts`. The host is authoritative exactly as
-the Auto-mode toggle is: picking a model posts `selectModel` and the dropdown
-repaints only when the host echoes `setProviders` back. A selection whose
-model no longer appears renders as a disabled `<provider> / <model>
-(unavailable)` placeholder, and the dropdown is disabled while a run is in
-flight or while no enabled provider offers a model.
+A pair of `<select>`s at the top of the Chat view: a **provider** select,
+followed by a **model** select populated from whichever provider is chosen.
+Only CONFIGURED providers are listed — one with no key (or Copilot when it is
+unavailable) is hidden entirely rather than shown disabled, and is reached
+through **Baiton: Set Provider API Key**, which quick-picks every keyed
+provider in the live catalog, hidden ones included. A **Set API key…** link
+appears beside the selector whenever nothing usable is on offer; its tooltip
+carries the reasons — the exact strings are `providerNeedsKeyReason(id)` ("Set
+an API key for <label> to use it."), `PROVIDER_NEEDS_ENDPOINT_REASON` ("Set
+baiton.orchestrator.endpoint to use OpenAI / Custom.") and
+`COPILOT_UNAVAILABLE_REASON` ("GitHub Copilot is not available in this window.
+Install and sign in to GitHub Copilot Chat."), all in
+`src/orchestrator/providers.ts`.
+
+A **stale badge** ("stale — showing last known models") appears beside the
+model select when the active provider's catalog snapshot is stale, with the
+failure reason as its tooltip; it follows the chosen provider and clears when a
+fresh one is selected. A selection whose model is not in the refreshed list is
+not dropped: it renders as a selectable `<model> (custom)` option, and the same
+applies to a persisted provider that has left the feed.
+
+The host is authoritative exactly as the Auto-mode toggle is: picking a
+provider only repaints the model list and posts nothing, picking a model posts
+`selectModel`, and either select repaints only when the host echoes
+`setProviders` back. Both selects are disabled while a run is in flight or
+while no provider offers a model.
 
 The selection is remembered per workspace in `workspaceState` under
 `baiton.orchestrator.selection` (`MODEL_SELECTION_KEY`), not in
@@ -467,20 +490,59 @@ The configuration form is the **Configuration** section of the Baiton view in th
 
 #### Agent Model & Effort Discovery (CLI Probing & Architecture)
 
-Baiton uses curated static capability catalogues in each adapter module rather than invoking agent CLI processes on the fly when opening the configuration panel:
+Agent model lists are refreshed asynchronously from their authoritative
+sources on every window reload, with the curated catalogues in each adapter
+module as the offline fallback.
 
-- **CLI capabilities investigation**:
-  - `claude` (Anthropic Claude Code): Does not provide a `models` subcommand; non-flag arguments launch an interactive prompt session. System health and auth can be probed via `claude doctor`. Supported effort levels (`low`, `medium`, `high`) are passed via `--effort`.
-  - `antigravity` (`agy`): Provides a dedicated `agy models` subcommand that queries available Gemini and Claude models from the API. Supports `--effort (low|medium|high)`.
-  - `codex` (OpenAI Codex CLI): Does not provide a `models` subcommand; positional arguments launch interactive sessions. System status is available via `codex doctor`. Reasoning effort is passed via `--config model_reasoning_effort=<effort>`.
-  - `opencode`: Provides a dedicated `opencode models` command listing provider-prefixed model identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Due to its pluggable multi-provider nature, any provider/model string is accepted, and effort is open-ended.
-- **Why static capability catalogues**:
-  - *Zero latency*: The config panel renders instantly without spawning subprocesses or waiting on network API round-trips.
-  - *Offline and air-gapped reliability*: The configuration panel is fully operable when disconnected from the network or prior to agent CLI authentication.
-  - *Host-free purity*: Keeps the config panel core completely free of Node `child_process` dependencies, preserving unit testability and browser-mirror parity.
-  - *Robust fallback*: The "Other…" input option guarantees users are never blocked from specifying newly-released models or custom deployments.
-- **Roadmap for dynamic discovery**:
-  - Future iterations may introduce background caching or an asynchronous "Refresh models from CLI" button for CLIs that support dynamic querying (`agy models`, `opencode models`), caching results in workspace storage while retaining static defaults as resilient fallbacks.
+- **Sources**:
+  - `claude` — the `anthropic` provider of the models.dev feed
+    (`https://models.dev/api.json?type=all`, `src/orchestrator/modelsDev.ts`),
+    filtered to `claude-*` ids. Effort levels stay the CLI's own
+    `low|medium|high`, and `claude-sonnet-5` (the `defaultConfig()` default) is
+    always present in the list.
+  - `codex` — `codex app-server` over stdio JSON-RPC (`initialize` →
+    `initialized` → `model/list`, JSONL framed). Each model's
+    `supportedReasoningEfforts` becomes its effort list, and the union of those
+    levels becomes the agent's effort dropdown.
+  - `opencode` — `GET /api/model` from a running or freshly started server,
+    with `opencode models` stdout as the fallback and validation source. Ids are
+    `provider/model` and effort stays free text (`--variant`).
+  - `antigravity` (`agy`) — unchanged: its curated catalogue and model/effort
+    mapping are never overlaid (it has no `AGENT_CATALOG_SOURCE` entry).
+  - models.dev additionally backs the orchestrator's **provider** catalog — see
+    **Providers and models**.
+- **How a refresh behaves**: `ModelDiscoveryService`
+  (`src/activation/modelDiscovery.ts`) runs every source in parallel behind a
+  per-source timeout. It is never awaited by activation and can never fail it —
+  `refresh()` does not reject, whatever a source does. Outcomes land in the
+  `CatalogStore` (`src/orchestrator/modelCatalog.ts`), which persists the last
+  good snapshot per source in `globalState` under `baiton.models.catalog`, so
+  the next window shows those lists immediately (`source: 'cached'`) before any
+  fetch. A failed refresh keeps the previous list and marks it `stale` with a
+  reason; a later success clears both. **Baiton: Refresh Model Lists**
+  (`baiton.refreshModels`) re-runs the whole thing on demand.
+- **What survives**: existing `.baiton/config.json` values and the persisted
+  `ModelSelection` always round-trip. An agent, model or effort that is
+  configured but missing from a refreshed list is appended to the dropdown and
+  stays editable and saveable, and the config panel shows a per-agent
+  "stale — showing last known models" note beside it.
+- **Privacy**: discovery reads no secret, credential or API key. Only model ids
+  and labels leave the host, and webviews receive ids, labels and stale
+  metadata only.
+- **CLI capabilities** (probe findings that still hold):
+  - `claude` provides no `models` subcommand; non-flag arguments launch an
+    interactive prompt session. Health and auth are probed via `claude doctor`.
+  - `antigravity` (`agy`) provides `agy models`, which queries the available
+    Gemini and Claude models from the API.
+  - `codex` provides no `models` subcommand; positional arguments launch
+    interactive sessions. `codex doctor` reports status.
+  - `opencode` provides `opencode models`, listing provider-prefixed model
+    identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Any
+    provider/model string is accepted and effort is open-ended.
+
+The curated catalogues remain the builtin fallback: a first-ever window with no
+persisted snapshot and no network still renders every dropdown, and the
+always-present "Other…" escape still accepts a model the lists do not name.
 
 ### Harness ask relay (per-adapter probe findings)
 
