@@ -3,6 +3,7 @@ import {
   validatePlanResult,
   validatePlanReviewResult,
   validateExecuteResult,
+  validateInvestigateResult,
   validateReviewResult,
   validateSpecDraftResult,
   validateStageResult,
@@ -316,6 +317,54 @@ describe('stage result schema examples (unit)', () => {
     });
   });
 
+  describe('investigate stage', () => {
+    it('accepts a well-formed investigate result', () => {
+      const value = {
+        finding: 'The retry loop drops the last review.',
+        files: ['src/a.ts'],
+        next_steps: ['carry the review into the retry brief'],
+      };
+      assert.ok(isOk(validateInvestigateResult(value)));
+    });
+
+    it('accepts empty `files` and `next_steps` arrays', () => {
+      const value = { finding: 'Nothing else to point at.', files: [], next_steps: [] };
+      assert.ok(isOk(validateInvestigateResult(value)));
+    });
+
+    it('rejects an investigate result missing the required `finding` field', () => {
+      assert.ok(isErr(validateInvestigateResult({ files: [], next_steps: [] })));
+    });
+
+    it('rejects an investigate result missing the required `files` field', () => {
+      assert.ok(isErr(validateInvestigateResult({ finding: 'f', next_steps: [] })));
+    });
+
+    it('rejects an investigate result missing the required `next_steps` field', () => {
+      assert.ok(isErr(validateInvestigateResult({ finding: 'f', files: [] })));
+    });
+
+    it('rejects an empty-string `finding` — the finding is the whole product', () => {
+      assert.ok(isErr(validateInvestigateResult({ finding: '', files: [], next_steps: [] })));
+    });
+
+    it('rejects an investigate result whose `files` holds a non-string item', () => {
+      assert.ok(isErr(validateInvestigateResult({ finding: 'f', files: [1], next_steps: [] })));
+    });
+
+    it('rejects an investigate result carrying an unexpected extra property', () => {
+      const value = { finding: 'f', files: [], next_steps: [], verdict: 'pass' };
+      assert.ok(isErr(validateInvestigateResult(value)));
+    });
+
+    it('reaches the same validator through validateStageResult', () => {
+      assert.ok(
+        isOk(validateStageResult('investigate', { finding: 'f', files: [], next_steps: [] })),
+      );
+      assert.ok(isErr(validateStageResult('investigate', { finding: 'f' })));
+    });
+  });
+
   describe('validateStageResult dispatches by stage', () => {
     it('validates a conformant plan through the generic entry point', () => {
       const value = {
@@ -333,6 +382,20 @@ describe('stage result schema examples (unit)', () => {
         acceptance: [],
       };
       assert.ok(isErr(validateStageResult('review', value)));
+    });
+
+    it('rejects an investigate shape submitted under the review stage', () => {
+      const value = { finding: 'f', files: [], next_steps: [] };
+      assert.ok(isErr(validateStageResult('review', value)));
+    });
+
+    it('rejects a review shape submitted under the investigate stage', () => {
+      const value = {
+        verdict: 'pass',
+        findings: [],
+        tests: { ran: true, passed: true, output_tail: 'ok' },
+      };
+      assert.ok(isErr(validateStageResult('investigate', value)));
     });
   });
 });

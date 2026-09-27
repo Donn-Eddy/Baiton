@@ -70,6 +70,11 @@ export const STAGE_ROLE: Record<Stage, Role> = {
   execute: 'executor',
   review: 'reviewer',
   pr: 'pr-writer',
+  // `investigate` is run-scoped and runs through the run pipeline, never
+  // through the todo-scoped queue; the existing `reviewer` role already has
+  // exactly the surface it needs (read + search + shell, writes only its run
+  // result), so no new role is introduced.
+  investigate: 'reviewer',
 };
 
 /** The lifecycle action a stage maps to, or `undefined` for `plan-review`. */
@@ -82,6 +87,8 @@ function actionForStage(stage: Stage): TransitionAction | undefined {
     case 'review':
       return 'review';
     case 'plan-review':
+      // `investigate` lands in the `default:` arm below for the same reason:
+      // it is dispatched by the run pipeline, not the per-todo queue.
       return undefined;
     default:
       return undefined;

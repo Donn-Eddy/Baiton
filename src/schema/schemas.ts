@@ -13,6 +13,7 @@
 import type { JSONSchemaType } from 'ajv';
 import type {
   ExecuteResult,
+  InvestigateResult,
   PlanResult,
   PlanReviewResult,
   PrResult,
@@ -161,5 +162,22 @@ export const prSchema: JSONSchemaType<PrResult> = {
   properties: {
     title: { type: 'string', minLength: 1 },
     body: { type: 'string' },
+  },
+};
+
+/**
+ * Investigate stage schema: the finding, the files it is grounded in, and the
+ * suggested next steps. Strict, like every other stage schema. The finding is
+ * required non-empty — an investigate run whose whole product is the finding
+ * has produced nothing without it.
+ */
+export const investigateSchema: JSONSchemaType<InvestigateResult> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['finding', 'files', 'next_steps'],
+  properties: {
+    finding: { type: 'string', minLength: 1 },
+    files: { type: 'array', items: { type: 'string' } },
+    next_steps: { type: 'array', items: { type: 'string' } },
   },
 };

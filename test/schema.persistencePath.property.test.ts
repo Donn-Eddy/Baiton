@@ -63,6 +63,18 @@ describe('Stage persistence-path naming (property harness)', () => {
             false,
             'pr artifact must not be numbered',
           );
+        } else if (stage === 'investigate') {
+          // An investigate run persists one finding at its run-dir root.
+          assert.strictEqual(
+            path,
+            'finding.md',
+            `investigate must yield finding.md, got ${path}`,
+          );
+          assert.strictEqual(
+            stageArtifactIsNumbered(stage),
+            false,
+            'investigate artifact must not be numbered',
+          );
         } else if (stage === 'plan') {
           // The plan persists once per todo, under the todo's own folder.
           assert.strictEqual(
@@ -143,12 +155,17 @@ describe('Stage persistence-path naming (property harness)', () => {
     );
   });
 
-  // The spec-scoped stages ignore the todo id entirely.
-  it('spec-draft and pr ignore the todo id', () => {
+  // The spec-scoped stages ignore the todo id entirely, and so does the
+  // run-scoped investigate stage.
+  it('the run- and spec-scoped stages ignore the todo id', () => {
     fc.assert(
       fc.property(fc.option(todoIdArb, { nil: undefined }), (todoId) => {
         assert.strictEqual(persistencePathForStage('spec-draft', todoId), 'spec.md');
         assert.strictEqual(persistencePathForStage('pr', todoId), 'pr.md');
+        assert.strictEqual(
+          persistencePathForStage('investigate', todoId),
+          'finding.md',
+        );
       }),
       { numRuns: 100 },
     );

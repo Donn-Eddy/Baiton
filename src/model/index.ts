@@ -4,6 +4,7 @@
 export * from './result';
 export * from './todoState';
 export * from './stage';
+export * from './mode';
 export * from './role';
 export * from './managedKey';
 export * from './parser';

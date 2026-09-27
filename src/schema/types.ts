@@ -129,10 +129,25 @@ export interface PrResult {
   body: string;
 }
 
+/**
+ * The investigator's structured output (Investigate stage): the answer to the
+ * question the run asked, the files it is grounded in, and what could be done
+ * next. No verdict and no test block — an investigate run changes nothing.
+ */
+export interface InvestigateResult {
+  /** The finding: the answer to the question the run asked. */
+  finding: string;
+  /** Repository-relative files the finding is grounded in. */
+  files: string[];
+  /** Suggested follow-up work, in priority order. */
+  next_steps: string[];
+}
+
 export type StageResult =
   | SpecDraftResult
   | PlanResult
   | PlanReviewResult
   | ExecuteResult
   | ReviewResult
-  | PrResult;
+  | PrResult
+  | InvestigateResult;
