@@ -13,6 +13,73 @@ approved_rev: d3c2518d802317f5b765cacdb44fe55ffa24ba9ecd633df587b9cf4b5524ffd4
 
 ## Goal
 
+Make every model selector in Baiton reflect the current valid options and keep selections stable across refreshes. This spec fixes the config-panel model selectors so Codex and OpenCode use live dropdowns instead of stale static lists or free-text inputs, while preserving custom values as editable "Other…" entries and keeping the last known-good list when discovery is stale or unavailable.
+
+## Required fix
+
+- Codex must use the live `codex app-server` discovery path: `initialize` -> `initialized` -> `model/list`, then read `result.data[*].model` plus supported/default reasoning efforts. The resulting ids become the dropdown values; if discovery fails, times out, or returns malformed data, the last known-good list is kept and marked stale.
+- OpenCode must use `opencode models` as the primary model source and `/api/model` as fallback. When neither succeeds, the previous model set is retained and the selector is marked stale instead of going blank or remaining free-text.
+- Claude and Antigravity stay on their curated closed sets. OpenCode remains the only provider/model-formatted agent, but it still renders as a dropdown-backed selector rather than a plain text field.
+- Existing config values must round-trip unchanged. Any saved value not currently in the live list is preserved as an editable custom "Other…" option so users do not lose valid data.
+- Refresh results are additive: new live models are shown when available, stale values remain selectable, and the selector never silently rewrites a valid custom value.
+
+## Current state
+
+- `src/adapter/index.ts` still returns outdated or incomplete capability tables for Codex and OpenCode.
+- `src/config/configPanel.ts` already preserves custom values, but the model list source is not refreshed from the live CLI/API output in the way the selectors expect.
+- The config panel and webview treat the model field as a select-plus-Other flow, so the fix is in the capability discovery, not in the form UI alone.
+- Discovery failures must degrade gracefully: keep the last successful list and mark it stale instead of blanking the model selector.
+
+## Design
+
+### 1. Capability discovery
+
+`agentCapabilities()` is the single source of truth for the model and effort dropdowns. Each adapter exposes the live current model ids and supported effort values from its native discovery command or API, with the curated table kept as fallback when discovery is unavailable or malformed.
+
+- Codex: use `codex app-server`, then `model/list`, and map each item to `model` + supported/default reasoning efforts.
+- OpenCode: use `opencode models` and fall back to `/api/model` when needed.
+- Claude and Antigravity remain on their curated sets.
+
+### 2. Config panel behavior
+
+The configuration panel continues to merge the refreshed list with any existing saved model value so legacy or custom entries remain editable as "Other…". The option set is refreshed live, and stale results are surfaced as metadata rather than silently replacing user data.
+
+### 3. Fail-safe stale behavior
+
+When a discovery probe fails, times out, or returns malformed data, Baiton keeps the previous model list, marks it stale, and continues showing the selector without blanking it.
+
+## Constraints
+
+- Discovery is asynchronous and time-boxed; failures do not block activation.
+- Secrets remain on the host; webviews only receive ids, labels, and stale metadata.
+- Existing config values round-trip unchanged.
+- Antigravity CLI behavior remains unchanged.
+
+## Testing
+
+Tests cover Codex live-model parsing, OpenCode CLI/API fallback parsing, stale-list retention, config-panel round-trip of custom values, and selector behavior when discovery fails or returns partial data.
+
+# TODOS
+
+- [done] T01 Add host-free model catalog core: snapshot types, stale-aware CatalogStore with memento persistence, and preserve-existing merge helper (files: src/orchestrator/modelCatalog.ts, src/orchestrator/index.ts, test/modelCatalog.test.ts)
+- [done] T02 Add models.dev feed client parsing https://models.dev/api.json?type=all into generic provider/model records with injected fetch and fixture tests (files: src/orchestrator/modelsDev.ts, test/fixtures/modelsDev.sample.json, test/modelsDev.test.ts)
+- [done] T03 Extend the adapter boundary with an optional discoverModels seam and make agentCapabilities overlay discovered snapshots while keeping antigravity unchanged (after T01; files: src/adapter/adapter.ts, src/adapter/index.ts, src/adapter/antigravity.ts, test/adapter.index.test.ts)
+- [done] T04 Implement Claude model discovery from the models.dev anthropic provider with the curated list as fallback so current models such as claude-opus-5-5 appear (after T02, T03; files: src/adapter/claude.ts, test/adapter.claude.test.ts)
+- [done] T05 Implement Codex model discovery through `codex app-server` JSON-RPC (initialize, initialized, model/list) including supported reasoning efforts (after T03; files: src/adapter/codex.ts, test/adapter.codex.test.ts)
+- [done] T06 Implement OpenCode model discovery via the server's /api/model with `opencode models` CLI output as fallback and validation source (after T03; files: src/adapter/opencode.ts, test/adapter.opencode.test.ts)
+- [done] T07 Add the ModelDiscoveryService that refreshes every source asynchronously on window reload, marks failures stale, persists results, and wires it into activation plus a refresh command (after T01, T02, T04, T05, T06; files: src/activation/modelDiscovery.ts, src/extension.ts, src/activation/commands.ts, package.json, test/modelDiscovery.test.ts)
+- [done] T08 Feed live capabilities into the config panel: optionsChanged protocol message, controller re-posts refreshed options with stale metadata, and existing custom values keep round-tripping (after T03, T07; files: src/config/configPanel.ts, src/activation/configPanelController.ts, src/activation/configPanel.ts, src/activation/configRefresh.ts, test/configPanel.controller.test.ts, test/configPanel.test.ts)
+- [done] T09 Update the config panel webview to apply refreshed agent/model/effort options in place, show stale indicators, and keep Other… custom entries editable (after T08; files: media/config.js, media/config.html, test/configPanel.view.test.ts, test/configPanel.mirror.test.ts)
+- [done] T10 Generalise the orchestrator provider catalog: open ProviderId, builtin copilot and openai entries plus models.dev-derived providers (Anthropic, DeepInfra, Cerebras, Baseten, DeepSeek, …), and legacy id/secret-key compatibility (after T01, T02; files: src/orchestrator/providers.ts, src/orchestrator/modelClient.ts, test/providers.test.ts)
+- [done] T11 Make ProviderRouter catalog-driven: models from the models.dev snapshot, availability limited to configured providers, stale propagation, and preserved legacy selections re-resolved on every reload (after T07, T10; files: src/activation/providerRouter.ts, src/activation/commands.ts, test/providerRouter.test.ts)
+- [done] T12 Drive the Set API Key quick pick from the generic provider catalog so hidden providers can be configured without exposing credentials to webviews (after T10; files: src/activation/setApiKey.ts, test/setApiKey.test.ts)
+- [done] T13 Extend the chat webview protocol and ChatController for provider-first grouped selection with stale and custom markers, mirrored in media/protocol.js (after T10, T11; files: src/orchestrator/webviewProtocol.ts, media/protocol.js, src/activation/chatController.ts, test/webviewProtocol.reducer.test.ts, test/webviewProtocol.mirror.test.ts, test/fixtures/protocolCases.ts)
+- [done] T14 Rebuild the Chat view model selector as provider select then model select, showing only configured providers, a stale badge, and custom selections (after T13; files: media/chat.js, media/chat.html, test/chatView.providers.test.ts)
+- [done] T15 Add end-to-end tests for reload refresh, discovery fallback, provider filtering, grouped selection, stale-list handling and config round-trip, and update the README discovery section (after T09, T12, T14; files: test/modelSelectorRefresh.test.ts, README.md)
+- [pending] T16 Fix current-model dropdown coverage for Codex and OpenCode selectors so all agents use valid, refreshed dropdowns and preserve custom values as editable "Other…" entries (after T15; files: src/adapter/index.ts, src/adapter/codex.ts, src/adapter/opencode.ts, src/config/configPanel.ts, media/config.js, test/adapter.index.test.ts, test/configPanel.controller.test.ts)
+
+## Goal
+
 Make every model selector in Baiton reflect what is actually available: the config panel's per-role agent/model/effort selectors and the Chat view's provider/model selector. Model lists are refreshed asynchronously from authoritative sources, providers are shown only when configured and reachable, selection is provider-first, a failed refresh keeps the last good list and marks it stale, and existing configuration values always round-trip. Antigravity (`agy`) keeps its curated model list and effort mapping unchanged.
 
 ## Required fix: current valid model dropdowns for every agent
