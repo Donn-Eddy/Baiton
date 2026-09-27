@@ -21,9 +21,11 @@
   The transcript also renders inline intervention cards (question / confirm /
   permission) built by chat.js.   The composer's control row also carries the
   Auto-mode toggle immediately left of Stop, which reflects `state.autoMode`
-  and posts `setAutoMode`. The composer also carries the grouped Provider &
-  Model dropdown: one <optgroup> per provider in catalog order, with disabled
-  groups for providers without a key (and a Set API key affordance); the empty
+  and posts `setAutoMode`. The composer also carries the provider-first model
+  selection: a Provider select followed by a Model select, listing only the
+  configured providers the host posts (never sorted or filtered here) and only
+  the chosen provider's models, plus a stale badge when that provider's catalog
+  snapshot is no longer known current (and a Set API key affordance); the empty
   state shows the active provider + model rather than an endpoint URL.
   All colors come from VS Code theme CSS variables so the view follows the
   active theme and reflects theme changes without a reload (Req 16.6, 16.7).
@@ -100,8 +102,8 @@
         color: var(--vscode-descriptionForeground);
       }
 
-      /* Provider & Model bar: the grouped provider/model dropdown plus the
-         conditional Set API key affordance. */
+      /* Provider & Model bar: the provider select, the model select, the stale
+         badge, plus the conditional Set API key affordance. */
       .model-bar {
         flex: 0 0 auto;
         display: flex;
@@ -113,6 +115,7 @@
         color: var(--vscode-descriptionForeground);
       }
 
+      #provider-select,
       #model-select {
         flex: 1 1 auto;
         min-width: 0;
@@ -122,13 +125,29 @@
         padding: 2px 4px;
       }
 
+      /* The model ids are the longer strings, so the model select keeps the
+         wider share of the row. */
+      #provider-select {
+        flex: 0 1 40%;
+      }
+
+      #provider-select:disabled,
       #model-select:disabled {
         opacity: 0.5;
         cursor: default;
       }
 
-      #model-select optgroup:disabled {
-        color: var(--vscode-descriptionForeground);
+      /* Stale catalog snapshot for the chosen provider. Hidden while empty so a
+         fresh catalog leaves no gap. */
+      .stale-note {
+        display: none;
+        font-size: 0.9em;
+        color: var(--vscode-inputValidation-warningForeground, var(--vscode-descriptionForeground));
+        white-space: nowrap;
+      }
+
+      .stale-note.visible:not(:empty) {
+        display: inline;
       }
 
       #model-set-key {
@@ -752,8 +771,11 @@
 
       <div class="composer">
         <div class="model-bar">
+          <label for="provider-select">Provider</label>
+          <select id="provider-select" aria-label="Provider"></select>
           <label for="model-select">Model</label>
-          <select id="model-select" aria-label="Provider and model"></select>
+          <select id="model-select" aria-label="Model"></select>
+          <span id="model-stale" class="stale-note"></span>
           <button id="model-set-key" class="link-button" type="button">Set API key…</button>
         </div>
         <textarea

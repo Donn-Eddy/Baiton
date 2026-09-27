@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Unit tests for the host-side ProviderRouter (multi-provider orchestrator).
@@ -25,6 +27,7 @@ import {
   PROVIDER_NEEDS_ENDPOINT_REASON,
   ModelSelection,
   ProviderId,
+  buildProviderCatalog,
   defaultModelFor,
   providerInfo,
   providerNeedsKeyReason,
@@ -43,6 +46,7 @@ import {
 } from '../src/orchestrator/copilotClient';
 import {
   ClientConfigDeps,
+  ModelCatalogSource,
   ProviderRouter,
   ProviderRouterConfig,
   ProviderSettings,
@@ -50,6 +54,86 @@ import {
   MementoLike,
   providerClientConfig,
 } from '../src/activation/providerRouter';
+import { ModelsDevFeed, parseModelsDevFeed } from '../src/orchestrator/modelsDev';
+import type { ModelCatalogSnapshot, ModelEntry } from '../src/orchestrator/modelCatalog';
+
+// --- the models.dev fixture --------------------------------------------------
+
+/**
+ * test/fixtures/modelsDev.sample.json read the way test/providers.test.ts and
+ * test/modelsDev.test.ts read it: untyped `fs` + `JSON.parse`, then through the
+ * real parser. Eight providers: anthropic, deepinfra, cerebras, baseten,
+ * deepseek, google, mistral, opencode.
+ */
+const fixtureFeed: ModelsDevFeed = (() => {
+  const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
+  const result = parseModelsDevFeed(JSON.parse(text));
+  assert.ok(result.ok, 'the models.dev fixture must parse');
+  return result.value;
+})();
+
+/** A `models.dev` catalog snapshot over bare `{ id, provider }` model entries. */
+function makeSnapshot(
+  entries: Array<{ id: string; provider?: string }>,
+  opts: { stale?: boolean; staleReason?: string; fetchedAt?: string } = {},
+): ModelCatalogSnapshot {
+  const models: ModelEntry[] = entries.map((entry) =>
+    entry.provider === undefined ? { id: entry.id } : { id: entry.id, provider: entry.provider },
+  );
+  return {
+    sourceId: 'models.dev',
+    models,
+    fetchedAt: opts.fetchedAt ?? '2026-02-02T00:00:00.000Z',
+    source: 'live',
+    stale: opts.stale ?? false,
+    ...(opts.staleReason !== undefined ? { staleReason: opts.staleReason } : {}),
+  };
+}
+
+/**
+ * The snapshot the discovery service would store for `feed`, mirroring its
+ * private `feedCatalogFetch`: the BARE model id as `id`, the provider half on
+ * `provider`, in feed order.
+ */
+function snapshotFromFeed(
+  feed: ModelsDevFeed,
+  opts: { stale?: boolean; staleReason?: string; fetchedAt?: string } = {},
+): ModelCatalogSnapshot {
+  const entries: Array<{ id: string; provider?: string }> = [];
+  for (const provider of feed) {
+    for (const model of provider.models) {
+      entries.push({ id: model.id, provider: provider.id });
+    }
+  }
+  return makeSnapshot(entries, opts);
+}
+
+/** A `ModelCatalogSource` over two mutable slots, so a test can swap either mid-run. */
+function mutableCatalog(initial: {
+  snapshot?: ModelCatalogSnapshot;
+  feed?: ModelsDevFeed;
+} = {}): ModelCatalogSource & { snapshotValue?: ModelCatalogSnapshot; feedValue?: ModelsDevFeed } {
+  const state: { snapshotValue?: ModelCatalogSnapshot; feedValue?: ModelsDevFeed } = {
+    snapshotValue: initial.snapshot,
+    feedValue: initial.feed,
+  };
+  return {
+    get snapshotValue(): ModelCatalogSnapshot | undefined {
+      return state.snapshotValue;
+    },
+    set snapshotValue(value: ModelCatalogSnapshot | undefined) {
+      state.snapshotValue = value;
+    },
+    get feedValue(): ModelsDevFeed | undefined {
+      return state.feedValue;
+    },
+    set feedValue(value: ModelsDevFeed | undefined) {
+      state.feedValue = value;
+    },
+    snapshot: () => state.snapshotValue,
+    feed: () => state.feedValue,
+  };
+}
 
 // --- fakes -------------------------------------------------------------------
 
@@ -233,6 +317,8 @@ function makeHarness(opts: {
   memento?: FakeMemento;
   lm?: CopilotVscodeApi;
   defaultClients?: boolean;
+  /** The live catalog seam; absent means "no live catalog" (the builtin five). */
+  catalog?: ModelCatalogSource;
 } = {}): RouterHarness {
   const secrets = opts.secrets ?? new FakeSecrets();
   const memento = opts.memento ?? new FakeMemento();
@@ -246,6 +332,7 @@ function makeHarness(opts: {
     settings,
     lm,
     version: '1.2.3',
+    ...(opts.catalog !== undefined ? { catalog: opts.catalog } : {}),
     createClient:
       opts.defaultClients === true
         ? undefined
@@ -387,59 +474,83 @@ describe('providerClientConfig', () => {
 // --- availability ------------------------------------------------------------
 
 describe('ProviderRouter.availability', () => {
-  it('returns one entry per provider in PROVIDER_IDS order', async () => {
-    const h = makeHarness();
+  it('availability() returns only configured providers, in catalog order', async () => {
+    const h = makeHarness(); // copilot enumerates 'fake-model'; nothing else is keyed
     const list = await h.router.availability();
     assert.deepStrictEqual(
       list.map((a) => a.id),
-      [...PROVIDER_IDS],
-      'PROVIDER_IDS order',
+      ['copilot'],
+      'only the configured providers are reported',
     );
     for (const entry of list) {
       assert.ok(entry.label.length > 0);
-      if (entry.enabled) {
-        assert.strictEqual('reason' in entry, false, `${entry.id} must not carry a reason`);
-      } else {
-        assert.ok(
-          typeof entry.reason === 'string' && entry.reason.length > 0,
-          `disabled ${entry.id} must carry a reason`,
-        );
-      }
+      assert.strictEqual(entry.enabled, true, `${entry.id} must be enabled`);
+      assert.strictEqual('reason' in entry, false, `${entry.id} must not carry a reason`);
       assert.ok(Array.isArray(entry.models));
     }
+
+    const hidden = await h.router.hiddenProviders();
+    assert.deepStrictEqual(
+      hidden.map((a) => a.id),
+      ['google', 'opencode', 'mistral', 'openai'],
+      'exactly the entries availability() omits, in catalog order',
+    );
+    for (const entry of hidden) {
+      assert.strictEqual(entry.enabled, false);
+      assert.ok(
+        typeof entry.reason === 'string' && entry.reason.length > 0,
+        `hidden ${entry.id} must carry a reason`,
+      );
+    }
+    // The two lists are disjoint and together cover the whole catalog.
+    const shown = list.map((a) => a.id);
+    assert.deepStrictEqual(
+      hidden.filter((a) => shown.includes(a.id)),
+      [],
+      'the two lists are disjoint',
+    );
+    assert.deepStrictEqual([...shown, ...hidden.map((a) => a.id)].sort(), [...PROVIDER_IDS].sort());
   });
 
   it('keyed providers flip `enabled` with the secret and report the catalog reason', async () => {
     const h = makeHarness({ lm: fakeLm([]) });
-    let list = await h.router.availability();
-    const google = list.find((a) => a.id === 'google')!;
-    const mistral = list.find((a) => a.id === 'mistral')!;
-    const opencode = list.find((a) => a.id === 'opencode')!;
+    let hidden = await h.router.hiddenProviders();
+    const google = hidden.find((a) => a.id === 'google')!;
+    const mistral = hidden.find((a) => a.id === 'mistral')!;
+    const opencode = hidden.find((a) => a.id === 'opencode')!;
 
     assert.strictEqual(google.enabled, false);
     assert.strictEqual(google.reason, providerNeedsKeyReason('google'));
     assert.deepStrictEqual(google.models, ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']);
     assert.strictEqual(mistral.enabled, false);
     assert.strictEqual(mistral.reason, providerNeedsKeyReason('mistral'));
+    assert.deepStrictEqual(mistral.models, providerInfo('mistral').models);
     assert.strictEqual(opencode.enabled, false);
     assert.strictEqual(opencode.reason, providerNeedsKeyReason('opencode'));
+    assert.deepStrictEqual(opencode.models, providerInfo('opencode').models);
 
     h.secrets.values.set(providerSecretKey('google')!, '  g-key  ');
-    list = await h.router.availability();
-    assert.strictEqual(list.find((a) => a.id === 'google')!.enabled, true, 'a secret enables google');
-    assert.strictEqual('reason' in list.find((a) => a.id === 'google')!, false);
-    assert.strictEqual(list.find((a) => a.id === 'mistral')!.enabled, false, 'the other providers do not flip');
+    const list = await h.router.availability();
+    assert.deepStrictEqual(list.map((a) => a.id), ['google'], 'a secret moves google into availability()');
+    assert.strictEqual('reason' in list[0], false);
+    hidden = await h.router.hiddenProviders();
+    assert.strictEqual(hidden.some((a) => a.id === 'google'), false, 'and out of hiddenProviders()');
+    assert.deepStrictEqual(
+      hidden.map((a) => a.id),
+      ['copilot', 'opencode', 'mistral', 'openai'],
+      'the other providers do not flip',
+    );
   });
 
   it('openai needs key AND endpoint; the reason follows the deterministic key-first check', async () => {
     const h = makeHarness({ lm: fakeLm([]) });
-    let openai = (await h.router.availability()).find((a) => a.id === 'openai')!;
+    let openai = (await h.router.hiddenProviders()).find((a) => a.id === 'openai')!;
     assert.strictEqual(openai.enabled, false);
     assert.strictEqual(openai.reason, providerNeedsKeyReason('openai'), 'the key is checked first');
     assert.deepStrictEqual(openai.models, []);
 
     h.secrets.values.set(providerSecretKey('openai')!, 'sk');
-    openai = (await h.router.availability()).find((a) => a.id === 'openai')!;
+    openai = (await h.router.hiddenProviders()).find((a) => a.id === 'openai')!;
     assert.strictEqual(openai.enabled, false);
     assert.strictEqual(openai.reason, PROVIDER_NEEDS_ENDPOINT_REASON, 'then the endpoint');
 
@@ -472,13 +583,13 @@ describe('ProviderRouter.availability', () => {
 
   it('copilot: disabled with the availability reason both for an empty list and a rejection', async () => {
     let h = makeHarness({ lm: fakeLm([]) });
-    let copilot = (await h.router.availability()).find((a) => a.id === 'copilot')!;
+    let copilot = (await h.router.hiddenProviders()).find((a) => a.id === 'copilot')!;
     assert.strictEqual(copilot.enabled, false);
     assert.strictEqual(copilot.reason, COPILOT_UNAVAILABLE_REASON);
     assert.deepStrictEqual(copilot.models, []);
 
     h = makeHarness({ lm: fakeLm([], { failSelector: true }) });
-    copilot = (await h.router.availability()).find((a) => a.id === 'copilot')!;
+    copilot = (await h.router.hiddenProviders()).find((a) => a.id === 'copilot')!;
     assert.strictEqual(copilot.enabled, false);
     assert.strictEqual(copilot.reason, COPILOT_UNAVAILABLE_REASON);
     assert.deepStrictEqual(copilot.models, []);
@@ -488,15 +599,16 @@ describe('ProviderRouter.availability', () => {
     const h = makeHarness();
     h.secrets.failGet = true;
     const list = await h.router.availability();
+    const hidden = await h.router.hiddenProviders();
 
-    const google = list.find((a) => a.id === 'google')!;
+    const google = hidden.find((a) => a.id === 'google')!;
     assert.strictEqual(google.enabled, false);
     assert.strictEqual(google.reason, providerNeedsKeyReason('google'));
-    const openai = list.find((a) => a.id === 'openai')!;
+    const openai = hidden.find((a) => a.id === 'openai')!;
     assert.strictEqual(openai.enabled, false);
     assert.strictEqual(openai.reason, providerNeedsKeyReason('openai'), 'no readable key = no key');
     // copilot never reads secrets, so it stays whatever lm reports.
-    assert.strictEqual(list.find((a) => a.id === 'copilot')!.enabled, true);
+    assert.deepStrictEqual(list.map((a) => a.id), ['copilot']);
   });
 
   it('enabledProviders and modelsFor are conveniences over availability', async () => {
@@ -517,6 +629,223 @@ describe('ProviderRouter.availability', () => {
     );
     assert.deepStrictEqual([...(await h.router.modelsFor('copilot'))], ['fake-model']);
     assert.deepStrictEqual([...(await h.router.modelsFor('openai'))], [], 'no model setting = no models');
+  });
+});
+
+// --- the catalog seam ---------------------------------------------------------
+
+describe('ProviderRouter catalog', () => {
+  it('snapshot models win over the stale builtin list', async () => {
+    const h = makeHarness({
+      catalog: mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed }),
+    });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+
+    assert.deepStrictEqual(
+      [...(await h.router.modelsFor('google'))],
+      ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+      "the fixture's google models, not the builtin list",
+    );
+    assert.notDeepStrictEqual(
+      [...(await h.router.modelsFor('google'))],
+      ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+      'the hard-coded builtin list is gone',
+    );
+  });
+
+  it('a feed-only provider becomes selectable once its key exists', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+
+    let deepseek = (await h.router.hiddenProviders()).find((a) => a.id === 'deepseek')!;
+    assert.ok(deepseek !== undefined, 'a feed provider is enumerated even with no key');
+    assert.strictEqual(
+      deepseek.reason,
+      providerNeedsKeyReason('deepseek', buildProviderCatalog(fixtureFeed)),
+    );
+
+    h.secrets.values.set('baiton.orchestrator.key.deepseek', 'ds');
+    deepseek = (await h.router.availability()).find((a) => a.id === 'deepseek')!;
+    assert.strictEqual(deepseek.enabled, true);
+    assert.strictEqual(deepseek.label, 'DeepSeek', 'the feed label');
+    assert.deepStrictEqual([...deepseek.models], ['deepseek-chat', 'deepseek-reasoner']);
+  });
+
+  it('legacy google/mistral/opencode/openai keys still enable those providers with a feed present', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    h.secrets.values.set(providerSecretKey('mistral')!, 'm');
+    h.secrets.values.set(providerSecretKey('opencode')!, 'o');
+    h.secrets.values.set(providerSecretKey('openai')!, 'k');
+    h.settings.endpoint = 'https://api.example.com';
+    h.settings.model = 'gpt-x';
+
+    assert.deepStrictEqual(await h.router.enabledProviders(), [
+      'google',
+      'opencode',
+      'mistral',
+      'openai',
+    ]);
+    // The builtin labels and key slots are unchanged by the feed merge.
+    const google = (await h.router.availability()).find((a) => a.id === 'google')!;
+    assert.strictEqual(google.label, providerInfo('google').label);
+    assert.strictEqual(providerSecretKey('google'), 'baiton.orchestrator.key.google');
+  });
+
+  it('offline: a snapshot-only provider is still enumerated, with the synthesised label', async () => {
+    // The snapshot is persisted across windows but the feed is not, so a window
+    // whose fetch has not landed yet knows the ids but not the labels.
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed) });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    h.secrets.values.set('baiton.orchestrator.key.deepseek', 'ds');
+
+    const deepseek = (await h.router.availability()).find((a) => a.id === 'deepseek')!;
+    assert.strictEqual(deepseek.enabled, true);
+    assert.strictEqual(deepseek.label, 'deepseek', 'no feed = no label; the id stands in');
+    assert.deepStrictEqual([...deepseek.models], ['deepseek-chat', 'deepseek-reasoner'], 'cached models');
+  });
+
+  it('a stale snapshot propagates stale/staleReason/fetchedAt onto snapshot-backed entries only', async () => {
+    const stale = snapshotFromFeed(fixtureFeed, {
+      stale: true,
+      staleReason: 'models.dev fetch failed: boom',
+      fetchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const catalog = mutableCatalog({ snapshot: stale, feed: fixtureFeed });
+    const h = makeHarness({ catalog });
+    h.secrets.values.set('baiton.orchestrator.key.deepseek', 'ds');
+    h.secrets.values.set(providerSecretKey('openai')!, 'k');
+    h.settings.endpoint = 'https://api.example.com';
+    h.settings.model = 'gpt-x';
+
+    let list = await h.router.availability();
+    const deepseek = list.find((a) => a.id === 'deepseek')!;
+    assert.strictEqual(deepseek.stale, true);
+    assert.strictEqual(deepseek.staleReason, 'models.dev fetch failed: boom');
+    assert.strictEqual(deepseek.fetchedAt, '2026-01-01T00:00:00.000Z');
+    // copilot enumerates live and openai reads the settings: neither is backed
+    // by the snapshot, so neither carries a stale key at all.
+    for (const id of ['copilot', 'openai']) {
+      const entry = list.find((a) => a.id === id)!;
+      assert.strictEqual('stale' in entry, false, `${id} must carry no stale key`);
+      assert.strictEqual('staleReason' in entry, false);
+      assert.strictEqual('fetchedAt' in entry, false);
+    }
+
+    catalog.snapshotValue = snapshotFromFeed(fixtureFeed, { fetchedAt: '2026-03-03T00:00:00.000Z' });
+    list = await h.router.availability();
+    const fresh = list.find((a) => a.id === 'deepseek')!;
+    assert.strictEqual('stale' in fresh, false, 'a successful snapshot leaves stale absent');
+    assert.strictEqual('staleReason' in fresh, false);
+    assert.strictEqual(fresh.fetchedAt, '2026-03-03T00:00:00.000Z');
+  });
+
+  it('a selected model absent from the refreshed list stays selectable, at the END, as customModels', async () => {
+    const catalog = mutableCatalog();
+    const h = makeHarness({ catalog });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    await h.router.select({ provider: 'google', model: 'gemini-1.0-vanished' });
+
+    catalog.snapshotValue = snapshotFromFeed(fixtureFeed);
+    catalog.feedValue = fixtureFeed;
+
+    const models = [...(await h.router.modelsFor('google'))];
+    assert.deepStrictEqual(
+      models,
+      ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.0-vanished'],
+      'catalog ids keep their source order first; the preserved id is appended',
+    );
+    const google = (await h.router.availability()).find((a) => a.id === 'google')!;
+    assert.deepStrictEqual([...google.customModels!], ['gemini-1.0-vanished']);
+  });
+
+  it('a legacy selection is preserved, not written over, and returns on the next refresh', async () => {
+    // A KNOWN-but-unconfigured provider takes the preserve path rather than the
+    // persist-the-fallback path of the malformed-blob cases: the blob is a real
+    // choice the user made, so it must survive the reload untouched.
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ catalog, lm: fakeLm([{ id: 'fake-model', family: 'f' }]) });
+    h.memento.values.set(MODEL_SELECTION_KEY, { provider: 'deepseek', model: 'deepseek-chat' });
+
+    await h.router.init();
+
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'copilot', model: 'fake-model' });
+    assert.deepStrictEqual(h.memento.updates, [], "the user's blob is untouched");
+
+    const events: Array<ModelSelection | undefined> = [];
+    h.router.onDidChangeSelection((s) => events.push(s));
+    h.secrets.values.set('baiton.orchestrator.key.deepseek', 'ds');
+
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'deepseek', model: 'deepseek-chat' });
+    assert.strictEqual(events.length, 1, 'exactly one change event');
+    assert.deepStrictEqual(h.memento.updates, [], 'still nothing written');
+  });
+
+  it('an orphaned ACTIVE selection returns once its provider is configured again', async () => {
+    const h = makeHarness({ lm: fakeLm([]) });
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    h.secrets.values.set(providerSecretKey('mistral')!, 'm');
+    await h.router.select({ provider: 'google', model: 'gemini-2.5-flash' });
+    const persisted = h.memento.updates.length;
+
+    h.secrets.values.delete(providerSecretKey('google')!);
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), {
+      provider: 'mistral',
+      model: 'mistral-large-latest',
+    });
+    assert.strictEqual(h.memento.updates.length, persisted, 'the displaced choice was not overwritten');
+
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    await h.router.refresh();
+
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'google', model: 'gemini-2.5-flash' });
+  });
+
+  it('a provider that has vanished from the catalog is never dropped', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ catalog, lm: fakeLm([]) });
+    h.secrets.values.set('baiton.orchestrator.key.gone-forever', 'k');
+    h.memento.values.set(MODEL_SELECTION_KEY, { provider: 'gone-forever', model: 'x' });
+
+    await h.router.init();
+
+    const list = await h.router.availability();
+    assert.ok(
+      list.some((a) => a.id === 'gone-forever'),
+      'the synthesised entry keeps the vanished provider enumerated',
+    );
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'gone-forever', model: 'x' });
+    assert.deepStrictEqual([...(await h.router.modelsFor('gone-forever'))], ['x'], 'its model survives');
+
+    await h.router.complete(makeReq());
+    assert.strictEqual(h.clients.get('gone-forever')!.requests.length, 1, 'complete() routes to it');
+  });
+
+  it('the catalog is re-read per call, so a landed refresh changes availability and refresh()', async () => {
+    const catalog = mutableCatalog();
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    h.secrets.values.set('baiton.orchestrator.key.deepseek', 'ds');
+
+    assert.deepStrictEqual(await h.router.enabledProviders(), [], 'no catalog yet: deepseek is unknown');
+
+    catalog.snapshotValue = snapshotFromFeed(fixtureFeed);
+    catalog.feedValue = fixtureFeed;
+
+    assert.deepStrictEqual(
+      await h.router.enabledProviders(),
+      ['deepseek'],
+      'the swap is seen without rebuilding the router',
+    );
+    await h.router.refresh();
+    assert.deepStrictEqual(h.router.getSelection(), {
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+    });
   });
 });
 
@@ -550,13 +879,17 @@ describe('ProviderRouter.init', () => {
     ]);
   });
 
-  it('falls back when the blob is absent, malformed, unknown, or its provider is disabled', async () => {
+  it('falls back and persists when the blob is absent or malformed', async () => {
+    // Only a blob that does not normalise to a real selection takes this path:
+    // there is nothing of the user's to protect, so the fallback is persisted.
+    // A well-formed blob naming an unconfigured provider — including an
+    // unknown id like `nope` — is PRESERVED instead; see the catalog suite's
+    // 'a legacy selection is preserved' and 'a provider that has vanished'.
     const cases: unknown[] = [
       undefined,
       'garbage',
       42,
       null,
-      { provider: 'nope', model: 'x' },
       { provider: 'google', model: '   ' },
       { model: 'x' },
     ];
@@ -577,7 +910,7 @@ describe('ProviderRouter.init', () => {
     }
   });
 
-  it('falls back past a now-disabled provider, persisting the first surviving entry', async () => {
+  it('falls back past a now-disabled provider WITHOUT persisting over the stored choice', async () => {
     const h = makeHarness({ lm: fakeLm([]) }); // copilot unavailable
     h.secrets.values.set(providerSecretKey('openai')!, 'sk');
     h.settings.endpoint = 'https://api.example.com';
@@ -587,9 +920,12 @@ describe('ProviderRouter.init', () => {
     await h.router.init();
 
     assert.deepStrictEqual(h.router.getSelection(), { provider: 'openai', model: 'gpt-x' });
-    assert.deepStrictEqual(h.memento.updates, [
-      { key: MODEL_SELECTION_KEY, value: { provider: 'openai', model: 'gpt-x' } },
-    ]);
+    assert.deepStrictEqual(h.memento.updates, [], 'the stored google choice is preserved, not overwritten');
+
+    // …and comes back the moment its key returns.
+    h.secrets.values.set(providerSecretKey('google')!, 'g');
+    await h.router.refresh();
+    assert.deepStrictEqual(h.router.getSelection(), { provider: 'google', model: 'gemini-2.5-flash' });
   });
 
   it('never throws when workspaceState.get throws and leaves nothing selected', async () => {
@@ -626,7 +962,10 @@ describe('ProviderRouter.select', () => {
       null,
       7,
       {},
-      { provider: 'nope', model: 'x' },
+      // An unknown provider id is no longer malformed: the catalog is open to
+      // models.dev-derived ids, so `normalizeModelSelection` keeps it and the
+      // router reports it as custom/stale instead of dropping it here.
+      { provider: '', model: 'x' },
       { provider: 'google', model: '   ' },
     ];
     for (const bad of bads) {

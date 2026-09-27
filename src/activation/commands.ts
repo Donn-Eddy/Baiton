@@ -128,9 +128,14 @@ import { planPath } from './specLister';
 import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
 import { ProviderRouter } from './providerRouter';
 import type { ProviderSettings } from './providerRouter';
-import { isProviderId } from '../orchestrator/providers';
-import type { ProviderId } from '../orchestrator/providers';
+import { findProviderInfo, isProviderId, providerCatalog } from '../orchestrator/providers';
+import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
 import { revealConfigPanel } from './openConfigPanelView';
+// The window's model catalog seams. This closes an `extension -> activation ->
+// commands -> extension` import cycle, which is harmless under tsc's CommonJS
+// output because both accessors are called only inside closures, never at
+// module evaluation time.
+import { getModelCatalogStore, getModelDiscovery } from '../extension';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
@@ -156,6 +161,7 @@ export const COMMANDS = {
   setApiKey: 'baiton.setOrchestratorApiKey',
   setProviderApiKey: 'baiton.setProviderApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
+  refreshModels: 'baiton.refreshModels',
 } as const;
 
 /**
@@ -509,6 +515,14 @@ export function registerCommands(
     // real namespace here and a fake in its unit test.
     lm: vscode,
     version: extensionVersion(context),
+    // The live model catalog: models come from the `models.dev` snapshot the
+    // discovery service refreshes, with its stale flag, and the provider list
+    // from the last parsed feed. Read per call — a refresh that lands after
+    // activation must be picked up without rebuilding the router.
+    catalog: {
+      snapshot: () => getModelCatalogStore()?.get('models.dev'),
+      feed: () => getModelDiscovery()?.feed(),
+    },
     log: (message) => surface.log(message),
   });
   // Restore the persisted selection (or pick the first usable provider) once
@@ -516,11 +530,27 @@ export function registerCommands(
   // Chat view that resolved first repaints its dropdown.
   void legacyMigration.then(() => router.init()).then(() => router.refresh());
 
+  // A landed catalog refresh changes which providers exist and which models
+  // they offer, so re-read availability; refresh() never rejects.
+  const catalogSub = getModelDiscovery()?.onDidChange(() => {
+    void router.refresh();
+  });
+  if (catalogSub !== undefined) {
+    disposables.push(new vscode.Disposable(() => catalogSub.dispose()));
+  }
+
   // One entry point for key management: the palette commands, and the Chat
   // view's inline "Set API key…" fix (which names the provider that failed).
   // A stored/cleared key refreshes availability, which repaints the dropdown.
+  // Read at call time, off the same feed accessor the router uses, so the pick
+  // offers every models.dev provider — including the ones the Chat dropdown
+  // hides, which must be keyable before they can appear there.
+  const providerCatalogNow = (): readonly ProviderInfo[] =>
+    providerCatalog(getModelDiscovery()?.feed());
   const promptProviderKey = (provider?: ProviderId): Promise<void> =>
-    setProviderApiKey(context.secrets, provider, () => router.refresh());
+    setProviderApiKey(context.secrets, provider, () => router.refresh(), {
+      catalog: providerCatalogNow,
+    });
 
   // Assemble the tool definitions advertised to the model, validating every
   // registered tool's `description` (Req 10.3, 10.5). If assembly is rejected —
@@ -723,8 +753,18 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(COMMANDS.chat, () => openChat()),
     vscode.commands.registerCommand(COMMANDS.openChat, () => openChat()),
+    // A catalog member (builtin or feed-derived) pre-selects the provider; an
+    // arbitrary string must never become a SecretStorage slot, so membership —
+    // not mere string-ness — is the gate, with builtin ids as the offline
+    // fallback for a window where the feed has not landed.
     vscode.commands.registerCommand(COMMANDS.setProviderApiKey, (arg?: unknown) =>
-      promptProviderKey(isProviderId(arg) ? arg : undefined),
+      promptProviderKey(
+        typeof arg === 'string' && findProviderInfo(arg, providerCatalogNow()) !== undefined
+          ? arg
+          : isProviderId(arg)
+            ? arg
+            : undefined,
+      ),
     ),
     // Kept as an alias so existing key bindings and the README keep working.
     vscode.commands.registerCommand(COMMANDS.setApiKey, () => promptProviderKey()),

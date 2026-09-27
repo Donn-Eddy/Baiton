@@ -26,6 +26,7 @@ import { writeTodoState } from './model/writer';
 import type { TodoState } from './model/todoState';
 import { Surface } from './activation/surface';
 import {
+  COMMANDS,
   registerCommands,
   registerInitializeCommand,
   registerConfigPanelCommand,
@@ -35,6 +36,8 @@ import {
 } from './activation/commands';
 import { registerConfigPanel } from './activation/configPanel';
 import { agentCapabilities, createAdapterRegistry } from './adapter';
+import { CatalogStore } from './orchestrator/modelCatalog';
+import { ModelDiscoveryService, builtinCatalogFetches } from './activation/modelDiscovery';
 import {
   createConfigRefresh,
   FOLDER_MISMATCH_NOTE,
@@ -100,16 +103,35 @@ let activationState: ActivationState | undefined;
 let commandSurface: CommandSurface | undefined;
 /** Guard ensuring the gated half of activation runs at most once to prevent duplicate command registrations. */
 let wired = false;
+/** The window's model catalog store, built before the activation gate. */
+let modelCatalogStore: CatalogStore | undefined;
+/** The window's model discovery service, built before the activation gate. */
+let modelDiscovery: ModelDiscoveryService | undefined;
 
 /** Read the activation state resolved by {@link activate}, if any. */
 export function getActivationState(): ActivationState | undefined {
   return activationState;
 }
 
+/**
+ * The window's model catalog store, the single source of truth for refreshed
+ * model lists (the config panel and provider router read it in later todos).
+ */
+export function getModelCatalogStore(): CatalogStore | undefined {
+  return modelCatalogStore;
+}
+
+/** The window's model discovery service, if activation got far enough to build it. */
+export function getModelDiscovery(): ModelDiscoveryService | undefined {
+  return modelDiscovery;
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   activationState = undefined;
   commandSurface = undefined;
   wired = false;
+  modelCatalogStore = undefined;
+  modelDiscovery = undefined;
 
   // 1. Engine-version guard (Req 23.2, 23.3). Refuse below the minimum with a
   //    message naming the minimum required version, and activate no further.
@@ -161,17 +183,63 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // ahead of the gate as well. `activate` returns early on a workspace-resolution
   // or config-load failure, and the view's error state plus Reset to defaults
   // is exactly what repairs an absent or unparseable `.baiton/config.json`.
+  const adapterRegistry = createAdapterRegistry();
   context.subscriptions.push(
     registerConfigPanel({
       extensionUri: context.extensionUri,
       resolveBaitonDir: resolveBaitonDirForCommands,
-      agentIds: createAdapterRegistry().ids,
+      agentIds: adapterRegistry.ids,
       capabilities: agentCapabilities(),
       log: (m) => surface.log(m),
       applyConfig: scopedApplyConfig,
     }),
   );
   context.subscriptions.push(registerConfigPanelCommand());
+
+  // The model catalog and its discovery service, also ahead of the gate: model
+  // lists must refresh (and `Baiton: Refresh Model Lists` must work) even in an
+  // as-yet-uninitialized folder, where workspace resolution or config load
+  // fails by design. The store rehydrates the persisted snapshots and seeds the
+  // curated builtins in its constructor; the discovery service only ever calls
+  // `applyResult`.
+  const catalogStore = new CatalogStore({
+    memento: context.globalState,
+    builtins: builtinCatalogFetches(),
+    log: (m) => surface.log(m),
+  });
+  const discovery = new ModelDiscoveryService({
+    store: catalogStore,
+    registry: adapterRegistry,
+    // A closure, not a hoisted value: the workspace is resolved later, in
+    // `completeActivation()`, so every refresh re-reads the current root.
+    cwd: () => getActivationState()?.workspace.root.fsPath,
+    log: (m) => surface.log(m),
+  });
+  modelCatalogStore = catalogStore;
+  modelDiscovery = discovery;
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMANDS.refreshModels, () =>
+      discovery.refresh().then(() => undefined),
+    ),
+  );
+  context.subscriptions.push(
+    new vscode.Disposable(() => {
+      discovery.dispose();
+      modelDiscovery = undefined;
+      modelCatalogStore = undefined;
+    }),
+  );
+  context.subscriptions.push(
+    discovery.onDidChange((table) => {
+      surface.log(`Baiton: model catalog updated (${Object.keys(table).join(', ')}).`);
+    }),
+  );
+
+  // Activation never awaits discovery: every failure degrades to a
+  // stale-marked previous list or to the curated builtin one, and no discovery
+  // failure may surface an error message or change what `activate()` returns.
+  void discovery.refresh();
 
   // Run the gated half of activation. Failures at initial activation keep using showErrorMessage.
   void completeActivation(context, surface);
@@ -282,6 +350,8 @@ export function deactivate(): void {
   activationState = undefined;
   commandSurface = undefined;
   wired = false;
+  modelCatalogStore = undefined;
+  modelDiscovery = undefined;
 }
 
 // --- vscode-backed seams over the pure activation cores -------------------

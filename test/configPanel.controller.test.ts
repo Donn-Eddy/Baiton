@@ -38,6 +38,12 @@
  *      `loadFailed { kind: 'absent', canReset: true }`;
  *    - stale token after external edit without reload -> `save` yields `saveFailed { reason: 'conflict' }`;
  *    - after `dispose()`, `notifyExternalChange` posts nothing.
+ * 9. Live capabilities (model-selector-refresh T08): `getCapabilities` read per load,
+ *    the `capabilities` / `agentCapabilities()` fallbacks, exactly one `optionsChanged`
+ *    (and no second `loaded`) per capability change, per-agent stale propagation, a
+ *    configured model dropped by a refresh still listed and still saveable, `start()`
+ *    twice subscribing once, silence after `dispose()`, and a real `CatalogStore`
+ *    driving the whole path through `agentCapabilities(store.table())`.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -59,7 +65,11 @@ import { ABSENT_TOKEN, configToken } from '../src/config/configDocument';
 import { defaultConfig, defaultConfigJson } from '../src/config/defaultConfig';
 import { configFilePath, loadConfig } from '../src/config/loadConfig';
 import type { Config } from '../src/config/types';
-import { isOk } from '../src/model/result';
+import { agentCapabilities } from '../src/adapter';
+import type { AgentCapabilities } from '../src/adapter';
+import { CatalogStore } from '../src/orchestrator/modelCatalog';
+import { builtinCatalogFetches } from '../src/activation/modelDiscovery';
+import { err, isOk, ok } from '../src/model/result';
 
 class RecordingWebview implements ConfigPanelWebview {
   public messages: ConfigPanelHostToWebview[] = [];
@@ -799,6 +809,331 @@ describe('ConfigPanelController (config-panel T05)', () => {
       // Webview message after dispose is also ignored
       await webview.send({ type: 'load' });
       assert.strictEqual(webview.messages.length, 1);
+    });
+  });
+
+  describe('9. live capabilities and optionsChanged (model-selector-refresh T08)', () => {
+    /**
+     * A host-free stand-in for the pair the activation layer wires to
+     * `agentCapabilities(store.table())` and `discovery.onDidChange(...)`.
+     */
+    function makeCapabilitySource(initial: Record<string, AgentCapabilities>) {
+      let table = initial;
+      const listeners = new Set<() => void>();
+      return {
+        listeners,
+        getCapabilities: () => table,
+        onDidChangeCapabilities: (listener: () => void) => {
+          listeners.add(listener);
+          return { dispose: () => listeners.delete(listener) };
+        },
+        set(next: Record<string, AgentCapabilities>): void {
+          table = next;
+        },
+        fire(): void {
+          for (const listener of [...listeners]) {
+            listener();
+          }
+        },
+      };
+    }
+
+    /** The `optionsChanged` messages posted so far. */
+    function optionsChanged(webview: RecordingWebview) {
+      return webview.messages.filter(
+        (m): m is Extract<ConfigPanelHostToWebview, { type: 'optionsChanged' }> =>
+          m.type === 'optionsChanged',
+      );
+    }
+
+    /** The `loaded` messages posted so far. */
+    function loadedMessages(webview: RecordingWebview) {
+      return webview.messages.filter(
+        (m): m is Extract<ConfigPanelHostToWebview, { type: 'loaded' }> => m.type === 'loaded',
+      );
+    }
+
+    it('reads getCapabilities() per load rather than freezing it at construction', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({
+        claude: { models: ['first-model'], efforts: ['low'] },
+      });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+
+      source.set({ claude: { models: ['second-model'], efforts: ['low'] } });
+      await webview.send({ type: 'load' });
+
+      const loads = loadedMessages(webview);
+      assert.strictEqual(loads.length, 2);
+      assert.deepStrictEqual(loads[0].options.byAgent.claude.models, [
+        'first-model',
+        // the configured model is appended by the round-trip rule
+        defaultConfig().roles.planner.model,
+      ]);
+      assert.ok(loads[1].options.byAgent.claude.models.includes('second-model'));
+      assert.strictEqual(loads[1].options.byAgent.claude.models.includes('first-model'), false);
+    });
+
+    it('falls back to the static capabilities, then to agentCapabilities()', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const legacy = new RecordingWebview();
+      const legacyController = new ConfigPanelController({
+        webview: legacy,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        capabilities: { claude: { models: ['legacy-model'], efforts: ['low'] } },
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      legacyController.start();
+      await legacy.send({ type: 'ready' });
+      assert.ok(loadedMessages(legacy)[0].options.byAgent.claude.models.includes('legacy-model'));
+
+      const bare = new RecordingWebview();
+      const bareController = new ConfigPanelController({
+        webview: bare,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      bareController.start();
+      await bare.send({ type: 'ready' });
+      for (const model of agentCapabilities().claude.models) {
+        assert.ok(loadedMessages(bare)[0].options.byAgent.claude.models.includes(model));
+      }
+    });
+
+    it('a capability change posts exactly one optionsChanged, no second loaded, and {} stale for a fresh table', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({
+        claude: { models: ['old-model'], efforts: ['low'] },
+      });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      assert.strictEqual(webview.messages.length, 1);
+
+      source.set({ claude: { models: ['new-model'], efforts: ['low'] } });
+      source.fire();
+
+      const changes = optionsChanged(webview);
+      assert.strictEqual(changes.length, 1);
+      assert.strictEqual(loadedMessages(webview).length, 1);
+      assert.ok(changes[0].options.byAgent.claude.models.includes('new-model'));
+      assert.deepStrictEqual(changes[0].stale, {});
+    });
+
+    it('propagates per-agent stale metadata with the last-known model list', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({
+        claude: { models: ['claude-sonnet-5'], efforts: ['low'] },
+        codex: { models: ['gpt-last-known'], efforts: ['low'] },
+      });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude', 'codex'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+
+      source.set({
+        claude: { models: ['claude-sonnet-5'], efforts: ['low'] },
+        codex: {
+          models: ['gpt-last-known'],
+          efforts: ['low'],
+          source: 'cached',
+          stale: true,
+          staleReason: 'models.dev unreachable',
+          fetchedAt: '2026-01-02T03:04:05.000Z',
+        },
+      });
+      source.fire();
+
+      const change = optionsChanged(webview)[0];
+      assert.deepStrictEqual(change.stale.codex, {
+        stale: true,
+        reason: 'models.dev unreachable',
+        fetchedAt: '2026-01-02T03:04:05.000Z',
+      });
+      assert.deepStrictEqual(change.options.byAgent.codex.models, ['gpt-last-known']);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(change.stale, 'claude'), false);
+    });
+
+    it('a configured model dropped by a refresh stays listed and still saves', async () => {
+      const dir = newDir();
+      const base = defaultConfig();
+      const doc = {
+        ...base,
+        roles: {
+          ...base.roles,
+          planner: { agent: 'claude', model: 'claude-opus-4-9', effort: 'high' },
+        },
+      };
+      writeConfigFile(dir, `${JSON.stringify(doc, null, 2)}\n`);
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({
+        claude: { models: ['claude-opus-4-9', 'claude-sonnet-5'], efforts: ['low', 'high'] },
+      });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      const loaded = loadedMessages(webview)[0];
+
+      source.set({
+        claude: { models: ['claude-sonnet-5'], efforts: ['low', 'high'], source: 'live', stale: false, fetchedAt: '2026-01-02T03:04:05.000Z' },
+      });
+      source.fire();
+
+      const change = optionsChanged(webview)[0];
+      assert.ok(change.options.byAgent.claude.models.includes('claude-opus-4-9'));
+
+      await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
+      const last = webview.messages[webview.messages.length - 1];
+      assert.strictEqual(last.type, 'saved');
+
+      const reloaded = await loadConfig(dir);
+      assert.ok(isOk(reloaded));
+      if (isOk(reloaded)) {
+        assert.strictEqual(reloaded.value.roles.planner.model, 'claude-opus-4-9');
+      }
+    });
+
+    it('start() twice subscribes once: one change yields one optionsChanged', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({ claude: { models: ['m1'], efforts: ['low'] } });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      controller.start();
+      assert.strictEqual(source.listeners.size, 1);
+
+      source.fire();
+      assert.strictEqual(optionsChanged(webview).length, 1);
+    });
+
+    it('after dispose() a change posts nothing and the subscription is gone', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const webview = new RecordingWebview();
+      const source = makeCapabilitySource({ claude: { models: ['m1'], efforts: ['low'] } });
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      const before = webview.messages.length;
+
+      controller.dispose();
+      assert.strictEqual(source.listeners.size, 0);
+      source.fire();
+      assert.strictEqual(webview.messages.length, before);
+      assert.strictEqual(optionsChanged(webview).length, 0);
+    });
+
+    it('carries real CatalogStore state through agentCapabilities into optionsChanged', async () => {
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+
+      const store = new CatalogStore({ builtins: builtinCatalogFetches() });
+      const webview = new RecordingWebview();
+      const listeners = new Set<() => void>();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: () => agentCapabilities(store.table()),
+        onDidChangeCapabilities: (listener: () => void) => {
+          listeners.add(listener);
+          return { dispose: () => listeners.delete(listener) };
+        },
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+
+      store.applyResult('claude', ok({ models: [{ id: 'claude-opus-5-5' }] }));
+      for (const listener of [...listeners]) {
+        listener();
+      }
+
+      const first = optionsChanged(webview)[0];
+      assert.ok(first.options.byAgent.claude.models.includes('claude-opus-5-5'));
+      assert.ok(first.options.byAgent.claude.models.includes('claude-sonnet-5'));
+      assert.strictEqual(first.stale.claude.stale, false);
+
+      store.applyResult('claude', err('network down'));
+      for (const listener of [...listeners]) {
+        listener();
+      }
+
+      const second = optionsChanged(webview)[1];
+      assert.strictEqual(second.stale.claude.stale, true);
+      assert.strictEqual(second.stale.claude.reason, 'network down');
+      assert.deepStrictEqual(
+        second.options.byAgent.claude.models,
+        first.options.byAgent.claude.models,
+      );
     });
   });
 });

@@ -145,8 +145,18 @@
   var OTHER_EFFORT_VALUE = '\u0000other';
 
   /**
-   * `{ phase: 'loading'|'ready'|'error', form, baseline, token, options,
-   *    errors, failure, banner, status, busy }`
+   * `{ phase: 'loading'|'ready'|'error', form, baseline, token, options, stale,
+   *    otherModel, otherEffort, errors, failure, banner, status, busy }`
+   *
+   * `stale`: `Record<agentId, { stale: boolean, reason?: string, fetchedAt?: string }>`
+   * — the per-agent refresh staleness last pushed by the host
+   * (model-selector-refresh T08/T09). A missing key means "not stale".
+   *
+   * `otherModel` / `otherEffort`: `Record<role, true>` — sticky "the user chose
+   * Other…" flags. They keep an in-progress free-text entry visible even after
+   * a refresh whose new list happens to contain the typed value. Reset by
+   * `loaded` (a fresh form re-derives from membership), never by
+   * `optionsChanged`.
    */
   var state = {
     phase: 'loading',
@@ -154,6 +164,9 @@
     baseline: '',
     token: '',
     options: { agents: [], byAgent: {} },
+    stale: {},
+    otherModel: {},
+    otherEffort: {},
     errors: [],
     // True only right after a host `saveFailed` (reason 'invalid') response,
     // while `state.errors` holds the host's authoritative field errors rather
@@ -207,28 +220,22 @@
 
   // ----- Rendering -----------------------------------------------------------
 
-  var renderedOptionsSignature = null;
+  var rolesBuilt = false;
 
-  function roleAgentsSignature() {
-    if (!state.form) {
-      return '';
-    }
-    var s = '';
-    for (var i = 0; i < ROLES.length; i++) {
-      var r = state.form.roles[ROLES[i]];
-      s += (r ? r.agent : '') + ',';
-    }
-    return s;
-  }
-
-  /** Runs once per option-set change or role agent change: builds the six role stacked blocks from ROLES (T11). */
+  /**
+   * Builds the six role stacked blocks from ROLES (T11) — structure only, and
+   * exactly once. The dynamic agent/model/effort options are NOT appended here;
+   * `renderOptionLists()` syncs them in place on every render so an out-of-band
+   * refresh cannot destroy focus, caret position or the shown/hidden state of
+   * the `Other…` inputs (model-selector-refresh T09). Only the static
+   * `(default)` and `Other…` options are created here, marked `data-static` so
+   * the sync leaves them alone.
+   */
   function buildRoleRows() {
-    var signature = JSON.stringify(state.options) + '|' + roleAgentsSignature();
-    if (signature === renderedOptionsSignature) {
+    if (rolesBuilt) {
       return;
     }
-    renderedOptionsSignature = signature;
-    rolesBody.textContent = '';
+    rolesBuilt = true;
 
     for (var i = 0; i < ROLES.length; i++) {
       var role = ROLES[i];
@@ -252,12 +259,6 @@
       agentSelect.id = 'role-' + role + '-agent';
       agentSelect.dataset.path = 'roles.' + role + '.agent';
       agentSelect.className = 'role-agent-select';
-      state.options.agents.forEach(function (agentId) {
-        var opt = document.createElement('option');
-        opt.value = agentId;
-        opt.textContent = agentId;
-        agentSelect.appendChild(opt);
-      });
       var agentErrorId = 'error-roles-' + role + '-agent';
       agentSelect.setAttribute('aria-describedby', agentErrorId);
       agentRow.appendChild(agentSelect);
@@ -268,11 +269,6 @@
       agentError.dataset.errorFor = 'roles.' + role + '.agent';
       agentRow.appendChild(agentError);
       group.appendChild(agentRow);
-
-      var currentAgent = (state.form && state.form.roles[role] && state.form.roles[role].agent) || (state.options.agents[0] || '');
-      var cap = (state.options.byAgent && state.options.byAgent[currentAgent]) || { models: [], efforts: [] };
-      var models = cap.models || [];
-      var efforts = cap.efforts || [];
 
       // Model row
       var modelRow = document.createElement('div');
@@ -292,15 +288,10 @@
       var modelErrorId = 'error-roles-' + role + '-model';
       modelSelect.setAttribute('aria-describedby', modelErrorId);
 
-      models.forEach(function (m) {
-        var opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        modelSelect.appendChild(opt);
-      });
       var otherModelOpt = document.createElement('option');
       otherModelOpt.value = OTHER_MODEL_VALUE;
       otherModelOpt.textContent = 'Other…';
+      otherModelOpt.dataset.static = 'other';
       modelSelect.appendChild(otherModelOpt);
 
       var modelInput = document.createElement('input');
@@ -312,17 +303,25 @@
       modelGroup.appendChild(modelSelect);
       modelGroup.appendChild(modelInput);
 
-      if (cap.modelLink) {
-        var modelLink = document.createElement('a');
-        modelLink.className = 'doc-link';
-        modelLink.href = cap.modelLink;
-        modelLink.target = '_blank';
-        modelLink.rel = 'noreferrer noopener';
-        modelLink.textContent = 'Documentation';
-        modelGroup.appendChild(modelLink);
-      }
+      // Always created; `renderOptionLists()` sets its href and visibility from
+      // the current capability, so a refresh that adds or drops `modelLink`
+      // needs no structural rebuild.
+      var modelLink = document.createElement('a');
+      modelLink.className = 'doc-link';
+      modelLink.target = '_blank';
+      modelLink.rel = 'noreferrer noopener';
+      modelLink.textContent = 'Documentation';
+      modelLink.id = 'role-' + role + '-model-link';
+      modelLink.style.display = 'none';
+      modelGroup.appendChild(modelLink);
 
       modelRow.appendChild(modelGroup);
+
+      var staleNote = document.createElement('div');
+      staleNote.className = 'stale-note';
+      staleNote.id = 'role-' + role + '-stale';
+      staleNote.dataset.staleFor = role;
+      modelRow.appendChild(staleNote);
 
       var modelError = document.createElement('div');
       modelError.className = 'field-error';
@@ -352,17 +351,13 @@
       var defaultOpt = document.createElement('option');
       defaultOpt.value = '';
       defaultOpt.textContent = '(default)';
+      defaultOpt.dataset.static = 'default';
       effortSelect.appendChild(defaultOpt);
 
-      efforts.forEach(function (eff) {
-        var opt = document.createElement('option');
-        opt.value = eff;
-        opt.textContent = eff;
-        effortSelect.appendChild(opt);
-      });
       var otherEffortOpt = document.createElement('option');
       otherEffortOpt.value = OTHER_EFFORT_VALUE;
       otherEffortOpt.textContent = 'Other…';
+      otherEffortOpt.dataset.static = 'other';
       effortSelect.appendChild(otherEffortOpt);
 
       var effortInput = document.createElement('input');
@@ -384,6 +379,143 @@
       group.appendChild(effortRow);
 
       rolesBody.appendChild(group);
+    }
+  }
+
+  /**
+   * Replace a select's DYNAMIC options (those without `data-static`) with
+   * `values`, in place, leaving the static `(default)`/`Other…` options where
+   * they are. A no-op when the rendered list already matches — that early
+   * return is what keeps focus, an open dropdown and the caret intact across
+   * the render that runs on every keystroke.
+   */
+  function syncSelectOptions(selectEl, values) {
+    if (!selectEl) {
+      return;
+    }
+    var desired = values || [];
+    var current = [];
+    var i;
+    for (i = 0; i < selectEl.children.length; i++) {
+      var child = selectEl.children[i];
+      if (child.tagName === 'OPTION' && !child.dataset.static) {
+        current.push(child.value);
+      }
+    }
+    if (current.length === desired.length) {
+      var same = true;
+      for (i = 0; i < current.length; i++) {
+        if (current[i] !== desired[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        return;
+      }
+    }
+
+    var previous = selectEl.value;
+    var existing = Array.prototype.slice.call(selectEl.children);
+    for (i = 0; i < existing.length; i++) {
+      if (existing[i].tagName === 'OPTION' && !existing[i].dataset.static) {
+        selectEl.removeChild(existing[i]);
+      }
+    }
+    var otherOption = null;
+    for (i = 0; i < selectEl.children.length; i++) {
+      if (selectEl.children[i].dataset.static === 'other') {
+        otherOption = selectEl.children[i];
+        break;
+      }
+    }
+    for (i = 0; i < desired.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = desired[i];
+      opt.textContent = desired[i];
+      selectEl.insertBefore(opt, otherOption);
+    }
+    var stillThere = Array.prototype.some.call(selectEl.options || [], function (o) {
+      return o.value === previous;
+    });
+    if (stillThere) {
+      selectEl.value = previous;
+    }
+  }
+
+  /** Sync every role's option lists and documentation link from state.options. */
+  function renderOptionLists() {
+    if (!state.form) {
+      return;
+    }
+    for (var i = 0; i < ROLES.length; i++) {
+      var role = ROLES[i];
+      var entry = state.form.roles[role];
+      if (!entry) {
+        continue;
+      }
+
+      // The configured agent is appended when it is not an installed id, so the
+      // round-trip append in renderValues() becomes a no-op and the list is not
+      // thrashed between renders.
+      var agents = (state.options.agents || []).slice();
+      if (entry.agent !== '' && agents.indexOf(entry.agent) === -1) {
+        agents.push(entry.agent);
+      }
+      syncSelectOptions(document.getElementById('role-' + role + '-agent'), agents);
+
+      var cap = (state.options.byAgent && state.options.byAgent[entry.agent]) || { models: [], efforts: [] };
+      syncSelectOptions(document.getElementById('role-' + role + '-model-select'), cap.models || []);
+      syncSelectOptions(document.getElementById('role-' + role + '-effort-select'), cap.efforts || []);
+
+      var link = document.getElementById('role-' + role + '-model-link');
+      if (link) {
+        if (cap.modelLink) {
+          link.href = cap.modelLink;
+          link.style.display = '';
+        } else {
+          link.removeAttribute('href');
+          link.style.display = 'none';
+        }
+      }
+    }
+  }
+
+  /**
+   * Render the per-agent stale badge next to each role's model control. Keys of
+   * `state.stale` are agent ids; a role whose agent has no entry — or an entry
+   * with `stale: false` (a fresh fetch) — renders nothing, so an untouched
+   * builtin table (`{}`) shows no badges at all. textContent only, never HTML.
+   */
+  function renderStale() {
+    if (!state.form) {
+      return;
+    }
+    for (var i = 0; i < ROLES.length; i++) {
+      var role = ROLES[i];
+      var note = document.getElementById('role-' + role + '-stale');
+      if (!note) {
+        continue;
+      }
+      var entry = state.form.roles[role];
+      var info = entry && state.stale ? state.stale[entry.agent] : undefined;
+      if (info && info.stale === true) {
+        var text = 'stale — showing last known models';
+        if (info.fetchedAt) {
+          text += ' (last updated ' + info.fetchedAt + ')';
+        }
+        note.textContent = text;
+        if (typeof info.reason === 'string' && info.reason.length > 0) {
+          note.title = info.reason;
+        } else {
+          note.removeAttribute('title');
+        }
+        note.classList.add('visible');
+      } else {
+        note.textContent = '';
+        note.classList.remove('visible');
+        note.removeAttribute('title');
+      }
     }
   }
 
@@ -426,9 +558,11 @@
             modelInput.value = entry.model;
           }
         } else {
-          var inModels = models.indexOf(entry.model) !== -1;
+          // Sticky: once the user picked `Other…` the free-text input stays
+          // shown, even if a refreshed list now contains the typed value.
+          var showInput = !!state.otherModel[role] || models.indexOf(entry.model) === -1;
           modelSelect.style.display = '';
-          if (inModels) {
+          if (!showInput) {
             if (modelSelect !== active) {
               modelSelect.value = entry.model;
             }
@@ -458,9 +592,10 @@
             effortInput.value = entry.effort;
           }
         } else {
-          var inEfforts = entry.effort === '' || efforts.indexOf(entry.effort) !== -1;
+          var showEffortInput =
+            !!state.otherEffort[role] || !(entry.effort === '' || efforts.indexOf(entry.effort) !== -1);
           effortSelect.style.display = '';
-          if (inEfforts) {
+          if (!showEffortInput) {
             if (effortSelect !== active) {
               effortSelect.value = entry.effort;
             }
@@ -600,6 +735,10 @@
     renderErrorView();
     if (state.form) {
       buildRoleRows();
+      // Option lists are synced BEFORE renderValues() so the select values it
+      // writes land on freshly present options.
+      renderOptionLists();
+      renderStale();
       renderValues();
       renderErrors();
     }
@@ -657,12 +796,14 @@
       var input = /** @type {HTMLInputElement} */ (document.getElementById('role-' + role + '-model-input'));
       var select = /** @type {HTMLSelectElement} */ (target);
       if (select.value === OTHER_MODEL_VALUE) {
+        state.otherModel[role] = true;
         if (input) {
           input.style.display = '';
           input.focus();
           setField('roles.' + role + '.model', input.value);
         }
       } else {
+        delete state.otherModel[role];
         if (input) {
           input.style.display = 'none';
           input.value = '';
@@ -683,12 +824,14 @@
       var effortIn = /** @type {HTMLInputElement} */ (document.getElementById('role-' + effortRole + '-effort-input'));
       var effortSel = /** @type {HTMLSelectElement} */ (target);
       if (effortSel.value === OTHER_EFFORT_VALUE) {
+        state.otherEffort[effortRole] = true;
         if (effortIn) {
           effortIn.style.display = '';
           effortIn.focus();
           setField('roles.' + effortRole + '.effort', effortIn.value);
         }
       } else {
+        delete state.otherEffort[effortRole];
         if (effortIn) {
           effortIn.style.display = 'none';
           effortIn.value = '';
@@ -806,6 +949,11 @@
         state.form = form;
         state.token = token;
         state.options = msg.options;
+        // A fresh form re-derives the `Other…` state from list membership, and
+        // its stale badges come from the next `optionsChanged`.
+        state.stale = {};
+        state.otherModel = {};
+        state.otherEffort = {};
         state.baseline = formJson(msg.form);
         state.errors = [];
         state.errorsFromServer = false;
@@ -815,6 +963,15 @@
         state.pendingExternal = null;
         break;
       }
+      case 'optionsChanged':
+        // Additive out-of-band refresh (model-selector-refresh T08/T09):
+        // replace the option lists only. No form, no token, no baseline, no
+        // busy/error change — the user's in-progress edits and the conflict
+        // token must survive. Safe before the first `loaded` too: it just
+        // stores the options, and a later `loaded` overwrites them.
+        state.options = msg.options || { agents: [], byAgent: {} };
+        state.stale = msg.stale || {};
+        break;
       case 'loadFailed':
         state.phase = 'error';
         state.form = null;

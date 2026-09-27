@@ -391,8 +391,13 @@ export const geminiDialect: WireDialect = { shapeMessages: shapeGeminiMessages }
 /**
  * Maps a provider catalog {@link DialectId} to its wire-dialect implementation,
  * so the host glue stays catalog-driven without providers.ts importing code.
+ *
+ * A catalog entry's dialect may now come from a models.dev-derived provider via
+ * `PROVIDER_DIALECTS`, so the parameter is widened to any string: an
+ * unrecognised value maps to the default OpenAI wire dialect rather than being
+ * a type error.
  */
-export function dialectFor(id: DialectId): WireDialect {
+export function dialectFor(id: DialectId | string): WireDialect {
   return id === 'gemini' ? geminiDialect : openAiDialect;
 }
 

@@ -1,17 +1,20 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type {
   Adapter,
+  AgentCapabilities,
   AskRelayDescriptor,
   DiscoverSessionInput,
+  DiscoveryContext,
   LaunchRequest,
   LaunchSpec,
   ProbeResult,
 } from './adapter';
-import { AGENT_BINARY } from './adapter';
+import { AGENT_BINARY, DEFAULT_DISCOVERY_TIMEOUT_MS, capabilitiesFromEntries } from './adapter';
 import type { Role } from '../model/role';
+import type { ModelEntry } from '../orchestrator/modelCatalog';
 import { runDirGrant, shellQuote } from './permissions';
 import { roleProfile } from './roleProfile';
 
@@ -132,6 +135,195 @@ export function codexEffortFlags(effort: string | undefined): string[] {
     return [];
   }
   return ['--config', `${CODEX_EFFORT_CONFIG_KEY}=${effort}`];
+}
+
+// --- `codex app-server` model discovery (model-selector-refresh T05) ---------
+
+/** The app-server subcommand the discovery handshake spawns: exactly `codex app-server` (no other flag; never `exec`). */
+export const CODEX_APP_SERVER_SUBCOMMAND = 'app-server';
+
+/** The JSON-RPC method of the first request: the `initialize` handshake step. */
+export const CODEX_APP_SERVER_INITIALIZE_METHOD = 'initialize';
+
+/** The JSON-RPC NOTIFICATION (no `id`) acknowledging `initialize`; covers the `initialized` handshake step. */
+export const CODEX_APP_SERVER_INITIALIZED_NOTIFICATION = 'initialized';
+
+/** The JSON-RPC request method that lists the CLI's models; covers the `model/list` step. */
+export const CODEX_APP_SERVER_MODEL_LIST_METHOD = 'model/list';
+
+/** The JSON-RPC request id of the `initialize` request, so the reader (and tests) can assert framing. */
+export const CODEX_APP_SERVER_INITIALIZE_ID = 1;
+
+/** The JSON-RPC request id of `model/list`, so the reader (and tests) can assert framing. */
+export const CODEX_APP_SERVER_MODEL_LIST_ID = 2;
+
+/**
+ * The client identity sent as `params.clientInfo` of the `initialize` request.
+ * A literal: never read from disk or env, so discovery reads no secrets.
+ */
+export const CODEX_APP_SERVER_CLIENT_INFO = { name: 'baiton', version: '1.0.0' } as const;
+
+/**
+ * Parse the `result` payload of a `model/list` response into
+ * {@link ModelEntry} records.
+ *
+ * Pure and total: never throws, never mutates the input, returns `[]` for any
+ * unrecognised payload. Deliberately tolerant — the response shape is only
+ * loosely pinned by the CLI, so an unrecognised field is ignored rather than
+ * failing the whole refresh, and an unusable item is skipped rather than
+ * rejected:
+ *
+ * - The payload is a bare array, or an object whose `models` (preferred) or
+ *   `items` (fallback) property is an array; anything else → `[]`.
+ * - Per item: a string becomes `{ id: trimmed }`; an object's id is the first
+ *   non-empty trimmed string of `id`, `model`, `slug`. An item with no usable
+ *   id is skipped.
+ * - `label` is the first non-empty trimmed string of `displayName`, `name`,
+ *   set ONLY when it differs from the id (same rule as `claudeModelsFromFeed`).
+ * - `efforts` comes from `supportedReasoningEfforts` when it is an array — each
+ *   element a non-empty trimmed string, or an object whose `effort`/`id`/`name`
+ *   is one; blanks skipped, duplicates dropped keeping first-seen order. Set
+ *   only when the resulting list is non-empty.
+ * - `defaultEffort` is the first non-empty trimmed string of
+ *   `defaultReasoningEffort`, `defaultEffort`; kept only when `efforts` is
+ *   empty/absent or contains it — a response cannot select a level it did not
+ *   advertise.
+ * - De-duplicate by id across items, first occurrence wins.
+ * - Every entry is built with CONDITIONAL key assignment — never an explicit
+ *   `undefined` own key — matching `normalizeModelEntry` in
+ *   src/orchestrator/modelCatalog.ts and `capabilitiesFromEntries` in
+ *   src/adapter/adapter.ts.
+ */
+export function codexModelsFromAppServer(payload: unknown): ModelEntry[] {
+  const items = appServerModelItems(payload);
+  const entries: ModelEntry[] = [];
+  const seenIds = new Set<string>();
+  for (const item of items) {
+    const entry = codexEntryFromItem(item);
+    if (entry === undefined || seenIds.has(entry.id)) {
+      continue;
+    }
+    seenIds.add(entry.id);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+/** The array of raw model items inside a `model/list` payload, or `[]` when the shape is unrecognised. */
+function appServerModelItems(payload: unknown): readonly unknown[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (typeof payload !== 'object' || payload === null) {
+    return [];
+  }
+  const obj = payload as Record<string, unknown>;
+  if (Array.isArray(obj['models'])) {
+    return obj['models'];
+  }
+  if (Array.isArray(obj['items'])) {
+    return obj['items'];
+  }
+  return [];
+}
+
+/** One parsed item as a partial entry, or `undefined` when it carries no usable id. */
+function codexEntryFromItem(item: unknown): ModelEntry | undefined {
+  let id: string | undefined;
+  let label: string | undefined;
+  let efforts: readonly string[] | undefined;
+  let defaultEffort: string | undefined;
+
+  if (typeof item === 'string') {
+    const trimmed = item.trim();
+    id = trimmed.length > 0 ? trimmed : undefined;
+  } else if (typeof item === 'object' && item !== null) {
+    const raw = item as Record<string, unknown>;
+    id = firstNonEmptyString([raw['id'], raw['model'], raw['slug']]);
+    label = firstNonEmptyString([raw['displayName'], raw['name']]);
+    efforts = effortsFromSupported(raw['supportedReasoningEfforts']);
+    defaultEffort = firstNonEmptyString([raw['defaultReasoningEffort'], raw['defaultEffort']]);
+    if (defaultEffort !== undefined && efforts !== undefined && !efforts.includes(defaultEffort)) {
+      defaultEffort = undefined;
+    }
+    if (label !== undefined && label === id) {
+      label = undefined;
+    }
+  }
+
+  if (id === undefined) {
+    return undefined;
+  }
+  const entry: { id: string; label?: string; efforts?: readonly string[]; defaultEffort?: string } = { id };
+  if (label !== undefined) {
+    entry.label = label;
+  }
+  if (efforts !== undefined) {
+    entry.efforts = efforts;
+  }
+  if (defaultEffort !== undefined) {
+    entry.defaultEffort = defaultEffort;
+  }
+  return entry;
+}
+
+/** The effort list from `supportedReasoningEfforts`, or undefined when absent/empty. */
+function effortsFromSupported(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const efforts: string[] = [];
+  const seen = new Set<string>();
+  for (const element of value) {
+    let effort: unknown = element;
+    if (typeof element === 'object' && element !== null) {
+      effort = (element as Record<string, unknown>)['effort'] ?? (element as Record<string, unknown>)['id'] ?? (element as Record<string, unknown>)['name'];
+    }
+    if (typeof effort !== 'string') {
+      continue;
+    }
+    const trimmed = effort.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    efforts.push(trimmed);
+  }
+  return efforts.length > 0 ? efforts : undefined;
+}
+
+/** The first element readable as a non-empty trimmed string, or undefined. */
+function firstNonEmptyString(values: readonly unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The minimal child-process surface `discoverModels` uses;
+ * `ChildProcessWithoutNullStreams` satisfies it structurally.
+ */
+export interface CodexAppServerProcess {
+  readonly stdin: { write(chunk: string): unknown; end(): unknown };
+  readonly stdout: { on(event: 'data', listener: (chunk: Buffer | string) => void): unknown };
+  readonly stderr?: { on(event: 'data', listener: (chunk: Buffer | string) => void): unknown };
+  on(event: 'error' | 'exit' | 'close', listener: (...args: unknown[]) => void): unknown;
+  kill(signal?: string): unknown;
+}
+
+/** Spawns `codex app-server` with piped stdio; the only place this module starts a process for discovery. */
+export type CodexAppServerSpawner = (options: { cwd?: string }) => CodexAppServerProcess;
+
+/** Optional construction options of {@link CodexAdapter}; every field has a default. */
+export interface CodexAdapterOptions {
+  /** The app-server spawner used by {@link CodexAdapter.discoverModels}; defaults to {@link defaultSpawnAppServer}. */
+  readonly spawnAppServer?: CodexAppServerSpawner;
 }
 
 /**
@@ -342,17 +534,36 @@ export function codexRelayFlags(relay?: AskRelayDescriptor): string[] {
  *    probed interactively on 0.155.1, `allow` ran the command with no
  *    keystroke and `deny` blocked it with its message shown to the model.
  *
- *    Degrades: the hook script's failure paths (and a handler timeout, a
- *    crash, an empty reply) all fall back to codex's own TUI prompt, never to
- *    an allow. The hook also needs codex's PROJECT trust — Baiton launches in
- *    the user's workspace, which the user normally trusted when first running
- *    codex there; in an untrusted workspace codex shows its "trust this
- *    folder" dialog, no hook fires, and asks stay in the terminal. `attach()`
- *    takes no relay (no caller passes one), so a re-opened session prompts in
- *    the terminal as before.
- */
+  *    Degrades: the hook script's failure paths (and a handler timeout, a
+  *    crash, an empty reply) all fall back to codex's own TUI prompt, never to
+  *    an allow. The hook also needs codex's PROJECT trust — Baiton launches in
+  *    the user's workspace, which the user normally trusted when first running
+  *    codex there; in an untrusted workspace codex shows its "trust this
+  *    folder" dialog, no hook fires, and asks stay in the terminal. `attach()`
+  *    takes no relay (no caller passes one), so a re-opened session prompts in
+  *    the terminal as before.
+  * 8. Model discovery degrades to the curated list on anything: `codex
+  *    app-server` is driven over stdio line-delimited JSON-RPC
+  *    (`initialize` → `initialized` notification → `model/list`) inside a hard
+  *    wall-clock timebox; any failure — spawn error, JSON-RPC error,
+  *    unparseable stdout, early exit, timeout, abort — resolves `undefined`,
+  *    which means "keep the curated `CODEX_MODELS`/`CODEX_EFFORTS` list", and
+  *    the child is killed on every exit path. Per-model
+  *    `supportedReasoningEfforts` become `ModelEntry.efforts`/`defaultEffort`
+  *    and their first-seen union the capability-level `efforts` (falling back
+  *    to `CODEX_EFFORTS` when no model discloses any). Discovery reads no
+  *    secrets and sends nothing but ids and labels onward —
+  *    {@link CODEX_APP_SERVER_CLIENT_INFO} is a literal.
+  */
 export class CodexAdapter implements Adapter {
   readonly id = 'codex' as const;
+
+  /** The app-server spawner used by {@link CodexAdapter.discoverModels}. */
+  private readonly spawnAppServer: CodexAppServerSpawner;
+
+  constructor(options: CodexAdapterOptions = {}) {
+    this.spawnAppServer = options.spawnAppServer ?? defaultSpawnAppServer;
+  }
 
   /**
    * codex mints its own session UUID on a fresh run (degrade 1 above), so
@@ -485,6 +696,199 @@ export class CodexAdapter implements Adapter {
     }
   }
 
+  /**
+   * Discover codex's model list by driving one `codex app-server` child
+   * through the stdio JSON-RPC handshake (`initialize` → `initialized`
+   * notification → `model/list`), obeying the `Adapter.discoverModels`
+   * contract: it MUST never reject and MUST resolve `undefined` on any
+   * failure — `undefined` means "keep the curated `CODEX_MODELS`/`CODEX_EFFORTS`
+   * list"; returning the curated list here would falsely mark it refreshed.
+   *
+   * Framing is line-delimited JSON (JSONL), one object per line, never
+   * `Content-Length` framing. Only the two responses carrying our request ids
+   * are consumed: server notifications and server→client requests are ignored,
+   * never answered. The child is killed and its stdin ended on EVERY exit path
+   * (success, error, timeout, abort) via the single idempotent `finish`, and
+   * the timeout timer is cleared and unref'd so a stray timer can never hold
+   * the host process open. WITH per-model efforts present the capability-level
+   * `efforts` is the first-seen union of the returned levels via
+   * {@link capabilitiesFromEntries}; with none disclosed the curated
+   * {@link CODEX_EFFORTS} is the documented fallback. Deliberately NO
+   * `source`/`stale`/`staleReason`/`fetchedAt`/`modelLink`: provenance is
+   * stamped by `CatalogStore.applyResult`, and codex has no model doc link.
+   * No env var, secret or credential is read anywhere in this path — only ids
+   * and labels leave the host.
+   */
+  async discoverModels(ctx: DiscoveryContext): Promise<AgentCapabilities | undefined> {
+    try {
+      // An aborted refresh must start no process.
+      if (ctx.signal?.aborted === true) {
+        return undefined;
+      }
+      const timeoutMs = Math.min(
+        ctx.timeoutMs > 0 ? ctx.timeoutMs : DEFAULT_DISCOVERY_TIMEOUT_MS,
+        DEFAULT_DISCOVERY_TIMEOUT_MS,
+      );
+      const child = this.spawnAppServer({ cwd: ctx.cwd });
+
+      const entries: ModelEntry[] | undefined = await new Promise<ModelEntry[] | undefined>((resolve) => {
+        let buffer = '';
+        let settled = false;
+        let abortListener: (() => void) | undefined;
+
+        // Single idempotent settle path: clears the timer, detaches the abort
+        // listener, ends stdin, kills the child on EVERY path, and resolves.
+        const finish = (result?: ModelEntry[], reason?: string): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          if (abortListener !== undefined) {
+            ctx.signal?.removeEventListener('abort', abortListener);
+          }
+          if (reason !== undefined) {
+            ctx.log?.(reason);
+          }
+          try {
+            child.stdin.end();
+          } catch {
+            // A dead pipe must not turn a settled outcome into a throw.
+          }
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // Same: killing an already-dead child is best-effort.
+          }
+          resolve(result);
+        };
+
+        // The hard wall-clock timebox; unref'd so a stray timer can never hold
+        // the host process open. Never invoked before `timer` is initialized:
+        // every settle path is asynchronous (or, for a throwing write, runs
+        // after this line below).
+        const timer = setTimeout(() => {
+          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after ${timeoutMs}ms`);
+        }, timeoutMs);
+        timer.unref?.();
+
+        const writeMessage = (message: unknown): void => {
+          try {
+            child.stdin.write(`${JSON.stringify(message)}\n`);
+          } catch {
+            // A write to a dead pipe finishes `undefined`, never throws.
+            finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} stdin write failed`);
+            return;
+          }
+        };
+
+        const sendInitialize = (): void => {
+          writeMessage({
+            jsonrpc: '2.0',
+            id: CODEX_APP_SERVER_INITIALIZE_ID,
+            method: CODEX_APP_SERVER_INITIALIZE_METHOD,
+            params: { clientInfo: CODEX_APP_SERVER_CLIENT_INFO },
+          });
+        };
+
+        const onAbort = (): void => {
+          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} discovery aborted`);
+        };
+
+        const dispatch = (message: unknown): void => {
+          if (typeof message !== 'object' || message === null) {
+            return;
+          }
+          const raw = message as { id?: unknown; error?: unknown; result?: unknown };
+          // Only a *truthy* `error` property counts as a failure; anything
+          // without one of our two ids (server notifications, server→client
+          // requests) never reaches here and is never answered.
+          if (raw.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+            if (raw.error) {
+              finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} initialize failed`);
+              return;
+            }
+            writeMessage({ jsonrpc: '2.0', method: CODEX_APP_SERVER_INITIALIZED_NOTIFICATION, params: {} });
+            writeMessage({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, method: CODEX_APP_SERVER_MODEL_LIST_METHOD, params: {} });
+            return;
+          }
+          if (raw.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
+            finish(
+              codexModelsFromAppServer(raw.result),
+              raw.error ? `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} model/list failed` : undefined,
+            );
+          }
+        };
+
+        const onData = (chunk: Buffer | string): void => {
+          buffer += String(chunk);
+          let newline = buffer.indexOf('\n');
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline);
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf('\n');
+            const trimmed = line.trim();
+            if (trimmed.length === 0) {
+              continue;
+            }
+            let message: unknown;
+            try {
+              message = JSON.parse(trimmed);
+            } catch {
+              continue; // An unparseable line never fails the whole refresh.
+            }
+            dispatch(message);
+          }
+        };
+
+        child.stdout.on('data', onData);
+
+        // Drain stderr so a chatty child cannot block on a full pipe; it never
+        // affects the outcome.
+        child.stderr?.on('data', (chunk: Buffer | string) => {
+          ctx.log?.(String(chunk));
+        });
+
+        child.on('error', (...args: unknown[]) => {
+          const err = args[0];
+          const code = err !== null && typeof err === 'object' && 'code' in err ? (err as { code?: unknown }).code : undefined;
+          finish(
+            undefined,
+            code === 'ENOENT'
+              ? `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} was not found on PATH`
+              : `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} spawn failed${err instanceof Error && err.message.length > 0 ? `: ${err.message}` : ''}`,
+          );
+        });
+
+        child.on('exit', (...args: unknown[]) => {
+          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} exited (code ${String(args[0])}) before the model list arrived`);
+        });
+
+        child.on('close', () => {
+          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} closed before the model list arrived`);
+        });
+
+        if (ctx.signal !== undefined) {
+          ctx.signal.addEventListener('abort', onAbort);
+          abortListener = onAbort;
+        }
+
+        sendInitialize();
+      });
+
+      if (entries === undefined || entries.length === 0) {
+        return undefined;
+      }
+      const hasEfforts = entries.some((entry) => (entry.efforts ?? []).length > 0);
+      // Deliberately NO source/stale/staleReason/fetchedAt/modelLink: the
+      // CatalogStore.applyResult stamps provenance, and codex has no modelLink
+      // (assert-free, matching claude's discoverModels).
+      return capabilitiesFromEntries(entries, hasEfforts ? undefined : { efforts: [...CODEX_EFFORTS] });
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Execute `codex --version`, resolving stdout or rejecting on failure. */
   private runVersion(): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -513,6 +917,16 @@ function describeProbeError(e: unknown): string {
     return `${CODEX_BIN} --version failed: ${e.message}`;
   }
   return `${CODEX_BIN} --version failed`;
+}
+
+/** Spawns `codex app-server` with piped stdio; the default {@link CodexAppServerSpawner}. */
+function defaultSpawnAppServer(options: { cwd?: string }): CodexAppServerProcess {
+  const child = spawn(CODEX_BIN, [CODEX_APP_SERVER_SUBCOMMAND], {
+    cwd: options.cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  return child as unknown as CodexAppServerProcess;
 }
 
 /** `$CODEX_HOME` when set and non-empty, else `~/.codex`. */

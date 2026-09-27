@@ -2,6 +2,7 @@ import type {
   HostToWebview,
   InterventionView,
   ProviderGroup,
+  ProviderModelItem,
   WebviewState,
 } from '../../src/orchestrator/webviewProtocol';
 
@@ -48,6 +49,11 @@ export function ask(over: Partial<InterventionView> = {}): InterventionView {
 /** A minimal provider group, overridable per field. */
 export function group(over: Partial<ProviderGroup> = {}): ProviderGroup {
   return { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }], ...over };
+}
+
+/** A minimal provider model item, overridable per field. */
+export function modelItem(over: Partial<ProviderModelItem> = {}): ProviderModelItem {
+  return { id: 'gemini-2.5-pro', ...over };
 }
 
 const cases: ProtocolCase[] = [];
@@ -528,6 +534,115 @@ cases.push({
   messages: [
     { type: 'showError', message: 'a', action: 'setApiKey', provider: 'mistral' },
     { type: 'showError', message: 'b' },
+  ],
+});
+
+// (45) setProviders carries the catalog refresh time
+cases.push({
+  name: 'setProviders carries refreshedAt',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [group()],
+      selection: { provider: 'google', model: 'gemini-2.5-pro' },
+      refreshedAt: '2026-09-26T10:00:00.000Z',
+    },
+  ],
+});
+
+// (46) a setProviders without refreshedAt clears a previous one: the key stays
+// present with the value `undefined` in both reducers
+cases.push({
+  name: 'setProviders without refreshedAt clears a previous one',
+  state: seed({
+    providers: [group()],
+    selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    refreshedAt: '2026-09-01T00:00:00.000Z',
+  }),
+  messages: [
+    { type: 'setProviders', groups: [group()], selection: { provider: 'google', model: 'gemini-2.5-pro' } },
+  ],
+});
+
+// (47) setProviders with a group whose catalog snapshot is stale
+cases.push({
+  name: 'setProviders with a stale group',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [group({ stale: true, staleReason: 'models.dev fetch failed: timeout' })],
+      selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    },
+  ],
+});
+
+// (48) setProviders with a preserved selection marked as a custom model id
+cases.push({
+  name: 'setProviders with a custom model marker',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [group({ models: [modelItem(), modelItem({ id: 'gemini-9-preview', custom: true })] })],
+      selection: { provider: 'google', model: 'gemini-9-preview' },
+    },
+  ],
+});
+
+// (49) setProviders with per-model reasoning-effort levels
+cases.push({
+  name: 'setProviders with per-model efforts',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [
+        group({
+          id: 'anthropic',
+          label: 'Anthropic',
+          models: [
+            modelItem({ id: 'claude-sonnet-5', label: 'Claude Sonnet 5', efforts: ['low', 'medium', 'high'] }),
+          ],
+        }),
+      ],
+      selection: { provider: 'anthropic', model: 'claude-sonnet-5' },
+    },
+  ],
+});
+
+// (50) setProviders with a feed-derived provider id: an open string id survives the fold
+cases.push({
+  name: 'setProviders with a feed-derived provider id',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [
+        group({
+          id: 'deepinfra',
+          label: 'DeepInfra',
+          models: [modelItem({ id: 'deepseek-ai/DeepSeek-V3' })],
+        }),
+      ],
+      selection: { provider: 'deepinfra', model: 'deepseek-ai/DeepSeek-V3' },
+      refreshedAt: '2026-09-26T09:30:00.000Z',
+    },
+  ],
+});
+
+// (51) multi-message fold over the new fields: a fresh post, the empty state, then a stale re-post
+cases.push({
+  name: 'setProviders then setEmptyState then a stale re-post',
+  messages: [
+    {
+      type: 'setProviders',
+      groups: [group({ models: [modelItem(), modelItem({ id: 'gemini-9-preview', custom: true })] })],
+      selection: { provider: 'google', model: 'gemini-9-preview' },
+      refreshedAt: '2026-09-26T10:00:00.000Z',
+    },
+    { type: 'setEmptyState', endpoint: null, model: 'gemini-9-preview' },
+    {
+      type: 'setProviders',
+      groups: [group({ stale: true, staleReason: 'models.dev fetch failed: offline' })],
+      selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    },
   ],
 });
 

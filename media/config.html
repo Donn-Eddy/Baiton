@@ -176,6 +176,18 @@
         color: var(--vscode-textLink-activeForeground);
       }
 
+      /* Per-agent refresh staleness ("stale — showing last known models").
+         Hidden while empty so a fresh list leaves no gap. */
+      .stale-note {
+        display: none;
+        font-size: 0.9em;
+        color: var(--vscode-inputValidation-warningForeground, var(--vscode-descriptionForeground));
+      }
+
+      .stale-note.visible:not(:empty) {
+        display: block;
+      }
+
       /* Inline banner: external change, save conflict, or an I/O failure. */
       #banner {
         display: none;

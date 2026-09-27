@@ -27,6 +27,54 @@ export interface AgentFormCapability {
   readonly models: readonly string[];
   readonly efforts: readonly string[];
   readonly modelLink?: string;
+  /**
+   * Where this list came from in this window (model-selector-refresh T08).
+   * Absent means the curated builtin table with no refresh applied.
+   */
+  readonly source?: 'live' | 'cached' | 'builtin';
+  /** True when the last refresh for this agent's source failed and the list is last-known-good. */
+  readonly stale?: boolean;
+  /** Human-readable reason; present only with `stale: true`. */
+  readonly staleReason?: string;
+  /** ISO-8601 time of the last SUCCESSFUL fetch for this agent's source. */
+  readonly fetchedAt?: string;
+}
+
+/**
+ * The per-agent staleness the webview renders as "stale — showing last known
+ * models" (model-selector-refresh T08).
+ */
+export interface AgentStaleness {
+  readonly stale: boolean;
+  readonly reason?: string;
+  readonly fetchedAt?: string;
+}
+
+/**
+ * The per-agent staleness map for a set of capabilities.
+ *
+ * Emits an entry only for an agent whose capability carries refresh metadata
+ * (`stale === true` or a `fetchedAt`), so an untouched builtin table produces
+ * `{}` and the webview renders no badge — including for agents appended from
+ * the form, which never carry metadata. `reason` and `fetchedAt` are added
+ * CONDITIONALLY (never as explicit `undefined` own keys). Pure: never mutates
+ * its input.
+ */
+export function agentStaleness(
+  byAgent: Readonly<Record<string, AgentFormCapability>>,
+): Record<string, AgentStaleness> {
+  const out: Record<string, AgentStaleness> = {};
+  for (const [agent, cap] of Object.entries(byAgent)) {
+    if (cap.stale !== true && cap.fetchedAt === undefined) {
+      continue;
+    }
+    out[agent] = {
+      stale: cap.stale === true,
+      ...(cap.staleReason !== undefined ? { reason: cap.staleReason } : {}),
+      ...(cap.fetchedAt !== undefined ? { fetchedAt: cap.fetchedAt } : {}),
+    };
+  }
+  return out;
 }
 
 /** One role's form entry: raw, possibly-invalid input text for each field. */
@@ -68,6 +116,13 @@ export interface ConfigFieldError {
 export type ConfigPanelHostToWebview =
   /** The form parsed from disk, the conflict token to echo back on save, and the dropdown option sets. */
   | { type: 'loaded'; form: ConfigForm; token: string; options: ConfigFormOptions }
+  /**
+   * The option lists were refreshed out-of-band (a model catalog refresh landed;
+   * model-selector-refresh T08). The webview must replace the option lists in
+   * place without touching the user's edits — no form is carried and no reload
+   * is implied.
+   */
+  | { type: 'optionsChanged'; options: ConfigFormOptions; stale: Record<string, AgentStaleness> }
   /** The document could not be loaded as a form; `canReset` offers "Reset to defaults". */
   | { type: 'loadFailed'; kind: 'absent' | 'unparseable' | 'invalid'; message: string; canReset: boolean }
   /** The write succeeded; `token` is the new conflict token. `notes` names anything that could not hot-reload. */
@@ -100,7 +155,18 @@ export function configFormOptions(
   form?: ConfigForm,
 ): ConfigFormOptions {
   const agents = [...agentIds];
-  const byAgent: Record<string, { models: string[]; efforts: string[]; modelLink?: string }> = {};
+  const byAgent: Record<
+    string,
+    {
+      models: string[];
+      efforts: string[];
+      modelLink?: string;
+      source?: 'live' | 'cached' | 'builtin';
+      stale?: boolean;
+      staleReason?: string;
+      fetchedAt?: string;
+    }
+  > = {};
 
   if (capabilities) {
     for (const [agent, cap] of Object.entries(capabilities)) {
@@ -108,6 +174,12 @@ export function configFormOptions(
         models: [...cap.models],
         efforts: [...cap.efforts],
         ...(cap.modelLink !== undefined ? { modelLink: cap.modelLink } : {}),
+        // Refresh metadata is copied conditionally so an untouched builtin entry keeps
+        // exactly its old key set (T08).
+        ...(cap.source !== undefined ? { source: cap.source } : {}),
+        ...(cap.stale !== undefined ? { stale: cap.stale } : {}),
+        ...(cap.staleReason !== undefined ? { staleReason: cap.staleReason } : {}),
+        ...(cap.fetchedAt !== undefined ? { fetchedAt: cap.fetchedAt } : {}),
       };
     }
   } else {

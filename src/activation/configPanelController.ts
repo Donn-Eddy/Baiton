@@ -13,7 +13,11 @@
  * Passing `form` into `configFormOptions` during load is load-bearing: it
  * appends an out-of-set agent or effort already present in the document so the
  * dropdown keeps that value instead of silently rewriting it on the next save —
- * ensuring an existing configuration still round-trips through the form.
+ * ensuring an existing configuration still round-trips through the form. The
+ * same applies to {@link ConfigPanelController.refreshOptions}, which rebuilds
+ * the options from the live capability table plus the last form read from disk:
+ * a model or effort that is configured but missing from a refreshed list is
+ * appended again, exactly as on load (model-selector-refresh T08).
  */
 import * as path from 'path';
 import { mkdir } from 'fs/promises';
@@ -22,6 +26,7 @@ import type { Config } from '../config/types';
 import { agentCapabilities } from '../adapter';
 import type { AgentCapabilities } from '../adapter';
 import {
+  agentStaleness,
   applyFormToDocument,
   configFormOptions,
   formFromDocument,
@@ -76,7 +81,19 @@ export interface ConfigPanelControllerDeps {
   webview: ConfigPanelWebview;
   baitonDir: string;
   agentIds: readonly string[];
+  /**
+   * A static capability table. Kept for callers that have no live source; the
+   * precedence is `getCapabilities()` → `capabilities` → `agentCapabilities()`.
+   */
   capabilities?: Readonly<Record<string, AgentCapabilities>>;
+  /**
+   * The live capability table (model-selector-refresh T08). Read on EVERY use —
+   * never hoisted into a field — so a refreshed catalog reaches the next `load()`
+   * or `refreshOptions()`.
+   */
+  getCapabilities?(): Readonly<Record<string, AgentCapabilities>>;
+  /** Fires when the discovery service lands a new catalog; drives `refreshOptions()`. */
+  onDidChangeCapabilities?(listener: () => void): { dispose(): void };
   confirmReset(message: string): Promise<boolean>;
   applyConfig?: ApplyConfig;
   log(message: string): void;
@@ -92,21 +109,33 @@ export class ConfigPanelController {
   private doc: Record<string, unknown> | undefined;
   private token: string | undefined;
   private options: ConfigFormOptions;
-  private readonly capabilities: Readonly<Record<string, AgentCapabilities>>;
+  /** The last form parsed from disk; the round-trip input for `refreshOptions()`. */
+  private form: ConfigForm | undefined;
+  private capabilitySub: { dispose(): void } | undefined;
   private disposed = false;
   private writing = false;
 
   constructor(private readonly deps: ConfigPanelControllerDeps) {
-    this.capabilities = deps.capabilities ?? agentCapabilities();
-    this.options = configFormOptions(deps.agentIds, this.capabilities);
+    // Seed the options so a `save` arriving before any `load` still validates.
+    this.options = configFormOptions(deps.agentIds, this.currentCapabilities());
   }
 
   /**
-   * Dispose the controller. After disposal, late-arriving watcher events
-   * or webview messages are silently ignored.
+   * The capability table to build options from, resolved on every use:
+   * `getCapabilities()` → `capabilities` → `agentCapabilities()`.
+   */
+  private currentCapabilities(): Readonly<Record<string, AgentCapabilities>> {
+    return this.deps.getCapabilities?.() ?? this.deps.capabilities ?? agentCapabilities();
+  }
+
+  /**
+   * Dispose the controller. After disposal, late-arriving watcher events,
+   * capability changes or webview messages are silently ignored.
    */
   public dispose(): void {
     this.disposed = true;
+    this.capabilitySub?.dispose();
+    this.capabilitySub = undefined;
   }
 
   /**
@@ -122,6 +151,44 @@ export class ConfigPanelController {
         this.deps.webview.post({ type: 'saveFailed', reason: 'io', message });
       });
     });
+
+    // Guarded: registerConfigPanel's ensureController() calls start() again on every
+    // re-resolve of the view, and a second subscription would post duplicate messages.
+    if (this.capabilitySub === undefined && this.deps.onDidChangeCapabilities !== undefined) {
+      this.capabilitySub = this.deps.onDidChangeCapabilities(() => {
+        try {
+          this.refreshOptions();
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          this.deps.log(
+            `ConfigPanelController: unexpected error handling optionsChanged: ${message}`,
+          );
+        }
+      });
+    }
+  }
+
+  /**
+   * Re-post the dropdown option sets after a model catalog refresh (T08).
+   *
+   * Deliberately does NOT re-post `loaded` and does not read the file, so an
+   * open panel's in-progress edits are never overwritten. The options are
+   * rebuilt from the live capability table plus the last form read from disk,
+   * which is what keeps a configured-but-no-longer-listed agent, model or
+   * effort listed after a refresh dropped it.
+   */
+  public refreshOptions(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.options = configFormOptions(this.deps.agentIds, this.currentCapabilities(), this.form);
+    const stale = agentStaleness(this.options.byAgent);
+    this.deps.webview.post({ type: 'optionsChanged', options: this.options, stale });
+    const staleAgents = Object.keys(stale).filter((agent) => stale[agent].stale);
+    this.deps.log(
+      `ConfigPanelController: model options refreshed (${this.options.agents.length} agent(s)` +
+        `${staleAgents.length > 0 ? `, stale: ${staleAgents.join(', ')}` : ''})`,
+    );
   }
 
   /**
@@ -201,7 +268,8 @@ export class ConfigPanelController {
     const form = formFromDocument(read.value.doc);
     this.doc = read.value.doc;
     this.token = read.value.token;
-    this.options = configFormOptions(this.deps.agentIds, this.capabilities, form);
+    this.form = form;
+    this.options = configFormOptions(this.deps.agentIds, this.currentCapabilities(), form);
     this.deps.webview.post({
       type: 'loaded',
       form,

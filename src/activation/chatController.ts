@@ -44,7 +44,9 @@
  *    a missing API key of the active provider names that provider and its fix
  *    opens that provider's key prompt directly;
  *  - post the Provider & Model dropdown (`setProviders`) on refresh and on
- *    every router selection change, and show the active provider + model in
+ *    every router selection change — carrying only the configured providers,
+ *    each group's stale markers, each model's `(custom)`/effort markers and
+ *    the catalog refresh time — and show the active provider + model in
  *    the empty state ("not configured" when nothing is selected);
  *  - switch the active provider/model on `selectModel` for the next turn only,
  *    leaving the transcript and the rendered conversation untouched;
@@ -151,6 +153,16 @@ export interface ProviderAvailabilityView {
   enabled: boolean;
   reason?: string;
   models: readonly string[];
+  /** True when the catalog snapshot backing `models` is no longer known current. */
+  stale?: boolean;
+  /** Why the snapshot is stale; present only with `stale: true`. */
+  staleReason?: string;
+  /** ISO-8601 time of the last successful catalog fetch backing `models`. */
+  fetchedAt?: string;
+  /** Ids inside `models` that came from a preserved selection, not the catalog. */
+  customModels?: readonly string[];
+  /** Per-model reasoning-effort levels, keyed by model id, when the source reports them. */
+  efforts?: Readonly<Record<string, readonly string[]>>;
 }
 
 /** The provider selection seam: the host binds it to the ProviderRouter. */
@@ -357,14 +369,32 @@ export class ChatController {
     }
     try {
       const entries = await source.availability();
-      const groups: ProviderGroup[] = entries.map((e) => ({
-        id: e.id,
-        label: e.label,
-        enabled: e.enabled,
-        ...(e.reason !== undefined ? { reason: e.reason } : {}),
-        models: e.models.map((id) => ({ id })),
-      }));
-      this.deps.webview.post({ type: 'setProviders', groups, selection: source.getSelection() ?? null });
+      const groups: ProviderGroup[] = entries.map((e) => {
+        const custom = new Set(e.customModels ?? []);
+        return {
+          id: e.id,
+          label: e.label,
+          enabled: e.enabled,
+          ...(e.reason !== undefined ? { reason: e.reason } : {}),
+          ...(e.stale === true ? { stale: true } : {}),
+          ...(e.stale === true && e.staleReason !== undefined ? { staleReason: e.staleReason } : {}),
+          models: e.models.map((id) => {
+            const efforts = e.efforts?.[id];
+            return {
+              id,
+              ...(custom.has(id) ? { custom: true } : {}),
+              ...(efforts !== undefined && efforts.length > 0 ? { efforts: [...efforts] } : {}),
+            };
+          }),
+        };
+      });
+      const refreshedAt = latestFetchedAt(entries);
+      this.deps.webview.post({
+        type: 'setProviders',
+        groups,
+        selection: source.getSelection() ?? null,
+        ...(refreshedAt !== undefined ? { refreshedAt } : {}),
+      });
     } catch (err) {
       this.deps.log(`Baiton chat: could not list the providers: ${describe(err)}`);
     }
@@ -1306,6 +1336,25 @@ interface PendingCard {
 /** A short, safe description of a thrown value for a user-facing message. */
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The most recent `fetchedAt` among the given availability entries, as the
+ * host reported it. Entries with no `fetchedAt` (copilot, openai, and any
+ * builtin-backed provider) are ignored, and an unparseable value is ignored
+ * rather than allowed to win. Returns undefined when nothing is catalog-backed.
+ */
+function latestFetchedAt(entries: readonly ProviderAvailabilityView[]): string | undefined {
+  let best: string | undefined;
+  let bestMs = -Infinity;
+  for (const e of entries) {
+    if (e.fetchedAt === undefined) continue;
+    const ms = Date.parse(e.fetchedAt);
+    if (!Number.isFinite(ms) || ms <= bestMs) continue;
+    bestMs = ms;
+    best = e.fetchedAt;
+  }
+  return best;
 }
 
 /** The one-line audit rationale of an Auto-mode approval, naming the stage that decided. */

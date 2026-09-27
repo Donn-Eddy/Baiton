@@ -14,6 +14,13 @@
  * - Limits block (`limits`): validated but has no consumer in the running extension yet.
  * - SpecExplorer (`src/activation/specExplorer.ts:126-150`): derives all tree state from
  *   the filesystem (`spec.md`) plus the `restricted` flag, reading no config.
+ * - Model and effort option lists (model-selector-refresh T08): refreshed lists reach the
+ *   Config Panel through `ConfigPanelController.refreshOptions()` and the `optionsChanged`
+ *   message, driven by `onDidChangeCapabilities` from the discovery service — not through
+ *   `ApplyConfig`. A catalog refresh is not a save, and a save is not a catalog refresh, so
+ *   `createConfigRefresh` keeps returning only the executable-resolution and in-flight-stage
+ *   notes (`IN_FLIGHT_NOTE`, `NOT_ACTIVATED_NOTE`, `FOLDER_MISMATCH_NOTE`); a stale catalog
+ *   is never a save-time note.
  */
 import type { Config } from '../config';
 import type { AgentExecutables } from './executable';

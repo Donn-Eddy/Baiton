@@ -13,7 +13,7 @@ export * from './opencode';
 export * from './antigravity';
 export * from './codex';
 
-import { AGENT_BINARY } from './adapter';
+import { AGENT_BINARY, AGENT_CATALOG_SOURCE } from './adapter';
 import type { Adapter, AgentCapabilities, AgentId } from './adapter';
 import { DEFAULT_PERMISSION_MODE, claudeAllowList } from './permissions';
 import type { PermissionMode } from './permissions';
@@ -24,6 +24,9 @@ import { ClaudeAdapter, CLAUDE_MODELS, CLAUDE_EFFORTS } from './claude';
 import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS, OPENCODE_MODEL_DOC_URL } from './opencode';
 import { AntigravityAdapter, ANTIGRAVITY_MODELS, ANTIGRAVITY_EFFORTS } from './antigravity';
 import { CodexAdapter, CODEX_MODELS, CODEX_EFFORTS } from './codex';
+import { mergePreservingExisting, modelIds } from '../orchestrator/modelCatalog';
+import type { ModelCatalogSnapshot, ModelCatalogTable, SnapshotSource } from '../orchestrator/modelCatalog';
+import { capabilitiesFromEntries } from './adapter';
 import type { Role } from '../model/role';
 
 /** Whether `value` is one of the known agent ids, derived from `AGENT_BINARY`'s keys. */
@@ -166,17 +169,29 @@ export function createAdapterRegistry(mode: PermissionMode = DEFAULT_PERMISSION_
 }
 
 /**
- * Assembles the single source of truth for model and reasoning effort options across
- * the extension and the config panel.
+ * The `defaultConfig()` default claude model. It must always remain selectable
+ * in the claude list, so the overlay appends it (via `mergePreservingExisting`,
+ * as `{ id, custom: true }` at the end) whenever a refreshed list lacks it.
+ * If `defaultConfig()` ever changes its default model this constant must move
+ * with it.
+ */
+const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5';
+
+/**
+ * The curated builtin capability table — the single source of truth for model
+ * and reasoning effort options across the extension and the config panel,
+ * before any catalog refresh is applied.
  *
  * For claude, antigravity, and codex, models and efforts are enumerated starting
  * sets rendered as dropdowns with an always-present "Other…" escape.
  * For opencode, both lists are empty (free text) with a link to model documentation.
  *
+ * Also the builtin seeds the discovery service hands its `CatalogStore`.
+ *
  * Returns a fresh object with newly copied arrays on every call, matching defaultConfig()'s
  * factory convention so mutation or appending in a consumer does not leak across calls.
  */
-export function agentCapabilities(): Record<AgentId, AgentCapabilities> {
+export function builtinAgentCapabilities(): Record<AgentId, AgentCapabilities> {
   return {
     claude: {
       models: [...CLAUDE_MODELS],
@@ -196,4 +211,106 @@ export function agentCapabilities(): Record<AgentId, AgentCapabilities> {
       efforts: [...CODEX_EFFORTS],
     },
   };
+}
+
+/**
+ * Assembles the single source of truth for model and reasoning effort options across
+ * the extension and the config panel.
+ *
+ * With no argument it returns the curated builtin table ({@link
+ * builtinAgentCapabilities}) — the fallback used at activation before any
+ * refresh lands. With a {@link ModelCatalogTable} it overlays the refreshed
+ * per-source lists (`AGENT_CATALOG_SOURCE` maps each agent to its source) and
+ * carries `source`/`stale`/`staleReason`/`fetchedAt` through; antigravity is
+ * never overlaid (no `AGENT_CATALOG_SOURCE` entry); `claude-sonnet-5` is
+ * always present for claude exactly once; an empty refreshed list never wipes
+ * a curated one (that snapshot keeps `source: 'builtin'` and its stale
+ * metadata over the curated models/efforts).
+ *
+ * Returns a fresh object with newly copied arrays on every call, matching defaultConfig()'s
+ * factory convention so mutation or appending in a consumer does not leak across calls.
+ */
+export function agentCapabilities(snapshots?: ModelCatalogTable): Record<AgentId, AgentCapabilities> {
+  const table = builtinAgentCapabilities();
+  if (snapshots === undefined) {
+    return table;
+  }
+  for (const agent of Object.keys(table) as AgentId[]) {
+    const sourceId = AGENT_CATALOG_SOURCE[agent];
+    if (sourceId === undefined) {
+      continue;
+    }
+    const snapshot = snapshots[sourceId];
+    if (snapshot === undefined) {
+      continue;
+    }
+    table[agent] = overlayCapabilities(agent, table[agent], snapshot);
+  }
+  return table;
+}
+
+/**
+ * Overlay one agent's curated capabilities with a refreshed catalog snapshot.
+ *
+ * claude first gets `mergePreservingExisting(snapshot, [CLAUDE_DEFAULT_MODEL])`
+ * so the `defaultConfig()` default stays selectable even when the feed omits
+ * it. An empty refreshed list never replaces the curated one: the builtin
+ * models/efforts/modelLink stay (no `modelEntries`) while the snapshot's
+ * `source`/`stale`/`staleReason`/`fetchedAt` are still carried — this is the
+ * normal, correct path for an opencode snapshot with no models, whose
+ * free-text shape (`models: []`, `efforts: []`, `modelLink`) survives.
+ * Otherwise the overlay is built via `capabilitiesFromEntries` with:
+ * `efforts` the snapshot-level list when non-empty, else the union of the
+ * entries' own efforts when any entry has them, else the builtin's;
+ * `modelLink` kept from the builtin when set. Always returns a fresh object
+ * with fresh arrays.
+ */
+function overlayCapabilities(
+  agent: AgentId,
+  builtin: AgentCapabilities,
+  snapshot: ModelCatalogSnapshot,
+): AgentCapabilities {
+  const effective = agent === 'claude' ? mergePreservingExisting(snapshot, [CLAUDE_DEFAULT_MODEL]) : snapshot;
+  if (modelIds(effective).length === 0) {
+    const empty: {
+      models: readonly string[];
+      efforts: readonly string[];
+      modelLink?: string;
+      source?: SnapshotSource;
+      stale?: boolean;
+      staleReason?: string;
+      fetchedAt?: string;
+    } = {
+      models: [...builtin.models],
+      efforts: [...builtin.efforts],
+      source: 'builtin',
+      stale: effective.stale,
+    };
+    if (builtin.modelLink !== undefined) {
+      empty.modelLink = builtin.modelLink;
+    }
+    if (effective.staleReason !== undefined) {
+      empty.staleReason = effective.staleReason;
+    }
+    if (effective.fetchedAt !== undefined) {
+      empty.fetchedAt = effective.fetchedAt;
+    }
+    return empty;
+  }
+  const hasSnapshotEfforts = effective.efforts !== undefined && effective.efforts.length > 0;
+  const hasEntryEfforts = effective.models.some((entry) => (entry.efforts ?? []).length > 0);
+  let efforts: readonly string[] | undefined;
+  if (hasSnapshotEfforts && effective.efforts !== undefined) {
+    efforts = [...effective.efforts];
+  } else if (!hasEntryEfforts) {
+    efforts = [...builtin.efforts];
+  }
+  return capabilitiesFromEntries([...effective.models], {
+    efforts,
+    modelLink: builtin.modelLink,
+    source: effective.source,
+    stale: effective.stale,
+    staleReason: effective.staleReason,
+    fetchedAt: effective.fetchedAt,
+  });
 }
