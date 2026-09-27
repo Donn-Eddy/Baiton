@@ -18,15 +18,30 @@
  *   ask-then-agree-then-`draft_spec` flow (Req 11.2).
  * - **drive** — a spec whose `status` has moved past `draft`: the next-legal-
  *   stage table, one todo at a time, and `submit_pr` when every todo is done.
+ * - **run** — a non-Spec Workspace conversation (Bug/Quick/Refactor/
+ *   Investigate): inspect with the read tools, state the work and the guessed
+ *   files, then dispatch one spec-less run with `start_run` or `investigate`.
  *
  * The phase is derived from the spec content itself through {@link phaseFor},
  * which the activation layer also calls to pick the tool surface it advertises,
  * so the prompt and the tools it may use always describe the same job.
  *
+ * Beware: the PHASE `run` is not the TOOL `run` — the tool belongs to the
+ * `drive` phase and dispatches one stage of an approved spec, while the phase
+ * named `run` has no spec tools at all (the same warning `guard.ts` carries).
+ *
+ * The conversation's {@link RunMode} is a property of the Workspace
+ * conversation only: a spec conversation is always Spec, so it ignores the
+ * mode and keeps its gather/drive split. The `mode` argument is optional and
+ * trailing on both {@link phaseFor} and {@link buildSystemPrompt}, and an
+ * absent mode or `'spec'` reproduces today's phase and today's prompt text byte
+ * for byte, so every existing Spec-mode test keeps passing unmodified.
+ *
  * For a spec conversation the prompt appends the current `spec.md` content when
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
  */
+import { DEFAULT_MODE, isSpecless, RunMode } from '../model/mode';
 import { parseSpec } from '../model/parser';
 import { OrchestratorPhase } from './guard';
 
@@ -70,13 +85,32 @@ const DRIVE_STATUSES: readonly string[] = [
 ] as const;
 
 /**
- * The phase a conversation is in (Req 11.1). A workspace conversation is always
- * `gather`. A spec conversation is `drive` only when its frontmatter `status`
- * parses to one of {@link DRIVE_STATUSES}; missing, unparseable or `draft`
- * content is `gather`, so the orchestrator falls back to the phase that can
- * still write the spec rather than to the one that dispatches stages.
+ * The phase a conversation is in (Req 11.1). A workspace conversation in a
+ * spec-less mode is `run`; in Spec mode it is always `gather`. A spec
+ * conversation is `drive` only when its frontmatter `status` parses to one of
+ * {@link DRIVE_STATUSES}; missing, unparseable or `draft` content is `gather`,
+ * so the orchestrator falls back to the phase that can still write the spec
+ * rather than to the one that dispatches stages.
+ *
+ * Every non-Spec mode maps to the single `run` phase: the pipeline, not the
+ * phase, distinguishes `investigate` from bug/quick/refactor, and
+ * `controlTools.ts` advertises both `start_run` and `investigate` on
+ * `phases: ['run']`.
+ *
+ * @param mode The conversation's mode. Absent or `'spec'` means the phase is
+ *   computed exactly as before. The spec-less branch is guarded on
+ *   `kind.kind === 'workspace'`, so a spec conversation ignores the argument
+ *   entirely and keeps its gather/drive split even if a caller passes `'bug'`:
+ *   that is the deliberate encoding of "a spec conversation is always Spec".
  */
-export function phaseFor(kind: ConversationKind, specContent?: string): OrchestratorPhase {
+export function phaseFor(
+  kind: ConversationKind,
+  specContent?: string,
+  mode: RunMode = DEFAULT_MODE,
+): OrchestratorPhase {
+  if (kind.kind === 'workspace' && isSpecless(mode)) {
+    return 'run';
+  }
   if (kind.kind !== 'spec' || specContent === undefined) {
     return 'gather';
   }
@@ -164,6 +198,83 @@ const ROLE_TEXT = [
   'You inspect the repository only through the read tools you have been given for this conversation, and never through any other means; you never modify files directly.',
 ].join('\n');
 
+/** The run-phase role text: same prohibitions, no spec tools at all. */
+export const RUN_ROLE_TEXT = [
+  'You are the Baiton chat orchestrator. This conversation is not a spec conversation: you agree one piece of work with the user and dispatch it as a single run.',
+  'You never edit source code. You write nothing at all yourself; the only writes in this conversation are made by the agents a run dispatches, under `.baiton/runs/` and the run\'s own worktree.',
+  'You inspect the repository only through the read tools you have been given for this conversation, and never through any other means.',
+].join('\n');
+
+/** The run-phase scope text: one job, plus the work that is not the orchestrator's. */
+export const RUN_SCOPE_TEXT = [
+  'You have exactly one job here: agree what the work is, then dispatch one run.',
+  'That is the whole job. Everything else belongs to someone else:',
+  ...PROHIBITION_LINES,
+].join('\n');
+
+/** A mode whose conversation is in the `run` phase: every mode except `spec`. */
+export type SpeclessMode = Exclude<RunMode, 'spec'>;
+
+/**
+ * The per-mode run flow text. An exhaustive `Record`, so adding a mode to
+ * {@link RunMode} later fails to compile until its flow text exists. Each entry
+ * follows the same beats the OVERVIEW names — inspect with the read tools, state
+ * the work in one line, name the guessed files, call the run tool — and names
+ * the tool call exactly as `controlTools.ts` declares it.
+ */
+export const RUN_FLOW_TEXT: Readonly<Record<SpeclessMode, string>> = {
+  bug: [
+    'Bug flow:',
+    '1. When the user reports a defect, inspect the repository with the read tools until you can state the defect in one line.',
+    '2. Establish how to reproduce it. Ask with `ask_user` if the user has not said.',
+    '3. Name the files the fix most likely touches. A short, honest guess is better than a long one.',
+    '4. Call `start_run` with `mode: "bug"`, the one-line defect as `statement`, the guessed `files`, and the reproduction as `reproduction`.',
+    '5. Then tell the user the run has started on its own branch and worktree, and that they can watch it in the Runs view and merge it when it passes.',
+  ].join('\n'),
+  quick: [
+    'Quick flow:',
+    '1. When the user describes a change, inspect the repository with the read tools until you can state the change in one line.',
+    '2. Name the files the change most likely touches. A short, honest guess is better than a long one.',
+    '3. Call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
+    '4. Then tell the user the run has started on its own branch and worktree, and that they can watch it in the Runs view and merge it when it passes.',
+    'Quick is for one small, self-contained change. If the work needs several coordinated changes, say so and offer to switch mode rather than dispatching it anyway.',
+  ].join('\n'),
+  refactor: [
+    'Refactor flow:',
+    '1. When the user describes a restructure, inspect the repository with the read tools until you can state the restructure in one line.',
+    '2. Name the files the restructure most likely touches. A short, honest guess is better than a long one.',
+    '3. Call `start_run` with `mode: "refactor"`, the one-line statement of the restructure, and the guessed `files`.',
+    '4. Then tell the user the run has started on its own branch and worktree, and that they can watch it in the Runs view and merge it when it passes.',
+    'A refactor must not change behaviour: say in the statement what shape the code should end up in, not what it should start doing.',
+    'The configured verify command must still pass afterwards; the run\'s reviewer checks that, not you.',
+  ].join('\n'),
+  investigate: [
+    'Investigation flow:',
+    '1. Inspect the repository with the read tools until you can state the question in one line.',
+    '2. Name the files the answer most likely lives in.',
+    '3. Call `investigate` with that one-line `question` and the guessed `files`.',
+    '4. Then tell the user the investigation has started and that the finding will appear in the chat and under `.baiton/runs/` when it lands.',
+    'An investigation changes nothing: no branch, no worktree, no commit. If the user wants the problem fixed rather than answered, say so and offer to switch mode.',
+  ].join('\n'),
+};
+
+/** The flow text for one spec-less mode, without an index-signature dance. */
+export function runFlowText(mode: SpeclessMode): string {
+  return RUN_FLOW_TEXT[mode];
+}
+
+/** How to propose a different mode rather than forcing the work into this one. */
+export const MODE_PROPOSAL_TEXT = [
+  'The mode is the user\'s choice, not yours, and you cannot change it yourself.',
+  'When the work does not fit this mode, propose the mode that does with `ask_user` and wait for the answer:',
+  '- Work that needs an agreed requirements document and several todos -> Spec.',
+  '- A defect with a reproduction -> Bug.',
+  '- One small, self-contained change -> Quick.',
+  '- A behaviour-preserving restructure -> Refactor.',
+  '- A question to be answered rather than work to be done -> Investigate.',
+  'If they agree, tell them to change the Mode control in the composer; do not dispatch under the wrong mode.',
+].join('\n');
+
 /**
  * The new-spec flow: gather requirements, get agreement, then hand them to the
  * spec-writer harness through `draft_spec`. The orchestrator never proposes the
@@ -220,10 +331,38 @@ const FRONTMATTER_TEXT = [
  *   available. Ignored for a workspace conversation. It also decides the phase
  *   (Req 11.1). When absent for a spec conversation the prompt is built without
  *   it, in the `gather` phase, and no error is raised (Req 11.7).
+ * @param mode The conversation's mode. Absent or `spec` builds the prompt
+ *   exactly as before; any other mode builds the run-phase prompt for that
+ *   mode. Ignored for a spec conversation, which is always Spec.
  * @returns The assembled system-prompt text.
  */
-export function buildSystemPrompt(kind: ConversationKind, specContent?: string): string {
-  const phase = phaseFor(kind, specContent);
+export function buildSystemPrompt(
+  kind: ConversationKind,
+  specContent?: string,
+  mode: RunMode = DEFAULT_MODE,
+): string {
+  // The `run` phase — every spec-less mode on a workspace conversation. The
+  // guard is written as `mode !== 'spec'` rather than `isSpecless(mode)` so
+  // control flow narrows `mode` to `SpeclessMode` with no cast. The run prompt
+  // deliberately omits TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT and the
+  // `Current spec file content:` block: a run-phase conversation has no
+  // spec-writing tool at all (`controlTools.ts` keeps `draft_spec`, `add_todo`,
+  // `edit_todo`, `remove_todo`, `update_overview`, `approve_spec`, `run` and
+  // `submit_pr` off the `run` phase), so spec grammar would describe files it
+  // cannot touch.
+  if (kind.kind === 'workspace' && mode !== 'spec') {
+    return [
+      RUN_ROLE_TEXT,
+      RUN_SCOPE_TEXT,
+      REFUSAL_TEXT,
+      ASK_USER_TEXT,
+      runFlowText(mode),
+      MODE_PROPOSAL_TEXT,
+      STYLE_TEXT,
+    ].join('\n\n');
+  }
+
+  const phase = phaseFor(kind, specContent, mode);
   const sections: string[] = [ROLE_TEXT, SCOPE_TEXT, REFUSAL_TEXT, ASK_USER_TEXT];
 
   // The phase decides which job the prompt describes: gathering requirements
