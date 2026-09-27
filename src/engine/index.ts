@@ -4,7 +4,9 @@
  * table and the serialized run queue + stage lifecycle (task 11.1), crash
  * recovery over the journal (task 11.2), the ask-relay file protocol, the per-mode run
  * brief context builder for spec-less runs, and the
- * run manifest store for spec-less runs (`.baiton/runs/<run-id>/run.json`).
+ * run manifest store for spec-less runs (`.baiton/runs/<run-id>/run.json`) and
+ * the run worktree lifecycle (`.baiton/worktrees/<run-id>/` create, merge and
+ * remove).
  */
 export * from './roleInstructions';
 export * from './brief';
@@ -21,5 +23,6 @@ export * from './runQueue';
 export * from './recovery';
 export * from './specDraft';
 export * from './runStore';
+export * from './runWorktree';
 export * from './prTool';
 export * from './submitPr';
