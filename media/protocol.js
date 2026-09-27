@@ -22,6 +22,10 @@
       records: [],
       busy: false,
       autoMode: false,
+      // Mirrors DEFAULT_MODE in src/model/mode.ts; this is a plain browser
+      // script and cannot import it, so the literal is kept in sync by hand.
+      mode: 'spec',
+      runActive: false,
       providers: [],
       selection: null,
     };
@@ -134,6 +138,10 @@
       }
       case 'setAutoMode':
         return Object.assign({}, state, { autoMode: msg.enabled });
+      case 'setMode':
+        return Object.assign({}, state, { mode: msg.mode });
+      case 'setRunActive':
+        return Object.assign({}, state, { runActive: msg.active });
       case 'setConversations':
         return Object.assign({}, state, { conversations: msg.items.slice() });
       case 'setActive':

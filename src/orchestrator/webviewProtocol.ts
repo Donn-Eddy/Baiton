@@ -13,6 +13,7 @@
  * host glue both speak this same contract.
  */
 
+import { DEFAULT_MODE, type RunMode } from '../model/mode';
 import type { InterventionAnswer, InterventionKind, InterventionOption } from './interventions';
 import type { ModelSelection, ProviderId } from './providers';
 
@@ -125,7 +126,19 @@ export type HostToWebview =
    */
   | { type: 'resolveIntervention'; id: string; answer: InterventionAnswer; rationale?: string; auto?: boolean }
   /** Set the Auto-mode toggle shown left of Stop. */
-  | { type: 'setAutoMode'; enabled: boolean };
+  | { type: 'setAutoMode'; enabled: boolean }
+  /**
+   * Set the conversation's mode. The host is authoritative: the composer's
+   * Mode control repaints only on this echo, so a webview `setMode` that the
+   * host rejects (a spec conversation is always Spec) simply never comes back.
+   */
+  | { type: 'setMode'; mode: RunMode }
+  /**
+   * Set whether a spec-less run is in flight for this workspace. The Mode
+   * control is disabled while it is true, so a run's mode cannot change under
+   * it mid-flight.
+   */
+  | { type: 'setRunActive'; active: boolean };
 
 /** A message the webview sends back to the host in response to user actions. */
 export type WebviewToHost =
@@ -152,7 +165,13 @@ export type WebviewToHost =
   /** The user answered an intervention card. */
   | { type: 'answerIntervention'; id: string; answer: InterventionAnswer }
   /** The user flipped the Auto-mode toggle. */
-  | { type: 'setAutoMode'; enabled: boolean };
+  | { type: 'setAutoMode'; enabled: boolean }
+  /**
+   * The user picked a mode in the composer's Mode control. The host decides
+   * whether the change takes: it persists the choice and echoes a host→webview
+   * `setMode`, which is the only thing that moves the rendered control.
+   */
+  | { type: 'setMode'; mode: RunMode };
 
 /**
  * One intervention card as the conversation renders it (pending or settled).
@@ -297,6 +316,10 @@ export interface WebviewState {
   busy: boolean;
   /** Whether Auto mode is on: safe asks are auto-approved, the rest escalate. */
   autoMode: boolean;
+  /** The active conversation's mode; `'spec'` unless the host says otherwise. */
+  mode: RunMode;
+  /** Whether a spec-less run is in flight; the Mode control is locked while true. */
+  runActive: boolean;
   /** The provider groups rendered in the Provider & Model dropdown. */
   providers: ProviderGroup[];
   /** The active provider/model pair, or null when none is chosen. */
@@ -327,6 +350,8 @@ export function initialWebviewState(): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
+    mode: DEFAULT_MODE,
+    runActive: false,
     providers: [],
     selection: null,
   };
@@ -352,6 +377,8 @@ export function initialWebviewState(): WebviewState {
  *   id by attaching the answer, rationale and auto flag; an id that matches
  *   no pending card is a no-op returning the same state.
  * - `setAutoMode` sets the Auto-mode toggle.
+ * - `setMode` sets the conversation's mode; the host is authoritative.
+ * - `setRunActive` sets whether a spec-less run is in flight.
  * - `setConversations` sets the selector entries.
  * - `setActive` sets the active conversation id.
  * - `setSessions` sets the session list; `setActiveSession` sets the active
@@ -452,6 +479,10 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
     }
     case 'setAutoMode':
       return { ...state, autoMode: msg.enabled };
+    case 'setMode':
+      return { ...state, mode: msg.mode };
+    case 'setRunActive':
+      return { ...state, runActive: msg.active };
     case 'setConversations':
       return { ...state, conversations: [...msg.items] };
     case 'setActive':

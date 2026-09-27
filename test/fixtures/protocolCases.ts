@@ -5,6 +5,7 @@ import type {
   ProviderModelItem,
   WebviewState,
 } from '../../src/orchestrator/webviewProtocol';
+import { RUN_MODES } from '../../src/model/mode';
 
 /**
  * Shared fixture cases both reducer implementations (the TypeScript core and
@@ -35,6 +36,8 @@ export function seed(over: Partial<WebviewState> = {}): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
+    mode: 'spec',
+    runActive: false,
     providers: [],
     selection: null,
     ...over,
@@ -643,6 +646,75 @@ cases.push({
       groups: [group({ stale: true, staleReason: 'models.dev fetch failed: offline' })],
       selection: { provider: 'google', model: 'gemini-2.5-pro' },
     },
+  ],
+});
+
+// (52) setMode over a fresh state, once per mode: every RunMode folds the same way
+for (const mode of RUN_MODES) {
+  cases.push({
+    name: `setMode sets the mode to ${mode}`,
+    messages: [{ type: 'setMode', mode }],
+  });
+}
+
+// (53) setMode over a state already carrying a mode: the new mode wins
+cases.push({
+  name: 'setMode overwrites a previously set mode',
+  state: seed({ mode: 'bug' }),
+  messages: [{ type: 'setMode', mode: 'refactor' }],
+});
+
+// (54) setMode over a rich state: nothing but the mode moves
+cases.push({
+  name: 'setMode leaves the rest of the state alone',
+  state: seed({
+    records: [{ role: 'user', content: 'hi' }],
+    busy: true,
+    autoMode: true,
+    providers: [group()],
+    selection: { provider: 'google', model: 'gemini-2.5-pro' },
+    empty: { endpoint: null, model: null },
+  }),
+  messages: [{ type: 'setMode', mode: 'quick' }],
+});
+
+// (55) setRunActive both ways
+cases.push({
+  name: 'setRunActive turns the run flag on',
+  messages: [{ type: 'setRunActive', active: true }],
+});
+cases.push({
+  name: 'setRunActive turns the run flag off',
+  state: seed({ runActive: true }),
+  messages: [{ type: 'setRunActive', active: false }],
+});
+
+// (56) the two new fields are independent
+cases.push({
+  name: 'setRunActive does not disturb the mode',
+  state: seed({ mode: 'investigate' }),
+  messages: [{ type: 'setRunActive', active: true }],
+});
+
+// (57) multi-message fold over both new messages
+cases.push({
+  name: 'setMode then setRunActive then setRunActive off',
+  messages: [
+    { type: 'setMode', mode: 'bug' },
+    { type: 'setRunActive', active: true },
+    { type: 'setRunActive', active: false },
+  ],
+});
+
+// (58) the new fields and the old flags do not clobber one another
+cases.push({
+  name: 'setMode interleaved with setBusy and setAutoMode',
+  messages: [
+    { type: 'setMode', mode: 'bug' },
+    { type: 'setBusy', busy: true },
+    { type: 'setAutoMode', enabled: true },
+    { type: 'setRunActive', active: true },
+    { type: 'setMode', mode: 'quick' },
   ],
 });
 
