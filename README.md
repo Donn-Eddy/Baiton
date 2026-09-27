@@ -780,9 +780,15 @@ module as the offline fallback.
     `low|medium|high`, and `claude-sonnet-5` (the `defaultConfig()` default) is
     always present in the list.
   - `codex` — `codex app-server` over stdio JSON-RPC (`initialize` →
-    `initialized` → `model/list`, JSONL framed). Each model's
-    `supportedReasoningEfforts` becomes its effort list, and the union of those
-    levels becomes the agent's effort dropdown.
+    `initialized` → `model/list`, JSONL framed). `model/list` is sent with
+    `includeHidden: true` and a `limit`, and a non-empty `nextCursor` is
+    followed within the same timebox, so a paged catalogue arrives whole. The
+    reply is read from `result.data` (or `models`/`items`), each model's id from
+    its `model` field, and each model's `supportedReasoningEfforts` (string or
+    `{ reasoningEffort }` elements) becomes its effort list, whose union becomes
+    the agent's effort dropdown. A failed or timed-out follow-up page keeps the
+    pages already received; a first-page failure keeps the previous list and
+    marks it stale.
   - `opencode` — `GET /api/model` from a running or freshly started server,
     with `opencode models` stdout as the fallback and validation source. Ids are
     `provider/model` and effort stays free text (`--variant`).
