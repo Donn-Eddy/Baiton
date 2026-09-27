@@ -595,10 +595,15 @@ describe('canonicalizeRoot', () => {
 
 /**
  * Bounded scan of `node_modules` for signs of native (compiled binary)
- * dependencies: `.node` binaries or a `binding.gyp` build descriptor. The walk
- * skips nested `node_modules` recursion depth beyond a package's own `build`/
- * `prebuilds` output and caps total visited entries so a runaway tree cannot
- * hang the test. Returns the relative paths of any offending artifacts.
+ * dependencies: `.node` binaries or a `binding.gyp` build descriptor. Only
+ * the PRODUCTION packages are scanned — the ones `package-lock.json` does not
+ * mark `dev: true`, which is exactly what vsce ships in the vsix — so a dev
+ * tool with a native addon (`@vscode/vsce` pulls in `keytar`) does not count.
+ * Each package directory is walked without descending into its nested
+ * `node_modules` (those packages are separate lockfile entries); with no
+ * lockfile the whole tree is walked. Total visited entries are capped so a
+ * runaway tree cannot hang the test. Returns the relative paths of any
+ * offending artifacts.
  */
 function findNativeArtifacts(nodeModules: string): string[] {
   if (!fs.existsSync(nodeModules)) {
@@ -625,7 +630,9 @@ function findNativeArtifacts(nodeModules: string): string[] {
       visited += 1;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        walk(full);
+        if (!(productionDirs !== undefined && entry.name === 'node_modules')) {
+          walk(full);
+        }
       } else if (entry.isFile()) {
         if (entry.name.endsWith('.node') || entry.name === 'binding.gyp') {
           offenders.push(path.relative(REPO_ROOT, full));
@@ -634,6 +641,33 @@ function findNativeArtifacts(nodeModules: string): string[] {
     }
   };
 
-  walk(nodeModules);
+  const productionDirs = productionPackageDirs(path.dirname(nodeModules));
+  if (productionDirs === undefined) {
+    walk(nodeModules);
+  } else {
+    for (const dir of productionDirs) {
+      walk(dir);
+    }
+  }
   return offenders;
+}
+
+/**
+ * The absolute directories of every non-dev package `package-lock.json`
+ * (lockfile v2/v3 `packages` map) lists under `root`, or undefined when there
+ * is no readable lockfile.
+ */
+function productionPackageDirs(root: string): string[] | undefined {
+  let lock: { packages?: Record<string, { dev?: boolean }> };
+  try {
+    lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (lock.packages === undefined) {
+    return undefined;
+  }
+  return Object.entries(lock.packages)
+    .filter(([key, meta]) => key.startsWith('node_modules/') && meta.dev !== true)
+    .map(([key]) => path.join(root, key));
 }
