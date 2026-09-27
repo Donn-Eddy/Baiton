@@ -217,6 +217,31 @@ describe('agentCapabilities snapshot overlay', () => {
     assert.strictEqual(withDefault.models.filter((m) => m === 'claude-sonnet-5').length, 1);
   });
 
+  it('a claude snapshot carrying per-model efforts (the local catalog) uses the union, not the builtin list', () => {
+    const entries: ModelEntry[] = [
+      { id: 'claude-opus-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+      { id: 'claude-sonnet-5', efforts: ['low', 'high'], defaultEffort: 'high' },
+    ];
+    const claude = agentCapabilities({ claude: snap('claude', entries) }).claude;
+    // The union of the entries' own levels, not the snapshot-less builtin path.
+    assert.deepStrictEqual(claude.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.strictEqual(claude.modelEntries?.[0].defaultEffort, 'medium');
+    assert.deepStrictEqual([...(claude.modelEntries?.[1].efforts ?? [])], ['low', 'high']);
+  });
+
+  it('the builtin claude table exposes the corrected curated ids and effort vocabulary', () => {
+    const curated = ['claude-sonnet-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001'];
+    assert.deepStrictEqual([...builtinAgentCapabilities().claude.models], curated);
+    assert.deepStrictEqual([...builtinAgentCapabilities().claude.efforts], [...CLAUDE_EFFORTS]);
+    assert.deepStrictEqual([...agentCapabilities().claude.models], curated);
+    // An empty claude snapshot keeps the curated efforts (and the required
+    // default is still appended by the overlay's mergePreservingExisting).
+    const empty = agentCapabilities({ claude: snap('claude', [], { source: 'builtin', stale: true }) }).claude;
+    assert.deepStrictEqual([...empty.efforts], [...CLAUDE_EFFORTS]);
+    assert.strictEqual(empty.source, 'builtin');
+    assert.ok(empty.models.includes('claude-sonnet-5'));
+  });
+
   it('codex falls back to the per-model efforts union; snapshot-level efforts win', () => {
     const entries: ModelEntry[] = [
       { id: 'gpt-6-astra', efforts: ['low', 'medium'], defaultEffort: 'medium' },

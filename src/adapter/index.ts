@@ -264,6 +264,12 @@ export function agentCapabilities(snapshots?: ModelCatalogTable): Record<AgentId
  * entries' own efforts when any entry has them, else the builtin's;
  * `modelLink` kept from the builtin when set. Always returns a fresh object
  * with fresh arrays.
+ *
+ * NOTE: a claude snapshot may now carry per-model `efforts`/`defaultEffort`
+ * too, taken from the Claude CLI's own local model catalog, so the
+ * union-of-entry-efforts path is the normal claude path and not codex-only; a
+ * feed-sourced claude snapshot still arrives with the capability-level
+ * `CLAUDE_EFFORTS` and takes the snapshot-level branch.
  */
 function overlayCapabilities(
   agent: AgentId,

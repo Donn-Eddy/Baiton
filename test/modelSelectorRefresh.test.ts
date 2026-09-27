@@ -297,6 +297,11 @@ describe('model selector refresh (T15 end to end)', () => {
             ? ok<ModelsDevFeed, string>(fixtureFeed())
             : err<string, ModelsDevFeed>('models.dev request failed: ETIMEDOUT');
         },
+        // T02: the default reader would read the developer's real
+        // ~/.claude/cache/model-catalog and make these feed-driven claude
+        // expectations machine-dependent. The catalog-path end-to-end leg is a
+        // later todo's.
+        readLocalCatalog: async () => undefined,
       }),
       codex: new CodexAdapter({ spawnAppServer: codex.spawner }),
       // A `serverBaseUrl` means nothing is spawned and nothing is killed; the

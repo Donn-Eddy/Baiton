@@ -196,7 +196,8 @@ describe('config panel core (config-panel T03)', () => {
       assert.deepStrictEqual(errors, [
         {
           path: 'roles.planner.effort',
-          message: '"planner" effort "unsupported" is not supported by claude (supported: low, medium, high).',
+          message:
+            '"planner" effort "unsupported" is not supported by claude (supported: low, medium, high, xhigh, max).',
         },
       ]);
     });

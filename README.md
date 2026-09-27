@@ -774,11 +774,22 @@ sources on every window reload, with the curated catalogues in each adapter
 module as the offline fallback.
 
 - **Sources**:
-  - `claude` — the `anthropic` provider of the models.dev feed
-    (`https://models.dev/api.json?type=all`, `src/orchestrator/modelsDev.ts`),
-    filtered to `claude-*` ids. Effort levels stay the CLI's own
-    `low|medium|high`, and `claude-sonnet-5` (the `defaultConfig()` default) is
-    always present in the list.
+  - `claude` — **the Claude CLI's own local model catalog first**:
+    `$CLAUDE_CONFIG_DIR`/`~/.claude/cache/model-catalog/*-cc.json` (version 2,
+    `catalog.surface: "cc"`), the freshest file by `fetchedAt`. It is read for
+    ids, labels and per-model effort levels only, with `main` section entries
+    before `overflow` ones, and each model's `thinking.effort_options` becoming
+    its own effort list with the `Default`-badged option as its default. No
+    network and no credential are needed for this path, and a catalog past its
+    `staleAt` is still used — it is the CLI's own last-known-good picker list,
+    and refreshing it is the CLI's job. The `anthropic` provider of the
+    models.dev feed (`https://models.dev/api.json?type=all`,
+    `src/orchestrator/modelsDev.ts`), filtered to `claude-*` ids and carrying no
+    per-model levels, is the **fallback only**, used when the local catalog is
+    missing, unreadable, malformed or empty; both unusable keeps the previous
+    list and marks it stale. The CLI-wide effort vocabulary is
+    `low|medium|high|xhigh|max` (`claude --help`), and `claude-sonnet-5` (the
+    `defaultConfig()` default) is always present in the list.
   - `codex` — `codex app-server` over stdio JSON-RPC (`initialize` →
     `initialized` → `model/list`, JSONL framed). `model/list` is sent with
     `includeHidden: true` and a `limit`, and a non-empty `nextCursor` is
@@ -817,6 +828,9 @@ module as the offline fallback.
 - **CLI capabilities** (probe findings that still hold):
   - `claude` provides no `models` subcommand; non-flag arguments launch an
     interactive prompt session. Health and auth are probed via `claude doctor`.
+    The CLI nonetheless maintains the local `cache/model-catalog/*-cc.json`
+    cache described above, which is the authoritative list its own model picker
+    shows — so discovery reads that file instead of asking the CLI.
   - `antigravity` (`agy`) provides `agy models`, which queries the available
     Gemini and Claude models from the API.
   - `codex` provides no `models` subcommand; positional arguments launch
