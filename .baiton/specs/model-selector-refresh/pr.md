@@ -1,0 +1,8 @@
+# pr result
+
+```json
+{
+  "title": "Refresh model selectors from live provider catalogs",
+  "body": "## What changed\n\n- Added a persisted, stale-aware model catalog and asynchronous discovery from models.dev, Codex app-server, and OpenCode, while retaining curated fallbacks and Antigravity's existing catalog.\n- Updated adapter capabilities, provider routing, and API-key setup to use dynamic catalogs, preserve legacy/custom selections, and expose only configured providers.\n- Reworked configuration and chat selectors for live option updates and provider-first model selection, including stale and custom-selection indicators.\n- Added protocol mirrors, fixtures, focused unit coverage, end-to-end refresh coverage, and README documentation for discovery behavior.\n\n## Why\n\nModel selectors now reflect providers and models that are actually available without blocking activation or dropping existing configuration when refreshes fail.\n\n## Verification\n\n- `npx tsc --noEmit -p tsconfig.json`\n- Targeted model-selector suite: 22 passing\n- Cross-feature targeted suites: 323 passing\n- `npm run test:unit`: 1625 passing, 1 pending; the only failure is the pre-existing native `keytar` packaging-gate check in `test/activation.gating.test.ts`.\n- `npm run test:property`: 1701 passing, 1 pending; same pre-existing keytar failure.\n\n## Follow-up\n\nThe config-panel live-capability seam and its tests are included, but activation still registers the panel with a static `agentCapabilities()` value before the discovery service is created. Reordering that activation wiring is needed for an already-open real configuration panel to receive refreshed capabilities."
+}
+```
