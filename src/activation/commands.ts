@@ -37,6 +37,13 @@
  *   - A {@link vscode.CodeLensProvider} over a spec's `# TODOS` lines exposing
  *     the stage triggers inline per todo.
  *
+ * It also constructs the run store and the spec-less run pipeline (design
+ * "dispatch modes"), supplies the resulting `RunPipelineSeam` to the tool
+ * registry (`start_run` / `investigate`) and to the chat's Investigate promote
+ * flow, remembers the composer's Mode select in `workspaceState` under
+ * {@link CHAT_MODE_KEY}, and holds the one-stage-per-repository lock jointly
+ * across the todo-scoped queues, the spec draft and the run pipeline.
+ *
  * Probe-failure, invalid-result, git, and recovery errors are surfaced through
  * the shared {@link Surface}: chat/tool errors as tool results, command
  * failures as notifications, and everything to the output channel (Req 5.3,
@@ -48,6 +55,8 @@ import * as vscode from 'vscode';
 import { isErr } from '../model/result';
 import { parseSpec, type ParsedSpec } from '../model/parser';
 import { legalActions, type TodoAction } from '../model/todoActions';
+import { DEFAULT_MODE, isRunMode } from '../model/mode';
+import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
 import { initialize } from '../config';
@@ -55,7 +64,9 @@ import type { Config } from '../config';
 import { createGitService } from '../git';
 import {
   createPrTool,
+  createRunPipeline,
   createRunQueue,
+  createRunStore,
   createSpecDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
@@ -65,6 +76,7 @@ import {
 } from '../engine';
 import type {
   DispatchResult,
+  RunPipeline,
   RunQueue,
   SpecDraftOutcome,
   SubmitPrError,
@@ -97,6 +109,7 @@ import type {
   InterventionSeam,
   OrchestratorPhase,
   PresentIntervention,
+  RunPipelineSeam,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
@@ -113,6 +126,7 @@ import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
 import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
 import {
+  createRunPipelineSeam,
   createRunQueueSeam,
   dispatchTrigger,
   STAGE_ROLE,
@@ -139,6 +153,9 @@ import { getModelCatalogStore, getModelDiscovery } from '../extension';
 
 /** The extension settings namespace (matches `src/extension.ts`). */
 const SETTINGS_NS = 'baiton';
+
+/** The `workspaceState` key the composer's Mode select is remembered under. */
+const CHAT_MODE_KEY = 'baiton.chat.mode';
 
 /** The Spec_Explorer tree view id contributed in `package.json` (task 14.1). */
 const SPEC_EXPLORER_VIEW_ID = 'baiton.specExplorer';
@@ -328,6 +345,17 @@ export function registerCommands(
   const repoRoot = workspace.root.fsPath;
   const baitonDir = workspace.baitonDir.fsPath;
   const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
+  /**
+   * The mode the composer's Mode select currently holds. The ChatController
+   * persists it under the same `workspaceState` key (see its `modeMemory` dep
+   * below), so reading the key is how the run-pipeline seam learns the composer
+   * mode without reaching into the controller. A stale or off-union stored value
+   * falls back to Spec, exactly as the controller's own seeding does.
+   */
+  const composerMode = (): RunMode => {
+    const stored = context.workspaceState.get<string>(CHAT_MODE_KEY);
+    return stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
+  };
 
   // --- shared seams -------------------------------------------------------
   const askRegistry = new PendingAskRegistry({
@@ -361,6 +389,39 @@ export function registerCommands(
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
+  // The spec-less run pipeline (design "dispatch modes"): Bug/Quick/Refactor
+  // drive plan -> execute -> review in a per-run worktree, Investigate answers a
+  // question read-only. It is run-scoped, so it sits beside the todo-scoped
+  // queues rather than inside one, and the two exclude each other so only one
+  // stage runs per repository. Manifests, journals and rendered artifacts live
+  // under `.baiton/runs/<run-id>/`; nothing is written under `.baiton/specs/`.
+  const runStore = createRunStore({ workspaceRoot: repoRoot });
+  const runPipeline: RunPipeline = createRunPipeline({
+    workspaceRoot: repoRoot,
+    git,
+    store: runStore,
+    terminalHost,
+    watcherFactory,
+    askWatcherFactory,
+    modelForRole: (role) => modelForRole(cfg(), role),
+    adapterForRole: adapterFor,
+    // Read per run off the live config, like every other config read here.
+    execAttempts: () => cfg().limits.exec_attempts,
+    verify: () => cfg().git.verify,
+    // The other half of the one-stage-per-repository lock: a run refuses while
+    // any spec queue or the spec draft has a stage in flight, and
+    // `RunQueueDeps.isExternallyBusy` / `SpecDraftDeps.isQueueRunning` refuse
+    // while a run does.
+    isSpecBusy: () => [...queues.values()].some((q) => q.isRunning()) || specDraftRunner.isRunning(),
+    onComplete: (outcome) => surface.log(`Baiton: run ${outcome.runId} ${outcome.state}: ${outcome.message}`),
+    report: (detail) => surface.warn(`Baiton: ${detail}`),
+  });
+  const runPipelineSeam: RunPipelineSeam = createRunPipelineSeam(
+    runPipeline,
+    composerMode,
+    (detail) => surface.warn(`Baiton: ${detail}`),
+  );
+
   // The run journal is per spec (`.baiton/specs/<slug>/runs.jsonl`, Req 21), so
   // one serialized queue is built per slug — each bound to its own journal —
   // and cached. Manual mode runs one stage per trigger and the queue itself
@@ -389,8 +450,9 @@ export function registerCommands(
       modelForRole: (role) => modelForRole(cfg(), role),
       adapterForRole: adapterFor,
       report: (error) => surface.reportDispatchError(error),
-      // A spec draft holds the same one-stage-per-repository lock (Req 20.1).
-      isExternallyBusy: () => specDraftRunner.isRunning(),
+      // A spec draft and a spec-less run hold the same one-stage-per-repository
+      // lock (Req 20.1); the run pipeline's `isSpecBusy` is the mirror of this.
+      isExternallyBusy: () => specDraftRunner.isRunning() || runPipeline.isRunning(),
     });
     queues.set(slug, queue);
     return queue;
@@ -473,6 +535,7 @@ export function registerCommands(
     submitPrForSlug,
     confirm,
     interventionSeam,
+    runPipelineSeam,
   );
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
@@ -482,7 +545,9 @@ export function registerCommands(
     services: draftServices,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
-    isQueueRunning: () => [...queues.values()].some((q) => q.isRunning()),
+    // The run pipeline is the third holder of the one-stage-per-repository lock.
+    isQueueRunning: () =>
+      [...queues.values()].some((q) => q.isRunning()) || runPipeline.isRunning(),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -490,7 +555,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam),
+    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -608,16 +673,19 @@ export function registerCommands(
     tools = assembled.value;
   }
 
-  // The orchestrator has two jobs, and each advertises its own tool surface
-  // (Req 11.1): gathering requirements for a new or draft spec, or driving an
-  // approved one. Validation above ran once over the whole registry, so these
-  // only select from the specs it already accepted; a rejected assembly leaves
-  // both phases empty. The controller picks one per send, and the registry
-  // refuses an out-of-phase call even if the model names it anyway.
+  // The orchestrator has three jobs, and each advertises its own tool surface
+  // (Req 11.1): gathering requirements for a new or draft spec, driving an
+  // approved one, or dispatching a spec-less run (the read tools, `ask_user`,
+  // `start_run` and `investigate`). Validation above ran once over the whole
+  // registry, so these only select from the specs it already accepted; a
+  // rejected assembly leaves every phase empty. The controller picks one per
+  // send, and the registry refuses an out-of-phase call even if the model names
+  // it anyway.
   const specsByName = new Map(tools.map((spec) => [spec.name, spec]));
   const toolsByPhase = new Map<OrchestratorPhase, ToolSpec[]>([
     ['gather', specsForPhase(registry, specsByName, 'gather')],
     ['drive', specsForPhase(registry, specsByName, 'drive')],
+    ['run', specsForPhase(registry, specsByName, 'run')],
   ]);
 
   // `baiton.initialize` is registered separately (and unconditionally) so it
@@ -751,6 +819,22 @@ export function registerCommands(
           await context.workspaceState.update('baiton.chat.autoMode', enabled);
         },
       },
+      // The composer's Mode select is remembered per workspace, so a window
+      // reload comes back in the mode the user left it in. Same key the
+      // `composerMode` reader above uses, never `settings.json`.
+      modeMemory: {
+        get: () => context.workspaceState.get<string>(CHAT_MODE_KEY),
+        set: async (mode) => {
+          await context.workspaceState.update(CHAT_MODE_KEY, mode);
+        },
+      },
+      // Run activity: the controller mirrors it to the view (the Mode select is
+      // disabled while a run is in flight), posts a system note when a run
+      // completes, and posts the Investigate promote card.
+      runs: runPipeline,
+      // A Bug/Quick choice on that promote card dispatches through the same
+      // seam the `start_run` tool uses.
+      runPipeline: runPipelineSeam,
     });
   // Re-start the controller on every fresh webview resolve so a reopen or a
   // window reload reloads the current conversation into the new webview
@@ -855,6 +939,10 @@ export function registerCommands(
         .map(([slug]) => slug);
       if (specDraftRunner.isRunning()) {
         running.push('(spec draft)');
+      }
+      const runId = runPipeline.currentRunId();
+      if (runId !== undefined) {
+        running.push(`(run ${runId})`);
       }
       return running;
     },
@@ -1635,10 +1723,12 @@ async function promptForSlug(
 
 /**
  * Build the {@link ToolServices} bundle for the tool registry from the real git
- * service, the run-queue seam, the injected confirmation seam, and the shared
- * intervention seam itself — the seam the inline-card `confirm` adapter wraps,
- * and which `ask_user` asks through directly. It is supplied by the caller so
- * both tool-services bundles share one seam.
+ * service, the run-queue seam, the run-pipeline seam the spec-less dispatch
+ * tools (`start_run` / `investigate`) start a run through, the injected
+ * confirmation seam, and the shared intervention seam itself — the seam the
+ * inline-card `confirm` adapter wraps, and which `ask_user` asks through
+ * directly. Both seams are supplied by the caller so both tool-services bundles
+ * share one of each.
  */
 function buildToolServices(
   repoRoot: string,
@@ -1650,6 +1740,7 @@ function buildToolServices(
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
   confirm: ConfirmSeam,
   intervention: InterventionSeam,
+  runPipeline: RunPipelineSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -1658,6 +1749,7 @@ function buildToolServices(
     confirm,
     intervention,
     runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
+    runPipeline,
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),
