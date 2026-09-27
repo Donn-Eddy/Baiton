@@ -25,6 +25,11 @@
  * Kept as a pure lookup so the brief writer stays testable without a VS Code
  * host.
  *
+ * One stage overrides the per-role text: `investigate` is run by the `reviewer`
+ * role but is a different job (answer a question read-only), so
+ * {@link roleInstructions} returns {@link INVESTIGATE_INSTRUCTION} whenever the
+ * stage is `investigate`, whatever the role.
+ *
  * Besides the per-role prose this module composes the optional ask-relay
  * section of the Brief (`# Asking for permission or a decision`), emitted for
  * agents with no native ask relay; `src/engine/askRelay.ts` owns the wire
@@ -32,6 +37,7 @@
  * the fenced JSON examples so they cannot drift from the parser).
  */
 import type { Role } from '../model/role';
+import type { Stage } from '../model/stage';
 import type { AskRelayDescriptor } from '../adapter';
 import type { RelayAsk } from './askRelay';
 import { serializeAsk, serializeResponse } from './askRelay';
@@ -100,6 +106,26 @@ export const CONTEXT_IS_COMPLETE_INSTRUCTION =
   '`spec.md`, anything under `.baiton/specs`, or any other todo\'s artifacts; ' +
   'the Context is the complete and authoritative statement of your inputs.';
 
+/**
+ * The investigate stage's instructions: answer one question from the code as it
+ * is, read-only, and report a finding rather than a fix. Selected by stage, not
+ * by role — the stage is run by the `reviewer` role but is a different job.
+ * Exported so tests and callers can assert the wording.
+ */
+export const INVESTIGATE_INSTRUCTION = [
+  'You are the investigator. The Context section gives you one question and ' +
+    'the files to start from. Study the repository read-only and answer the ' +
+    'question from the code as it is. Make no code changes: no edits outside ' +
+    'your run directory, no commits, no branches, no stashes.',
+  '',
+  'Answer with a finding: what is actually true of the code, why it is true, ' +
+    'and the evidence (file and symbol names) that grounds it. Do not propose ' +
+    'a fix as though it were the answer; list the follow-up work you would do ' +
+    'as next steps.',
+  '',
+  CONTEXT_IS_COMPLETE_INSTRUCTION,
+].join('\n');
+
 /** The role-specific instruction body that opens the Brief. */
 const ROLE_INSTRUCTIONS: Record<Role, string> = {
   'spec-writer': SPEC_WRITER_INSTRUCTION,
@@ -156,7 +182,13 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
 };
 
 /** The instruction body for a role (the opening section of the Brief). */
-export function roleInstructions(role: Role): string {
+export function roleInstructions(role: Role, stage?: Stage): string {
+  // The investigate stage is run by the `reviewer` role but is a different
+  // job, so the text is selected by stage, not by role. Every other stage
+  // (and every call with no stage) returns exactly what it returned before.
+  if (stage === 'investigate') {
+    return INVESTIGATE_INSTRUCTION;
+  }
   return ROLE_INSTRUCTIONS[role];
 }
 

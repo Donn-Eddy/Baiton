@@ -12,6 +12,7 @@ export const window: {
   showWarningMessage: (message: unknown, ...args: unknown[]) => Promise<unknown>;
   showErrorMessage: (message: unknown, ...args: unknown[]) => Promise<unknown>;
   registerWebviewViewProvider: (viewId: unknown, provider: unknown, options?: unknown) => void;
+  registerTreeDataProvider: (viewId: unknown, provider: unknown) => void;
 };
 
 export const commands: {
@@ -35,6 +36,25 @@ export class Disposable {
   constructor(callOnDispose?: () => void);
   dispose(): void;
   static from(...disposables: unknown[]): Disposable;
+}
+
+export class EventEmitter<T> {
+  readonly event: (listener: (value: T) => void) => Disposable;
+  fire(value: T): void;
+  dispose(): void;
+}
+
+export const TreeItemCollapsibleState: { None: number; Collapsed: number; Expanded: number };
+
+export class TreeItem {
+  constructor(label: unknown, collapsibleState?: number);
+  label: unknown;
+  collapsibleState?: number;
+}
+
+export class ThemeIcon {
+  constructor(id: string);
+  readonly id: string;
 }
 
 export const ViewColumn: { Active: number; Beside: number; One: number; Two: number; Three: number };

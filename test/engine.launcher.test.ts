@@ -381,3 +381,172 @@ describe('launchStage adapter relay files', () => {
     assert.ok(!(host.created[0].shellArgs ?? []).includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
   });
 });
+
+/**
+ * The optional `cwd` run-root override: with it set, everything this launch
+ * writes — the brief, the result path, the asks dir, the adapter relay files —
+ * and the terminal cwd resolve under that root instead of the workspace root,
+ * with nothing written under the workspace root. With it absent the launch is
+ * byte-identical to before (Req 11.1–11.5).
+ */
+describe('launchStage cwd override', () => {
+  let root: string;
+  let runRoot: string;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-launcher-cwd-'));
+    runRoot = path.join(root, '.baiton', 'worktrees', 'r1');
+    fs.mkdirSync(runRoot, { recursive: true });
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const input = (workspaceRoot: string, cwd?: string, relayAsks?: boolean) => ({
+    workspaceRoot,
+    runId: 'run-1',
+    stage: 'execute' as const,
+    role: 'executor' as const,
+    model: 'gemini-3.8-flash',
+    effort: 'high',
+    resume: false,
+    sessionId: 'sess',
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(relayAsks !== undefined ? { relayAsks } : {}),
+  });
+
+  /** A stub adapter that records its requests, optionally returning relay files. */
+  function recordingAdapter(
+    id: string = 'antigravity',
+    files?: RelayFile[],
+  ): { adapter: Adapter; requests: LaunchRequest[] } {
+    const requests: LaunchRequest[] = [];
+    const adapter: Adapter = {
+      id: id as AgentId,
+      acceptsSessionId: false,
+      probe: async (): Promise<ProbeResult> => ({ version: '1', ok: true }),
+      launch: (req) => {
+        requests.push(req);
+        return { shellPath: 'agy', shellArgs: [] };
+      },
+      attach: () => ({ shellPath: 'agy', shellArgs: [] }),
+      ...(files !== undefined ? { relayFiles: () => files } : {}),
+    };
+    return { adapter, requests };
+  }
+
+  it('writes the brief and result under the cwd, not the workspace root', () => {
+    const { adapter } = recordingAdapter();
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    if (!result.ok) {
+      return;
+    }
+    const runDir = path.join(runRoot, '.baiton', 'runs', 'run-1');
+    assert.strictEqual(result.value.briefPath, path.join(runDir, 'brief.md'));
+    assert.strictEqual(result.value.resultPath, path.join(runDir, 'result.json'));
+    assert.ok(fs.existsSync(runDir), 'the run dir exists under the cwd');
+    assert.ok(fs.existsSync(result.value.briefPath), 'the brief is written under the cwd');
+    assert.ok(
+      !fs.existsSync(path.join(root, '.baiton', 'runs', 'run-1')),
+      'nothing is written under the workspace root',
+    );
+  });
+
+  it('creates the terminal with cwd at the run root', () => {
+    const { adapter } = recordingAdapter();
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    assert.strictEqual(host.created.length, 1);
+    assert.strictEqual(host.created[0].cwd, runRoot);
+  });
+
+  it('names the cwd brief path in the initial prompt and the adapter request', () => {
+    const { adapter, requests } = recordingAdapter();
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    const briefPath = path.join(runRoot, '.baiton', 'runs', 'run-1', 'brief.md');
+    const expected = `Read ${briefPath} and do what it says.`;
+    assert.strictEqual(requests[0].prompt, expected);
+    assert.strictEqual(result.ok && result.value.initialPrompt, expected);
+  });
+
+  it('resolves the asks directory under the cwd and names it in the fallback brief', () => {
+    const { adapter } = recordingAdapter('opencode');
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot, true), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    if (!result.ok) {
+      return;
+    }
+    assert.strictEqual(result.value.relay?.dir, asksDirFor(runRoot, 'run-1'));
+    assert.ok(fs.existsSync(asksDirFor(runRoot, 'run-1')), 'asks dir exists under the cwd');
+    assert.ok(!fs.existsSync(asksDirFor(root, 'run-1')), 'no asks dir under the workspace root');
+    const brief = fs.readFileSync(result.value.briefPath, 'utf8');
+    assert.ok(brief.includes(asksDirFor(runRoot, 'run-1')), 'brief names the cwd asks directory');
+  });
+
+  it('writes adapter relay files under the cwd run dir', () => {
+    const rel = path.join('.baiton', 'runs', 'run-1', '.agents', 'hooks.json');
+    const { adapter } = recordingAdapter('antigravity', [{ path: rel, content: '{}\n' }]);
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot, true), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    assert.strictEqual(fs.readFileSync(path.join(runRoot, rel), 'utf8'), '{}\n');
+    assert.ok(!fs.existsSync(path.join(root, rel)), 'nothing written under the workspace root');
+  });
+
+  it('refuses a relay file escaping the cwd run dir, creating nothing', () => {
+    const escape = path.join('.baiton', 'runs', 'other', 'hooks.json');
+    const { adapter, requests } = recordingAdapter('antigravity', [{ path: escape, content: '{}' }]);
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root, runRoot, true), { adapter, terminalHost: host });
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'launch-args');
+    }
+    assert.strictEqual(requests.length, 0, 'launch() is never called');
+    assert.strictEqual(host.created.length, 0);
+    assert.ok(!fs.existsSync(path.join(runRoot, escape)));
+    assert.ok(!fs.existsSync(path.join(runRoot, '.baiton', 'runs', 'run-1')));
+    assert.ok(!fs.existsSync(path.join(root, '.baiton', 'runs')));
+  });
+
+  for (const bad of ['relative/dir', '']) {
+    it(`halts with root-resolution for an invalid cwd (${JSON.stringify(bad)}), creating nothing`, () => {
+      const { adapter, requests } = recordingAdapter();
+      const host = new StubTerminalHost();
+      const result = launchStage(input(root, bad), { adapter, terminalHost: host });
+      assert.ok(!result.ok);
+      if (!result.ok) {
+        assert.strictEqual(result.error.kind, 'root-resolution');
+      }
+      assert.strictEqual(requests.length, 0, 'launch() is never called');
+      assert.strictEqual(host.created.length, 0);
+      assert.ok(!fs.existsSync(path.join(root, '.baiton', 'runs')));
+      assert.ok(!fs.existsSync(path.join(runRoot, '.baiton')));
+    });
+  }
+
+  it('is byte-identical to the previous behaviour when cwd is absent', () => {
+    const { adapter, requests } = recordingAdapter();
+    const host = new StubTerminalHost();
+    const result = launchStage(input(root), { adapter, terminalHost: host });
+    assert.ok(result.ok);
+    if (!result.ok) {
+      return;
+    }
+    const runDir = path.join(root, '.baiton', 'runs', 'run-1');
+    const briefPath = path.join(runDir, 'brief.md');
+    assert.strictEqual(result.value.briefPath, briefPath);
+    assert.strictEqual(result.value.resultPath, path.join(runDir, 'result.json'));
+    assert.strictEqual(result.value.initialPrompt, `Read ${briefPath} and do what it says.`);
+    assert.strictEqual(requests[0].prompt, `Read ${briefPath} and do what it says.`);
+    assert.deepStrictEqual(result.value.launchSpec, { shellPath: 'agy', shellArgs: [] });
+    assert.strictEqual(host.created[0].cwd, root);
+    assert.ok(fs.existsSync(briefPath));
+    assert.ok(!fs.existsSync(path.join(runRoot, '.baiton')), 'nothing written under the worktree');
+  });
+});

@@ -21,6 +21,16 @@
  *   todo list and writes `.baiton/specs/<slug>/spec.md`. Confirms a summary of
  *   the requirements through the confirm seam first; a decline drafts nothing.
  *   Returns as soon as the sub-agent is running, carrying its run id.
+ * - `start_run(mode, statement, files, reproduction?)` (dispatch) — start one
+ *   spec-less bug/quick/refactor run. It raises the confirm card (mode,
+ *   one-line statement, guessed files, target branch) through the intervention
+ *   seam, returns as soon as the run is launched, and writes nothing on a
+ *   decline.
+ * - `investigate(question, files)` (dispatch) — start one read-only
+ *   investigation. It raises the same confirm card (mode, the question as the
+ *   one-line statement, guessed files, target branch) through the intervention
+ *   seam, returns as soon as the run is launched, and writes nothing on a
+ *   decline.
  * - `run(slug, todo, stage)` (dispatch) — dispatch exactly one legal stage
  *   transition (`plan`, `execute` or `review`) through the run-queue seam and
  *   block until it reaches a terminal outcome; refuse when a stage is already
@@ -32,7 +42,11 @@
  *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
  * `draft_spec` only while gathering requirements, `run` and `submit_pr` only
- * while driving an approved spec, and `ask_user` plus `approve_spec` in both.
+ * while driving an approved spec, `approve_spec` in both, and `ask_user` in all
+ * three — a run-mode conversation agrees the work through it too.
+ * `start_run` and `investigate` belong only to the `run` phase, so they are
+ * unavailable in a Spec conversation, exactly as `draft_spec`, `run` and
+ * `submit_pr` are unavailable in a run-mode one.
  *
  * Every extension write under the spec folder is committed on the spec branch
  * as `spec(<slug>): <id> <what>` before any subsequent stage (Req 17.1); the
@@ -44,6 +58,7 @@ import * as path from 'path';
 import { approvalHash } from '../model/hash';
 import { parseSpec } from '../model/parser';
 import { validateSpec } from '../model/validator';
+import { RunMode, isRunMode } from '../model/mode';
 import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
 import { Tool, ToolContext, ToolResult } from './guard';
@@ -55,6 +70,8 @@ export function createControlTools(services: ToolServices): Tool[] {
   return [
     askUserTool(services),
     draftSpecTool(services),
+    startRunTool(services),
+    investigateTool(services),
     approveSpecTool(services),
     runTool(services),
     submitPrTool(services),
@@ -75,7 +92,7 @@ function askUserTool(services: ToolServices): Tool {
     description:
       'Ask the user a question and wait for their answer: offer a short list of options, accept a typed reply, or both. Use this instead of ending your turn with a question.',
     mutating: false,
-    phases: ['gather', 'drive'],
+    phases: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
       properties: {
@@ -266,6 +283,207 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * `start_run(mode, statement, files, reproduction?)` — start one spec-less
+ * bug/quick/refactor run through the run-pipeline seam.
+ *
+ * Every argument is validated before the card is raised and before the seam is
+ * touched, so a malformed call asks nothing and dispatches nothing. A decline
+ * writes nothing and dispatches nothing. Unlike `run`, the tool returns as soon
+ * as the run is launched — it does not block on the run finishing. It is a
+ * dispatch tool, so the guard disables it under Restricted Mode (Req 22.2).
+ */
+function startRunTool(services: ToolServices): Tool {
+  return {
+    name: 'start_run',
+    description:
+      'Start a spec-less run (bug, quick or refactor): hand a one-line statement of the work and the files involved to the planner, which plans, executes and reviews it on its own branch.',
+    mutating: false,
+    phases: ['run'],
+    dispatch: true,
+    schema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['bug', 'quick', 'refactor'] },
+        statement: { type: 'string' },
+        files: { type: 'array', items: { type: 'string' } },
+        reproduction: { type: 'string' },
+      },
+      required: ['mode', 'statement', 'files'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, _tc: ToolContext): Promise<ToolResult> {
+      const mode = readString(args, 'mode');
+      if (mode === undefined || !isRunMode(mode) || !RUN_TOOL_MODES.includes(mode)) {
+        return {
+          ok: false,
+          error:
+            `start_run "mode" must be one of bug, quick, refactor: ${mode}. ` +
+            'Use investigate for a read-only question, and the spec tools for spec work.',
+        };
+      }
+
+      const statementRead = readOneLine(args, 'statement', 'start_run');
+      if (!statementRead.ok) {
+        return { ok: false, error: statementRead.error };
+      }
+      const statement = statementRead.value;
+
+      const filesRead = readFileList(args, 'start_run');
+      if (!filesRead.ok) {
+        return { ok: false, error: filesRead.error };
+      }
+      const files = filesRead.files;
+
+      let reproduction: string | undefined;
+      if (typeof args === 'object' && args !== null) {
+        const raw = (args as Record<string, unknown>)['reproduction'];
+        if (raw !== undefined) {
+          if (typeof raw !== 'string' || raw.trim().length === 0) {
+            return {
+              ok: false,
+              error: 'start_run "reproduction" must be a non-empty string when given',
+            };
+          }
+          reproduction = raw.trim();
+        }
+      }
+
+      if (services.runPipeline === undefined) {
+        return { ok: false, error: 'start_run is not available in this host' };
+      }
+
+      const branch = await targetBranch(services);
+      const detail = [
+        `Mode: ${mode}`,
+        `Work: ${statement}`,
+        `Files: ${files.length > 0 ? files.join(', ') : '(none guessed)'}`,
+        ...(reproduction !== undefined ? [`Reproduction: ${reproduction}`] : []),
+        `Target branch: ${branch}`,
+        'The run works on its own branch and worktree; nothing outside .baiton/runs/ and .baiton/worktrees/ changes until you merge it.',
+      ].join('\n');
+      const confirmed = await askConfirmCard(services, `Start a ${mode} run?`, detail);
+      if (!confirmed) {
+        return { ok: false, error: `starting the ${mode} run was declined; nothing was written` };
+      }
+
+      const outcome = await services.runPipeline.start({
+        mode,
+        statement,
+        files,
+        ...(reproduction !== undefined ? { reproduction } : {}),
+      });
+      switch (outcome.kind) {
+        case 'started':
+          return {
+            ok: true,
+            data: {
+              runId: outcome.runId,
+              mode,
+              ...(outcome.branch !== undefined ? { branch: outcome.branch } : {}),
+            },
+          };
+        case 'busy':
+          return {
+            ok: false,
+            error: 'a stage is already running for this repository; try again after it finishes',
+          };
+        case 'refused':
+          return { ok: false, error: `the run did not start: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'start_run dispatch returned an unknown outcome' };
+      }
+    },
+  };
+}
+
+/**
+ * `investigate(question, files)` — start one read-only investigation through
+ * the run-pipeline seam.
+ *
+ * Arguments are validated before the card and before the seam, so a malformed
+ * call asks nothing and dispatches nothing; a decline writes nothing. The tool
+ * returns as soon as the run is launched rather than blocking on the finding.
+ * It is a dispatch tool, so the guard disables it under Restricted Mode
+ * (Req 22.2).
+ */
+function investigateTool(services: ToolServices): Tool {
+  return {
+    name: 'investigate',
+    description:
+      'Answer a question about the repository with a read-only investigation: the investigator studies the named files and writes a one-line finding, the files it looked at, and suggested next steps.',
+    mutating: false,
+    phases: ['run'],
+    dispatch: true,
+    schema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string' },
+        files: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['question', 'files'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, _tc: ToolContext): Promise<ToolResult> {
+      const questionRead = readOneLine(args, 'question', 'investigate');
+      if (!questionRead.ok) {
+        return { ok: false, error: questionRead.error };
+      }
+      const question = questionRead.value;
+
+      const filesRead = readFileList(args, 'investigate');
+      if (!filesRead.ok) {
+        return { ok: false, error: filesRead.error };
+      }
+      const files = filesRead.files;
+
+      if (services.runPipeline === undefined) {
+        return { ok: false, error: 'investigate is not available in this host' };
+      }
+
+      const branch = await targetBranch(services);
+      const detail = [
+        'Mode: investigate',
+        `Question: ${question}`,
+        `Files: ${files.length > 0 ? files.join(', ') : '(none guessed)'}`,
+        `Target branch: ${branch}`,
+        'Read-only: no branch, no worktree and no commit. The only write is the finding under .baiton/runs/.',
+      ].join('\n');
+      const confirmed = await askConfirmCard(services, 'Investigate this question?', detail);
+      if (!confirmed) {
+        return { ok: false, error: 'the investigation was declined; nothing was written' };
+      }
+
+      // The pipeline's manifest stores the question as the run's `statement`.
+      const outcome = await services.runPipeline.start({
+        mode: 'investigate',
+        statement: question,
+        files,
+      });
+      switch (outcome.kind) {
+        case 'started':
+          return {
+            ok: true,
+            data: {
+              runId: outcome.runId,
+              mode: 'investigate',
+              ...(outcome.branch !== undefined ? { branch: outcome.branch } : {}),
+            },
+          };
+        case 'busy':
+          return {
+            ok: false,
+            error: 'a stage is already running for this repository; try again after it finishes',
+          };
+        case 'refused':
+          return { ok: false, error: `the investigation did not start: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'investigate dispatch returned an unknown outcome' };
+      }
+    },
+  };
 }
 
 /** `approve_spec(slug)` — approve (or re-approve) a spec (Req 16, 5.2, 5.5). */
@@ -683,6 +901,101 @@ function readBoolean(args: unknown, key: string): { ok: true; value: boolean | u
     return { ok: false, error: `ask_user "${key}" must be a boolean` };
   }
   return { ok: true, value };
+}
+
+/**
+ * The three build modes `start_run` accepts. `investigate` is dispatched by its
+ * own tool and `spec` is the spec pipeline, so neither is accepted here.
+ */
+const RUN_TOOL_MODES: readonly RunMode[] = ['bug', 'quick', 'refactor'] as const;
+
+/**
+ * Read the `files` array of repository-relative paths. Validation is purely
+ * lexical — non-empty, relative, no `..` segment — so the tool never touches
+ * the filesystem; the planner brief resolves the paths. Entries are trimmed and
+ * exact duplicates dropped, first-seen order preserved. An empty array is legal
+ * (nothing was guessed).
+ */
+function readFileList(
+  args: unknown,
+  tool: string,
+): { ok: true; files: string[] } | { ok: false; error: string } {
+  const raw =
+    typeof args === 'object' && args !== null
+      ? (args as Record<string, unknown>)['files']
+      : undefined;
+  if (raw === undefined || !Array.isArray(raw)) {
+    return { ok: false, error: `${tool} requires a "files" array of repository-relative paths` };
+  }
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      return { ok: false, error: `each ${tool} "files" entry must be a non-empty string` };
+    }
+    const trimmed = entry.trim();
+    if (path.isAbsolute(trimmed) || trimmed.split(/[\\/]/).includes('..')) {
+      return {
+        ok: false,
+        error: `${tool} "files" must be repository-relative paths without "..": ${entry}`,
+      };
+    }
+    if (!seen.has(trimmed)) {
+      seen.add(trimmed);
+      files.push(trimmed);
+    }
+  }
+  return { ok: true, files };
+}
+
+/**
+ * Read a required single-line string. The manifest stores a one-line
+ * statement, so an embedded newline is rejected rather than silently folded.
+ */
+function readOneLine(
+  args: unknown,
+  key: string,
+  tool: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const raw = readString(args, key);
+  if (raw === undefined || raw.trim().length === 0) {
+    return { ok: false, error: `${tool} requires a non-empty string "${key}"` };
+  }
+  if (raw.includes('\n')) {
+    return { ok: false, error: `${tool} "${key}" must be a single line` };
+  }
+  return { ok: true, value: raw.trim() };
+}
+
+/**
+ * Raise one confirm card with the given prompt and detail. The intervention
+ * seam renders them as a card when wired; a host with only the legacy confirm
+ * seam gets the same text verbatim, so both paths read identically.
+ */
+async function askConfirmCard(
+  services: ToolServices,
+  prompt: string,
+  detail: string,
+): Promise<boolean> {
+  if (services.intervention !== undefined) {
+    const answer = await services.intervention.ask({ kind: 'confirm', prompt, detail });
+    return answer.kind === 'approved';
+  }
+  return services.confirm.confirm(`${prompt}\n\n${detail}`);
+}
+
+/**
+ * The branch the card names as the run's target. The card must never fail
+ * because git did (a throwing stub, a detached HEAD), so a failure falls back
+ * to the configured base; the pipeline re-derives the real base when it starts.
+ */
+async function targetBranch(services: ToolServices): Promise<string> {
+  try {
+    const b = (await services.git.currentBranch()).trim();
+    return b === '' ? services.gitSettings.base : b;
+  } catch {
+    return services.gitSettings.base;
+  }
 }
 
 /** Render a caught git error into a user-facing message. */

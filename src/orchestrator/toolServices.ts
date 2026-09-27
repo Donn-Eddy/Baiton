@@ -10,7 +10,14 @@
  */
 import { GitService } from '../git';
 import type { InterventionSeam } from './interventions';
-import { Clock, ConfirmSeam, DraftSpecSeam, IdGenerator, RunQueueSeam } from './seams';
+import {
+  Clock,
+  ConfirmSeam,
+  DraftSpecSeam,
+  IdGenerator,
+  RunPipelineSeam,
+  RunQueueSeam,
+} from './seams';
 
 /** The git settings the approval flow needs (remote to fetch, base branch). */
 export interface ToolGitSettings {
@@ -36,6 +43,8 @@ export interface ToolGitSettings {
  *                 questions through (question / confirm / permission).
  * - `runQueue`  — the serialized run-queue seam `run` dispatches into (Req 10.3).
  * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
+ * - `runPipeline` — the spec-less run pipeline seam `start_run` and
+ *                 `investigate` dispatch into.
  * - `clock`     — wall clock for transcript timestamps.
  * - `ids`       — identifier source (reserved for tool-generated ids).
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
@@ -61,6 +70,13 @@ export interface ToolServices {
    * builds a registry; `draft_spec` then reports it as unavailable.
    */
   draftSpec?: DraftSpecSeam;
+  /**
+   * The spec-less run pipeline the `start_run` and `investigate` tools dispatch
+   * into. Optional so a host that has not wired the run pipeline still builds a
+   * registry; both tools then report themselves as unavailable and dispatch
+   * nothing.
+   */
+  runPipeline?: RunPipelineSeam;
   clock: Clock;
   ids: IdGenerator;
   gitSettings: ToolGitSettings;

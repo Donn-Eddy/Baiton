@@ -5,6 +5,7 @@ import type {
   PlanResult,
   PlanReviewResult,
   ExecuteResult,
+  InvestigateResult,
   PrResult,
   SpecDraftResult,
   ReviewResult,
@@ -134,6 +135,13 @@ const specDraftArb: fc.Arbitrary<SpecDraftResult> = fc.record({
   ),
 });
 
+/** A conformant {@link InvestigateResult}; the finding is non-empty. */
+const investigateArb: fc.Arbitrary<InvestigateResult> = fc.record({
+  finding: fc.string({ minLength: 1, maxLength: 30 }),
+  files: filesArb,
+  next_steps: fc.array(textArb, { maxLength: 5 }),
+});
+
 const RESULT_ARBS: Record<Stage, fc.Arbitrary<StageResult>> = {
   'spec-draft': specDraftArb as fc.Arbitrary<StageResult>,
   plan: planArb as fc.Arbitrary<StageResult>,
@@ -141,6 +149,7 @@ const RESULT_ARBS: Record<Stage, fc.Arbitrary<StageResult>> = {
   execute: executeArb as fc.Arbitrary<StageResult>,
   review: reviewArb as fc.Arbitrary<StageResult>,
   pr: prArb as fc.Arbitrary<StageResult>,
+  investigate: investigateArb as fc.Arbitrary<StageResult>,
 };
 
 // --- Property --------------------------------------------------------------

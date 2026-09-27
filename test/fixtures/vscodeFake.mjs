@@ -29,6 +29,8 @@ export const window = {
   showErrorMessage: (message, ...args) => fake().window.showErrorMessage(message, ...args),
   registerWebviewViewProvider: (viewId, provider, options) =>
     fake().window.registerWebviewViewProvider(viewId, provider, options),
+  registerTreeDataProvider: (viewId, provider) =>
+    fake().window.registerTreeDataProvider(viewId, provider),
 };
 
 export const commands = {
@@ -82,6 +84,49 @@ export class Disposable {
         d?.dispose?.();
       }
     });
+  }
+}
+
+// --- Tree view surface (runsExplorer / specExplorer tests) ------------------
+// Concrete value classes, like Disposable/ViewColumn above: the tree glue only
+// needs them to behave, not to be observed by a test through `fake()`.
+
+/** A working event emitter, so a provider's `onDidChangeTreeData` is testable. */
+export class EventEmitter {
+  constructor() {
+    this.listeners = new Set();
+  }
+  get event() {
+    return (listener) => {
+      this.listeners.add(listener);
+      return new Disposable(() => this.listeners.delete(listener));
+    };
+  }
+  fire(value) {
+    for (const l of [...this.listeners]) {
+      l(value);
+    }
+  }
+  dispose() {
+    this.listeners.clear();
+  }
+}
+
+/** Whether a tree item is a leaf, collapsed, or expanded. */
+export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
+
+/** One rendered tree row; the provider assigns the rest of its fields directly. */
+export class TreeItem {
+  constructor(label, collapsibleState) {
+    this.label = label;
+    this.collapsibleState = collapsibleState;
+  }
+}
+
+/** A codicon reference, identified by its id. */
+export class ThemeIcon {
+  constructor(id) {
+    this.id = id;
   }
 }
 

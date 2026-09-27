@@ -267,6 +267,35 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       }
     });
 
+    it('the run phase assembles the read tools, ask_user and the two dispatch tools', () => {
+      const repo = newRepo();
+      const registry = createToolRegistry(makeServices(repo));
+
+      const result = registry.assembleFor('run');
+      assert.strictEqual(result.ok, true, 'the run phase must assemble');
+      if (!result.ok) {
+        return;
+      }
+      const names = result.value.map((s) => s.name);
+      for (const expected of ['start_run', 'investigate', 'ask_user', 'read_file']) {
+        assert.ok(names.includes(expected), `the run phase advertises "${expected}"`);
+      }
+      for (const absent of ['run', 'draft_spec', 'submit_pr', 'approve_spec', 'add_todo']) {
+        assert.ok(!names.includes(absent), `the run phase must not advertise "${absent}"`);
+      }
+
+      const byName = new Map(registry.definitionsFor('run').map((d) => [d.name, d]));
+      for (const spec of result.value) {
+        assert.strictEqual(
+          spec.description,
+          byName.get(spec.name)!.description,
+          `"${spec.name}" carries its tool's own description`,
+        );
+        assert.notStrictEqual(spec.description.trim(), '');
+        assert.notStrictEqual(spec.description, spec.name);
+      }
+    });
+
     it('validates only the phase it assembles, so another phase\'s bad description cannot block it', () => {
       const good: Tool = fakeTool('gather_only', 'a perfectly good description');
       good.phases = ['gather'];

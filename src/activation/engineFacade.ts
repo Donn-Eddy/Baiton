@@ -1,6 +1,8 @@
 /**
  * The engine facade that binds a stage/action trigger to the run queue
- * (task 15.2; design "Stage engine").
+ * (task 15.2; design "Stage engine"). It also binds the spec-less dispatch
+ * tools (`start_run` / `investigate`) to the run pipeline through
+ * {@link createRunPipelineSeam} (design "dispatch modes").
  *
  * Both the orchestrator's `run` tool (through {@link RunQueueSeam}) and the VS
  * Code stage-trigger commands and CodeLens ask for "run this stage/action on
@@ -29,14 +31,24 @@
  * triggers reaching the queue relay asks identically.
  */
 import * as path from 'path';
+import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
 import type {
   DispatchResult,
+  RunPipeline,
+  RunPipelineRequest,
   RunQueue,
   TransitionAction,
 } from '../engine';
-import type { RunDispatchOutcome, RunDispatchRequest, RunQueueSeam } from '../orchestrator';
+import type {
+  RunDispatchOutcome,
+  RunDispatchRequest,
+  RunPipelineSeam,
+  RunQueueSeam,
+  StartRunOutcome,
+  StartRunRequest,
+} from '../orchestrator';
 import type { Adapter } from '../adapter';
 import { latestStart, parseJournal, resumableSessionId, JournalEntry } from '../journal';
 
@@ -70,6 +82,11 @@ export const STAGE_ROLE: Record<Stage, Role> = {
   execute: 'executor',
   review: 'reviewer',
   pr: 'pr-writer',
+  // `investigate` is run-scoped and runs through the run pipeline, never
+  // through the todo-scoped queue; the existing `reviewer` role already has
+  // exactly the surface it needs (read + search + shell, writes only its run
+  // result), so no new role is introduced.
+  investigate: 'reviewer',
 };
 
 /** The lifecycle action a stage maps to, or `undefined` for `plan-review`. */
@@ -82,6 +99,8 @@ function actionForStage(stage: Stage): TransitionAction | undefined {
     case 'review':
       return 'review';
     case 'plan-review':
+      // `investigate` lands in the `default:` arm below for the same reason:
+      // it is dispatched by the run pipeline, not the per-todo queue.
       return undefined;
     default:
       return undefined;
@@ -206,6 +225,52 @@ export function createRunQueueSeam(
  */
 function outcomeRunId(result: Extract<DispatchResult, { ok: true }>): string {
   return result.outcome.kind;
+}
+
+/**
+ * A {@link RunPipelineSeam} for the `start_run` / `investigate` dispatch tools,
+ * backed by the real run pipeline.
+ *
+ * The seam is narrower than {@link RunPipelineRequest} on purpose: a tool knows
+ * the mode it was called with, but only the host knows what the composer's Mode
+ * select said, so this adapter fills `composerMode` from the host and derives
+ * `explicitMode` — true exactly when the orchestrator dispatched a mode other
+ * than the one the user selected (an Investigate dispatched from a Bug
+ * conversation, say).
+ *
+ * It resolves as soon as the run is launched: the pipeline's `completed`
+ * promise is deliberately not awaited here (the chat mirrors completion through
+ * `RunPipeline.onChange`), only guarded, so a rejection can never surface as an
+ * unhandled rejection in the extension host.
+ */
+export function createRunPipelineSeam(
+  pipeline: Pick<RunPipeline, 'start'>,
+  composerMode: () => RunMode,
+  report?: (message: string) => void,
+): RunPipelineSeam {
+  return {
+    async start(req: StartRunRequest): Promise<StartRunOutcome> {
+      const composer = composerMode();
+      const request: RunPipelineRequest = {
+        mode: req.mode,
+        composerMode: composer,
+        explicitMode: req.mode !== composer,
+        statement: req.statement,
+        files: [...req.files],
+        ...(req.reproduction !== undefined ? { reproduction: req.reproduction } : {}),
+      };
+      const result = await pipeline.start(request);
+      if (result.ok) {
+        void result.completed.catch((e: unknown) => {
+          report?.(`run ${result.runId} failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+        return { kind: 'started', runId: result.runId, branch: result.manifest.branch };
+      }
+      return result.error.kind === 'busy'
+        ? { kind: 'busy' }
+        : { kind: 'refused', reason: result.error.message };
+    },
+  };
 }
 
 /**

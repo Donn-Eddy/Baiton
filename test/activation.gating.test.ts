@@ -19,6 +19,13 @@ import {
 } from '../src/activation/executable';
 import { isErr, isOk } from '../src/model/result';
 import { AGENT_BINARY } from '../src/adapter/adapter';
+import { createRunPipelineSeam } from '../src/activation/engineFacade';
+import type {
+  RunPipelineOutcome,
+  RunPipelineRequest,
+  RunPipelineStart,
+} from '../src/engine/runPipeline';
+import type { RunManifest } from '../src/engine/runStore';
 
 /**
  * Unit tests for workspace resolution, the engine-version guard, executable
@@ -49,6 +56,15 @@ import { AGENT_BINARY } from '../src/adapter/adapter';
  *   (Req 23.1, 23.2, 23.4); an executable-override setting declared for every
  *   AGENT_BINARY id (Req 22.7); baiton.openConfigPanel and baiton.initialize
  *   contributed without commandPalette gating.
+ * - createRunPipelineSeam: a started run maps to `started` carrying the
+ *   manifest's branch; `composerMode` is read per call and copied onto the
+ *   request, with `explicitMode` false when it equals the dispatched mode and
+ *   true when it differs; `files` is copied rather than aliased; `reproduction`
+ *   is omitted from the request when absent and forwarded when present; a
+ *   `busy` refusal maps to `busy` with no reason leaked and every other refusal
+ *   kind to `refused` with the error's message; and a rejecting `completed`
+ *   promise reaches the injected `report` (naming the run id) without becoming
+ *   an unhandled rejection, and is equally safe with no `report` bound.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -391,7 +407,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer and bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+  it('contributes the Spec Explorer, the Runs view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
     interface ViewContrib {
       id: string;
       name?: string;
@@ -419,9 +435,9 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.ok(views, 'views must be present');
     assert.deepStrictEqual(
       views.baiton?.map((v) => v.id),
-      ['baiton.specExplorer', 'baiton.configPanel'],
+      ['baiton.specExplorer', 'baiton.runsView', 'baiton.configPanel'],
     );
-    const configView = views.baiton?.[1];
+    const configView = views.baiton?.find((v) => v.id === 'baiton.configPanel');
     assert.strictEqual(configView?.type, 'webview');
     assert.strictEqual(configView?.visibility, 'collapsed');
     assert.deepStrictEqual(views['baiton-chat']?.map((v) => v.id), ['baiton.chatView']);
@@ -671,3 +687,152 @@ function productionPackageDirs(root: string): string[] | undefined {
     .filter(([key, meta]) => key.startsWith('node_modules/') && meta.dev !== true)
     .map(([key]) => path.join(root, key));
 }
+
+/** A `RunPipeline.start` double that records its request and answers a scripted result. */
+function fakePipeline(answer: RunPipelineStart) {
+  const requests: RunPipelineRequest[] = [];
+  return {
+    requests,
+    start: async (req: RunPipelineRequest): Promise<RunPipelineStart> => {
+      requests.push(req);
+      return answer;
+    },
+  };
+}
+
+/**
+ * A `{ ok: true }` start result. Only `manifest.branch` is read by the seam, so
+ * the manifest is a minimal literal cast rather than a hand-built whole one.
+ */
+function startedResult(
+  runId: string,
+  branch: string,
+  completed: Promise<RunPipelineOutcome>,
+): RunPipelineStart {
+  return { ok: true, runId, manifest: { branch } as RunManifest, completed };
+}
+
+/** A `completed` promise that never settles, for the cases that ignore it. */
+function pendingCompletion(): Promise<RunPipelineOutcome> {
+  return new Promise<RunPipelineOutcome>(() => {});
+}
+
+describe('createRunPipelineSeam', () => {
+  it('maps a started run to started with the manifest branch', async () => {
+    const pipeline = fakePipeline(startedResult('bug-1', 'baiton/bug/bug-1', pendingCompletion()));
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+    const outcome = await seam.start({ mode: 'bug', statement: 'crash on save', files: [] });
+
+    assert.deepStrictEqual(outcome, {
+      kind: 'started',
+      runId: 'bug-1',
+      branch: 'baiton/bug/bug-1',
+    });
+  });
+
+  it('reads composerMode per call and leaves explicitMode false when it matches', async () => {
+    const pipeline = fakePipeline(startedResult('bug-1', 'b', pendingCompletion()));
+    let reads = 0;
+    const seam = createRunPipelineSeam(pipeline, () => {
+      reads += 1;
+      return 'bug';
+    });
+
+    await seam.start({ mode: 'bug', statement: 's', files: [] });
+    await seam.start({ mode: 'bug', statement: 's', files: [] });
+
+    assert.strictEqual(reads, 2);
+    assert.strictEqual(pipeline.requests.length, 2);
+    for (const request of pipeline.requests) {
+      assert.strictEqual(request.composerMode, 'bug');
+      assert.strictEqual(request.explicitMode, false);
+    }
+  });
+
+  it('sets explicitMode when the dispatched mode differs from the composer mode', async () => {
+    const pipeline = fakePipeline(startedResult('inv-1', 'b', pendingCompletion()));
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+    await seam.start({ mode: 'investigate', statement: 'why?', files: [] });
+
+    const request = pipeline.requests[0];
+    assert.strictEqual(request.mode, 'investigate');
+    assert.strictEqual(request.composerMode, 'bug');
+    assert.strictEqual(request.explicitMode, true);
+  });
+
+  it('copies files rather than aliasing the caller array', async () => {
+    const pipeline = fakePipeline(startedResult('bug-1', 'b', pendingCompletion()));
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+    const files = ['src/a.ts'];
+
+    await seam.start({ mode: 'bug', statement: 's', files });
+    files.push('src/b.ts');
+
+    assert.deepStrictEqual(pipeline.requests[0].files, ['src/a.ts']);
+  });
+
+  it('omits reproduction when the caller omits it and forwards it when present', async () => {
+    const pipeline = fakePipeline(startedResult('bug-1', 'b', pendingCompletion()));
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+    await seam.start({ mode: 'bug', statement: 's', files: [] });
+    assert.strictEqual('reproduction' in pipeline.requests[0], false);
+
+    await seam.start({ mode: 'bug', statement: 's', files: [], reproduction: 'save twice' });
+    assert.strictEqual(pipeline.requests[1].reproduction, 'save twice');
+  });
+
+  it('maps a busy refusal to busy with no reason leaked', async () => {
+    const pipeline = fakePipeline({
+      ok: false,
+      error: { kind: 'busy', message: 'a stage is already running' },
+    });
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+    const outcome = await seam.start({ mode: 'bug', statement: 's', files: [] });
+
+    assert.deepStrictEqual(outcome, { kind: 'busy' });
+  });
+
+  it('maps every other refusal kind to refused with the error message', async () => {
+    const kinds = ['invalid-mode', 'detached-head', 'no-base-head', 'manifest', 'worktree'] as const;
+    for (const kind of kinds) {
+      const message = `${kind} went wrong`;
+      const pipeline = fakePipeline({ ok: false, error: { kind, message } });
+      const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+      const outcome = await seam.start({ mode: 'bug', statement: 's', files: [] });
+
+      assert.deepStrictEqual(outcome, { kind: 'refused', reason: message }, kind);
+    }
+  });
+
+  it('swallows a rejecting completed promise and reports it naming the run id', async () => {
+    const completed = Promise.reject(new Error('manifest write failed'));
+    const pipeline = fakePipeline(startedResult('bug-7', 'b', completed));
+    const reported: string[] = [];
+    const seam = createRunPipelineSeam(pipeline, () => 'bug', (m) => reported.push(m));
+
+    const outcome = await seam.start({ mode: 'bug', statement: 's', files: [] });
+    assert.strictEqual(outcome.kind, 'started');
+
+    await new Promise((r) => setTimeout(r, 0));
+    assert.strictEqual(reported.length, 1);
+    assert.ok(reported[0].includes('bug-7'), reported[0]);
+    assert.ok(reported[0].includes('manifest write failed'), reported[0]);
+  });
+
+  it('is safe with no report sink when completed rejects', async () => {
+    const completed = Promise.reject(new Error('boom'));
+    const pipeline = fakePipeline(startedResult('bug-8', 'b', completed));
+    const seam = createRunPipelineSeam(pipeline, () => 'bug');
+
+    const outcome = await seam.start({ mode: 'bug', statement: 's', files: [] });
+    assert.strictEqual(outcome.kind, 'started');
+
+    // No unhandled rejection: the seam attached its own catch before resolving.
+    await new Promise((r) => setTimeout(r, 0));
+  });
+});

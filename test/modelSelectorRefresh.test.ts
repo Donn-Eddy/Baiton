@@ -1388,6 +1388,7 @@ describe('model selector refresh (T15 end to end)', () => {
       ['send', 'button'],
       ['stop', 'button'],
       ['auto-mode', 'button'],
+      ['mode-select', 'select'],
       ['new-chat', 'button'],
       ['session-list', 'div'],
       ['provider-select', 'select'],

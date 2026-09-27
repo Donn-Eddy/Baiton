@@ -314,10 +314,12 @@ export interface RunQueueDeps {
    */
   newSessionId?: () => string;
   /**
-   * Reports a stage running outside this queue — today the spec-draft runner,
-   * which is spec-scoped and so cannot be expressed as a queue request. The
-   * queue refuses a dispatch as `busy` while it answers true, which keeps the
-   * one-stage-per-repository guarantee across both paths (Req 20.1).
+   * Reports a stage running outside this queue — today the spec-draft runner
+   * AND the spec-less run pipeline (`createRunPipeline`). Neither can be
+   * expressed as a queue request: both are repository-scoped rather than
+   * todo-scoped, so they have no `todoId` and resolve no lifecycle transition.
+   * The queue refuses a dispatch as `busy` while this answers true, which keeps
+   * the one-stage-per-repository guarantee across all three paths (Req 20.1).
    */
   isExternallyBusy?: () => boolean;
 }
@@ -450,8 +452,8 @@ class SerialRunQueue implements RunQueue {
    * {@link DispatchError} that has already been reported.
    */
   private async runOne(req: RunRequest): Promise<DispatchResult> {
-    // A stage running outside the queue (a spec draft) holds the same
-    // one-stage-per-repository lock (Req 20.1).
+    // A stage running outside the queue (a spec draft or a spec-less run) holds
+    // the same one-stage-per-repository lock (Req 20.1).
     if (this.deps.isExternallyBusy?.() === true) {
       return this.refuse({
         kind: 'busy',

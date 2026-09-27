@@ -29,6 +29,7 @@ import type { Stage } from '../model/stage';
 import type { TodoState } from '../model/todoState';
 import type {
   ExecuteResult,
+  InvestigateResult,
   PlanResult,
   PlanReviewResult,
   ReviewResult,
@@ -234,6 +235,27 @@ export function renderReviewArtifact(
 }
 
 /**
+ * The investigate artifact: the finding, the files it is grounded in, and the
+ * suggested next steps. This is `finding.md` — the whole product of an
+ * investigate run, and the text the chat's promote card carries into a Bug or
+ * Quick run as the work statement.
+ */
+export function renderInvestigateArtifact(
+  runId: string,
+  result: InvestigateResult,
+): string {
+  return [
+    `# Finding ${runId}`,
+    '## Finding',
+    result.finding,
+    '## Files',
+    bullets(result.files.map((f) => `\`${f}\``)),
+    '## Next steps',
+    bullets(result.next_steps),
+  ].join('\n\n') + '\n';
+}
+
+/**
  * Render a validated stage result as the Markdown artifact persisted under the
  * spec. The four todo-level stages get the per-stage renderers above; the two
  * spec-scoped stages (`spec-draft`, `pr`) keep the structured JSON, because
@@ -255,6 +277,10 @@ export function renderArtifact(
       return renderExecuteArtifact(id, structured as ExecuteResult);
     case 'review':
       return renderReviewArtifact(id, structured as ReviewResult);
+    case 'investigate':
+      // Run-scoped: the caller passes the run id through the `todoId`
+      // parameter, so `id` is the run id here.
+      return renderInvestigateArtifact(id, structured as InvestigateResult);
     default: {
       const json = JSON.stringify(structured, null, 2);
       return `# ${stage} result\n\n\`\`\`json\n${json}\n\`\`\`\n`;

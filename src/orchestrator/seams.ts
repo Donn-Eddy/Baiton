@@ -17,10 +17,15 @@
  *   tool dispatches into (Req 10.3–10.5). The stage engine owns the real queue
  *   (task 11); the tool only asks it to dispatch one stage and reports what it
  *   answers.
+ * - {@link RunPipelineSeam} — the spec-less run pipeline the `start_run` and
+ *   `investigate` dispatch tools start a run through. The stage engine owns the
+ *   real pipeline; the tools only ask it to start a run and report what it
+ *   answers.
  * - {@link Clock} and {@link IdGenerator} — the wall clock and run-id source,
  *   injected so transcript timestamps and any generated identifiers are
  *   deterministic under test.
  */
+import { RunMode } from '../model/mode';
 import { Stage } from '../model/stage';
 
 /**
@@ -106,6 +111,45 @@ export type DraftSpecOutcome =
  */
 export interface DraftSpecSeam {
   draft(req: DraftSpecRequest): Promise<DraftSpecOutcome>;
+}
+
+/** One confirmed spec-less dispatch from a run-mode conversation. */
+export interface StartRunRequest {
+  /** The mode the run executes as; never 'spec'. */
+  mode: RunMode;
+  /** The one-line statement of the work (or the question, for investigate). */
+  statement: string;
+  /** The repository-relative files the orchestrator guessed are involved. */
+  files: string[];
+  /** How to reproduce the defect; only a Bug run supplies it. */
+  reproduction?: string;
+}
+
+/**
+ * The answer the run pipeline gives `start_run`/`investigate`. `started`
+ * carries the run id (and the branch the run was created on, when the host
+ * knows it) so the model can tell the user where to watch; `busy` means a
+ * stage is already running for the repository — a spec queue, the spec draft,
+ * or another run; `refused` carries the reason the run never launched.
+ */
+export type StartRunOutcome =
+  | { kind: 'started'; runId: string; branch?: string }
+  | { kind: 'busy' }
+  | { kind: 'refused'; reason: string };
+
+/**
+ * The spec-less run pipeline seam the dispatch tools start a run through. The
+ * stage engine implements it over `createRunPipeline(...).start`; the tools
+ * only ask it to start a run and report what it answers. It resolves as soon
+ * as the run is launched, so the chat turn is never blocked on the run.
+ *
+ * The seam is deliberately narrower than `RunPipelineRequest` in
+ * src/engine/runPipeline.ts: the pipeline also wants `composerMode` and
+ * `explicitMode`, which only the host knows (the composer's Mode select). The
+ * host adapter fills those in; a tool never guesses them.
+ */
+export interface RunPipelineSeam {
+  start(req: StartRunRequest): Promise<StartRunOutcome>;
 }
 
 /** A wall clock, injected so transcript timestamps are deterministic in tests. */

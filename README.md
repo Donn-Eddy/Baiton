@@ -2,14 +2,17 @@
 
 Spec-driven development with heterogeneous coding CLI agents. Baiton is an
 open-source VS Code extension: a chat orchestrator authors and drives spec
-files, and the editor renders those specs and their todos.
+files, and the editor renders those specs and their todos. A conversation also
+runs in one of five **modes** — Spec, Bug, Quick, Refactor and Investigate — and
+the non-Spec modes dispatch spec-less runs, each on its own branch and worktree.
 
 ## The Baiton views
 
 Baiton contributes two view containers, one on each side of the window:
 
 - the **activity bar** container (the `$(rocket)` icon, titled **Baiton**),
-  holding the **Spec Explorer**;
+  holding the **Spec Explorer**, the **Runs** view and the collapsed
+  **Configuration** section;
 - the **secondary side bar** container (the `$(comment-discussion)` icon,
   titled **Baiton Chat**), holding the **Chat** view. If the secondary side bar
   is hidden, run **View: Toggle Secondary Side Bar** to reveal it.
@@ -20,7 +23,7 @@ earlier version, VS Code remembers that placement and keeps it; run
 **View: Reset View Locations** once to put both views back where Baiton
 contributes them.
 
-The two views:
+The views:
 
 - **Spec Explorer** — a tree listing each `.baiton/specs/<slug>/spec.md` in the
   repository. Every spec shows its slug, its frontmatter `status` (or an
@@ -43,6 +46,10 @@ The two views:
   Restricted Mode. The tree refreshes automatically when files under
   `.baiton/specs/**` change.
 
+- **Runs** — a tree of the spec-less runs a non-Spec conversation dispatched,
+  split into **Active** and **Complete**, with **Cancel**, **View diff** and
+  **Merge** as its item actions. See **The Runs view** below.
+
 - **Chat** — a webview hosting the orchestrator conversations: one Workspace
   conversation for creating new specs, plus one conversation per spec. Selecting
   a spec in the Spec Explorer (or opening its `spec.md`) switches the chat to
@@ -52,13 +59,17 @@ The two views:
 
 ### What the orchestrator does
 
-The orchestrator has exactly two jobs:
+In a **Spec** conversation the orchestrator has exactly two jobs:
 
 1. **Create a spec** — ask you clarifying questions until you agree on what the
    work is, then hand the agreed requirements to the spec writer with
    `draft_spec`.
 2. **Drive an approved spec** — dispatch each stage with `run` until every todo
    is done, then `submit_pr`.
+
+In a non-Spec conversation it has one job instead — **start a run**: understand
+the work, then dispatch it with `start_run` or `investigate` (see
+**Conversation modes** below).
 
 It writes no specs, no plans and no code, and it reviews nothing: the agent
 configured for each role does that work when the orchestrator dispatches it.
@@ -67,18 +78,24 @@ rather than diagnosing it or trying another route.
 
 Its tools follow the job it is doing, so it can only act within it:
 
-| tools | creating a spec | driving a spec |
-|---|---|---|
-| `list_specs`, `read_spec`, `git_status` | yes | yes |
-| `ask_user` | yes | yes |
-| `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no |
-| `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes |
-| `draft_spec` | yes | no |
-| `approve_spec` | yes | yes (re-approve) |
-| `run`, `submit_pr` | no | yes |
+| tools | creating a spec | driving a spec | in a run |
+|---|---|---|---|
+| `list_specs`, `read_spec`, `git_status` | yes | yes | yes |
+| `ask_user` | yes | yes | yes |
+| `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no | yes |
+| `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes | no |
+| `draft_spec` | yes | no | no |
+| `approve_spec` | yes | yes (re-approve) | no |
+| `run`, `submit_pr` | no | yes | no |
+| `start_run`, `investigate` | no | no | yes |
+
+The spec tools keep the phases they always had, so they are simply unavailable
+in a non-Spec conversation; and because `start_run` and `investigate` are
+dispatch tools, the guard's Restricted-Mode rule disables them exactly as it
+disables every other dispatch tool.
 
 `ask_user` joins `list_specs`, `read_spec` and `git_status` as a tool that is
-available in both phases. Where a point needs your answer, the orchestrator
+available in all three phases. Where a point needs your answer, the orchestrator
 calls `ask_user(question, options?, allow_free_text?, placeholder?)` instead of
 ending its turn with a question: the question appears as an inline card in the
 conversation and the call blocks until you answer it, so your answer comes back
@@ -94,10 +111,71 @@ instruction that tells the model this is what it receives in its system prompt
 **Interventions in chat** below for the cards themselves.
 
 A spec conversation counts as "creating" while its frontmatter `status` is
-`draft`, and as "driving" from `approved` onwards. There is no tool for reading
-a stage's artifacts: the plan and the review write-ups are for you, through
-**View plan** and the todo's folder under `.baiton/specs/<slug>/todos/<id>/`,
-not for the orchestrator to second-guess.
+`draft`, and as "driving" from `approved` onwards. A non-Spec conversation is in
+the `run` phase throughout. There is no tool for reading a stage's artifacts:
+the plan and the review write-ups are for you, through **View plan** and the
+todo's folder under `.baiton/specs/<slug>/todos/<id>/` — or, for a run,
+`plan.md`, `review-<n>.md` and `finding.md` under `.baiton/runs/<run-id>/` — not
+for the orchestrator to second-guess.
+
+### Conversation modes
+
+A conversation runs in one of five modes, which decides the pipeline a dispatch
+from it runs. The composer's Mode control shows them by these labels, and the
+ids are `spec | bug | quick | refactor | investigate` (`RunMode` in
+`src/model/mode.ts`):
+
+- **Spec** — the unchanged spec flow: gather requirements → `draft_spec` →
+  approve → one `run` per todo, writing under `.baiton/specs/`.
+- **Bug** — a defect with a reproduction.
+- **Quick** — one small, self-contained change.
+- **Refactor** — a behaviour-preserving restructure.
+- **Investigate** — a question to be answered rather than work to be done.
+
+`DEFAULT_MODE` is `spec`, and an absent or unknown stored value falls back to
+it, so a conversation that never touched the control behaves exactly as it
+always did. **Bug**, **Quick** and **Refactor** share ONE spec-less
+plan → execute → review pipeline that differs only in the framing handed to the
+planner and the executor; **Investigate** is a read-only dispatch ending in a
+written finding. No non-Spec mode reads or writes anything under
+`.baiton/specs/` (`isSpecless(mode)` in `src/model/mode.ts`).
+
+**The Mode control** is a `<select>` in the composer's control row immediately
+left of the **Auto** toggle (`#mode-select` in `media/chat.html`, `renderMode` in
+`media/chat.js`). The host is authoritative in exactly the way it is for the
+Auto toggle: the change posts `setMode` and the control repaints only when the
+host echoes `setMode` back (`src/orchestrator/webviewProtocol.ts` carries
+`setMode` in both directions plus the host→webview `setRunActive` flag;
+`media/protocol.js` mirrors the reducer and a shared-fixture parity test pins
+the two together). It is disabled while the chat is busy, while a run is in
+flight (`setRunActive`), and on a spec conversation, which is pinned to Spec
+because the mode is a property of the Workspace conversation. Its three tooltips
+are, verbatim:
+
+- "A spec conversation always runs the Spec pipeline."
+- "A run is in flight; the mode cannot change until it finishes."
+- "Conversation mode: the pipeline a dispatch from this chat runs."
+
+The selection is remembered per workspace in VS Code's `workspaceState` under
+`baiton.chat.mode` (`CHAT_MODE_KEY` in `src/activation/commands.ts`), never in
+`settings.json` — the same arrangement as `baiton.chat.autoMode` and
+`baiton.orchestrator.selection`.
+
+In a non-Spec conversation `OrchestratorPhase` is `run`, and the flow follows
+one beat list per mode (`RUN_FLOW_TEXT` in `src/orchestrator/systemPrompt.ts`):
+inspect the repository with the read tools, state the work in one line, name the
+files it most likely touches, then call the run tool and tell you it has
+started. **Bug** additionally establishes how to reproduce the defect, asking
+with `ask_user` if you have not said. **Quick** is for one small, self-contained
+change, and work needing several coordinated changes is offered a different mode
+instead. **Refactor** must not change behaviour, and the configured verify
+command is checked by the run's reviewer, not by the orchestrator.
+**Investigate** changes nothing: no branch, no worktree and no commit.
+
+The mode is your choice and the model cannot change it. When the work does not
+fit the current mode it proposes the mode that does through `ask_user` and tells
+you to change the Mode control, rather than dispatching under the wrong mode
+(`MODE_PROPOSAL_TEXT` in `src/orchestrator/systemPrompt.ts`).
 
 ### Chat sessions
 
@@ -123,7 +201,8 @@ There is no index file: each session's title and timestamps are derived from
 its transcript. A transcript from before sessions existed (`.baiton/chat.jsonl`
 or `.baiton/specs/<slug>/chat.jsonl`) is migrated into the new layout as one
 session the first time the view opens that conversation, and an empty one is
-removed. All of these paths are covered by `.baiton/.gitignore`.
+removed. All of these paths are covered by `.baiton/.gitignore`, which also
+excludes `/runs/` and `/worktrees/` — everything a spec-less run owns.
 
 ### Interventions in chat
 
@@ -134,7 +213,8 @@ kinds:
 - **question** — the orchestrator asking you something, through its `ask_user`
   tool (see **What the orchestrator does** above);
 - **confirm** — a confirmation, such as the one `draft_spec` and `approve_spec`
-  raise before they act;
+  raise before they act, or the run card `start_run` and `investigate` raise (see
+  **Spec-less runs** below);
 - **permission** — a sub-agent harness ask relayed out of a running stage,
   carrying the agent id, the tool name and the tool arguments.
 
@@ -189,9 +269,9 @@ spec.
    in the Workspace conversation and the new spec appears in the Spec Explorer
    and in the conversation selector.
 
-Only one stage runs per repository, so a spec draft and a todo stage never run
-at the same time. A `spec-writer` entry missing from an existing
-`.baiton/config.json` is filled in from the `planner` entry. After the draft
+Only one stage runs per repository, so a spec draft, a todo stage and a
+spec-less run's stage never run at the same time. A `spec-writer` entry missing
+from an existing `.baiton/config.json` is filled in from the `planner` entry. After the draft
 lands you can refine it in chat with `update_overview`, `add_todo`, `edit_todo`
 and `remove_todo`.
 
@@ -205,6 +285,178 @@ stage reaches a terminal outcome, so there is nothing to poll. `plan-review` is
 not a stage it can trigger: it runs inside the plan stage's own review rounds.
 When every todo is `done`, the orchestrator offers `submit_pr`. You can still
 run any stage yourself from the Spec Explorer.
+
+### Spec-less runs (Bug, Quick, Refactor)
+
+In a **Bug**, **Quick** or **Refactor** conversation the orchestrator dispatches
+with `start_run(mode, statement, files, reproduction?)`, whose `mode` is
+restricted to `bug | quick | refactor`; the read-only mode dispatches with
+`investigate(question, files)`. Every argument is validated BEFORE the card is
+raised and before the run seam is touched, so a malformed call asks nothing and
+dispatches nothing. Unlike `run`, the tool returns as soon as the run is
+LAUNCHED rather than blocking until it finishes.
+
+**The confirm card** is an inline confirm in the conversation, not a modal
+dialog. It is prompted "Start a `<mode>` run?" and its detail lines are:
+
+```
+Mode: <mode>
+Work: <statement>
+Files: <files, comma-separated, or (none guessed)>
+Reproduction: <reproduction>          (only when one was collected)
+Target branch: <branch>
+The run works on its own branch and worktree; nothing outside .baiton/runs/ and .baiton/worktrees/ changes until you merge it.
+```
+
+Declining it writes nothing and dispatches nothing; its refusal reaches the
+model as `starting the <mode> run was declined; nothing was written`.
+Investigate's card is prompted "Investigate this question?" with the lines
+`Mode: investigate`, `Question: …`, `Files: …`, `Target branch: …` and
+"Read-only: no branch, no worktree and no commit. The only write is the finding
+under .baiton/runs/."
+
+**The layout.** The run id is `<mode>-<stamp>-<suffix4>`, e.g.
+`bug-20260926-141501-a1b2` (`newRunId` in `src/engine/runStore.ts`). The branch
+is `baiton/<mode>/<run-id>` (`runBranchFor`), and the worktree is
+`.baiton/worktrees/<run-id>/`, created with `git worktree add -b` at the head of
+whichever branch was checked out when the run started (`createRunWorktree` in
+`src/engine/runWorktree.ts`). A run cannot start from a detached HEAD
+(`detached-head`: check out a named branch first, because the run's branch is
+merged back into the branch it started from), and it cannot start on a branch
+with no commits (`no-base-head`: make an initial commit first).
+
+**What lives where.** In the main checkout:
+
+- `.baiton/runs/<run-id>/run.json` — the run manifest: id, mode, the composer's
+  mode plus an `explicitMode` flag, statement, guessed files, the optional
+  reproduction, the base branch and its head commit at start, the run's branch,
+  the worktree dir, state, per-stage attempt counters, outcome and timestamps.
+- `.baiton/runs/<run-id>/runs.jsonl` — the run's journal.
+- `.baiton/runs/<run-id>/plan.md`, `execute-<n>.md`, `review-<n>.md` and
+  `finding.md` — the rendered stage artifacts, always in the run directory and
+  never under a spec.
+
+Each stage LAUNCH gets its own sibling directory named `<run-id>.<stage>.<n>`
+holding that launch's brief, result and `asks/` files — which is why a run id may
+never contain a dot — and for a code run those launch directories resolve inside
+the worktree, so the relative run-dir grants in the role profiles still point at
+what the launcher wrote (`launchIdFor` in `src/engine/runStore.ts`, and the
+header of `src/engine/runPipeline.ts`). `.baiton/.gitignore` excludes
+`/worktrees/` alongside `/runs/` (`GITIGNORE_CONTENTS` in
+`src/config/gitignore.ts`), so nothing a run owns is ever committed.
+
+**States** are `confirmed | planning | planned | executing | executed |
+reviewing | done | failed | cancelled | answered | merged` (`RunState`). The
+complete ones — `done`, `failed`, `cancelled`, `answered`, `merged` — are exactly
+the Runs view's Complete group (`isRunComplete`).
+
+**The pipeline** is plan → execute → review. A `findings` verdict sends the run
+back to execute, bounded by `limits.exec_attempts`; a `pass` marks it `done`.
+Execute commits in the worktree with a `Run-Id: <run-id>` trailer
+(`RUN_ID_TRAILER` in `src/engine/runPipeline.ts`). Investigate reuses the
+existing `reviewer` role — read plus shell, writes confined to the run directory
+— so `.baiton/config.json` needs no new role and no migration. Cancelling
+disposes the running stage's terminal and records `cancelled`, and deliberately
+LEAVES the worktree and the branch in place for inspection.
+
+The one-stage-per-repository guarantee holds both ways: a run refuses with
+`busy` while a spec queue or the spec draft has a stage in flight, and a running
+run makes the spec queue externally busy.
+
+### The Runs view
+
+`baiton.runsView`, titled **Runs**, sits beside the Spec Explorer in the
+activity-bar container. It has exactly two groups, **Active** first then
+**Complete**, and both are always present even when empty, so the view never
+loses a heading (`src/model/runTreeModel.ts`, `src/activation/runsExplorer.ts`).
+
+Each run node's label is the statement, truncated to 80 chars with the last char
+an ellipsis (`RUN_LABEL_MAX_CHARS`). Its description is `<mode> · <stage>` —
+with ` (attempt <n>)` past the first attempt — while a stage is in flight,
+`<mode> · <state>` for an active-but-idle run, and `<mode> · <outcome>` once the
+run is complete. Its tooltip spells out `<mode> run <run-id>`, the statement,
+`Branch: <branch> (from <base branch>)`, `State: …`, `Stage: <stage> (attempt
+<n>)` when one is running, and `Outcome: …` when complete.
+
+The outcome text (`runOutcomeLabel`) is `merged`, `answered`, `cancelled`,
+`review passed` for a `done` run whose verdict was `pass` (otherwise `done`),
+and for a `failed` run either `failed: <message truncated to 60 chars>` or
+`review reported findings`.
+
+**The action rules** (`legalRunActions`, in its order):
+
+- **Cancel** only while the run is active AND a stage is actually in flight. An
+  active-but-idle run — `confirmed`, `planned` or `executed` with no live stage —
+  offers nothing, because there is no terminal to dispose. Cancelling keeps the
+  worktree and the branch. If the stage finishes first, the cancel warns rather
+  than claiming success.
+- **View diff** only on a complete run that still has a worktree and is not
+  `merged`: merging removes the worktree and the branch, and an Investigate run
+  never had one, so neither offers a diff. It opens the range
+  `<base commit>..<branch>`, named in both the diff title and the log
+  (`shortSha` / `runDiffRange` in `src/activation/runsExplorer.ts`). A `failed`
+  or `cancelled` run keeps its branch and offers View diff alone.
+- **Merge into `<base branch>`** only on a `done` run with a worktree — one whose
+  review passed.
+
+**Why a merge is refused**, in the pinned check order wrong-branch → base-moved →
+dirty-tree → missing-branch → merge (`mergeRunWorktree` in
+`src/engine/runWorktree.ts`). Only one reason reaches you, and the
+machine-readable reason token is logged beside the prose:
+
+- `wrong-branch` — the base branch the run started from is not the one checked
+  out; check it out, then merge again.
+- `base-moved` — the base branch has moved since the run started, or no longer
+  exists.
+- `dirty-tree` — the working tree has uncommitted changes, reported as a count;
+  commit or stash them, then merge again.
+- `missing-branch` — the run branch is gone; it may already have been merged and
+  cleaned up.
+- `conflict` — the merge conflicted and was aborted, so the base branch is
+  unchanged and the run's branch and worktree are untouched.
+
+The merge always runs in the main checkout, never in the worktree. It commits
+`Merge <branch>: <statement>` with a `Run-Id: <run-id>` trailer, so the merge is
+findable by run id exactly as the execute commits are, and a successful merge
+then removes the worktree and deletes the branch. Cleanup problems are reported
+as warnings and never turn a landed merge into a failure: the commit is already
+on the base branch.
+
+**Refresh** comes from a `FileSystemWatcher` over `.baiton/runs/*/run.json`,
+debounced 500 ms (`RUNS_REFRESH_DEBOUNCE_MS`) so a burst of manifest writes
+coalesces, plus every run-pipeline change event applied immediately so a started
+stage repaints without waiting out the debounce. Launch directories
+(`<run-id>.<stage>.<n>`) are skipped.
+
+**Restricted Mode**: from the `view/item/context` `when` clauses in
+`package.json`, `baiton.runs.cancel` and `baiton.runs.merge` are gated on
+`!baiton.restricted`, while `baiton.runs.viewDiff` is not, because it only reads.
+
+### Investigate findings
+
+An Investigate run launches ONE `investigate` stage from the main checkout: no
+branch, no worktree, no commit and no diff. Its result is validated against
+`investigateSchema` (`finding`, `files`, `next_steps`) and rendered to
+`.baiton/runs/<run-id>/finding.md`; the run ends in the state `answered`, which
+the Runs view shows as the outcome `answered`.
+
+When the finding lands, a system note is posted on the Workspace conversation and
+the controller offers a **promote card** — once per run id
+(`ChatController.promoteFinding`). Its prompt reads "Investigation `<run-id>`
+found: \<finding\>", then `Files: …` (or `Files: (none named)`), then
+`Next steps: …` when the finding named any, then "Start a run from this
+finding?". The three options are **Start a Bug run** ("Plan, fix and review the
+defect on its own branch."), **Start a Quick run** ("Plan, make and review the
+small change on its own branch.") and **Dismiss** ("Keep the finding only.").
+
+Choosing Bug or Quick raises the ORDINARY run confirm card, with the finding as
+the work statement and the branch the investigation started from as the target
+branch (`promoteRunConfirm`), so a promoted run reads identically to a
+model-dispatched one. Only an approval dispatches: a dismissal, a decline or a
+typed answer writes nothing and dispatches nothing. In Restricted Mode no card is
+offered and a note stands in for it ("Restricted Mode: the finding of
+`<run-id>` was not offered as a run."). `PROMOTE_MODES` is exactly `bug` and
+`quick` — a finding is never promoted straight to Refactor or Spec.
 
 ### Auto mode
 
@@ -474,7 +726,7 @@ the whole conversation.
 
 ### The config panel
 
-The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
+The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer and the Runs view. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
 
 - **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
@@ -573,7 +825,7 @@ always-present "Other…" escape still accepts a model the lists do not name.
 
 ### Harness ask relay (per-adapter probe findings)
 
-A launched run's `.baiton/runs/<run-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the run stays paused until the answer file appears. These asks are what become **permission** intervention cards in the run's spec conversation (see **Interventions in chat**), answered in place in the chat, with Auto mode applied to them when it is on; the run stays paused until the response file appears, and **Stop** — or a run that ends — declines any ask still pending, so nothing hangs.
+A launched stage's `.baiton/runs/<launch-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the stage stays paused until the answer file appears. The `<launch-id>` is the id the stage was launched under: a spec run's own run id, or, for a spec-less run, the launch directory `<run-id>.<stage>.<n>` described in **Spec-less runs** above — the run's own `.baiton/runs/<run-id>/` directory holds the manifest and artifacts, not the asks. These asks are what become **permission** intervention cards in the conversation the stage was launched from (see **Interventions in chat**), answered in place in the chat, with Auto mode applied to them when it is on; the stage stays paused until the response file appears, and **Stop** — or a run that ends — declines any ask still pending, so nothing hangs.
 
 - **claude findings** (probed `claude --version 2.1.278`):
   - `--settings` accepts an inline JSON string as well as a file path (`<file-or-json>` in `claude --help`), and a `-p` run started with an inline hooks JSON launched cleanly and installed the hook — verified by the probe.
@@ -690,6 +942,16 @@ The state table above is the thing that decides which relay each adapter uses: t
 - **Baiton: Set Provider Endpoint** (`baiton.setProviderEndpoint`) — picks a
   provider that needs an endpoint (or already has one set), then sets or
   clears its base URL in `baiton.orchestrator.endpoints`.
+- **Baiton: Cancel Run** (`baiton.runs.cancel`) — disposes the terminal of the
+  stage in flight for the selected run; its worktree and branch are kept.
+- **Baiton: View Run Diff** (`baiton.runs.viewDiff`) — opens the run branch's
+  diff against the commit it started from (`<base commit>..<branch>`).
+- **Baiton: Merge Run** (`baiton.runs.merge`) — merges a passed run's branch into
+  the branch it started from, then removes the worktree and deletes the branch.
+
+The three run commands are Runs-view item actions rather than palette entries:
+each is contributed with `"when": "false"` under `commandPalette`, and cancel and
+merge additionally require `!baiton.restricted`.
 
 ## Settings
 
@@ -719,6 +981,8 @@ The state table above is the thing that decides which relay each adapter uses: t
   fall back to 20.
 
 Deliberately **not** settings: API keys live in SecretStorage (see
-**Per-provider API keys** above) and the active provider/model lives in
+**Per-provider API keys** above), the active provider/model lives in
 `workspaceState` under `baiton.orchestrator.selection` — see
-**Providers and models**.
+**Providers and models** — and the conversation mode lives in `workspaceState`
+too, under `baiton.chat.mode`, next to `baiton.chat.autoMode` — see
+**Conversation modes**.

@@ -20,7 +20,11 @@
  * choice is posted back with `answerIntervention`, a resolved card shows the
  * decision as a durable inline record. The composer control row also carries
  * an Auto-mode toggle immediately left of Stop that reflects `state.autoMode`,
- * stays enabled while busy, and posts `setAutoMode`. The composer also carries
+ * stays enabled while busy, and posts `setAutoMode`, and — immediately left of
+ * that toggle — a Mode select that reflects `state.mode`, posts `setMode`,
+ * repaints only on the host's echo, and (in contrast to the Auto toggle) is
+ * disabled while `state.busy`, while `state.runActive`, or on a spec
+ * conversation. The composer also carries
  * the provider-first model selection: a provider select followed by a model
  * select. Only the configured providers the host posts arrive, in host order
  * (the webview never sorts or filters them); the model select lists just the
@@ -64,10 +68,25 @@
   const sendBtn = /** @type {HTMLButtonElement} */ (document.getElementById('send'));
   const stopBtn = /** @type {HTMLButtonElement} */ (document.getElementById('stop'));
   const autoBtn = /** @type {HTMLButtonElement} */ (document.getElementById('auto-mode'));
+  const modeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('mode-select'));
   const newChatBtn = /** @type {HTMLButtonElement} */ (document.getElementById('new-chat'));
   const sessionListEl = /** @type {HTMLElement} */ (document.getElementById('session-list'));
 
   const MAX_INPUT_CHARS = 100000;
+
+  // Mirrors RUN_MODES in src/model/mode.ts, in the same order (spec first). This
+  // is a plain browser script and cannot import it, so the list and its labels
+  // are kept in sync by hand, exactly as protocol.js keeps DEFAULT_MODE.
+  const MODE_OPTIONS = [
+    { id: 'spec', label: 'Spec' },
+    { id: 'bug', label: 'Bug' },
+    { id: 'quick', label: 'Quick' },
+    { id: 'refactor', label: 'Refactor' },
+    { id: 'investigate', label: 'Investigate' },
+  ];
+  // Mirrors WORKSPACE_CONVERSATION_ID in src/activation/chatController.ts; any
+  // other non-empty conversation id is a spec slug.
+  const WORKSPACE_CONVERSATION_ID = 'workspace';
 
   // ----- State -----------------------------------------------------------
 
@@ -1180,6 +1199,46 @@
     autoBtn.disabled = false;
   }
 
+  /** Whether the active conversation is a spec conversation (always Spec). */
+  function isSpecConversation() {
+    return state.activeId !== '' && state.activeId !== WORKSPACE_CONVERSATION_ID;
+  }
+
+  /**
+   * The Mode select is a pure projection of `state.mode`: the change handler
+   * never writes it, it posts `setMode` and the view repaints when the host
+   * echoes `setMode` back through the reducer. Unlike the Auto toggle it is
+   * disabled while busy, while a run is in flight, and on a spec conversation
+   * (which always runs the Spec pipeline).
+   */
+  function renderMode() {
+    // The option list is static, so it is built exactly once: rebuilding it on
+    // every render would clobber an open/keyboard-navigated dropdown.
+    if (modeSelect.options.length === 0) {
+      MODE_OPTIONS.forEach(function (item) {
+        const opt = document.createElement('option');
+        opt.value = item.id;
+        opt.dataset.mode = item.id;
+        opt.textContent = item.label;
+        modeSelect.appendChild(opt);
+      });
+    }
+    // A spec conversation is always Spec: shown pinned, whatever state.mode says.
+    const pinned = isSpecConversation();
+    modeSelect.value = pinned ? 'spec' : state.mode;
+    if (!modeSelect.value) {
+      // An unknown mode matches no option and leaves the value empty; fall back
+      // to Spec rather than showing a blank control.
+      modeSelect.value = 'spec';
+    }
+    modeSelect.disabled = state.busy || state.runActive === true || pinned;
+    modeSelect.title = pinned
+      ? 'A spec conversation always runs the Spec pipeline.'
+      : state.runActive === true
+        ? 'A run is in flight; the mode cannot change until it finishes.'
+        : 'Conversation mode: the pipeline a dispatch from this chat runs.';
+  }
+
   function updateEnablement() {
     // Send/stop enablement follows the busy flag; send additionally requires a
     // non-whitespace, in-limit input (Req 14.2, 14.3, 14.4, 14.5). The host
@@ -1202,6 +1261,7 @@
     renderEmptyState();
     renderTranscript();
     renderAutoMode();
+    renderMode();
     updateEnablement();
   }
 
@@ -1291,6 +1351,23 @@
     // Host-authoritative: request the flip and let the host's `setAutoMode`
     // echo drive the repaint, exactly as `sendText` leaves `busy` to the host.
     vscode.postMessage({ type: 'setAutoMode', enabled: !state.autoMode });
+  });
+
+  modeSelect.addEventListener('change', function () {
+    if (modeSelect.disabled) {
+      // Belt and braces: repaint from state rather than posting.
+      renderMode();
+      return;
+    }
+    const opt = modeSelect.options[modeSelect.selectedIndex];
+    const mode = (opt && opt.dataset && opt.dataset.mode) || modeSelect.value;
+    if (mode && mode !== state.mode) {
+      vscode.postMessage({ type: 'setMode', mode: mode });
+    }
+    // Host-authoritative: snap the control back to the folded state. Only the
+    // host's `setMode` echo moves it, exactly as `sendText` leaves `busy` to
+    // the host and `selectModel` leaves `state.selection` to it.
+    renderMode();
   });
 
   stopBtn.addEventListener('click', function () {

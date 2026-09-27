@@ -19,6 +19,12 @@ import { isErr, isOk } from '../src/model/result';
  * - branch creation + checkout (Req 16.5)
  * - commit with a `Run-Id:` trailer + find-by-Run-Id (Req 17.4, 21.5)
  * - `resetWorkingTree` restoring the tree and its non-zero failure path (Req 15.6)
+ * - run worktrees: add on a new branch, porcelain list parsing, remove (plain and
+ *   forced over local modifications)
+ * - branch delete, merged and unmerged, with and without force
+ * - `branchHead` resolving a ref or reporting undefined for a missing one
+ * - `merge` as a real merge commit, and its aborted conflict/unknown-branch paths
+ * - whole-tree `isClean`, distinct from the spec-scoped clean check
  *
  * Temp repos are removed after each test.
  */
@@ -263,6 +269,276 @@ describe('git service against a temp repo (Task 8.2)', () => {
       } finally {
         fs.rmSync(nonRepo, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('run worktrees, branch delete, branchHead, merge and isClean', () => {
+    const scratch: string[] = [];
+
+    /**
+     * A fresh temp directory OUTSIDE any repository, registered for cleanup.
+     * Worktrees live in sibling scratch dirs rather than inside the repo, so a
+     * worktree's own files can never perturb the repo's status (and hence
+     * `isClean`).
+     */
+    function newScratch(): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-wt-'));
+      scratch.push(dir);
+      return dir;
+    }
+
+    /** A not-yet-existing worktree path; git creates the leaf directory itself. */
+    function newWorktreePath(name = 'run-1'): string {
+      return path.join(newScratch(), name);
+    }
+
+    afterEach(() => {
+      while (scratch.length > 0) {
+        const dir = scratch.pop()!;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('adds a worktree on a new branch and lists both worktrees', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      assert.strictEqual(fs.existsSync(wt), true, 'worktree directory should exist');
+      const inWorktree = createGitService(wt);
+      assert.strictEqual(await inWorktree.currentBranch(), 'baiton/bug/run-1');
+      assert.strictEqual(await inWorktree.head(), base);
+
+      const worktrees = await git$.listWorktrees();
+      assert.strictEqual(worktrees.length, 2, 'main worktree plus the added one');
+      // Git prints realpaths, so compare against the realpath of each input.
+      assert.strictEqual(worktrees[0].dir, fs.realpathSync(repo));
+      assert.strictEqual(worktrees[0].branch, 'main');
+      const added = worktrees.find((entry) => entry.branch === 'baiton/bug/run-1');
+      assert.ok(added, 'the added worktree should be listed');
+      assert.strictEqual(added.dir, fs.realpathSync(wt));
+      assert.strictEqual(added.head, base);
+      assert.strictEqual(added.locked, false);
+      assert.strictEqual(added.prunable, false);
+    });
+
+    it('rejects addWorktree when the branch already exists', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      await git$.createSpecBranch('taken', base);
+
+      // `-b`, not `-B`: a collision must fail loudly rather than reset the branch.
+      await assert.rejects(() => git$.addWorktree(newWorktreePath(), 'taken', base));
+    });
+
+    it('reports a locked worktree as locked', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      git(repo, 'worktree', 'lock', wt);
+      try {
+        const added = (await git$.listWorktrees()).find(
+          (entry) => entry.branch === 'baiton/bug/run-1',
+        );
+        assert.ok(added, 'the added worktree should be listed');
+        assert.strictEqual(added.locked, true);
+      } finally {
+        // Unlock so directory cleanup is unaffected by the lock.
+        git(repo, 'worktree', 'unlock', wt);
+      }
+    });
+
+    it('removes a worktree and its directory', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      await git$.removeWorktree(wt);
+
+      assert.strictEqual((await git$.listWorktrees()).length, 1, 'only the main worktree left');
+      assert.strictEqual(fs.existsSync(wt), false, 'worktree directory should be gone');
+    });
+
+    it('refuses to remove a dirty worktree without force and removes it with force', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      // Local modifications inside the worktree: a modified tracked file and an
+      // untracked leftover, as a stage that failed mid-edit would leave behind.
+      writeFile(wt, 'README.md', 'baseline\nrun edit\n');
+      writeFile(wt, 'scratch.txt', 'leftover\n');
+
+      await assert.rejects(() => git$.removeWorktree(wt));
+      assert.strictEqual(fs.existsSync(wt), true, 'refused removal should leave it in place');
+
+      await git$.removeWorktree(wt, true);
+      assert.strictEqual(fs.existsSync(wt), false, 'forced removal should delete it');
+      assert.strictEqual((await git$.listWorktrees()).length, 1);
+    });
+
+    it('resolves branchHead for existing refs and returns undefined for a missing one', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const expected = git(repo, 'rev-parse', 'main').trim();
+
+      assert.strictEqual(await git$.branchHead('main'), expected);
+      assert.strictEqual(await git$.branchHead('HEAD'), expected);
+      // Deliberately undefined rather than a rejection.
+      assert.strictEqual(await git$.branchHead('no-such-branch'), undefined);
+    });
+
+    it('merges a run branch back as a two-parent merge commit', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      writeFile(wt, 'src/run.ts', 'export const run = 1;\n');
+      await createGitService(wt).commit('run work', { 'Run-Id': 'run-1' });
+
+      const merged = await git$.merge('baiton/bug/run-1', 'baiton: merge run-1');
+
+      assert.ok(isOk(merged), 'a clean merge should succeed');
+      assert.match(merged.value, /^[0-9a-f]{40}$/);
+      assert.strictEqual(merged.value, await git$.head(), 'the value is the new HEAD');
+      // `--no-ff` guarantees a merge commit: `<merge> <parent1> <parent2>`.
+      const parents = git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').trim().split(/\s+/);
+      assert.strictEqual(parents.length, 3, `merge commit should have two parents: ${parents}`);
+      assert.ok(git(repo, 'log', '-1', '--format=%s').includes('baiton: merge run-1'));
+      assert.strictEqual(
+        fs.existsSync(path.join(repo, 'src/run.ts')),
+        true,
+        "the run branch's file should now be in the base working tree",
+      );
+      assert.strictEqual(await git$.isClean(), true, 'a completed merge leaves a clean tree');
+    });
+
+    it('composes merge, worktree removal and branch delete as run cleanup', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+      writeFile(wt, 'src/run.ts', 'export const run = 1;\n');
+      await createGitService(wt).commit('run work', { 'Run-Id': 'run-1' });
+      assert.ok(isOk(await git$.merge('baiton/bug/run-1', 'baiton: merge run-1')));
+
+      await git$.removeWorktree(wt);
+      // Plain `-d` suffices: the branch is merged.
+      await git$.deleteBranch('baiton/bug/run-1');
+
+      assert.strictEqual(await git$.branchHead('baiton/bug/run-1'), undefined);
+      assert.strictEqual((await git$.listWorktrees()).length, 1);
+    });
+
+    it('refuses to delete an unmerged branch without force and deletes it with force', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+      writeFile(wt, 'src/run.ts', 'export const run = 1;\n');
+      await createGitService(wt).commit('run work', { 'Run-Id': 'run-1' });
+      // The branch must not be checked out anywhere for a delete to be attempted.
+      await git$.removeWorktree(wt);
+
+      await assert.rejects(() => git$.deleteBranch('baiton/bug/run-1'));
+      assert.notStrictEqual(await git$.branchHead('baiton/bug/run-1'), undefined);
+
+      await git$.deleteBranch('baiton/bug/run-1', true);
+      assert.strictEqual(await git$.branchHead('baiton/bug/run-1'), undefined);
+    });
+
+    it('returns an error and aborts the merge on a conflict', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      const wt = newWorktreePath();
+      await git$.addWorktree(wt, 'baiton/bug/run-1', base);
+
+      // Conflicting edits to the same file on both sides.
+      writeFile(wt, 'README.md', 'baseline\nfrom the run\n');
+      await createGitService(wt).commit('run work', { 'Run-Id': 'run-1' });
+      writeFile(repo, 'README.md', 'baseline\nfrom main\n');
+      await git$.commit('main work');
+
+      const merged = await git$.merge('baiton/bug/run-1', 'baiton: merge run-1');
+
+      assert.ok(isErr(merged), 'a conflicting merge should fail');
+      assert.ok(
+        merged.error.command.startsWith('git '),
+        'the error should name the git command that failed',
+      );
+      assert.notStrictEqual(merged.error.exitCode, 0);
+      // The failed merge is aborted, so the repo is not left mid-merge.
+      assert.strictEqual(
+        fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD')),
+        false,
+        'the merge should have been aborted',
+      );
+      assert.strictEqual(
+        fs.readFileSync(path.join(repo, 'README.md'), 'utf8'),
+        'baseline\nfrom main\n',
+        "the base branch's content should be intact",
+      );
+      assert.strictEqual(await git$.isClean(), true, 'the tree is left as it was');
+    });
+
+    it('returns an error rather than throwing when the merged branch does not exist', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+
+      const merged = await git$.merge('no-such-branch', 'baiton: merge nothing');
+
+      assert.ok(isErr(merged), 'merging a missing branch should be an error Result');
+      assert.notStrictEqual(merged.error.exitCode, 0);
+      assert.strictEqual(await git$.isClean(), true);
+    });
+
+    describe('isClean (whole tree)', () => {
+      it('is true on a freshly committed repo', async () => {
+        const git$ = createGitService(newRepo());
+
+        assert.strictEqual(await git$.isClean(), true);
+      });
+
+      it('is false with an untracked file', async () => {
+        const repo = newRepo();
+        const git$ = createGitService(repo);
+        writeFile(repo, 'scratch.txt', 'untracked\n');
+
+        assert.strictEqual(await git$.isClean(), false);
+      });
+
+      it('is false with a modified tracked file', async () => {
+        const repo = newRepo();
+        const git$ = createGitService(repo);
+        writeFile(repo, 'README.md', 'baseline\nlocal edit\n');
+
+        assert.strictEqual(await git$.isClean(), false);
+      });
+
+      it('is false where isCleanExceptSpecFolder is true (they are different checks)', async () => {
+        const repo = newRepo();
+        const git$ = createGitService(repo);
+        writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
+
+        assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+        assert.strictEqual(await git$.isClean(), false);
+      });
     });
   });
 });

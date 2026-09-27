@@ -56,6 +56,12 @@ function baseResult(stage: Stage): Record<string, unknown> {
       };
     case 'pr':
       return { title: 'Add greeting', body: 'What changed and why.' };
+    case 'investigate':
+      return {
+        finding: 'The retry loop drops the last review.',
+        files: ['src/engine/runPipeline.ts'],
+        next_steps: ['carry the review into the retry brief'],
+      };
   }
 }
 

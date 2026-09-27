@@ -13,6 +13,7 @@ import type { Stage } from '../model/stage';
 import { Result, err, ok } from '../model/result';
 import {
   executeSchema,
+  investigateSchema,
   planReviewSchema,
   planSchema,
   prSchema,
@@ -21,6 +22,7 @@ import {
 } from './schemas';
 import type {
   ExecuteResult,
+  InvestigateResult,
   PlanResult,
   PlanReviewResult,
   PrResult,
@@ -37,6 +39,7 @@ export {
   executeSchema,
   reviewSchema,
   prSchema,
+  investigateSchema,
 } from './schemas';
 
 /**
@@ -53,6 +56,7 @@ const validatePlanReview = ajv.compile(planReviewSchema);
 const validateExecute = ajv.compile(executeSchema);
 const validateReview = ajv.compile(reviewSchema);
 const validatePr = ajv.compile(prSchema);
+const validateInvestigate = ajv.compile(investigateSchema);
 
 /** Stage → compiled Ajv validator (Req 12.2). */
 const VALIDATORS: Record<Stage, ValidateFunction> = {
@@ -62,6 +66,7 @@ const VALIDATORS: Record<Stage, ValidateFunction> = {
   execute: validateExecute as ValidateFunction,
   review: validateReview as ValidateFunction,
   pr: validatePr as ValidateFunction,
+  investigate: validateInvestigate as ValidateFunction,
 };
 
 /** Stage → its JSON Schema (the brief carries this to the Sub_Agent). */
@@ -72,6 +77,7 @@ export const STAGE_SCHEMAS: Record<Stage, object> = {
   execute: executeSchema,
   review: reviewSchema,
   pr: prSchema,
+  investigate: investigateSchema,
 };
 
 /** Return the JSON Schema for a stage (the brief embeds it). */
@@ -166,6 +172,16 @@ export function validateReviewResult(
   >;
 }
 
+/** Typed convenience wrapper for the Investigate stage. */
+export function validateInvestigateResult(
+  value: unknown,
+): Result<InvestigateResult, SchemaError[]> {
+  return validateStageResult('investigate', value) as Result<
+    InvestigateResult,
+    SchemaError[]
+  >;
+}
+
 /**
  * Whether a stage's persisted artifact is numbered with the run's attempt/round
  * index. Plan persists once as `plan.md`; the other three are numbered
@@ -178,7 +194,12 @@ export function validatePrResult(
 }
 
 export function stageArtifactIsNumbered(stage: Stage): boolean {
-  return stage !== 'plan' && stage !== 'pr' && stage !== 'spec-draft';
+  return (
+    stage !== 'plan' &&
+    stage !== 'pr' &&
+    stage !== 'spec-draft' &&
+    stage !== 'investigate'
+  );
 }
 
 /**
@@ -190,6 +211,10 @@ export function stageArtifactIsNumbered(stage: Stage): boolean {
  * `todos/<todoId>/review-<n>.md` (Req 24.3). The two spec-scoped stages ignore
  * the todo id and stay at the spec root: `spec-draft` → `spec.md`, `pr` →
  * `pr.md`.
+ *
+ * `investigate` is run-scoped rather than spec-scoped: its `finding.md` is
+ * relative to the run directory, not to any spec, and like the unnumbered
+ * spec-scoped stages it ignores both the todo id and the index.
  *
  * Omitting the todo id for a todo-level stage throws, as does omitting the
  * round/attempt index `n` for a numbered stage: neither artifact has a
@@ -216,6 +241,10 @@ export function persistencePathForStage(
     case 'pr':
       // The PR draft persists once per spec, at the spec root (Req 8 "PR").
       return 'pr.md';
+    case 'investigate':
+      // An investigate run persists one finding, at the root of its run
+      // directory; it is run-scoped, so the todo id and index are unused.
+      return 'finding.md';
     default:
       return assertNever(stage);
   }

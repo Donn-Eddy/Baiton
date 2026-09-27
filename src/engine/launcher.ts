@@ -3,13 +3,15 @@
  *
  * {@link launchStage} performs the fixed handoff for one stage:
  *
- *   1. Resolve the run directory under the workspace root and the absolute
- *      `brief.md` / `result.json` paths.
+ *   1. Resolve the run directory under the run root (the workspace root, or
+ *      `input.cwd` when the caller launches into a run worktree) and the
+ *      absolute `brief.md` / `result.json` paths.
  *   2. Write the Brief with its sections in the required order (Req 11.3) via
  *      {@link writeBrief}.
  *   3. Create the terminal with the adapter's `shellPath`/`shellArgs` and `cwd`
- *      at the workspace root, with no intervening shell (Req 11.1, 11.2), using
- *      the injected {@link TerminalHost} seam.
+ *      at the run root (the workspace root, or `input.cwd` when the caller
+ *      launches into a run worktree), with no intervening shell (Req 11.1,
+ *      11.2), using the injected {@link TerminalHost} seam.
  *   4. Hand the one-line initial prompt `Read <brief path> and do what it says.`
  *      to the CLI as its positional argument (Req 11.4).
  *
@@ -24,7 +26,8 @@
  * the adapter accepts the launch and before the terminal is created, and
  * reads it back — a failed write halts the launch like a failed Brief write.
  * With the flag omitted the launch is byte-identical to the previous
- * behaviour.
+ * behaviour. Likewise with `cwd` absent: the run root is the workspace root
+ * and the launch is byte-identical to a launch without the field.
  *
  * If resolving the workspace root or writing the Brief fails, it halts before
  * creating any terminal and returns a {@link Result} error; the caller leaves
@@ -58,6 +61,16 @@ export const RESULT_FILE_NAME = 'result.json';
 export interface LaunchStageInput {
   /** Absolute path of the workspace root; the terminal `cwd` (Req 11.2). */
   workspaceRoot: string;
+  /**
+   * Optional absolute run root the launch resolves against: the terminal cwd
+   * and the `.baiton/runs/<launch-id>/` brief, result and asks directories
+   * live under it instead of under `workspaceRoot`. Set by the spec-less run
+   * pipeline to launch a stage inside `.baiton/worktrees/<run-id>/`, so the
+   * role profiles' RELATIVE run-dir grants (`.baiton/runs/<launch-id>/`) still
+   * resolve to the same directory the launcher wrote. Absent, the launch is
+   * byte-identical to a launch without the field.
+   */
+  cwd?: string;
   /** The run id; names the `.baiton/runs/<run-id>/` directory (Req 11.2). */
   runId: string;
   /** The stage being dispatched (selects the schema section of the Brief). */
@@ -106,7 +119,8 @@ export interface LaunchStageOutput {
  * Why a launch was halted before the Sub_Agent ran (Req 11.5). Both variants
  * mean no terminal was created and the caller must leave the todo unchanged.
  *
- * - `root-resolution` — the workspace root could not be resolved.
+ * - `root-resolution` — the workspace root, or the `cwd` override, could not
+ *                       be resolved.
  * - `launch-args`     — the adapter refused the request (e.g. a model/effort
  *                       pair the CLI rejects); `message` says what to fix.
  * - `brief-write`     — writing `brief.md`, or an adapter's ask-relay file,
@@ -142,8 +156,9 @@ export interface LaunchDeps {
 /**
  * Write the Brief and launch the Sub_Agent for one stage (Req 11.1–11.5).
  *
- * On success the terminal has been created at the workspace root running the
- * adapter's `shellPath`/`shellArgs` and has been sent the initial prompt. On a
+ * On success the terminal has been created at the run root (the workspace
+ * root, or `input.cwd` when set) running the adapter's
+ * `shellPath`/`shellArgs` and has been sent the initial prompt. On a
  * root-resolution or brief-write failure it returns an error before creating
  * any terminal, leaving state to the caller (Req 11.5).
  */
@@ -161,13 +176,25 @@ export function launchStage(
   }
   const root = rootCheck.value;
 
-  const runDir = path.join(root, '.baiton', 'runs', input.runId);
+  // The run root this launch resolves against: the workspace root, or the
+  // caller's override (a run worktree). Validated the same way, so a bad
+  // override halts before anything is written (Req 11.5).
+  let base = root;
+  if (input.cwd !== undefined) {
+    const cwdCheck = resolveRoot(input.cwd);
+    if (!cwdCheck.ok) {
+      return cwdCheck;
+    }
+    base = cwdCheck.value;
+  }
+
+  const runDir = path.join(base, '.baiton', 'runs', input.runId);
   const briefPath = path.join(runDir, BRIEF_FILE_NAME);
   const resultPath = path.join(runDir, RESULT_FILE_NAME);
 
   // Ask relay: only when explicitly enabled, so an unset flag produces a
   // launch request byte-identical to the previous behaviour.
-  const relay = input.relayAsks === true ? askRelayDescriptor(root, input.runId) : undefined;
+  const relay = input.relayAsks === true ? askRelayDescriptor(base, input.runId) : undefined;
 
   // Adapters with a verified native relay (claude's inline --settings PreToolUse
   // hook, antigravity's run-dir hooks.json) wire the asks themselves; the rest get the config-driven fallback,
@@ -184,7 +211,7 @@ export function launchStage(
     relay !== undefined && deps.adapter.relayFiles !== undefined ? deps.adapter.relayFiles(relay) : [];
   const relayTargets: { file: RelayFile; absPath: string }[] = [];
   for (const file of relayFiles) {
-    const absPath = path.resolve(root, file.path);
+    const absPath = path.resolve(base, file.path);
     if (path.isAbsolute(file.path) || !isInsideDir(runDir, absPath)) {
       return err({
         kind: 'launch-args',
@@ -224,7 +251,7 @@ export function launchStage(
   try {
     mkdirSync(runDir, { recursive: true });
     if (relay) {
-      ensureAsksDir(root, input.runId);
+      ensureAsksDir(base, input.runId);
     }
   } catch (cause) {
     return err({
@@ -267,12 +294,12 @@ export function launchStage(
   }
 
   // 4. Create the terminal with the adapter's launch args and cwd at the
-  //    workspace root, no intervening shell (Req 11.1, 11.2).
+  //    run root, no intervening shell (Req 11.1, 11.2).
   const terminal = deps.terminalHost.createTerminal({
     name: `Baiton ${input.stage} ${input.runId}`,
     shellPath: launchSpec.shellPath,
     shellArgs: launchSpec.shellArgs,
-    cwd: root,
+    cwd: base,
     env: launchSpec.env,
   });
 

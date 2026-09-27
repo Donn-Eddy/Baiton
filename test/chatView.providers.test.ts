@@ -297,6 +297,7 @@ const ELEMENT_IDS: Array<[string, string]> = [
   ['send', 'button'],
   ['stop', 'button'],
   ['auto-mode', 'button'],
+  ['mode-select', 'select'],
   ['new-chat', 'button'],
   ['session-list', 'div'],
   ['provider-select', 'select'],

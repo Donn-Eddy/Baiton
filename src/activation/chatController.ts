@@ -51,7 +51,16 @@
  *  - switch the active provider/model on `selectModel` for the next turn only,
  *    leaving the transcript and the rendered conversation untouched;
  *  - show the empty state with the configured endpoint and model (indicating
- *    "not configured" for each unset one) and a Set API Key action (Req 13.5).
+ *    "not configured" for each unset one) and a Set API Key action (Req 13.5);
+ *  - own the conversation's mode: host-authoritative and `workspaceState`-backed,
+ *    pinned to Spec while a spec conversation is in view, refused while the chat
+ *    is busy or a run is in flight, echoed back on every path so the composer's
+ *    Mode select is a pure projection, and the source of the phase, the tool
+ *    surface and the system prompt of every send;
+ *  - mirror spec-less run activity to the view (`setRunActive`), record a
+ *    finished run's outcome as a system note on the Workspace_Conversation, and
+ *    offer an Investigate run's finding as a promote card whose Bug/Quick choice
+ *    raises the ordinary run confirm card before anything is dispatched.
  */
 import * as path from 'path';
 import { mkdir, readFile } from 'fs/promises';
@@ -78,10 +87,22 @@ import {
   toRenderRecords,
   toolUpdate,
 } from '../orchestrator';
+import { DEFAULT_MODE, isRunMode, type RunMode } from '../model/mode';
+import type {
+  RunFinding,
+  RunManifest,
+  RunPipelineEvent,
+  RunPipelineOutcome,
+  Unsubscribe,
+} from '../engine';
 import type {
   AutoModeOutcome,
   AutoModeRunContext,
   ChatMessage,
+  ConfirmRequest,
+  QuestionRequest,
+  RunPipelineSeam,
+  StartRunOutcome,
   SessionItem,
   SessionMeta,
   SessionScope,
@@ -244,6 +265,47 @@ export interface ChatControllerDeps {
    * gates nothing and every ask is presented to the user as usual.
    */
   autoGate?: AutoModeGate;
+  /**
+   * Persists the composer's Mode select across windows (`baiton.chat.mode`).
+   * Absent, the mode still works for the life of the controller but starts at
+   * Spec on every reload.
+   */
+  modeMemory?: ModeMemory;
+  /**
+   * The spec-less run pipeline's activity and events. The controller subscribes
+   * in {@link ChatController.start} and unsubscribes in
+   * {@link ChatController.dispose}. Absent, `runActive` stays false, no
+   * completion note is posted and no promote card appears. A host that also
+   * binds `RunPipelineDeps.onFinding` to
+   * {@link ChatController.promoteFinding} gets no duplicate card: the promote
+   * card is deduped per run id.
+   */
+  runs?: RunActivitySource;
+  /**
+   * Dispatches a run confirmed from an Investigate promote card. Absent, no
+   * promote card is posted (there would be nothing to act on).
+   */
+  runPipeline?: RunPipelineSeam;
+}
+
+/** Remembers the composer's Mode select across windows (backed by `workspaceState`). */
+export interface ModeMemory {
+  /** The remembered mode value, or `undefined` when nothing was stored. */
+  get(): string | undefined;
+  /** Remember the new mode. */
+  set(mode: RunMode): Promise<void>;
+}
+
+/**
+ * The run-activity seam: whether a spec-less run is in flight and the pipeline's
+ * change events. Structurally satisfied by the `RunPipeline` that
+ * `createRunPipeline` returns, so the host passes the pipeline itself.
+ */
+export interface RunActivitySource {
+  /** Whether a run is in flight right now (seeds the first paint). */
+  isRunning(): boolean;
+  /** Subscribe to the pipeline's change events; the returned function unsubscribes. */
+  onChange(listener: (event: RunPipelineEvent) => void): Unsubscribe;
 }
 
 /** Remembers the Auto-mode toggle across windows (backed by `workspaceState`). */
@@ -299,6 +361,18 @@ export class ChatController {
   /** Whether Auto mode is on; seeded from `autoModeMemory` and echoed to the view. */
   private autoMode = false;
 
+  /** The Workspace conversation's mode; seeded from `modeMemory`, echoed to the view. */
+  private mode: RunMode = DEFAULT_MODE;
+
+  /** Whether a spec-less run is in flight; mirrored to the view as `setRunActive`. */
+  private runActive = false;
+
+  /** The run-pipeline change subscription taken in {@link start}. */
+  private runsSub: Unsubscribe | undefined;
+
+  /** Run ids whose finding already produced a promote card, so it is posted once. */
+  private readonly promoted = new Set<string>();
+
   /** Aborts the in-flight run; created per send, triggered on stop (Req 14.6). */
   private abort: AbortController | undefined;
 
@@ -337,6 +411,10 @@ export class ChatController {
         ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
       });
     this.autoMode = deps.autoModeMemory?.get() ?? false;
+    // Validating host-side means an unknown or stale `workspaceState` value
+    // silently falls back to Spec rather than poisoning the phase.
+    const stored = deps.modeMemory?.get();
+    this.mode = stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
   }
 
   /**
@@ -348,16 +426,23 @@ export class ChatController {
     this.deps.webview.onMessage((msg) => void this.handle(msg));
     this.selectionSub?.dispose();
     this.selectionSub = this.deps.providers?.onDidChangeSelection(() => { void this.postProviders(); });
+    // `start()` runs again on every fresh webview resolve, hence unsubscribe-first.
+    this.runsSub?.();
+    this.runActive = this.deps.runs?.isRunning() ?? false;
+    this.runsSub = this.deps.runs?.onChange((event) => { void this.onRunEvent(event); });
     void this.refresh();
   }
 
   /**
-   * Unwire the provider-selection subscription the last `start()` registered,
-   * so the host can release the view without leaving duplicate posts behind.
+   * Unwire the provider-selection and run-pipeline subscriptions the last
+   * `start()` registered, so the host can release the view without leaving
+   * duplicate posts behind.
    */
   public dispose(): void {
     this.selectionSub?.dispose();
     this.selectionSub = undefined;
+    this.runsSub?.();
+    this.runsSub = undefined;
   }
 
   /**
@@ -431,6 +516,89 @@ export class ChatController {
     await this.refresh();
   }
 
+  /**
+   * One run-pipeline event. Every non-terminal event means a run is in flight,
+   * which the view reflects by disabling the Mode select; `completed` clears the
+   * flag, records a system note on the Workspace conversation, and — for an
+   * Investigate run that produced a finding — offers to promote it.
+   */
+  private async onRunEvent(event: RunPipelineEvent): Promise<void> {
+    const active = event.kind !== 'completed';
+    if (active !== this.runActive) {
+      this.runActive = active;
+      this.postRunActive();
+    }
+    if (event.kind !== 'completed') {
+      return;
+    }
+    const note = runCompletionNote(event.outcome, event.manifest);
+    if (event.outcome.state === 'failed') {
+      this.deps.log(`Baiton chat: ${note}`);
+    }
+    // `noteSystem` refreshes, which re-posts `setMode`/`setRunActive`, so the
+    // composer repaints with the run finished.
+    await this.noteSystem(note);
+    if (event.outcome.finding !== undefined) {
+      await this.promoteFinding(event.outcome.finding);
+    }
+  }
+
+  /**
+   * Offer to promote an Investigate finding into a Bug or Quick run. The promote
+   * card is posted once per run id; choosing a mode raises the ordinary run
+   * confirm card, and only an approval dispatches — a dismissal, a decline or a
+   * typed answer writes nothing and dispatches nothing. A no-op without the
+   * dispatch seam, and in Restricted Mode a note stands in for the card.
+   */
+  public async promoteFinding(finding: RunFinding): Promise<void> {
+    if (this.promoted.has(finding.runId)) {
+      return;
+    }
+    this.promoted.add(finding.runId);
+    if (this.deps.runPipeline === undefined) {
+      return;
+    }
+    if (this.deps.guardContext().restricted) {
+      await this.noteSystem(`Restricted Mode: the finding of \`${finding.runId}\` was not offered as a run.`);
+      return;
+    }
+    const chosen = await this.askCard(promoteCardRequest(finding));
+    if (chosen.kind !== 'option' || !PROMOTE_MODES.includes(chosen.optionId as RunMode)) {
+      return;
+    }
+    const mode = chosen.optionId as RunMode;
+    const files = finding.files.length > 0 ? finding.files : finding.questionFiles;
+    const confirmed = await this.askCard(
+      promoteRunConfirm(mode, finding.finding, files, finding.manifest.baseBranch),
+    );
+    if (confirmed.kind !== 'approved') {
+      return;
+    }
+    let outcome: StartRunOutcome;
+    try {
+      outcome = await this.deps.runPipeline.start({ mode, statement: finding.finding, files: [...files] });
+    } catch (err) {
+      await this.noteSystem(`Starting the ${mode} run failed: ${describe(err)}.`);
+      return;
+    }
+    await this.noteSystem(startedRunNote(mode, outcome));
+  }
+
+  /**
+   * Raise one ask through this controller's own registry and card machinery.
+   * `scopeId` is deliberately left unset, so `scopeForAsk` keeps the card on the
+   * conversation in view rather than treating `'workspace'` as a spec slug.
+   */
+  private async askCard(request: QuestionRequest | ConfirmRequest): Promise<InterventionAnswer> {
+    const { intervention, answer } = this.asks.create(request);
+    try {
+      await this.presentIntervention(intervention);
+    } catch (err) {
+      this.asks.reject(intervention.id, `the ask could not be shown: ${describe(err)}`);
+    }
+    return answer;
+  }
+
   // --- webview messages ----------------------------------------------------
 
   /** Dispatch one webview→host message. */
@@ -466,6 +634,9 @@ export class ChatController {
       case 'setAutoMode':
         await this.onSetAutoMode(msg.enabled);
         return;
+      case 'setMode':
+        await this.onSetMode(msg.mode);
+        return;
     }
   }
 
@@ -489,6 +660,48 @@ export class ChatController {
     } catch (err) {
       this.deps.log(`Baiton chat: could not remember the Auto-mode setting: ${describe(err)}`);
     }
+  }
+
+  /**
+   * The user picked a mode in the composer. The mode is a property of the
+   * Workspace_Conversation: a spec conversation is always Spec, so a `setMode`
+   * there changes nothing. A change is also refused while the chat is busy or a
+   * spec-less run is in flight, and an off-union value is refused outright.
+   * Every one of those paths still echoes, so the control can never hold a
+   * value the host did not choose. A memory write that fails is logged only:
+   * undoing the in-memory change would desync the already-posted echo.
+   */
+  private async onSetMode(mode: RunMode): Promise<void> {
+    if (this.busy || this.runActive || this.activeSpec !== undefined || !isRunMode(mode)) {
+      this.postMode();
+      return;
+    }
+    if (mode === this.mode) {
+      this.postMode();
+      return;
+    }
+    this.mode = mode;
+    this.postMode();
+    try {
+      await this.deps.modeMemory?.set(mode);
+    } catch (err) {
+      this.deps.log(`Baiton chat: could not remember the conversation mode: ${describe(err)}`);
+    }
+  }
+
+  /** The mode that actually governs the conversation in view: Spec on a spec conversation. */
+  private effectiveMode(): RunMode {
+    return this.activeSpec === undefined ? this.mode : DEFAULT_MODE;
+  }
+
+  /** Repaint the composer's Mode select from the host's state. */
+  private postMode(): void {
+    this.deps.webview.post({ type: 'setMode', mode: this.effectiveMode() });
+  }
+
+  /** Mirror run activity to the view (the Mode select and nothing else gate on it today). */
+  private postRunActive(): void {
+    this.deps.webview.post({ type: 'setRunActive', active: this.runActive });
   }
 
   /**
@@ -801,10 +1014,13 @@ export class ChatController {
 
     const slug = this.activeSpec;
     const scope = this.activeScope();
-    // The phase is fixed for this send: it decides both the tools advertised to
-    // the model and the tools the registry will actually run (Req 11.1). The
-    // prompt re-reads `spec.md` every round (Req 11.6), so a status that
-    // changes mid-run is picked up by the next send, not mid-loop.
+    // The mode and the phase are both fixed for this send: the phase decides
+    // the tools advertised to the model and the tools the registry will
+    // actually run (Req 11.1), and the mode decides the prompt. The Mode select
+    // is refused while busy, so capturing the mode here only documents that
+    // invariant. The prompt re-reads `spec.md` every round (Req 11.6), so a
+    // status that changes mid-run is picked up by the next send, not mid-loop.
+    const mode = this.effectiveMode();
     const phase = await this.phaseForConversation(slug);
     // A fresh chat has no id until its first message: allocate one now so the
     // transcript file is created by this very append (Req 9.9).
@@ -833,7 +1049,7 @@ export class ChatController {
         tools: this.deps.toolsFor(phase),
         call: (name, args, callId, signal) =>
           this.callTool(name, args, callId, signal, phase),
-        systemPrompt: () => this.buildPrompt(slug),
+        systemPrompt: () => this.buildPrompt(slug, mode),
         append: async (m) => {
           await this.append(transcript, m);
           this.postAppended(m);
@@ -885,11 +1101,11 @@ export class ChatController {
    * `spec.md` each call so a spec conversation never reuses cached content
    * (Req 11.6). A missing/unreadable `spec.md` builds without it (Req 11.7).
    */
-  private async buildPrompt(slug: string | undefined): Promise<string> {
+  private async buildPrompt(slug: string | undefined, mode: RunMode): Promise<string> {
     const kind: ConversationKind =
       slug === undefined ? { kind: 'workspace' } : { kind: 'spec', slug };
     if (slug === undefined) {
-      return buildSystemPrompt(kind);
+      return buildSystemPrompt(kind, undefined, mode);
     }
     const specContent = await this.readSpec(slug);
     return buildSystemPrompt(kind, specContent);
@@ -898,12 +1114,14 @@ export class ChatController {
   /**
    * The orchestrator phase of the conversation being sent to (Req 11.1),
    * derived from the same `spec.md` the prompt is built from: a workspace
-   * conversation, or a spec that is missing, unreadable or still `draft`, is
-   * `gather`; an approved spec is `drive`.
+   * conversation in Spec mode, or a spec that is missing, unreadable or still
+   * `draft`, is `gather`; an approved spec is `drive`; a spec-less mode on the
+   * Workspace conversation is `run`. The spec branch deliberately passes no
+   * mode, so a spec conversation maps exactly as it does today.
    */
   private async phaseForConversation(slug: string | undefined): Promise<OrchestratorPhase> {
     if (slug === undefined) {
-      return phaseFor({ kind: 'workspace' });
+      return phaseFor({ kind: 'workspace' }, undefined, this.effectiveMode());
     }
     return phaseFor({ kind: 'spec', slug }, await this.readSpec(slug));
   }
@@ -922,6 +1140,10 @@ export class ChatController {
     await this.migrate(scope);
     this.conversations = await this.buildConversationItems();
     this.deps.webview.post({ type: 'setAutoMode', enabled: this.autoMode });
+    // Selecting a spec repaints the select as Spec and selecting Workspace again
+    // repaints the remembered mode, because both go through `refresh()`.
+    this.postMode();
+    this.postRunActive();
     await this.postProviders();
     this.deps.webview.post({ type: 'setConversations', items: this.conversations });
     this.deps.webview.post({ type: 'setActive', conversationId: this.activeConversationId() });
@@ -1196,6 +1418,84 @@ export class ChatController {
       type: 'showError',
       message: `The orchestrator failed: ${describe(err)}`,
     });
+  }
+}
+
+/** The system note one finished run records on the Workspace conversation. */
+export function runCompletionNote(outcome: RunPipelineOutcome, manifest: RunManifest): string {
+  const id = `\`${outcome.runId}\``;
+  switch (outcome.state) {
+    case 'done':
+      return `Run ${id} (${outcome.mode}) finished on branch \`${manifest.branch}\`: ${outcome.message}. Review the diff and merge it from the Runs view.`;
+    case 'answered':
+      return `Investigation ${id} finished: ${outcome.message}.`;
+    case 'failed':
+      return `Run ${id} (${outcome.mode}) failed: ${outcome.message}.`;
+    case 'cancelled':
+      return `Run ${id} (${outcome.mode}) was cancelled: ${outcome.message}.`;
+    default:
+      return `Run ${id} (${outcome.mode}) ended (${outcome.state}): ${outcome.message}.`;
+  }
+}
+
+/** The modes an Investigate finding can be promoted into. */
+export const PROMOTE_MODES: readonly RunMode[] = ['bug', 'quick'] as const;
+
+/** The promote card offered once an Investigate run has written its finding. */
+export function promoteCardRequest(finding: RunFinding): QuestionRequest {
+  const files = finding.files.length > 0 ? finding.files : finding.questionFiles;
+  return {
+    kind: 'question',
+    prompt: [
+      `Investigation \`${finding.runId}\` found: ${finding.finding}`,
+      files.length > 0 ? `Files: ${files.join(', ')}` : 'Files: (none named)',
+      ...(finding.nextSteps.length > 0 ? [`Next steps: ${finding.nextSteps.join('; ')}`] : []),
+      '',
+      'Start a run from this finding?',
+    ].join('\n'),
+    options: [
+      { id: 'bug', label: 'Start a Bug run', detail: 'Plan, fix and review the defect on its own branch.' },
+      { id: 'quick', label: 'Start a Quick run', detail: 'Plan, make and review the small change on its own branch.' },
+      { id: 'dismiss', label: 'Dismiss', detail: 'Keep the finding only.' },
+    ],
+    allowFreeText: false,
+  };
+}
+
+/**
+ * The run confirm card a promoted finding raises; the same shape `start_run`
+ * shows, so a promoted run reads identically to a model-dispatched one. The
+ * branch is the one that was checked out when the investigation started, so no
+ * git call is needed here.
+ */
+export function promoteRunConfirm(
+  mode: RunMode,
+  statement: string,
+  files: readonly string[],
+  branch: string,
+): ConfirmRequest {
+  return {
+    kind: 'confirm',
+    prompt: `Start a ${mode} run?`,
+    detail: [
+      `Mode: ${mode}`,
+      `Work: ${statement}`,
+      `Files: ${files.length > 0 ? files.join(', ') : '(none guessed)'}`,
+      `Target branch: ${branch}`,
+      'The run works on its own branch and worktree; nothing outside .baiton/runs/ and .baiton/worktrees/ changes until you merge it.',
+    ].join('\n'),
+  };
+}
+
+/** The system note a promoted dispatch records. */
+export function startedRunNote(mode: RunMode, outcome: StartRunOutcome): string {
+  switch (outcome.kind) {
+    case 'started':
+      return `Started a ${mode} run \`${outcome.runId}\`${outcome.branch !== undefined ? ` on branch \`${outcome.branch}\`` : ''}.`;
+    case 'busy':
+      return `The ${mode} run did not start: a stage is already running for this repository.`;
+    case 'refused':
+      return `The ${mode} run did not start: ${outcome.reason}.`;
   }
 }
 

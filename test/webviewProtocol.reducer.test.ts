@@ -20,6 +20,7 @@ import {
   normalizeEscalation,
 } from '../src/orchestrator/webviewProtocol';
 import type { ModelSelection } from '../src/orchestrator/providers';
+import { DEFAULT_MODE, RUN_MODES } from '../src/model/mode';
 
 describe('webview protocol reducer', () => {
   const rec = (
@@ -228,6 +229,8 @@ describe('webview protocol reducer', () => {
     reduce(seed, { type: 'showIntervention', intervention: { id: 'a1', kind: 'confirm', prompt: 'p', status: 'pending' } });
     reduce(seed, { type: 'resolveIntervention', id: 'a1', answer: { kind: 'approved' } });
     reduce(seed, { type: 'setAutoMode', enabled: true });
+    reduce(seed, { type: 'setMode', mode: 'bug' });
+    reduce(seed, { type: 'setRunActive', active: true });
     assert.strictEqual(JSON.stringify(seed), snapshot);
   });
 });
@@ -872,5 +875,97 @@ describe('interventions', () => {
       assert.deepStrictEqual(out[0].intervention, card);
       assert.notStrictEqual(out[0].intervention, card);
     });
+  });
+});
+
+describe('conversation mode and run activity', () => {
+  const rec = (role: RenderRecord['role'], content: string): RenderRecord => ({ role, content });
+
+  const groups: ProviderGroup[] = [
+    { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }] },
+  ];
+
+  it('a fresh state starts in the default mode with no run in flight', () => {
+    assert.strictEqual(initialWebviewState().mode, DEFAULT_MODE);
+    assert.strictEqual(initialWebviewState().mode, 'spec');
+    assert.strictEqual(initialWebviewState().runActive, false);
+  });
+
+  it('setMode sets every mode', () => {
+    for (const mode of RUN_MODES) {
+      const next = reduce(initialWebviewState(), { type: 'setMode', mode });
+      assert.strictEqual(next.mode, mode, `setMode should have set ${mode}`);
+    }
+  });
+
+  it('setMode replaces a previous mode', () => {
+    const one = reduce(initialWebviewState(), { type: 'setMode', mode: 'bug' });
+    assert.strictEqual(one.mode, 'bug');
+    const two = reduce(one, { type: 'setMode', mode: 'spec' });
+    assert.strictEqual(two.mode, 'spec');
+  });
+
+  it('setMode leaves the rest of the state alone', () => {
+    const selection: ModelSelection = { provider: 'google', model: 'gemini-2.5-pro' };
+    const seed: WebviewState = {
+      ...initialWebviewState(),
+      conversations: [{ id: 'workspace', label: 'Workspace' }],
+      activeId: 'workspace',
+      sessions: [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace' }],
+      activeSessionId: 's1',
+      records: [rec('user', 'hi')],
+      busy: true,
+      autoMode: true,
+      providers: groups,
+      selection,
+      empty: { endpoint: 'http://x', model: 'm' },
+    };
+    const next = reduce(seed, { type: 'setMode', mode: 'refactor' });
+
+    assert.strictEqual(next.mode, 'refactor');
+    assert.deepStrictEqual(next.conversations, [{ id: 'workspace', label: 'Workspace' }]);
+    assert.strictEqual(next.activeId, 'workspace');
+    assert.deepStrictEqual(next.sessions, [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace' }]);
+    assert.strictEqual(next.activeSessionId, 's1');
+    assert.deepStrictEqual(next.records, [rec('user', 'hi')]);
+    assert.strictEqual(next.busy, true);
+    assert.strictEqual(next.autoMode, true);
+    assert.deepStrictEqual(next.providers, groups);
+    assert.deepStrictEqual(next.selection, selection);
+    assert.deepStrictEqual(next.empty, { endpoint: 'http://x', model: 'm' });
+  });
+
+  it('setRunActive sets the flag both ways', () => {
+    const on = reduce(initialWebviewState(), { type: 'setRunActive', active: true });
+    assert.strictEqual(on.runActive, true);
+    const off = reduce(on, { type: 'setRunActive', active: false });
+    assert.strictEqual(off.runActive, false);
+  });
+
+  it('setRunActive does not change the mode and setMode does not change runActive', () => {
+    const moded = reduce(initialWebviewState(), { type: 'setMode', mode: 'investigate' });
+    assert.strictEqual(moded.runActive, false);
+
+    const running = reduce(moded, { type: 'setRunActive', active: true });
+    assert.strictEqual(running.mode, 'investigate');
+    assert.strictEqual(running.runActive, true);
+
+    const remoded = reduce(running, { type: 'setMode', mode: 'quick' });
+    assert.strictEqual(remoded.mode, 'quick');
+    assert.strictEqual(remoded.runActive, true);
+  });
+
+  it('setMode and setRunActive do not mutate the input state', () => {
+    const seed = initialWebviewState();
+    const snapshot = JSON.stringify(seed);
+    reduce(seed, { type: 'setMode', mode: 'bug' });
+    reduce(seed, { type: 'setRunActive', active: true });
+    assert.strictEqual(JSON.stringify(seed), snapshot);
+  });
+
+  it('a webview setMode carries the chosen mode', () => {
+    const msg: WebviewToHost = { type: 'setMode', mode: 'investigate' };
+    assert.strictEqual(msg.type, 'setMode');
+    assert.strictEqual(msg.mode, 'investigate');
   });
 });
