@@ -12,5 +12,6 @@ export * from './hash';
 export * from './validator';
 export * from './writer';
 export * from './treeModel';
+export * from './runTreeModel';
 export * from './todoActions';
 export * from './specActions';
