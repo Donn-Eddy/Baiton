@@ -16,6 +16,8 @@ import {
   DraftSpecRequest,
   RunDispatchOutcome,
   RunDispatchRequest,
+  StartRunOutcome,
+  StartRunRequest,
 } from '../src/orchestrator/seams';
 import type {
   InterventionAnswer,
@@ -66,6 +68,8 @@ const EXPECTED_TOOLS = [
   // Control tools (Req 10.1, 10.3)
   'ask_user',
   'draft_spec',
+  'start_run',
+  'investigate',
   'approve_spec',
   'run',
   'submit_pr',
@@ -171,6 +175,20 @@ function recordingDraft(
   };
 }
 
+/** A run-pipeline seam that records the requests it received. */
+function spyingPipeline(
+  outcome: StartRunOutcome = { kind: 'started', runId: 'run-1', branch: 'baiton/bug/run-1' },
+): { start: (req: StartRunRequest) => Promise<StartRunOutcome>; calls: StartRunRequest[] } {
+  const calls: StartRunRequest[] = [];
+  return {
+    calls,
+    start: async (req: StartRunRequest): Promise<StartRunOutcome> => {
+      calls.push(req);
+      return outcome;
+    },
+  };
+}
+
 /** Build {@link ToolServices} rooted at `repoRoot` with the given git/confirm. */
 function makeServices(
   repoRoot: string,
@@ -179,6 +197,7 @@ function makeServices(
   draftSpec?: { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome> },
   runQueue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> } = noRunQueue,
   intervention?: InterventionSeam,
+  runPipeline?: { start: (req: StartRunRequest) => Promise<StartRunOutcome> },
 ): ToolServices {
   return {
     repoRoot,
@@ -191,6 +210,7 @@ function makeServices(
     },
     ...(draftSpec !== undefined ? { draftSpec } : {}),
     ...(intervention !== undefined ? { intervention } : {}),
+    ...(runPipeline !== undefined ? { runPipeline } : {}),
     clock: { now: () => '2024-01-01T00:00:00.000Z' },
     ids: { next: () => 'id-1' },
     gitSettings: { remote: 'origin', base: 'main' },
@@ -203,6 +223,15 @@ function makeGuard(repoRoot: string): GuardContext {
     repoRoot,
     specsDir: path.join(repoRoot, '.baiton', 'specs'),
     restricted: false,
+  });
+}
+
+/** An untrusted {@link GuardContext} rooted at the temp repo (Restricted Mode). */
+function makeRestrictedGuard(repoRoot: string): GuardContext {
+  return new GuardContext({
+    repoRoot,
+    specsDir: path.join(repoRoot, '.baiton', 'specs'),
+    restricted: true,
   });
 }
 
@@ -559,7 +588,11 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
      * questions and hands the agreed requirements to the spec writer; `drive`
      * dispatches stages for an approved spec. The repository read tools and
      * `draft_spec` belong to the first, `run` and `submit_pr` to the second,
-     * and the spec-write tools plus the cheap orientation reads to both.
+     * and the spec-write tools plus the cheap orientation reads to both. The
+     * third phase, `run`, is a spec-less (Bug/Quick/Refactor/Investigate)
+     * conversation: it sees the read tools, `ask_user` and the two dispatch
+     * tools `start_run` and `investigate`, and no spec tool at all. Note the
+     * phase named `run` is not the tool named `run`, which stays drive-only.
      */
     const EXPECTED_PHASE_TOOLS: Record<OrchestratorPhase, string[]> = {
       gather: [
@@ -591,6 +624,19 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'approve_spec',
         'run',
         'submit_pr',
+      ],
+      run: [
+        'list_specs',
+        'read_spec',
+        'list_files',
+        'read_file',
+        'search',
+        'git_status',
+        'git_diff',
+        'git_log',
+        'ask_user',
+        'start_run',
+        'investigate',
       ],
     };
 
@@ -721,6 +767,435 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
           phase,
         );
         assert.strictEqual(result.ok, true, `read_spec runs while ${phase}`);
+      }
+    });
+
+    it('refuses start_run outside the run phase, never reaching the pipeline', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const confirm = recordingConfirm(true);
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), confirm, undefined, noRunQueue, undefined, pipeline),
+      );
+
+      for (const phase of ['gather', 'drive'] as const) {
+        const result = await registry.call(
+          'start_run',
+          { mode: 'bug', statement: 'Fix it', files: [] },
+          undefined,
+          makeGuard(repo),
+          phase,
+        );
+        assert.strictEqual(result.ok, false, `start_run must refuse while ${phase}`);
+        if (!result.ok) {
+          assert.match(result.error, /start_run/, 'the refusal names the tool');
+          assert.match(result.error, new RegExp(phase), 'the refusal names the phase');
+        }
+      }
+      assert.strictEqual(pipeline.calls.length, 0, 'the run pipeline was never reached');
+      assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
+    });
+
+    it('refuses every spec tool while in the run phase, changing nothing', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      const specFile = writeSpec(repo, slug, draftSpec());
+      const before = fs.readFileSync(specFile, 'utf8');
+      const queue = {
+        calls: [] as RunDispatchRequest[],
+        dispatch: async (req: RunDispatchRequest): Promise<RunDispatchOutcome> => {
+          queue.calls.push(req);
+          return { kind: 'dispatched', runId: 'run-x' };
+        },
+      };
+      const draft = recordingDraft();
+      const confirm = recordingConfirm(true);
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), confirm, draft, queue),
+      );
+
+      const calls: [string, unknown][] = [
+        ['run', { slug, todo: 'T01', stage: 'plan' }],
+        ['draft_spec', { slug: 'other', requirements: 'Goal: something.' }],
+        ['submit_pr', { slug }],
+        ['approve_spec', { slug }],
+        ['add_todo', { slug, text: 'T02 Another thing' }],
+      ];
+      for (const [name, args] of calls) {
+        const result = await registry.call(name, args, `call-run-phase-${name}`, makeGuard(repo), 'run');
+        assert.strictEqual(result.ok, false, `${name} must refuse while in the run phase`);
+        if (!result.ok) {
+          assert.match(result.error, new RegExp(name), 'the refusal names the tool');
+          assert.match(result.error, /run/, 'the refusal names the phase');
+        }
+      }
+
+      assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
+      assert.strictEqual(queue.calls.length, 0, 'the run queue was never reached');
+      assert.strictEqual(draft.calls.length, 0, 'the spec writer was never dispatched');
+      assert.strictEqual(
+        fs.readFileSync(specFile, 'utf8'),
+        before,
+        'an out-of-phase call leaves the spec byte-for-byte unchanged',
+      );
+    });
+  });
+
+  describe('start_run and investigate (run-phase dispatch tools)', () => {
+    /** Build a registry whose run pipeline is `pipeline`. */
+    function registryWith(
+      repo: string,
+      pipeline: { start: (req: StartRunRequest) => Promise<StartRunOutcome> } | undefined,
+      confirm: { confirm: (message: string) => Promise<boolean> },
+      intervention?: InterventionSeam,
+      git: GitService = benignGit(),
+    ) {
+      return createToolRegistry(
+        makeServices(repo, git, confirm, undefined, noRunQueue, intervention, pipeline),
+      );
+    }
+
+    it('confirms, then dispatches the run with every argument it was given', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const confirm = recordingConfirm(true);
+      const registry = registryWith(repo, pipeline, confirm);
+
+      const result = await registry.call(
+        'start_run',
+        {
+          mode: 'bug',
+          statement: 'Fix the off-by-one in slice',
+          files: ['src/a.ts', 'src/b.ts'],
+          reproduction: 'call slice(0)',
+        },
+        'call-run-1',
+        makeGuard(repo),
+        'run',
+      );
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        const data = result.data as { runId: string; mode: string; branch?: string };
+        assert.strictEqual(data.runId, 'run-1');
+        assert.strictEqual(data.mode, 'bug');
+        assert.strictEqual(data.branch, 'baiton/bug/run-1');
+      }
+      assert.deepStrictEqual(pipeline.calls, [
+        {
+          mode: 'bug',
+          statement: 'Fix the off-by-one in slice',
+          files: ['src/a.ts', 'src/b.ts'],
+          reproduction: 'call slice(0)',
+        },
+      ]);
+      assert.strictEqual(confirm.calls.length, 1, 'exactly one card was raised');
+      const card = confirm.calls[0]!;
+      assert.match(card, /bug/);
+      assert.match(card, /Fix the off-by-one in slice/);
+      assert.match(card, /src\/a\.ts/);
+      assert.match(card, /src\/b\.ts/);
+      assert.match(card, /main/, "the card names benignGit's current branch");
+    });
+
+    it('raises the card through the intervention seam when one is wired', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const intervention = recordingIntervention({ kind: 'approved' });
+      const confirm = recordingConfirm(false);
+      const registry = registryWith(repo, pipeline, confirm, intervention.seam);
+
+      const result = await registry.call(
+        'start_run',
+        { mode: 'quick', statement: 'Rename the flag', files: ['src/flags.ts'] },
+        'call-run-2',
+        makeGuard(repo),
+        'run',
+      );
+
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(intervention.calls.length, 1, 'exactly one intervention request');
+      const request = intervention.calls[0]!;
+      assert.strictEqual(request.kind, 'confirm');
+      const text = `${request.prompt}\n${'detail' in request ? request.detail ?? '' : ''}`;
+      assert.match(text, /quick/);
+      assert.match(text, /Rename the flag/);
+      assert.match(text, /src\/flags\.ts/);
+      assert.match(text, /main/);
+      assert.strictEqual(confirm.calls.length, 0, 'the legacy seam is not used when the card is');
+    });
+
+    it('writes and dispatches nothing when the card is declined', async () => {
+      for (const decline of ['intervention', 'confirm'] as const) {
+        const repo = newRepo();
+        const pipeline = spyingPipeline();
+        const confirm = recordingConfirm(false);
+        const intervention =
+          decline === 'intervention' ? recordingIntervention({ kind: 'declined' }) : undefined;
+        const registry = registryWith(repo, pipeline, confirm, intervention?.seam);
+
+        for (const [name, args] of [
+          ['start_run', { mode: 'refactor', statement: 'Split the module', files: ['src/a.ts'] }],
+          ['investigate', { question: 'Where is X?', files: ['src/a.ts'] }],
+        ] as [string, unknown][]) {
+          const result = await registry.call(name, args, undefined, makeGuard(repo), 'run');
+          assert.strictEqual(result.ok, false, `${name} must refuse on a decline`);
+          if (!result.ok) {
+            assert.match(result.error, /declined/i);
+          }
+        }
+
+        assert.strictEqual(pipeline.calls.length, 0, 'a decline dispatches nothing');
+        assert.strictEqual(
+          fs.existsSync(path.join(repo, '.baiton', 'runs')),
+          false,
+          'a decline creates nothing under .baiton/runs/',
+        );
+      }
+    });
+
+    it('refuses invalid arguments before the card and before the seam', async () => {
+      const cases: [string, unknown, RegExp][] = [
+        ['start_run', { mode: 'spec', statement: 'x', files: [] }, /bug, quick, refactor/],
+        ['start_run', { mode: 'investigate', statement: 'x', files: [] }, /bug, quick, refactor/],
+        ['start_run', { mode: 'nope', statement: 'x', files: [] }, /bug, quick, refactor/],
+        ['start_run', { mode: 'bug', files: [] }, /"statement"/],
+        ['start_run', { mode: 'bug', statement: '   ', files: [] }, /"statement"/],
+        ['start_run', { mode: 'bug', statement: 'a\nb', files: [] }, /single line/],
+        ['start_run', { mode: 'bug', statement: 'x', files: 'nope' }, /"files"/],
+        ['start_run', { mode: 'bug', statement: 'x', files: [''] }, /non-empty string/],
+        ['start_run', { mode: 'bug', statement: 'x', files: ['/etc/passwd'] }, /repository-relative/],
+        ['start_run', { mode: 'bug', statement: 'x', files: ['../outside.ts'] }, /repository-relative/],
+        [
+          'start_run',
+          { mode: 'bug', statement: 'x', files: [], reproduction: '  ' },
+          /"reproduction"/,
+        ],
+        ['investigate', { files: ['src/a.ts'] }, /"question"/],
+        ['investigate', { question: 'a\nb', files: [] }, /single line/],
+        ['investigate', { question: 'Where?' }, /"files"/],
+      ];
+
+      for (const [name, args, pattern] of cases) {
+        const repo = newRepo();
+        const pipeline = spyingPipeline();
+        const confirm = recordingConfirm(true);
+        const registry = registryWith(repo, pipeline, confirm);
+
+        const result = await registry.call(name, args, undefined, makeGuard(repo), 'run');
+        assert.strictEqual(result.ok, false, `${name} must refuse ${JSON.stringify(args)}`);
+        if (!result.ok) {
+          assert.match(result.error, pattern);
+        }
+        assert.strictEqual(confirm.calls.length, 0, 'no card on a malformed call');
+        assert.strictEqual(pipeline.calls.length, 0, 'no dispatch on a malformed call');
+      }
+    });
+
+    it('accepts an empty files array and collapses duplicates', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const registry = registryWith(repo, pipeline, recordingConfirm(true));
+
+      const empty = await registry.call(
+        'start_run',
+        { mode: 'quick', statement: 'Nothing guessed', files: [] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      assert.strictEqual(empty.ok, true);
+      assert.deepStrictEqual(pipeline.calls[0]!.files, []);
+
+      const dupes = await registry.call(
+        'start_run',
+        { mode: 'quick', statement: 'Same file twice', files: ['a.ts', 'a.ts'] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      assert.strictEqual(dupes.ok, true);
+      assert.deepStrictEqual(pipeline.calls[1]!.files, ['a.ts']);
+    });
+
+    it('surfaces busy and refused outcomes from the pipeline', async () => {
+      const repo = newRepo();
+      const busy = createToolRegistry(
+        makeServices(
+          repo,
+          benignGit(),
+          recordingConfirm(true),
+          undefined,
+          noRunQueue,
+          undefined,
+          spyingPipeline({ kind: 'busy' }),
+        ),
+      );
+      const busyResult = await busy.call(
+        'start_run',
+        { mode: 'bug', statement: 'x', files: [] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      assert.strictEqual(busyResult.ok, false);
+      if (!busyResult.ok) {
+        assert.match(busyResult.error, /already running/i);
+      }
+
+      const refused = createToolRegistry(
+        makeServices(
+          repo,
+          benignGit(),
+          recordingConfirm(true),
+          undefined,
+          noRunQueue,
+          undefined,
+          spyingPipeline({ kind: 'refused', reason: 'the working tree is dirty' }),
+        ),
+      );
+      const refusedResult = await refused.call(
+        'start_run',
+        { mode: 'bug', statement: 'x', files: [] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      assert.strictEqual(refusedResult.ok, false);
+      if (!refusedResult.ok) {
+        assert.match(refusedResult.error, /working tree is dirty/);
+      }
+    });
+
+    it('reports itself unavailable when no run pipeline is wired', async () => {
+      const repo = newRepo();
+      const confirm = recordingConfirm(true);
+      const registry = registryWith(repo, undefined, confirm);
+
+      for (const [name, args] of [
+        ['start_run', { mode: 'bug', statement: 'x', files: [] }],
+        ['investigate', { question: 'Where?', files: [] }],
+      ] as [string, unknown][]) {
+        const result = await registry.call(name, args, undefined, makeGuard(repo), 'run');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+          assert.match(result.error, /not available/i);
+        }
+      }
+      assert.strictEqual(confirm.calls.length, 0, 'an unavailable tool raises no card');
+    });
+
+    it('investigate dispatches the question as the run statement', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline({ kind: 'started', runId: 'run-2' });
+      const confirm = recordingConfirm(true);
+      const registry = registryWith(repo, pipeline, confirm);
+
+      const result = await registry.call(
+        'investigate',
+        { question: 'Where is the retry budget enforced?', files: ['src/engine/runQueue.ts'] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        const data = result.data as { runId: string; mode: string };
+        assert.strictEqual(data.runId, 'run-2');
+        assert.strictEqual(data.mode, 'investigate');
+      }
+      assert.deepStrictEqual(pipeline.calls, [
+        {
+          mode: 'investigate',
+          statement: 'Where is the retry budget enforced?',
+          files: ['src/engine/runQueue.ts'],
+        },
+      ]);
+      const card = confirm.calls[0]!;
+      assert.match(card, /Where is the retry budget enforced\?/);
+      assert.match(card, /src\/engine\/runQueue\.ts/);
+      assert.match(card, /main/);
+      assert.match(card, /Read-only/);
+    });
+
+    it('is callable without an idempotency key, being non-mutating', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const registry = registryWith(repo, pipeline, recordingConfirm(true));
+
+      const a = await registry.call(
+        'start_run',
+        { mode: 'bug', statement: 'x', files: [] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      const b = await registry.call(
+        'investigate',
+        { question: 'Where?', files: [] },
+        undefined,
+        makeGuard(repo),
+        'run',
+      );
+      assert.strictEqual(a.ok, true);
+      assert.strictEqual(b.ok, true);
+      assert.strictEqual(pipeline.calls.length, 2, 'both reached the seam without a call id');
+    });
+
+    it('is disabled under Restricted Mode, reaching neither card nor seam', async () => {
+      const repo = newRepo();
+      const pipeline = spyingPipeline();
+      const confirm = recordingConfirm(true);
+      const registry = registryWith(repo, pipeline, confirm, undefined, throwingGit());
+
+      for (const [name, args] of [
+        ['start_run', { mode: 'bug', statement: 'x', files: [] }],
+        ['investigate', { question: 'Where?', files: [] }],
+      ] as [string, unknown][]) {
+        const result = await registry.call(
+          name,
+          args,
+          'call-restricted-1',
+          makeRestrictedGuard(repo),
+          'run',
+        );
+        assert.strictEqual(result.ok, false, `${name} is disabled in Restricted Mode`);
+        if (!result.ok) {
+          assert.match(result.error, /Restricted Mode/);
+        }
+      }
+      assert.strictEqual(confirm.calls.length, 0, 'no card in Restricted Mode');
+      assert.strictEqual(pipeline.calls.length, 0, 'no dispatch in Restricted Mode');
+    });
+
+    it('advertises the schemas and flags the design fixes', () => {
+      const repo = newRepo();
+      const registry = registryWith(repo, spyingPipeline(), recordingConfirm(true));
+      const defs = registry.definitions();
+
+      const startRun = defs.find((d) => d.name === 'start_run')!;
+      const startSchema = startRun.schema as {
+        properties: { mode: { enum: string[] } };
+        additionalProperties: boolean;
+        required: string[];
+      };
+      assert.deepStrictEqual(startSchema.properties.mode.enum, ['bug', 'quick', 'refactor']);
+      assert.strictEqual(startSchema.additionalProperties, false);
+      assert.deepStrictEqual(startSchema.required, ['mode', 'statement', 'files']);
+
+      const investigate = defs.find((d) => d.name === 'investigate')!;
+      const investigateSchema = investigate.schema as {
+        required: string[];
+        additionalProperties: boolean;
+      };
+      assert.deepStrictEqual(investigateSchema.required, ['question', 'files']);
+      assert.strictEqual(investigateSchema.additionalProperties, false);
+
+      for (const tool of [startRun, investigate]) {
+        assert.strictEqual(tool.dispatch, true, `${tool.name} is a dispatch tool`);
+        assert.strictEqual(tool.mutating, false, `${tool.name} writes no spec file itself`);
+        assert.deepStrictEqual([...tool.phases], ['run'], `${tool.name} is run-phase only`);
       }
     });
   });

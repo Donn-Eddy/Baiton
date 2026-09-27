@@ -74,7 +74,7 @@ export interface ToolContext {
 }
 
 /**
- * Which of the orchestrator's two jobs a conversation is doing right now
+ * Which of the orchestrator's three jobs a conversation is doing right now
  * (Req 11.1).
  *
  * - `gather` — a Workspace conversation, or a spec still in `draft`: ask
@@ -83,24 +83,33 @@ export interface ToolContext {
  * - `drive`  — an approved spec being driven to completion: dispatch the next
  *              legal stage through `run` until every todo is done, then
  *              `submit_pr`.
+ * - `run`    — a non-Spec (Bug/Quick/Refactor/Investigate) Workspace
+ *              conversation: inspect the repository with the read tools, agree
+ *              the work, then dispatch one spec-less run through `start_run` or
+ *              `investigate`.
+ *
+ * Beware: the PHASE named `run` is not the TOOL named `run`. The `run` tool
+ * stays `phases: ['drive']` and dispatches a spec stage for a todo, while the
+ * `run` phase advertises `start_run`/`investigate` and never sees `run`.
  *
  * Each tool declares the phases it belongs to, so the tool surface advertised
  * to the model — and the surface the registry will actually run — is exactly
  * the set the current job needs.
  */
-export type OrchestratorPhase = 'gather' | 'drive';
+export type OrchestratorPhase = 'gather' | 'drive' | 'run';
 
-/** Both orchestrator phases, for iteration in assembly and tests. */
-export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive'] as const;
+/** All three orchestrator phases, for iteration in assembly and tests. */
+export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive', 'run'] as const;
 
 /**
  * A single orchestrator tool (design "Orchestrator: tool registry and guard").
  *
  * - `mutating` — whether the tool changes files. Mutating tools require an
  *                idempotency key and are disabled under Restricted Mode.
- * - `dispatch` — whether the tool dispatches a stage (e.g. `run`). Dispatch is
- *                disabled under Restricted Mode (Req 22.2) even though the
- *                dispatch tool writes no spec file itself.
+ * - `dispatch` — whether the tool dispatches a stage (e.g. `run`, `start_run`,
+ *                `investigate`). Dispatch is disabled under Restricted Mode
+ *                (Req 22.2) even though the dispatch tool writes no spec file
+ *                itself.
  * - `phases`   — the orchestrator phases this tool is part of (Req 11.1). A
  *                tool is neither advertised nor runnable outside them.
  * - `schema`   — JSON Schema for the tool's arguments (validated elsewhere in

@@ -14,12 +14,15 @@
  * imports no `vscode` API; the activation layer builds the services and passes
  * a {@link GuardContext} per call.
  *
- * Every tool also declares the orchestrator phases it belongs to (Req 11.1).
- * The phase is enforced twice: {@link ToolRegistry.definitionsFor} and
- * {@link ToolRegistry.assembleFor} advertise only the current phase's tools,
- * and {@link ToolRegistry.call} refuses an out-of-phase tool before its `run`
- * is reached, so a tool the model should not have cannot act even if it is
- * named anyway.
+ * Every tool also declares which of the three orchestrator phases — `gather`,
+ * `drive` and `run` — it belongs to (Req 11.1). A `run`-phase conversation sees
+ * the read tools, `ask_user` and the two spec-less dispatch tools `start_run`
+ * and `investigate`, and nothing else. The phase is enforced twice:
+ * {@link ToolRegistry.definitionsFor} and {@link ToolRegistry.assembleFor}
+ * advertise only the current phase's tools, and {@link ToolRegistry.call}
+ * refuses an out-of-phase tool — a dispatch included — before the guard and
+ * before the tool's `run` is reached, so a tool the model should not have
+ * cannot act even if it is named anyway.
  */
 import {
   GuardContext,

@@ -1,14 +1,19 @@
 import * as assert from 'assert';
 import * as path from 'path';
 import * as fc from 'fast-check';
+import * as os from 'os';
 import {
   guardTool,
   IdempotencyStore,
+  ORCHESTRATOR_PHASES,
   Tool,
   ToolContext,
   ToolResult,
   GuardContext,
 } from '../src/orchestrator/guard';
+import { createToolRegistry } from '../src/orchestrator/registry';
+import { ToolServices } from '../src/orchestrator/toolServices';
+import { GitService } from '../src/git';
 
 /**
  * Property test for Restricted Mode disabling writes and dispatch
@@ -61,7 +66,7 @@ function makeTool(
     description: 'fake tool for the restricted-mode guard harness',
     mutating,
     dispatch,
-    phases: ['gather', 'drive'],
+    phases: [...ORCHESTRATOR_PHASES],
     schema: {},
     async run(_args: unknown, _tc: ToolContext): Promise<ToolResult> {
       ran = true;
@@ -154,5 +159,71 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
       ),
       { numRuns: 200 },
     );
+  });
+
+  it('the real registry refuses every dispatch tool under Restricted Mode, reaching no seam', async () => {
+    // Every seam throws: the guard must refuse before any of them is touched.
+    // No filesystem access happens either, so the paths need not exist.
+    const boom = (what: string) => (): never => {
+      throw new Error(`${what} must not be reached under Restricted Mode`);
+    };
+    const git = new Proxy({} as GitService, {
+      get: (_t, prop) => boom(`git.${String(prop)}`),
+    });
+    const repoRoot = path.join(os.tmpdir(), 'baiton-guard-restricted-registry');
+    const services: ToolServices = {
+      repoRoot,
+      baitonDir: path.join(repoRoot, '.baiton'),
+      git,
+      confirm: { confirm: boom('confirm') },
+      runQueue: { dispatch: boom('runQueue.dispatch') },
+      draftSpec: { draft: boom('draftSpec.draft') },
+      runPipeline: { start: boom('runPipeline.start') },
+      submitPr: boom('submitPr'),
+      clock: { now: () => '2024-01-01T00:00:00.000Z' },
+      ids: { next: () => 'id-1' },
+      gitSettings: { remote: 'origin', base: 'main' },
+    };
+    const registry = createToolRegistry(services);
+
+    const dispatchTools = registry.definitions().filter((d) => d.dispatch === true);
+    const dispatchNames = dispatchTools.map((d) => d.name).sort();
+    assert.deepStrictEqual(
+      dispatchNames,
+      ['draft_spec', 'investigate', 'run', 'start_run'],
+      'every dispatch tool is covered; a new one may not silently drop out',
+    );
+
+    for (const tool of dispatchTools) {
+      const restricted = await registry.call(
+        tool.name,
+        {},
+        'key-1',
+        makeCtx(true),
+        tool.phases[0]!,
+      );
+      assert.strictEqual(restricted.ok, false, `${tool.name} must refuse under Restricted Mode`);
+      if (!restricted.ok) {
+        assert.match(restricted.error, /Restricted Mode/);
+      }
+
+      // The mirror: unrestricted, the same call gets past the Restricted-Mode
+      // gate. It may still fail on a missing argument or an unwired seam, but
+      // never with a Restricted-Mode refusal.
+      const trusted = await registry.call(
+        tool.name,
+        {},
+        'key-2',
+        makeCtx(false),
+        tool.phases[0]!,
+      );
+      if (!trusted.ok) {
+        assert.doesNotMatch(
+          trusted.error,
+          /Restricted Mode/,
+          `${tool.name} must get past the Restricted-Mode gate when trusted`,
+        );
+      }
+    }
   });
 });
