@@ -407,7 +407,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer and bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+  it('contributes the Spec Explorer, the Runs view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
     interface ViewContrib {
       id: string;
       name?: string;
@@ -435,9 +435,9 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.ok(views, 'views must be present');
     assert.deepStrictEqual(
       views.baiton?.map((v) => v.id),
-      ['baiton.specExplorer', 'baiton.configPanel'],
+      ['baiton.specExplorer', 'baiton.runsView', 'baiton.configPanel'],
     );
-    const configView = views.baiton?.[1];
+    const configView = views.baiton?.find((v) => v.id === 'baiton.configPanel');
     assert.strictEqual(configView?.type, 'webview');
     assert.strictEqual(configView?.visibility, 'collapsed');
     assert.deepStrictEqual(views['baiton-chat']?.map((v) => v.id), ['baiton.chatView']);

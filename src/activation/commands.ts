@@ -34,6 +34,10 @@
  *   - The Spec_Explorer tree view (with its filesystem watcher) whose inline
  *     actions forward to the same `baiton.plan/execute/review/replan/stop/
  *     approve` commands with `[slug, todoId]` / `[slug]` (Req 2, 5, 6, 18.4).
+ *   - The Runs tree view beside it (with its `.baiton/runs/*\/run.json` watcher
+ *     and a subscription to the run pipeline) whose inline actions forward the
+ *     clicked run id to `baiton.runs.cancel` / `baiton.runs.viewDiff` /
+ *     `baiton.runs.merge` (design "dispatch modes").
  *   - A {@link vscode.CodeLensProvider} over a spec's `# TODOS` lines exposing
  *     the stage triggers inline per todo.
  *
@@ -71,6 +75,7 @@ import {
   DEFAULT_PR_TOOL,
   isPrToolSelection,
   resolveProviderExecutable,
+  runsRootDir,
   selectProvider,
   submitPr,
 } from '../engine';
@@ -137,6 +142,16 @@ import { ChatController } from './chatController';
 import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
+import {
+  RunsExplorer,
+  RUNS_VIEW_ID,
+  runNodeTarget,
+  runRunsCancel,
+  runRunsMerge,
+  runRunsViewDiff,
+  type RunsCommandDeps,
+  type RunTreeNode,
+} from './runsExplorer';
 import { openChat } from './openChat';
 import { planPath } from './specLister';
 import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
@@ -186,6 +201,9 @@ export const COMMANDS = {
   setProviderApiKey: 'baiton.setProviderApiKey',
   openConfigPanel: 'baiton.openConfigPanel',
   refreshModels: 'baiton.refreshModels',
+  runsCancel: 'baiton.runs.cancel',
+  runsViewDiff: 'baiton.runs.viewDiff',
+  runsMerge: 'baiton.runs.merge',
 } as const;
 
 /**
@@ -907,6 +925,49 @@ export function registerCommands(
   disposables.push(
     vscode.window.registerTreeDataProvider(SPEC_EXPLORER_VIEW_ID, explorer),
     explorer,
+  );
+
+  // --- runs view (design "dispatch modes") ---
+  // Built after the Spec_Explorer so the `baiton.restricted` context key its
+  // `start()` publishes is already set; the Runs menus only negate it. The
+  // `git` service here is the main-checkout one: the merge and the diff must
+  // run in the main checkout, never in a run's worktree. `refresh` is a lazily
+  // invoked arrow, so it may name `runsExplorer` from inside `runsDeps`.
+  const runsExplorer = new RunsExplorer(
+    runStore,
+    runsRootDir(repoRoot),
+    runPipeline,
+    surface,
+  ).start();
+  const runsDeps: RunsCommandDeps = {
+    repoRoot,
+    store: runStore,
+    git,
+    pipeline: runPipeline,
+    surface,
+    restricted: () => workspace.restricted,
+    // The title is carried by the seam for a host that can name the document;
+    // an untitled `diff` document takes its name from the editor.
+    showDiff: async (_title, diff) => {
+      const doc = await vscode.workspace.openTextDocument({ content: diff, language: 'diff' });
+      await vscode.window.showTextDocument(doc, { preview: true });
+    },
+    confirm: async (message, action) =>
+      (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
+    refresh: () => runsExplorer.refreshNow(),
+  };
+  disposables.push(
+    vscode.window.registerTreeDataProvider(RUNS_VIEW_ID, runsExplorer),
+    runsExplorer,
+    vscode.commands.registerCommand(COMMANDS.runsCancel, (arg?: RunTreeNode | string) =>
+      runRunsCancel(runsDeps, runIdArg(arg)),
+    ),
+    vscode.commands.registerCommand(COMMANDS.runsViewDiff, (arg?: RunTreeNode | string) =>
+      runRunsViewDiff(runsDeps, runIdArg(arg)),
+    ),
+    vscode.commands.registerCommand(COMMANDS.runsMerge, (arg?: RunTreeNode | string) =>
+      runRunsMerge(runsDeps, runIdArg(arg)),
+    ),
   );
 
   // Follow the active editor: when it is a spec's `spec.md`, make that spec the
@@ -1890,6 +1951,15 @@ function todoArgs(
     return { slug: target?.[0], todoId: target?.[1] };
   }
   return { slug: a, todoId: b };
+}
+
+/**
+ * Normalize the argument a `baiton.runs.*` command receives into a run id. The
+ * Runs tree's inline actions invoke the command with the clicked
+ * {@link RunTreeNode}; a palette invocation (if ever enabled) passes a run id.
+ */
+function runIdArg(arg?: RunTreeNode | string): string | undefined {
+  return typeof arg === 'string' ? arg : arg !== undefined ? runNodeTarget(arg) : undefined;
 }
 
 /**
