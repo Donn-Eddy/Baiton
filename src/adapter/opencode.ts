@@ -187,7 +187,14 @@ export const OPENCODE_MODELS: readonly string[] = [];
 
 /**
  * Opencode effort list: empty by design because effort maps to user-configured
- * `--variant` values. An empty list signals free-text rendering in the config panel.
+ * `--variant` values. An empty list signals free-text rendering in the config
+ * panel.
+ *
+ * This is the CURATED fallback only. Discovery now derives per-model effort
+ * levels from each model's `variants` keys (see
+ * {@link opencodeModelsFromVerboseOutput}) and the capability-level list from
+ * their ordered union, so a discovered empty list means only "no model
+ * disclosed any level" — never "opencode has no variants".
  */
 export const OPENCODE_EFFORTS: readonly string[] = [];
 
@@ -214,8 +221,28 @@ export const OPENCODE_SERVE_ARGS: readonly string[] = [
   OPENCODE_SERVE_PORT,
 ];
 
-/** The CLI fallback/validation source: `opencode models`. */
+/** The primary discovery source's subcommand: `opencode models`. */
 export const OPENCODE_MODELS_SUBCOMMAND = 'models';
+
+/** The flag that makes `opencode models` disclose each model's full JSON. */
+export const OPENCODE_MODELS_VERBOSE_FLAG = '--verbose';
+
+/**
+ * The full argv of the primary discovery source: `opencode models --verbose`.
+ *
+ * Verified on opencode 1.18.30: the verbose listing prints each
+ * `provider/model` line followed by that model's pretty-printed JSON object,
+ * whose `variants` KEYS are exactly the values `--variant` accepts for that
+ * model (and whose `name` is its display label). An older CLI that does not
+ * know `--verbose` either errors — in which case the runner resolves
+ * `undefined` and the `/api/model` fallback runs — or prints the bare listing,
+ * which {@link opencodeModelsFromVerboseOutput} handles identically to
+ * {@link opencodeModelsFromCliOutput}.
+ */
+export const OPENCODE_MODELS_ARGS: readonly string[] = [
+  OPENCODE_MODELS_SUBCOMMAND,
+  OPENCODE_MODELS_VERBOSE_FLAG,
+];
 
 /** The server route the primary discovery path GETs. */
 export const OPENCODE_MODEL_ENDPOINT_PATH = '/api/model';
@@ -250,8 +277,8 @@ export type OpencodeServerStarter = (options: {
 }) => Promise<OpencodeServer | undefined>;
 
 /**
- * Runs `opencode models` and resolves its stdout, or `undefined` on any
- * failure. Never rejects.
+ * Runs `opencode models --verbose` and resolves its stdout, or `undefined` on
+ * any failure. Never rejects.
  */
 export type OpencodeModelsCli = (options: {
   cwd?: string;
@@ -276,7 +303,7 @@ export interface OpencodeAdapterOptions {
  * Pure and total: never throws, never mutates the input, returns `[]` for any
  * unrecognised shape. The response shape is not pinned by any fixture or
  * documentation in this repo, so the parser is deliberately tolerant — an
- * unrecognised shape degrades to the `opencode models` fallback rather than
+ * unrecognised shape yields no entry rather than
  * failing the refresh. Accepted shapes, first match winning:
  *
  * 1. a bare array of items;
@@ -450,7 +477,11 @@ function firstNonEmptyString(values: readonly unknown[]): string | undefined {
 const OPENCODE_MODEL_TOKEN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._:-]+$/;
 
 /**
- * Parse `opencode models` stdout into {@link ModelEntry} records.
+ * Parse a BARE `opencode models` listing into {@link ModelEntry} records.
+ *
+ * Kept as the documented plain-listing parser; discovery itself goes through
+ * {@link opencodeModelsFromVerboseOutput}, which yields exactly these ids on a
+ * listing with no JSON blocks.
  *
  * Pure and total: never throws. Each line has its ANSI escapes and any leading
  * bullet/marker stripped, and only its FIRST whitespace-delimited token is
@@ -480,18 +511,156 @@ export function opencodeModelsFromCliOutput(stdout: string): ModelEntry[] {
   return entries;
 }
 
+/** Strip ANSI escapes and any leading bullet/marker from one listing line. */
+function cleanOpencodeLine(line: string): string {
+  return (
+    line
+      // The ESC byte is intentional: it is exactly what a coloured listing line
+      // hides its id behind.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\u001B\[[0-9;]*m/g, '')
+      .replace(/^[\s>*•-]+/, '')
+      .trim()
+  );
+}
+
 /**
- * Union the two discovery sources — the todo's "fallback AND validation
- * source" rule made explicit and testable.
+ * Parse `opencode models --verbose` stdout into {@link ModelEntry} records —
+ * the PRIMARY discovery source.
  *
- * The API entries come first, in their own order (they carry the labels), then
- * every CLI entry whose id is not already present is appended. The CLI list
- * therefore VALIDATES — its ids are cross-checked and any it alone knows are
- * added — but never DROPS an API-reported model: a model missing from one
- * source is a gap in that source, not evidence the model is gone. With an empty
- * `apiEntries` the result is exactly the CLI entries (pure fallback); with an
- * empty `cliEntries` it is exactly the API entries. Pure: neither input is
- * mutated.
+ * Pure and total: never throws, never mutates, `[]` for empty or unrecognised
+ * input. Each line is ANSI-stripped and marker-stripped exactly as
+ * {@link opencodeModelsFromCliOutput} strips it, and a line is an entry only
+ * when its FIRST whitespace-delimited token matches {@link OPENCODE_MODEL_TOKEN}
+ * — which drops headers, blank lines and prose. When the next non-blank line
+ * after an id opens a `{`, the pretty-printed object is collected by brace depth
+ * counted OUTSIDE double-quoted strings (so a `{` inside a `"name"` value never
+ * shifts the depth) and `JSON.parse`d; an unparseable block, or one running to
+ * EOF unterminated, degrades to a plain `{ id, provider }` entry rather than
+ * failing.
+ *
+ * From a parsed detail object only two fields are read: `name` becomes `label`
+ * (set only when it differs from both the full token and the bare model id) and
+ * the KEYS of `variants` become `efforts`, in object order, which are exactly
+ * the values `--variant` accepts for that model. A model whose `variants` is
+ * `{}`, missing, null or not an object gets NO `efforts` key at all — an empty
+ * array is not the same thing downstream. `defaultEffort` is NEVER emitted:
+ * opencode marks no default variant. Every key is assigned CONDITIONALLY, never
+ * as an explicit `undefined` own key.
+ *
+ * Entries are de-duplicated by id, first occurrence winning (a duplicate's JSON
+ * block is still consumed), and source order is otherwise preserved. On a bare
+ * listing with no JSON blocks the result carries exactly the same ids as
+ * {@link opencodeModelsFromCliOutput}.
+ */
+export function opencodeModelsFromVerboseOutput(stdout: string): ModelEntry[] {
+  const lines = stdout.split(/\r?\n/);
+  const entries: ModelEntry[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const cleaned = cleanOpencodeLine(lines[i] ?? '');
+    const token = cleaned.split(/\s+/)[0] ?? '';
+    if (!OPENCODE_MODEL_TOKEN.test(token)) {
+      continue;
+    }
+
+    // Look ahead past blank lines for this model's pretty-printed JSON block.
+    let scan = i + 1;
+    while (scan < lines.length && cleanOpencodeLine(lines[scan] ?? '').length === 0) {
+      scan += 1;
+    }
+    let detail: Record<string, unknown> | undefined;
+    if (scan < lines.length && cleanOpencodeLine(lines[scan] ?? '').startsWith('{')) {
+      const collected: string[] = [];
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      let closed = false;
+      let cursor = scan;
+      for (; cursor < lines.length; cursor += 1) {
+        const raw = cleanOpencodeLine(lines[cursor] ?? '');
+        collected.push(raw);
+        for (const ch of raw) {
+          if (escaped) {
+            escaped = false;
+            continue;
+          }
+          if (inString) {
+            if (ch === '\\') {
+              escaped = true;
+            } else if (ch === '"') {
+              inString = false;
+            }
+            continue;
+          }
+          if (ch === '"') {
+            inString = true;
+          } else if (ch === '{') {
+            depth += 1;
+          } else if (ch === '}') {
+            depth -= 1;
+          }
+        }
+        if (depth <= 0) {
+          closed = true;
+          break;
+        }
+      }
+      // Consume the block either way: an unterminated one runs to EOF.
+      i = closed ? cursor : lines.length;
+      try {
+        const parsed: unknown = JSON.parse(collected.join('\n'));
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          detail = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // An unparseable block degrades to a plain entry.
+      }
+    }
+
+    if (seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+
+    const slash = token.indexOf('/');
+    const entry: { id: string; label?: string; provider?: string; efforts?: readonly string[] } = {
+      id: token,
+      provider: token.slice(0, slash),
+    };
+    if (detail !== undefined) {
+      const label = firstNonEmptyString([detail['name']]);
+      if (label !== undefined && label !== token && label !== token.slice(slash + 1)) {
+        entry.label = label;
+      }
+      const variants = detail['variants'];
+      if (typeof variants === 'object' && variants !== null && !Array.isArray(variants)) {
+        const keys = Object.keys(variants as Record<string, unknown>);
+        if (keys.length > 0) {
+          entry.efforts = keys;
+        }
+      }
+    }
+    entries.push(entry);
+  }
+
+  return entries;
+}
+
+/**
+ * Union the two discovery sources.
+ *
+ * Since T03 inverted the precedence this runs only on the `/api/model` fallback
+ * path, where the CLI list is empty — so it is effectively the identity on the
+ * API entries. It is kept because the union rule itself is still the contract:
+ * a model missing from one source is a gap in that source, not evidence the
+ * model is gone.
+ *
+ * The API entries come first, in their own order, then every CLI entry whose id
+ * is not already present is appended. With an empty `apiEntries` the result is
+ * exactly the CLI entries; with an empty `cliEntries` — the only case reached
+ * today — it is exactly the API entries. Pure: neither input is mutated.
  */
 export function mergeOpencodeModelSources(
   apiEntries: readonly ModelEntry[],
@@ -560,18 +729,22 @@ export function mergeOpencodeModelSources(
  *    surface, with the generic fallback covering asks; note that an `ask`
  *    action is not a relay either, because a non-interactive `opencode run`
  *    auto-rejects it ("permission requested: bash (…); auto-rejecting").
- * 4. Model discovery degrades to the curated free-text list on anything. The
- *    primary source is the opencode server's `/api/model` route, reached
- *    through a server named by `serverBaseUrl`/{@link OPENCODE_SERVER_ENV_VAR}
- *    or, failing that, one `opencode serve --hostname 127.0.0.1 --port 0` child
- *    whose ephemeral URL is read off its banner; `opencode models` stdout is
- *    both the fallback and the validation source (see
- *    {@link mergeOpencodeModelSources}). Any failure — no server, a rejected or
- *    non-2xx request, malformed JSON, an unrecognised shape, unparseable
- *    stdout, a timeout, an abort — resolves `undefined`, which means "keep the
- *    curated list", and a server this adapter started is disposed on every exit
- *    path. `efforts` stays `[]` because opencode effort is a free-text
- *    `--variant`. See {@link OpencodeAdapter.discoverModels}.
+ * 4. Model discovery's primary source is `opencode models --verbose`
+ *    ({@link OPENCODE_MODELS_ARGS}), which discloses ids, each model's `name`
+ *    label and its `variants` keys — exactly the values `--variant` accepts for
+ *    that model. The opencode server's `/api/model` route, reached through a
+ *    server named by `serverBaseUrl`/{@link OPENCODE_SERVER_ENV_VAR} or, failing
+ *    that, one `opencode serve --hostname 127.0.0.1 --port 0` child whose
+ *    ephemeral URL is read off its banner, is the IDS-ONLY fallback, used only
+ *    when the CLI is unavailable, fails, times out or yields nothing (its
+ *    `variants` is empty in this build). The two endpoints that do carry the
+ *    variant map, `/provider` and `/config/providers`, are never requested
+ *    because both return the configured provider API keys in clear text. Any
+ *    failure — unparseable stdout, no server, a rejected or non-2xx request,
+ *    malformed JSON, an unrecognised shape, a timeout, an abort — resolves
+ *    `undefined`, which means "keep the last known-good list" (not "keep the
+ *    curated list"), and a server this adapter started is disposed on every exit
+ *    path. See {@link OpencodeAdapter.discoverModels}.
  *
  * The run-dir path this adapter hands opencode in the initial prompt relies on
  * the workspace root already being canonical (see `canonicalizeRoot` in
@@ -589,7 +762,7 @@ export class OpencodeAdapter implements Adapter {
   /** The `/api/model` transport; `undefined` when the runtime has no global `fetch`, which skips the API path. */
   private readonly fetchModels: FeedFetch | undefined;
 
-  /** The `opencode models` runner used as fallback and validation source. */
+  /** The `opencode models --verbose` runner: the primary discovery source. */
   private readonly runModelsCli: OpencodeModelsCli;
 
   /** A pre-existing server's base URL; when set nothing is spawned and nothing is killed. */
@@ -714,29 +887,38 @@ export class OpencodeAdapter implements Adapter {
   }
 
   /**
-   * Discover opencode's model list, primarily from the server's
-   * `/api/model` route and secondarily from `opencode models` stdout.
+   * Discover opencode's model list, primarily from `opencode models --verbose`
+   * and secondarily from the server's `/api/model` route.
    *
    * Contract, honoured exactly as `CodexAdapter.discoverModels` honours it: it
-   * MUST never reject, and `undefined` means "keep the curated free-text
-   * `OPENCODE_MODELS`/`OPENCODE_EFFORTS` list" — returning that curated list
-   * here would falsely mark it refreshed. `ctx.signal` and `ctx.timeoutMs` are
-   * both honoured: an already-aborted refresh starts no process and makes no
+   * MUST never reject, and `undefined` means "keep the last known-good list" —
+   * returning the curated `OPENCODE_MODELS`/`OPENCODE_EFFORTS` list here would
+   * falsely mark it refreshed. `ctx.signal` and `ctx.timeoutMs` are both
+   * honoured: an already-aborted refresh starts no process and makes no
    * request, an abort mid-flight resolves `undefined`, and the single
-   * wall-clock budget is shared between the server/API path and the CLI path
-   * (a slow server start can legitimately leave no budget for the validation
-   * run, in which case the API entries stand alone).
+   * wall-clock budget now starts with the CLI run — a slow CLI can legitimately
+   * leave no budget for the `/api/model` fallback, in which case the refresh
+   * keeps the last known-good list.
+   *
+   * The primary path returns as soon as the verbose listing yields one entry, so
+   * NO server is started and NO request is made at all; per-model labels come
+   * from each model's `name` and per-model efforts from its `variants` keys.
+   * `/api/model` runs only when the CLI is unavailable, fails, times out or
+   * yields nothing, and contributes ids and labels only. The key-bearing
+   * `/provider` and `/config/providers` endpoints — the only ones that also
+   * carry the variant map — are NEVER requested: both return the configured
+   * provider API keys in clear text.
    *
    * Every child process and socket is torn down: a server this adapter started
    * is disposed exactly once from a `finally`, a pre-existing server named by
    * `serverBaseUrl` or {@link OPENCODE_SERVER_ENV_VAR} is never killed, and
    * every timer is unref'd and cleared. No secret is read — the only
    * environment access is the {@link OPENCODE_SERVER_ENV_VAR} base-URL check —
-   * so only ids and labels leave the host.
+   * so only ids, labels and variant names leave the host.
    *
-   * The two sources are unioned by {@link mergeOpencodeModelSources}, so the
-   * CLI is both the fallback (the API produced nothing) and the validation
-   * source (it can add ids the API omitted, never remove one). The result
+   * Launch argv is untouched by discovery: a chosen effort is still `--variant
+   * <effort>`, an empty effort emits no flag, and `--variant default` is never
+   * emitted because opencode reserves `default` for "no variant". The result
    * deliberately carries NO `source`/`stale`/`staleReason`/`fetchedAt` —
    * provenance is stamped by `CatalogStore.applyResult` — and NO `modelLink`,
    * which `overlayCapabilities` re-attaches from the builtin.
@@ -754,21 +936,37 @@ export class OpencodeAdapter implements Adapter {
       const deadline = Date.now() + timeoutMs;
       const remaining = (): number => deadline - Date.now();
 
-      const apiEntries = await this.discoverFromApi(ctx, remaining);
-
+      // Primary: `opencode models --verbose`. No server, no request.
       let cliEntries: ModelEntry[] = [];
-      if (!isAborted(ctx.signal) && remaining() > 0) {
-        const stdout = await this.runModelsCli({ cwd: ctx.cwd, timeoutMs: remaining() });
-        cliEntries = opencodeModelsFromCliOutput(stdout ?? '');
+      if (remaining() > 0) {
+        try {
+          const stdout = await this.runModelsCli({ cwd: ctx.cwd, timeoutMs: remaining() });
+          cliEntries = opencodeModelsFromVerboseOutput(stdout ?? '');
+        } catch {
+          // The seam is documented never to reject, but a rejecting injected
+          // runner must still fall through to `/api/model` rather than end the
+          // whole refresh.
+          cliEntries = [];
+        }
+      }
+      if (isAborted(ctx.signal)) {
+        return undefined;
+      }
+      if (cliEntries.length > 0) {
+        return capabilitiesFromEntries(cliEntries);
       }
 
+      // Fallback: `/api/model`, ids and labels only.
+      const apiEntries =
+        !isAborted(ctx.signal) && remaining() > 0 ? await this.discoverFromApi(ctx, remaining) : [];
       const entries = mergeOpencodeModelSources(apiEntries, cliEntries);
       if (isAborted(ctx.signal) || entries.length === 0) {
         return undefined;
       }
-      // Efforts stay free text (an empty list signals free-text rendering);
-      // provenance and modelLink are deliberately absent, see the doc comment.
-      return capabilitiesFromEntries(entries, { efforts: [...OPENCODE_EFFORTS] });
+      // The capability-level efforts are the ordered union of the entries' own
+      // levels — empty on this path, which keeps free-text rendering.
+      // Provenance and modelLink are deliberately absent, see the doc comment.
+      return capabilitiesFromEntries(entries);
     } catch {
       return undefined;
     }
@@ -935,7 +1133,8 @@ export function parseOpencodeServerUrl(text: string): string | undefined {
  *
  * Never rejects: a spawn error (ENOENT included), an exit before a URL appeared
  * and the wall-clock timeout each resolve `undefined`, which degrades discovery
- * to the `opencode models` fallback. Exactly one idempotent `settle` path
+ * to `undefined`, so the caller keeps the last known-good list. Exactly one
+ * idempotent `settle` path
  * clears the timer, detaches the listeners and — on every non-success path —
  * kills the child, mirroring the `finish` helper in
  * `CodexAdapter.discoverModels`. The timer is unref'd so a stray timer can
@@ -1045,10 +1244,12 @@ function defaultStartOpencodeServer(options: {
 }
 
 /**
- * Run `opencode models` in `cwd` and resolve its stdout; the default
- * {@link OpencodeModelsCli}. Resolves `undefined` on any error — a missing
- * binary, a non-zero exit, a timeout — and never rejects, matching the
- * never-throw contract of {@link OpencodeAdapter.discoverModels}.
+ * Run `opencode models --verbose` ({@link OPENCODE_MODELS_ARGS}) in `cwd` and
+ * resolve its stdout; the default {@link OpencodeModelsCli}. Resolves
+ * `undefined` on any error — a missing binary, a non-zero exit (an older CLI
+ * rejecting `--verbose` included), a timeout — and never rejects, matching the
+ * never-throw contract of {@link OpencodeAdapter.discoverModels}. The
+ * 16 MiB `maxBuffer` comfortably holds the ~50 KB verbose listing.
  */
 function defaultRunModelsCli(options: {
   cwd?: string;
@@ -1057,7 +1258,7 @@ function defaultRunModelsCli(options: {
   return new Promise<string | undefined>((resolve) => {
     execFile(
       OPENCODE_BIN,
-      [OPENCODE_MODELS_SUBCOMMAND],
+      [...OPENCODE_MODELS_ARGS],
       {
         cwd: options.cwd,
         timeout: options.timeoutMs,

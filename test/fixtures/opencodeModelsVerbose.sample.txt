@@ -1,0 +1,75 @@
+anthropic/claude-sonnet-5
+{
+  "id": "claude-sonnet-5",
+  "name": "Claude Sonnet 5",
+  "reasoning": true,
+  "cost": {
+    "input": 3,
+    "output": 15
+  },
+  "limit": {
+    "context": 200000,
+    "output": 64000
+  },
+  "variants": {
+    "low": {},
+    "high": {},
+    "max": {}
+  }
+}
+
+openai/gpt-6
+{
+  "id": "gpt-6",
+  "name": "GPT-6",
+  "reasoning": false,
+  "variants": {}
+}
+
+google/gemini-3-pro
+{
+  "id": "gemini-3-pro",
+  "name": "Gemini 3 Pro",
+  "reasoning": true,
+  "variants": {
+    "none": {},
+    "thinking": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    }
+  }
+}
+
+zed/weird-1
+{
+  "id": "weird-1",
+  "name": "Weird {model} name",
+  "variants": {
+    "minimal": {}
+  }
+}
+
+local/llama-4
+{
+  "id": "llama-4",
+  "name": "llama-4",
+  "variants": {}
+}
+
+broken/model-1
+{
+  "id": "model-1",
+  "variants": { "low": , }
+}
+
+openai/gpt-6
+{
+  "id": "gpt-6",
+  "name": "GPT-6 (duplicate line)",
+  "variants": {
+    "ignored": {}
+  }
+}
+
+last/no-detail

@@ -1,7 +1,10 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   OpencodeAdapter,
   OPENCODE_CONFIG_ENV,
+  OPENCODE_MODELS_ARGS,
   OPENCODE_SERVER_ENV_VAR,
   isOpencodeSessionId,
   mergeOpencodeModelSources,
@@ -9,6 +12,7 @@ import {
   opencodeConfigEnv,
   opencodeModelsFromApi,
   opencodeModelsFromCliOutput,
+  opencodeModelsFromVerboseOutput,
   parseOpencodeServerUrl,
 } from '../src/adapter/opencode';
 import type {
@@ -656,6 +660,111 @@ describe('opencodeModelsFromCliOutput (model-selector-refresh T06)', () => {
   });
 });
 
+/** The checked-in `opencode models --verbose` listing both parser suites read. */
+const VERBOSE_FIXTURE = fs.readFileSync(
+  path.join(__dirname, 'fixtures', 'opencodeModelsVerbose.sample.txt'),
+  'utf8',
+);
+
+/** The fixture's ids in listing order (the duplicate collapses to one entry). */
+const VERBOSE_IDS = [
+  'anthropic/claude-sonnet-5',
+  'openai/gpt-6',
+  'google/gemini-3-pro',
+  'zed/weird-1',
+  'local/llama-4',
+  'broken/model-1',
+  'last/no-detail',
+];
+
+describe('opencodeModelsFromVerboseOutput (codex-opencode-dropdown-fix T03)', () => {
+  const entries = opencodeModelsFromVerboseOutput(VERBOSE_FIXTURE);
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+
+  it('reads every id in listing order with its provider', () => {
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.id),
+      VERBOSE_IDS,
+    );
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.provider),
+      ['anthropic', 'openai', 'google', 'zed', 'local', 'broken', 'last'],
+    );
+  });
+
+  it('takes label from name, and omits it when name equals the bare model id', () => {
+    assert.strictEqual(byId.get('anthropic/claude-sonnet-5')?.label, 'Claude Sonnet 5');
+    assert.strictEqual(byId.get('openai/gpt-6')?.label, 'GPT-6');
+    assert.ok(!('label' in (byId.get('local/llama-4') ?? {})));
+  });
+
+  it('turns the variants keys into per-model efforts, in object order', () => {
+    assert.deepStrictEqual(byId.get('anthropic/claude-sonnet-5')?.efforts, ['low', 'high', 'max']);
+    assert.deepStrictEqual(byId.get('google/gemini-3-pro')?.efforts, ['none', 'thinking']);
+    assert.deepStrictEqual(byId.get('zed/weird-1')?.efforts, ['minimal']);
+  });
+
+  it('omits the efforts key entirely for {} variants, an unparseable block and a detail-less id', () => {
+    for (const id of ['openai/gpt-6', 'local/llama-4', 'broken/model-1', 'last/no-detail']) {
+      assert.ok(!('efforts' in (byId.get(id) ?? {})), `${id} must carry no efforts key`);
+    }
+  });
+
+  it('degrades an unparseable block and a detail-less id to a plain { id, provider } entry', () => {
+    assert.deepStrictEqual(byId.get('broken/model-1'), {
+      id: 'broken/model-1',
+      provider: 'broken',
+    });
+    assert.deepStrictEqual(byId.get('last/no-detail'), {
+      id: 'last/no-detail',
+      provider: 'last',
+    });
+  });
+
+  it('never emits defaultEffort (opencode marks no default variant)', () => {
+    for (const entry of entries) {
+      assert.ok(!('defaultEffort' in entry), `${entry.id} must carry no defaultEffort`);
+    }
+  });
+
+  it('parses a model whose name contains braces without swallowing the next entry', () => {
+    assert.strictEqual(byId.get('zed/weird-1')?.label, 'Weird {model} name');
+    // The entry after the brace-carrying one survived.
+    assert.ok(byId.has('local/llama-4'));
+  });
+
+  it('keeps the first occurrence of a duplicate id', () => {
+    assert.strictEqual(byId.get('openai/gpt-6')?.label, 'GPT-6');
+    assert.strictEqual(entries.filter((entry) => entry.id === 'openai/gpt-6').length, 1);
+  });
+
+  it('returns [] for empty and prose-only input', () => {
+    assert.deepStrictEqual(opencodeModelsFromVerboseOutput(''), []);
+    assert.deepStrictEqual(
+      opencodeModelsFromVerboseOutput('no models configured\nrun `opencode auth login`\n'),
+      [],
+    );
+  });
+
+  it('yields exactly the bare-listing parser ids on a listing with no JSON blocks', () => {
+    const bare = [
+      'Available models:',
+      '',
+      '  anthropic/claude-sonnet-5   Claude Sonnet 5 (recommended)',
+      '  \u001B[1manthropic/claude-opus-5\u001B[0m',
+      '  * openai/gpt-6',
+      '  • google/gemini-3-pro',
+      '',
+    ].join('\n');
+
+    assert.deepStrictEqual(
+      opencodeModelsFromVerboseOutput(bare).map((entry) => entry.id),
+      opencodeModelsFromCliOutput(bare).map((entry) => entry.id),
+    );
+    assert.deepStrictEqual(opencodeModelsFromVerboseOutput(bare), opencodeModelsFromCliOutput(bare));
+  });
+});
+
 describe('mergeOpencodeModelSources (model-selector-refresh T06)', () => {
   const api = [{ id: 'a/b', label: 'A B' }, { id: 'c/d' }];
   const cli = [{ id: 'c/d', provider: 'c' }, { id: 'e/f', provider: 'e' }];
@@ -711,7 +820,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
     },
   };
 
-  /** A `opencode models` listing that overlaps the API and adds one id. */
+  /** A BARE `opencode models` listing (no JSON blocks, so no variants). */
   const CLI_STDOUT = ['anthropic/claude-sonnet-5', 'google/gemini-3-pro'].join('\n');
 
   /** Build a DiscoveryContext with sensible defaults overridable per test. */
@@ -773,10 +882,14 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
     }
   });
 
-  it('GETs exactly <baseUrl>/api/model and returns the merged list with empty efforts', async () => {
+  it('pins the primary argv as `opencode models --verbose`', () => {
+    assert.deepStrictEqual([...OPENCODE_MODELS_ARGS], ['models', '--verbose']);
+  });
+
+  it('returns the verbose CLI listing with per-model efforts and labels, starting no server', async () => {
     const server = fakeServer();
     const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
-    const cli = fakeCli(CLI_STDOUT);
+    const cli = fakeCli(VERBOSE_FIXTURE);
     const adapter = new OpencodeAdapter(undefined, {
       startServer: server.starter,
       fetchModels: fetcher.fetch,
@@ -785,17 +898,88 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
 
     const caps = await adapter.discoverModels(ctx({ cwd: '/ws' }));
 
-    assert.deepStrictEqual(fetcher.urls, ['http://127.0.0.1:52341/api/model']);
     assert.ok(caps !== undefined);
-    assert.deepStrictEqual(caps.models, [
-      'anthropic/claude-sonnet-5',
-      'openai/gpt-6',
-      'google/gemini-3-pro',
-    ]);
-    assert.deepStrictEqual(caps.efforts, []);
+    assert.deepStrictEqual(caps.models, VERBOSE_IDS);
+    assert.deepStrictEqual(caps.efforts, ['low', 'high', 'max', 'none', 'thinking', 'minimal']);
     assert.strictEqual(caps.modelEntries?.[0]?.label, 'Claude Sonnet 5');
-    assert.strictEqual(server.calls[0]?.cwd, '/ws');
+    assert.deepStrictEqual(caps.modelEntries?.[0]?.efforts, ['low', 'high', 'max']);
+    // The primary path starts no server and makes no request.
+    assert.deepStrictEqual(server.calls, []);
+    assert.deepStrictEqual(fetcher.urls, []);
     assert.strictEqual(cli.calls[0]?.cwd, '/ws');
+  });
+
+  it('yields empty capability-level efforts on a bare listing with no variants', async () => {
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer().starter,
+      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
+      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+    });
+
+    const caps = await adapter.discoverModels(ctx());
+    assert.deepStrictEqual(caps?.models, ['anthropic/claude-sonnet-5', 'google/gemini-3-pro']);
+    assert.deepStrictEqual(caps?.efforts, []);
+  });
+
+  it('starts no server and makes no request when the CLI succeeds', async () => {
+    const server = fakeServer();
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: server.starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: fakeCli(VERBOSE_FIXTURE).runModelsCli,
+    });
+
+    await adapter.discoverModels(ctx());
+    assert.deepStrictEqual(server.calls, []);
+    assert.deepStrictEqual(server.disposals, []);
+    assert.deepStrictEqual(fetcher.urls, []);
+  });
+
+  const cliMisses: Array<[string, OpencodeModelsCli]> = [
+    ['the binary is unavailable', async () => undefined],
+    ['stdout is empty', async () => ''],
+    ['stdout is prose only', async () => 'no models configured\n'],
+    [
+      'the runner rejects',
+      async () => {
+        throw new Error('ENOENT');
+      },
+    ],
+  ];
+
+  for (const [label, runModelsCli] of cliMisses) {
+    it(`falls back to /api/model when ${label}`, async () => {
+      const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+      const adapter = new OpencodeAdapter(undefined, {
+        startServer: fakeServer().starter,
+        fetchModels: fetcher.fetch,
+        runModelsCli,
+      });
+
+      const caps = await adapter.discoverModels(ctx());
+      assert.deepStrictEqual(fetcher.urls, ['http://127.0.0.1:52341/api/model']);
+      assert.deepStrictEqual(caps?.models, ['anthropic/claude-sonnet-5', 'openai/gpt-6']);
+      assert.deepStrictEqual(caps?.efforts, []);
+      assert.strictEqual(caps?.modelEntries?.[0]?.label, 'Claude Sonnet 5');
+    });
+  }
+
+  it('never requests /provider or /config/providers', async () => {
+    const fetcher = fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD)));
+    const adapter = new OpencodeAdapter(undefined, {
+      startServer: fakeServer().starter,
+      fetchModels: fetcher.fetch,
+      runModelsCli: fakeCli(undefined).runModelsCli,
+    });
+
+    await adapter.discoverModels(ctx());
+    assert.ok(fetcher.urls.length > 0);
+    for (const url of fetcher.urls) {
+      assert.ok(url.endsWith('/api/model'), `unexpected URL ${url}`);
+      assert.ok(!url.includes('/provider'), `key-bearing URL ${url}`);
+      assert.ok(!url.includes('/config/providers'), `key-bearing URL ${url}`);
+    }
   });
 
   it('stamps no provenance and no modelLink (CatalogStore/overlayCapabilities own those)', async () => {
@@ -831,7 +1015,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
       fetchModels: async () => {
         throw new Error('ECONNREFUSED');
       },
-      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+      runModelsCli: fakeCli(undefined).runModelsCli,
     });
     await failingAdapter.discoverModels(ctx());
     assert.strictEqual(failing.disposals.length, 1);
@@ -845,7 +1029,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
         return handle;
       },
       fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
-      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+      runModelsCli: fakeCli('').runModelsCli,
     });
     assert.strictEqual(await abortingAdapter.discoverModels(ctx({ signal: controller.signal })), undefined);
     assert.strictEqual(aborting.disposals.length, 1);
@@ -930,39 +1114,17 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
   ];
 
   for (const [label, options] of apiFailures) {
-    it(`falls back to the CLI list when ${label}`, async () => {
+    it(`resolves undefined when the CLI yielded nothing and ${label}`, async () => {
       const adapter = new OpencodeAdapter(undefined, {
         startServer: fakeServer().starter,
         fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
-        runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+        runModelsCli: fakeCli(undefined).runModelsCli,
         ...options,
       });
 
-      const caps = await adapter.discoverModels(ctx());
-      assert.deepStrictEqual(caps?.models, [
-        'anthropic/claude-sonnet-5',
-        'google/gemini-3-pro',
-      ]);
+      assert.strictEqual(await adapter.discoverModels(ctx()), undefined);
     });
   }
-
-  it('runs the CLI as a validation source even when the API succeeded', async () => {
-    const cli = fakeCli(CLI_STDOUT);
-    const adapter = new OpencodeAdapter(undefined, {
-      startServer: fakeServer().starter,
-      fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
-      runModelsCli: cli.runModelsCli,
-    });
-
-    const caps = await adapter.discoverModels(ctx());
-    assert.strictEqual(cli.calls.length, 1);
-    // API entries lead, the CLI-only id is appended, the overlap is not doubled.
-    assert.deepStrictEqual(caps?.models, [
-      'anthropic/claude-sonnet-5',
-      'openai/gpt-6',
-      'google/gemini-3-pro',
-    ]);
-  });
 
   it('resolves undefined (never the curated list) when both sources are empty', async () => {
     const adapter = new OpencodeAdapter(undefined, {
@@ -1000,7 +1162,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
         controller.abort();
         throw new Error('aborted');
       },
-      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+      runModelsCli: fakeCli('').runModelsCli,
     });
 
     assert.strictEqual(await adapter.discoverModels(ctx({ signal: controller.signal })), undefined);
@@ -1032,7 +1194,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
   it('clamps a budget larger than the default and replaces a non-positive one', async () => {
     for (const timeoutMs of [DEFAULT_DISCOVERY_TIMEOUT_MS * 10, 0, -5]) {
       const server = fakeServer();
-      const cli = fakeCli(CLI_STDOUT);
+      const cli = fakeCli('');
       const adapter = new OpencodeAdapter(undefined, {
         startServer: server.starter,
         fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
@@ -1057,14 +1219,14 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
     const adapter = new OpencodeAdapter(undefined, {
       startServer: fakeServer().starter,
       fetchModels: fakeFetch(() => okResponse(JSON.stringify(API_PAYLOAD))).fetch,
-      runModelsCli: fakeCli(CLI_STDOUT).runModelsCli,
+      runModelsCli: fakeCli(undefined).runModelsCli,
     });
 
     const caps = await adapter.discoverModels(ctx());
     const fetched = capabilitiesToCatalogFetch(caps!);
     assert.deepStrictEqual(
       fetched.models.map((entry) => entry.id),
-      ['anthropic/claude-sonnet-5', 'openai/gpt-6', 'google/gemini-3-pro'],
+      ['anthropic/claude-sonnet-5', 'openai/gpt-6'],
     );
     assert.ok(!('efforts' in fetched));
   });

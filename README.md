@@ -800,9 +800,23 @@ module as the offline fallback.
     the agent's effort dropdown. A failed or timed-out follow-up page keeps the
     pages already received; a first-page failure keeps the previous list and
     marks it stale.
-  - `opencode` — `GET /api/model` from a running or freshly started server,
-    with `opencode models` stdout as the fallback and validation source. Ids are
-    `provider/model` and effort stays free text (`--variant`).
+  - `opencode` — **`opencode models --verbose` first**. After each
+    `provider/model` line the verbose listing prints that model's JSON, from
+    which Baiton reads only `name` (the label) and the **keys** of `variants` —
+    which are exactly the values `--variant` accepts for that model. A model
+    whose `variants` is `{}` has no reasoning levels, and the agent-level effort
+    list is the ordered union of the per-model keys. OpenCode marks no default
+    variant, so no effort is ever defaulted, and an empty effort still emits no
+    `--variant` flag (Baiton never emits `--variant default`, which OpenCode
+    reserves for "no variant"). `GET /api/model` — from a server named by
+    `serverBaseUrl`/`OPENCODE_SERVER`, else one freshly started `opencode serve
+    --hostname 127.0.0.1 --port 0` — is the **ids-and-labels-only fallback**,
+    used only when the CLI is unavailable, fails, times out or yields nothing
+    (its `variants` is empty in this build); on the primary path no server is
+    started at all. The two endpoints that *do* carry the variant map,
+    `/provider` and `/config/providers`, are **never** requested: both return the
+    configured provider API keys in clear text. Ids are `provider/model`. Both
+    sources unusable keeps the previous list and marks it stale.
   - `antigravity` (`agy`) — unchanged: its curated catalogue and model/effort
     mapping are never overlaid (it has no `AGENT_CATALOG_SOURCE` entry).
   - models.dev additionally backs the orchestrator's **provider** catalog — see
@@ -822,9 +836,12 @@ module as the offline fallback.
   configured but missing from a refreshed list is appended to the dropdown and
   stays editable and saveable, and the config panel shows a per-agent
   "stale — showing last known models" note beside it.
-- **Privacy**: discovery reads no secret, credential or API key. Only model ids
-  and labels leave the host, and webviews receive ids, labels and stale
-  metadata only.
+- **Privacy**: discovery reads no secret, credential or API key. The OpenCode
+  verbose listing is read only for ids, each model's `name` and its `variants`
+  keys — never for provider credentials, which is why the key-bearing
+  `/provider` and `/config/providers` endpoints are never requested. Only model
+  ids, labels and effort names leave the host, and webviews receive ids, labels,
+  effort names and stale metadata only.
 - **CLI capabilities** (probe findings that still hold):
   - `claude` provides no `models` subcommand; non-flag arguments launch an
     interactive prompt session. Health and auth are probed via `claude doctor`.
@@ -835,9 +852,12 @@ module as the offline fallback.
     Gemini and Claude models from the API.
   - `codex` provides no `models` subcommand; positional arguments launch
     interactive sessions. `codex doctor` reports status.
-  - `opencode` provides `opencode models`, listing provider-prefixed model
-    identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Any
-    provider/model string is accepted and effort is open-ended.
+  - `opencode` provides `opencode models --verbose`, listing provider-prefixed
+    model identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`)
+    each followed by that model's JSON, whose `name` is its label and whose
+    `variants` keys are its accepted `--variant` values. Any provider/model
+    string is still accepted, and a model that discloses no variants keeps an
+    open-ended effort.
 
 The curated catalogues remain the builtin fallback: a first-ever window with no
 persisted snapshot and no network still renders every dropdown, and the
