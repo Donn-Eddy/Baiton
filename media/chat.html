@@ -21,7 +21,10 @@
   The transcript also renders inline intervention cards (question / confirm /
   permission) built by chat.js.   The composer's control row also carries the
   Auto-mode toggle immediately left of Stop, which reflects `state.autoMode`
-  and posts `setAutoMode`. The composer also carries the provider-first model
+  and posts `setAutoMode`, and, immediately left of the Auto-mode toggle, a
+  host-authoritative Mode select that reflects `state.mode`, posts `setMode`,
+  and is disabled while busy, while a run is active, or on a spec conversation.
+  The composer also carries the provider-first model
   selection: a Provider select followed by a Model select, listing only the
   configured providers the host posts (never sorted or filtered here) and only
   the chosen provider's models, plus a stale badge when that provider's catalog
@@ -708,6 +711,22 @@
         cursor: default;
       }
 
+      /* Conversation mode select: host-authoritative, sits immediately left of
+         the Auto-mode toggle. Disabled while the chat is busy, while a run is
+         in flight, and on a spec conversation (which is always Spec). */
+      #mode-select {
+        flex: 0 0 auto;
+        color: var(--vscode-dropdown-foreground);
+        background-color: var(--vscode-dropdown-background);
+        border: 1px solid var(--vscode-dropdown-border);
+        padding: 2px 4px;
+      }
+
+      #mode-select:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
       /* Auto-mode toggle: secondary (off) vs. primary-filled (on). The pressed
          state is driven by aria-pressed so the DOM attribute is the single source
          of truth for both the visual and the accessible state. */
@@ -785,6 +804,12 @@
           aria-label="Message input"
         ></textarea>
         <div class="composer-actions">
+          <select
+            id="mode-select"
+            class="mode-select"
+            aria-label="Conversation mode"
+            title="Conversation mode: the pipeline a dispatch from this chat runs."
+          ></select>
           <button
             id="auto-mode"
             class="secondary"
