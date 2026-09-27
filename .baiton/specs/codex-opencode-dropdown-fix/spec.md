@@ -11,6 +11,66 @@ approved_rev:
 
 # OVERVIEW
 
+## Goal
+
+Fix the model selectors so Codex and OpenCode use current valid dropdowns backed by live discovery results, while preserving custom values as editable "Other…" entries and keeping the last known-good list when discovery fails.
+
+## Required fix
+
+- Codex must use the live `codex app-server` discovery path: `initialize` -> `initialized` -> `model/list`, then read `result.data[*].model` plus the supported/default reasoning-effort metadata. The returned ids become the dropdown values; if discovery fails, times out, or returns malformed data, the last known-good list is kept and marked stale.
+- OpenCode must use `opencode models` as the primary model source and `/api/model` as fallback. When neither succeeds, the previous model set is retained and the selector is marked stale instead of blanking out or staying free-text.
+- Claude must not rely only on a generic curated list when a richer local model catalog exists. The discovery path should consider the local Claude model catalog in `~/.claude/cache/model-catalog/` as a source of valid current Claude models and effort levels. The spec should treat that catalog as an authoritative local fallback or confirmation source for Claude capabilities, while still keeping the existing curated table as a safe fallback when the cache is absent or stale.
+- Antigravity and Claude remain on their supported closed sets. OpenCode remains the only provider/model-formatted agent, but it is still rendered as a dropdown-backed selector rather than a plain text input.
+- Existing config values must round-trip unchanged. Any saved value not currently in the live list is preserved as an editable custom "Other…" entry so users do not lose valid data.
+- Refresh results are additive: new live models are shown when available, stale values remain selectable, and the selector never silently rewrites a valid custom value.
+
+## Current state
+
+- `src/adapter/index.ts` still returns outdated or incomplete capability tables for Codex and OpenCode.
+- `src/config/configPanel.ts` already preserves custom values, but the model list source is not refreshed from the live CLI/API output in the way the selectors expect.
+- The config panel optionally keeps the "Other…" field flow, so the fix is in the capability discovery and option merge rather than in the form alone.
+- Discovery failures must degrade gracefully: keep the last successful list and mark it stale instead of blanking the selector.
+- Claude has a local cache at `~/.claude/cache/model-catalog/` that appears to contain the current valid model catalog and effort levels; the spec should treat this as a concrete Claude capability source to validate against the curated list.
+
+## Design
+
+### 1. Capability discovery
+
+`agentCapabilities()` is the single source of truth for the model and effort dropdowns. Each adapter exposes the live current model ids and supported effort values from its native discovery command or API, with the curated table kept as fallback when discovery is unavailable or malformed.
+
+- Codex: use `codex app-server`, then `model/list`, and map each item to `model` + supported/default reasoning efforts.
+- OpenCode: use `opencode models` and fall back to `/api/model` when needed.
+- Claude: consult the local Claude model cache under `~/.claude/cache/model-catalog/` as a concrete source of valid current models and effort levels; fall back to the curated table when the cache is missing, unreadable, or stale.
+- Antigravity: remain on the curated set.
+
+### 2. Config panel behavior
+
+The configuration panel continues to merge the refreshed list with any existing saved model value so legacy or custom entries remain editable as "Other…". The option set is refreshed live, and stale results are surfaced as metadata rather than silently replacing user data.
+
+### 3. Fail-safe stale behavior
+
+When a discovery probe fails, times out, or returns malformed data, Baiton keeps the previous model list, marks it stale, and continues showing the selector without blanking it.
+
+## Constraints
+
+- Discovery is asynchronous and time-boxed; failures do not block activation.
+- Secrets remain on the host; webviews only receive ids, labels, and stale metadata.
+- Existing config values round-trip unchanged.
+- Antigravity CLI behavior remains unchanged.
+
+## Testing
+
+Tests cover Codex live-model parsing, OpenCode CLI/API fallback parsing, Claude local-cache parsing and fallback behavior, stale-list retention, config-panel round-trip of custom values, and selector behavior when discovery fails or returns partial data.
+
+# TODOS
+
+- [pending] T01 Add the Codex live discovery probe to the adapter capability flow: `codex app-server` + `initialize`/`initialized`/`model/list`, extracting current model ids and reasoning-effort metadata (files: src/adapter/codex.ts, src/adapter/index.ts, test/adapter.codex.test.ts)
+- [pending] T02 Add the OpenCode discovery probe to the adapter capability flow: `opencode models` with `/api/model` fallback, preserving stale data on failure (files: src/adapter/opencode.ts, src/adapter/index.ts, test/adapter.opencode.test.ts)
+- [pending] T03 Add the Claude local model-cache source for valid current models and effort levels from `~/.claude/cache/model-catalog/`, with curated fallback if the cache is missing or stale (files: src/adapter/claude.ts, src/adapter/index.ts, test/adapter.claude.test.ts)
+- [pending] T04 Ensure the config panel merges refreshed live model lists with existing custom values and keeps them editable as "Other…" entries (files: src/config/configPanel.ts, src/activation/configPanelController.ts, media/config.js, test/configPanel.controller.test.ts)
+- [pending] T05 Ensure stale or failed refreshes keep the last good model list and surface stale metadata without blanking the selector (files: src/adapter/index.ts, src/config/configPanel.ts, test/adapter.index.test.ts, test/configPanel.controller.test.ts)
+- [pending] T06 Add or update tests to cover live discovery, cache-based Claude fallback, stale retention, and custom-value round-tripping for Codex/OpenCode selectors (files: test/adapter.index.test.ts, test/adapter.codex.test.ts, test/adapter.opencode.test.ts, test/adapter.claude.test.ts, test/configPanel.controller.test.ts, README.md)
+
 # OVERVIEW
 
 ## Goal
