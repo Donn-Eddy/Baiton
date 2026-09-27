@@ -284,6 +284,11 @@ export interface RunsCommandDeps {
  * runs one run at a time — and the worktree and the branch are deliberately left
  * on disk, exactly as `RunPipeline.cancel()` leaves them, so a cancelled run can
  * still be inspected and diffed.
+ *
+ * The manifest reaches `cancelled` asynchronously: `RunPipeline` writes it once
+ * the disposed terminal makes `awaitStageResult` resolve `closed`, and the view
+ * repaints again off the pipeline's `completed` event. The {@link refresh} here
+ * is therefore only the immediate spinner-clearing paint, not the final one.
  */
 export async function runRunsCancel(
   deps: RunsCommandDeps,
@@ -304,9 +309,25 @@ export async function runRunsCancel(
     deps.surface.warn(`Baiton: run ${target} has no stage in flight to cancel.`);
     return;
   }
-  deps.pipeline.cancel();
-  deps.surface.log(`Baiton: cancel run ${target}`);
+  const disposed = deps.pipeline.cancel();
+  if (!disposed) {
+    // The stage finished between `currentRunId()` and `cancel()`: nothing was
+    // disposed, so this must not report a cancellation.
+    deps.surface.warn(`Baiton: run ${target} has no stage in flight to cancel.`);
+    return;
+  }
+  deps.surface.log(`Baiton: cancel run ${target}; its worktree and branch are kept.`);
   deps.refresh();
+}
+
+/** A commit abbreviated for a user-facing label; short shas are left alone. */
+export function shortSha(sha: string): string {
+  return sha.length > 7 ? sha.slice(0, 7) : sha;
+}
+
+/** The diff range a run's View diff opens: `<base commit>..<branch>`. */
+export function runDiffRange(manifest: RunManifest): string {
+  return `${shortSha(manifest.baseHead)}..${manifest.branch}`;
 }
 
 /**
@@ -352,7 +373,10 @@ export async function runRunsViewDiff(
     deps.surface.info(`Baiton: run ${runId} changed nothing on ${manifest.branch}.`);
     return;
   }
-  await deps.showDiff(`${manifest.mode} run ${runId}`, text);
+  // `git diff A B` is exactly the `A..B` comparison the range names.
+  const range = runDiffRange(manifest);
+  deps.surface.log(`Baiton: diff for run ${runId}: ${range}.`);
+  await deps.showDiff(`${manifest.mode} run ${runId}: ${range}`, text);
 }
 
 /**
@@ -412,6 +436,8 @@ export async function runRunsMerge(
   );
   if (!merged.ok) {
     // Every refusal already names its reason; nothing is written to the manifest.
+    // The machine-readable token goes to the log next to the user's prose.
+    deps.surface.log(`Baiton: merge refused for run ${runId} (${merged.error.reason}).`);
     deps.surface.warn(`Baiton: ${merged.error.message}`);
     deps.refresh();
     return;
@@ -426,6 +452,10 @@ export async function runRunsMerge(
         `merged: ${updated.error.message}`,
     );
   }
+  // `mergeRunWorktree` did the removal as its cleanup step; this only reports it.
+  deps.surface.log(
+    `Baiton: removed the worktree and branch ${merged.value.branch} for run ${runId}.`,
+  );
   deps.surface.info(
     `Baiton: merged ${merged.value.branch} into ${merged.value.baseBranch} as ${merged.value.commit}.`,
   );

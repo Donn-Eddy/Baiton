@@ -556,7 +556,7 @@ describe('Runs view (design "dispatch modes", todo T16)', () => {
     await mod.runRunsViewDiff(shown.deps, 'bug-1');
     assert.deepStrictEqual(diffArgs, [['aaa', 'baiton/bug/bug-1']]);
     assert.deepStrictEqual(shown.diffs, [
-      { title: 'bug run bug-1', diff: 'diff --git a/x b/x\n' },
+      { title: 'bug run bug-1: aaa..baiton/bug/bug-1', diff: 'diff --git a/x b/x\n' },
     ]);
     assert.deepStrictEqual(shown.surface.warns, []);
 

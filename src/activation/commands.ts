@@ -946,11 +946,13 @@ export function registerCommands(
     pipeline: runPipeline,
     surface,
     restricted: () => workspace.restricted,
-    // The title is carried by the seam for a host that can name the document;
-    // an untitled `diff` document takes its name from the editor.
-    showDiff: async (_title, diff) => {
+    // An untitled `diff` document cannot be renamed, which is why the
+    // `<base commit>..<branch>` range the title carries is reported on the
+    // output channel rather than shown as the tab name.
+    showDiff: async (title, diff) => {
       const doc = await vscode.workspace.openTextDocument({ content: diff, language: 'diff' });
       await vscode.window.showTextDocument(doc, { preview: true });
+      surface.log(`Baiton: opened ${title}.`);
     },
     confirm: async (message, action) =>
       (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
