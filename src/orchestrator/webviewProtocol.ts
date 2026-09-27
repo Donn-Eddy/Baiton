@@ -16,8 +16,12 @@
 import type { InterventionAnswer, InterventionKind, InterventionOption } from './interventions';
 import type { ModelSelection, ProviderId } from './providers';
 
-/** The fix action an inline error message can offer (Req 13). */
-export type FixAction = 'openSettings' | 'setApiKey';
+/**
+ * The fix action an inline error message can offer (Req 13). `setEndpoint`
+ * opens the per-provider endpoint prompt, for a provider whose catalog entry
+ * carries no base URL and whose `baiton.orchestrator.endpoints` entry is unset.
+ */
+export type FixAction = 'openSettings' | 'setApiKey' | 'setEndpoint';
 
 /** One model offered under a provider group in the Chat dropdown. */
 export interface ProviderModelItem {

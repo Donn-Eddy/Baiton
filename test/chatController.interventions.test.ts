@@ -620,6 +620,35 @@ describe('ChatController interventions', () => {
       assert.deepStrictEqual(fixes[1], { action: 'setApiKey', provider: undefined });
     });
 
+    it('a missing endpoint on a non-openai provider maps to a provider-scoped setEndpoint fix', async () => {
+      providers.selection = { provider: 'mistral', model: 'mistral-large-latest' };
+      client.failWith = new MissingConfigError('endpoint');
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      await webview.send({ type: 'sendText', text: 'go' });
+      await waitFor(() => webview.all('showError').length === 1, 'the error');
+      const error = webview.last('showError')!;
+      assert.strictEqual(error.message, 'The Mistral AI endpoint is not configured.');
+      assert.strictEqual(error.action, 'setEndpoint');
+      assert.strictEqual(error.provider, 'mistral');
+
+      await webview.send({ type: 'triggerFix', action: 'setEndpoint', provider: 'mistral' });
+      assert.deepStrictEqual(fixes, [{ action: 'setEndpoint', provider: 'mistral' }]);
+    });
+
+    it('a missing endpoint on openai still opens the settings', async () => {
+      providers.selection = { provider: 'openai', model: 'gpt-x' };
+      client.failWith = new MissingConfigError('endpoint');
+      controller.start();
+      await waitFor(() => webview.all('setProviders').length === 1, 'the first setProviders');
+      await webview.send({ type: 'sendText', text: 'go' });
+      await waitFor(() => webview.all('showError').length === 1, 'the error');
+      const error = webview.last('showError')!;
+      assert.strictEqual(error.message, 'The orchestrator endpoint is not configured.');
+      assert.strictEqual(error.action, 'openSettings');
+      assert.strictEqual(error.provider, undefined);
+    });
+
     it('without the providers dep there is no setProviders and selectModel is a no-op', async () => {
       const second = new ChatController({
         webview,

@@ -59,6 +59,7 @@ import {
   defaultModelFor,
   normalizeModelSelection,
   providerInfo,
+  providerNeedsEndpointReason,
   providerNeedsKeyReason,
   providerSecretKey,
   sameModelSelection,
@@ -107,6 +108,13 @@ export interface MementoLike {
 export interface ProviderSettings {
   /** `baiton.orchestrator.endpoint` — the OpenAI / Custom base URL. */
   getEndpoint: () => string | undefined;
+  /**
+   * `baiton.orchestrator.endpoints[id]` — a user-set base URL for one
+   * non-settings provider. When set (non-blank) it WINS over the catalog's
+   * base URL, so a proxy can front a provider the feed does know; it is the
+   * only way to reach a feed provider whose entry discloses no `api`.
+   */
+  getProviderEndpoint: (id: ProviderId) => string | undefined;
   /** `baiton.orchestrator.model` — the OpenAI / Custom model id. */
   getModel: () => string | undefined;
   /** `baiton.orchestrator.streaming` — whether the endpoint advertises streaming. */
@@ -139,7 +147,7 @@ export interface ProviderRouterConfig {
   version: string;
   /**
    * The live model catalog. Absent means "no live catalog": the router then
-   * behaves exactly as before this seam existed — the five builtin entries in
+   * behaves exactly as before this seam existed — the six builtin entries in
    * their builtin order, with their builtin model lists.
    */
   catalog?: ModelCatalogSource;
@@ -173,6 +181,27 @@ export interface ClientConfigDeps {
   version: string;
   /** Resolves the model id currently chosen for this provider. */
   getModel: () => string | undefined;
+  /**
+   * The live, feed-merged catalog, read at CALL time. Without it `id` is
+   * resolved against the builtins only, so a feed-derived provider degrades to
+   * a synthesised entry with no base URL. The router passes its own
+   * `catalogEntries()` so a feed that lands after the (memoised) client was
+   * built still supplies the base URL on the next request.
+   */
+  catalog?: () => readonly ProviderInfo[];
+}
+
+/**
+ * The base URL `id` is reached at: the user's `baiton.orchestrator.endpoints`
+ * entry when it is non-blank (a proxy override wins even over a known URL),
+ * else the catalog entry's own base URL, else undefined.
+ */
+export function resolveProviderEndpoint(
+  info: ProviderInfo,
+  settings: ProviderSettings,
+): string | undefined {
+  const user = settings.getProviderEndpoint(info.id)?.trim();
+  return user !== undefined && user.length > 0 ? user : info.defaultBaseUrl;
 }
 
 /**
@@ -180,9 +209,12 @@ export interface ClientConfigDeps {
  * wiring is assertable without reaching into {@link OpenAiModelClient}'s
  * private state.
  *
- * Branches on `id`'s catalog entry:
- * - providers with a catalog base URL use it verbatim; `openai` reads the
- *   `baiton.orchestrator.endpoint` setting instead;
+ * Branches on `id`'s catalog entry (resolved against `deps.catalog` when
+ * given, so feed providers are known):
+ * - `openai` reads the `baiton.orchestrator.endpoint` setting; every other
+ *   provider reads its `baiton.orchestrator.endpoints` entry and falls back to
+ *   the catalog base URL (see {@link resolveProviderEndpoint}), both at call
+ *   time;
  * - every provider reads its model through the injected `getModel` at call
  *   time so a switch needs no new client; `openai` additionally falls back to
  *   the `baiton.orchestrator.model` setting;
@@ -201,11 +233,14 @@ export function providerClientConfig(id: ProviderId, deps: ClientConfigDeps): Mo
   if (id === 'copilot') {
     throw new Error('copilot has no OpenAI-compatible client config');
   }
-  const info: ProviderInfo = providerInfo(id);
+  const resolve = (): ProviderInfo => providerInfo(id, deps.catalog?.());
+  // Dialect and header style are fixed per client (the OpenCode session uuid
+  // must stay stable), so they come from the entry known at construction.
+  const info: ProviderInfo = resolve();
   const config: ModelClientConfig = {
     getEndpoint: info.usesSettings
       ? () => deps.settings.getEndpoint() || undefined
-      : () => info.defaultBaseUrl,
+      : () => resolveProviderEndpoint(resolve(), deps.settings),
     getModel: info.usesSettings
       ? () => deps.getModel() ?? (deps.settings.getModel() || undefined)
       : () => deps.getModel(),
@@ -285,6 +320,14 @@ export class ProviderRouter implements ModelClient {
    */
   private readonly keyPresence = new Map<string, boolean>();
   /**
+   * The in-flight presence read per SecretStorage key, shared while the memo
+   * is live. Two catalog entries can resolve to ONE slot (`opencode-go`
+   * aliases `opencode`, see `PROVIDER_SECRET_ALIAS`) and `computeAll` reads
+   * every entry concurrently, so without this both would hit SecretStorage
+   * before either memoised — breaking the one-read-per-key guarantee.
+   */
+  private readonly keyReads = new Map<string, Promise<boolean>>();
+  /**
    * Bumped on every invalidation, so a `get` that was in flight when a key
    * changed does not record its (possibly stale) answer.
    */
@@ -311,6 +354,7 @@ export class ProviderRouter implements ModelClient {
   private forgetSecret(key: string): void {
     this.secretsEpoch++;
     this.keyPresence.delete(key);
+    this.keyReads.delete(key);
   }
 
   /**
@@ -334,6 +378,7 @@ export class ProviderRouter implements ModelClient {
   public dispose(): void {
     this.secretsSub?.dispose();
     this.keyPresence.clear();
+    this.keyReads.clear();
     this.secretsEpoch++;
     this.disposed = true;
   }
@@ -351,6 +396,24 @@ export class ProviderRouter implements ModelClient {
     if (cached !== undefined) {
       return cached;
     }
+    if (this.secretsSub === undefined || this.disposed) {
+      return this.readStoredKey(key, label);
+    }
+    const pending = this.keyReads.get(key);
+    if (pending !== undefined) {
+      return pending;
+    }
+    const read = this.readStoredKey(key, label).finally(() => {
+      if (this.keyReads.get(key) === read) {
+        this.keyReads.delete(key);
+      }
+    });
+    this.keyReads.set(key, read);
+    return read;
+  }
+
+  /** One SecretStorage read behind {@link hasStoredKey}; memoises per its rules. */
+  private async readStoredKey(key: string, label: string): Promise<boolean> {
     const epoch = this.secretsEpoch;
     try {
       const present = hasKey(await this.config.secrets.get(key));
@@ -401,6 +464,7 @@ export class ProviderRouter implements ModelClient {
             settings: this.config.settings,
             version: this.config.version,
             getModel: () => this.modelFor(id),
+            catalog: () => this.catalogEntries(),
           }),
         );
       }
@@ -601,7 +665,8 @@ export class ProviderRouter implements ModelClient {
    * of band. API-key presence alone may come from the per-key memo, which
    * `secrets.onDidChange` keeps current (see {@link SecretsLike}).
    *
-   * "Configured" means: a keyed provider with a stored key, `openai` with both
+   * "Configured" means: a keyed provider with a stored key and a resolvable
+   * endpoint (see {@link resolveProviderEndpoint}), `openai` with both
    * a key and a `baiton.orchestrator.endpoint`, `copilot` when `vscode.lm`
    * enumerates at least one model. Every returned entry therefore has
    * `enabled: true` and no `reason`; the ones left out are
@@ -614,8 +679,8 @@ export class ProviderRouter implements ModelClient {
   /**
    * Exactly the entries {@link availability} omits — the providers the
    * dropdown hides — each carrying the `reason` it is unusable
-   * (`providerNeedsKeyReason(id)`, {@link PROVIDER_NEEDS_ENDPOINT_REASON} or
-   * {@link COPILOT_UNAVAILABLE_REASON}). This is the list the Set-API-key
+   * (`providerNeedsKeyReason(id)`, `providerNeedsEndpointReason(id)`,
+   * {@link PROVIDER_NEEDS_ENDPOINT_REASON} or {@link COPILOT_UNAVAILABLE_REASON}). This is the list the Set-API-key
    * quick pick offers, so a provider can be configured before it can appear.
    */
   public async hiddenProviders(): Promise<ProviderAvailability[]> {
@@ -643,7 +708,7 @@ export class ProviderRouter implements ModelClient {
    * Every provider this window knows about, in dropdown order.
    *
    * The feed-merged catalog first ({@link buildProviderCatalog}; with no feed
-   * this is byte-identical to the five builtin entries), then — skipping ids
+   * this is byte-identical to the six builtin entries), then — skipping ids
    * already present — every distinct provider of the models.dev snapshot in
    * snapshot order, then the active and preserved selections' providers.
    *
@@ -745,7 +810,9 @@ export class ProviderRouter implements ModelClient {
    * One resolved catalog entry's availability, branched on its id: `copilot`
    * through `vscode.lm`, `openai` through key + endpoint + the
    * `baiton.orchestrator.model` setting, and every other id keyed on its
-   * SecretStorage slot with the catalog/snapshot model list. Snapshot-backed
+   * SecretStorage slot plus a resolvable endpoint (its
+   * `baiton.orchestrator.endpoints` entry or catalog base URL), with the
+   * catalog/snapshot model list. Snapshot-backed
    * models additionally carry the snapshot's `fetchedAt` and, when it is
    * stale, `stale` + `staleReason`; the keys stay ABSENT otherwise.
    */
@@ -760,16 +827,31 @@ export class ProviderRouter implements ModelClient {
       // Models come from the `baiton.orchestrator.model` setting: never stale.
       base = await this.openAiAvailability(info);
     } else {
-      const enabled = await this.hasStoredKey(providerSecretKey(id)!, info.label);
+      const hasApiKey = await this.hasStoredKey(providerSecretKey(id)!, info.label);
+      // Key first, then endpoint, so the reported reason is deterministic
+      // (the same order as `openai`). A `source: 'custom'` entry is one the
+      // feed has not described yet (offline, snapshot only): its base URL is
+      // unknown rather than absent, so it is not reported as endpoint-less —
+      // the landed feed or a completion's own MissingConfigError says more.
+      const needsEndpoint =
+        hasApiKey &&
+        info.source !== 'custom' &&
+        resolveProviderEndpoint(info, this.config.settings) === undefined;
       const resolved = this.modelsForInfo(info);
       fromSnapshot = resolved.fromSnapshot;
+      const enabled = hasApiKey && !needsEndpoint;
+      // `[info]` is the resolved entry itself, so the reason names this
+      // catalog's label without rebuilding the catalog per provider.
+      const reason = !hasApiKey
+        ? providerNeedsKeyReason(id, [info])
+        : needsEndpoint
+          ? providerNeedsEndpointReason(id, [info])
+          : undefined;
       base = {
         id,
         label: info.label,
         enabled,
-        // `[info]` is the resolved entry itself, so the reason names this
-        // catalog's label without rebuilding the catalog per provider.
-        ...(enabled ? {} : { reason: providerNeedsKeyReason(id, [info]) }),
+        ...(reason !== undefined ? { reason } : {}),
         models: resolved.models,
       };
     }

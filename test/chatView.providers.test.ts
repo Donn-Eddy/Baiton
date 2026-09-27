@@ -640,6 +640,22 @@ describe('chat view provider-first model selector (model-selector-refresh T14)',
     ]);
   });
 
+  it('a setEndpoint inline error offers Set Provider Endpoint and echoes the provider', () => {
+    const view = loadChatView();
+    view.send({
+      type: 'showError',
+      message: 'The Deep Infra endpoint is not configured.',
+      action: 'setEndpoint',
+      provider: 'deepinfra',
+    });
+    const fix = view.ids['error-fix'];
+    assert.strictEqual(fix.textContent, 'Set Provider Endpoint');
+    fix.fire('click', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [
+      { type: 'triggerFix', action: 'setEndpoint', provider: 'deepinfra' },
+    ]);
+  });
+
   it('setBusy disables both selects while true and re-enables them after', () => {
     const view = loadChatView();
     view.send({ type: 'setProviders', groups: providerFixture(), selection: null });

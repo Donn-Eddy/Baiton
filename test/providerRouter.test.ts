@@ -30,6 +30,7 @@ import {
   buildProviderCatalog,
   defaultModelFor,
   providerInfo,
+  providerNeedsEndpointReason,
   providerNeedsKeyReason,
   providerSecretKey,
 } from '../src/orchestrator/providers';
@@ -53,6 +54,7 @@ import {
   SecretsLike,
   MementoLike,
   providerClientConfig,
+  resolveProviderEndpoint,
 } from '../src/activation/providerRouter';
 import { ModelsDevFeed, parseModelsDevFeed } from '../src/orchestrator/modelsDev';
 import type { ModelCatalogSnapshot, ModelEntry } from '../src/orchestrator/modelCatalog';
@@ -62,8 +64,8 @@ import type { ModelCatalogSnapshot, ModelEntry } from '../src/orchestrator/model
 /**
  * test/fixtures/modelsDev.sample.json read the way test/providers.test.ts and
  * test/modelsDev.test.ts read it: untyped `fs` + `JSON.parse`, then through the
- * real parser. Eight providers: anthropic, deepinfra, cerebras, baseten,
- * deepseek, google, mistral, opencode.
+ * real parser. Nine providers: anthropic, deepinfra, cerebras, baseten,
+ * deepseek, google, mistral, opencode (Zen), opencode-go.
  */
 const fixtureFeed: ModelsDevFeed = (() => {
   const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
@@ -174,9 +176,11 @@ class FakeMemento implements MementoLike {
   }
 }
 
-/** The mutable settings state behind the four `ProviderSettings` getters. */
+/** The mutable settings state behind the `ProviderSettings` getters. */
 interface MutableSettings {
   endpoint: string | undefined;
+  /** `baiton.orchestrator.endpoints`, keyed by provider id. */
+  endpoints: Record<string, string>;
   model: string | undefined;
   streaming: boolean;
   maxTokens: unknown;
@@ -185,6 +189,7 @@ interface MutableSettings {
 function makeSettings(): ProviderSettings & MutableSettings {
   const state: MutableSettings = {
     endpoint: undefined,
+    endpoints: {},
     model: undefined,
     streaming: false,
     maxTokens: undefined,
@@ -195,6 +200,12 @@ function makeSettings(): ProviderSettings & MutableSettings {
     },
     set endpoint(value: string | undefined) {
       state.endpoint = value;
+    },
+    get endpoints(): Record<string, string> {
+      return state.endpoints;
+    },
+    set endpoints(value: Record<string, string>) {
+      state.endpoints = value;
     },
     get model(): string | undefined {
       return state.model;
@@ -215,6 +226,7 @@ function makeSettings(): ProviderSettings & MutableSettings {
       state.maxTokens = value;
     },
     getEndpoint: () => state.endpoint,
+    getProviderEndpoint: (id) => state.endpoints[id],
     getModel: () => state.model,
     isStreaming: () => state.streaming,
     getMaxTokens: () => state.maxTokens,
@@ -492,7 +504,7 @@ describe('ProviderRouter.availability', () => {
     const hidden = await h.router.hiddenProviders();
     assert.deepStrictEqual(
       hidden.map((a) => a.id),
-      ['google', 'opencode', 'mistral', 'openai'],
+      ['google', 'opencode-go', 'opencode', 'mistral', 'openai'],
       'exactly the entries availability() omits, in catalog order',
     );
     for (const entry of hidden) {
@@ -537,7 +549,7 @@ describe('ProviderRouter.availability', () => {
     assert.strictEqual(hidden.some((a) => a.id === 'google'), false, 'and out of hiddenProviders()');
     assert.deepStrictEqual(
       hidden.map((a) => a.id),
-      ['copilot', 'opencode', 'mistral', 'openai'],
+      ['copilot', 'opencode-go', 'opencode', 'mistral', 'openai'],
       'the other providers do not flip',
     );
   });
@@ -683,6 +695,7 @@ describe('ProviderRouter catalog', () => {
 
     assert.deepStrictEqual(await h.router.enabledProviders(), [
       'google',
+      'opencode-go',
       'opencode',
       'mistral',
       'openai',
@@ -691,6 +704,36 @@ describe('ProviderRouter catalog', () => {
     const google = (await h.router.availability()).find((a) => a.id === 'google')!;
     assert.strictEqual(google.label, providerInfo('google').label);
     assert.strictEqual(providerSecretKey('google'), 'baiton.orchestrator.key.google');
+  });
+
+  it('one stored OpenCode key enables both OpenCode Go and OpenCode Zen, each with its own models', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    // The pre-split slot: a key saved before OpenCode Go existed.
+    h.secrets.values.set('baiton.orchestrator.key.opencode', 'oc-key');
+
+    const list = await h.router.availability();
+    assert.deepStrictEqual(list.map((a) => a.id), ['opencode-go', 'opencode']);
+    const go = list.find((a) => a.id === 'opencode-go')!;
+    const zen = list.find((a) => a.id === 'opencode')!;
+    assert.strictEqual(go.label, 'OpenCode Go');
+    assert.strictEqual(zen.label, 'OpenCode Zen');
+    assert.deepStrictEqual([...go.models], ['kimi-k2.7-code', 'glm-5.3', 'minimax-m3']);
+    assert.deepStrictEqual([...zen.models], ['grok-code', 'gpt-oss-120b-zen', 'claude-sonnet-5-zen']);
+
+    // Clearing the one key hides both again.
+    h.secrets.values.delete('baiton.orchestrator.key.opencode');
+    h.router.forgetProviderKey('opencode-go');
+    assert.deepStrictEqual((await h.router.availability()).map((a) => a.id), []);
+  });
+
+  it('the OpenCode Go client reads the shared key and targets the Go gateway', async () => {
+    const secrets = new FakeSecrets();
+    secrets.values.set('baiton.orchestrator.key.opencode', '  oc-key  ');
+    const config = providerClientConfig('opencode-go', makeDeps(secrets, makeSettings()));
+    assert.strictEqual(await config.getEndpoint(), 'https://opencode.ai/zen/go/v1');
+    assert.strictEqual(await config.getApiKey(), 'oc-key');
+    assert.ok(config.extraHeaders !== undefined, 'the OpenCode headers apply to Go too');
   });
 
   it('offline: a snapshot-only provider is still enumerated, with the synthesised label', async () => {
@@ -1381,10 +1424,20 @@ class WatchedSecrets extends CountingSecrets {
 
 describe('ProviderRouter SecretStorage reads', () => {
   /** Every secret key the fixture catalog's providers read (copilot has none). */
-  const keyedSecretKeys = (): string[] =>
-    buildProviderCatalog(fixtureFeed)
-      .map((info) => providerSecretKey(info.id))
-      .filter((key): key is string => key !== undefined);
+  /**
+   * Keyed catalog ENTRIES, counting aliased ids (`opencode-go` -> `opencode`)
+   * separately: with no memo every entry reads its slot, shared or not.
+   */
+  const keyedEntryCount = (): number =>
+    buildProviderCatalog(fixtureFeed).filter((info) => providerSecretKey(info.id) !== undefined).length;
+
+  const keyedSecretKeys = (): string[] => [
+    ...new Set(
+      buildProviderCatalog(fixtureFeed)
+        .map((info) => providerSecretKey(info.id))
+        .filter((key): key is string => key !== undefined),
+    ),
+  ];
 
   function watchedHarness(): RouterHarness & { secrets: WatchedSecrets } {
     const secrets = new WatchedSecrets();
@@ -1461,7 +1514,7 @@ describe('ProviderRouter SecretStorage reads', () => {
     await h.router.availability();
     await h.router.availability();
 
-    assert.strictEqual(secrets.reads.length, 2 * keyedSecretKeys().length);
+    assert.strictEqual(secrets.reads.length, 2 * keyedEntryCount());
   });
 
   it('dispose() detaches from onDidChange and stops memoising', async () => {
@@ -1473,6 +1526,134 @@ describe('ProviderRouter SecretStorage reads', () => {
 
     await h.router.availability();
     await h.router.availability();
-    assert.strictEqual(h.secrets.reads.length, 2 * keyedSecretKeys().length);
+    assert.strictEqual(h.secrets.reads.length, 2 * keyedEntryCount());
+  });
+});
+
+// --- per-provider endpoints (baiton.orchestrator.endpoints) ------------------
+
+describe('ProviderRouter per-provider endpoints', () => {
+  const fixtureCatalog = (): ReturnType<typeof buildProviderCatalog> => buildProviderCatalog(fixtureFeed);
+
+  function feedHarness(): RouterHarness {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    return makeHarness({ lm: fakeLm([]), catalog });
+  }
+
+  it('a no-api feed provider is enumerated, asking for a key first', async () => {
+    const h = feedHarness();
+    const deepinfra = (await h.router.hiddenProviders()).find((a) => a.id === 'deepinfra')!;
+    assert.ok(deepinfra, 'deepinfra is enumerated even though the feed publishes no URL');
+    assert.strictEqual(deepinfra.label, 'Deep Infra');
+    assert.strictEqual(deepinfra.reason, providerNeedsKeyReason('deepinfra', fixtureCatalog()));
+  });
+
+  it('with a key but no endpoint it reports the endpoint reason; an endpoint enables it', async () => {
+    const h = feedHarness();
+    h.secrets.values.set('baiton.orchestrator.key.deepinfra', 'di-key');
+
+    let deepinfra = (await h.router.hiddenProviders()).find((a) => a.id === 'deepinfra')!;
+    assert.strictEqual(deepinfra.enabled, false);
+    assert.strictEqual(deepinfra.reason, providerNeedsEndpointReason('deepinfra', fixtureCatalog()));
+    assert.ok(deepinfra.models.length > 0, 'its models are still listed');
+
+    h.settings.endpoints = { deepinfra: '  https://api.deepinfra.com/v1/openai  ' };
+    deepinfra = (await h.router.availability()).find((a) => a.id === 'deepinfra')!;
+    assert.strictEqual(deepinfra.enabled, true);
+    assert.strictEqual('reason' in deepinfra, false);
+  });
+
+  it('a blank endpoint entry counts as unset', async () => {
+    const h = feedHarness();
+    h.secrets.values.set('baiton.orchestrator.key.cerebras', 'cb');
+    h.settings.endpoints = { cerebras: '   ' };
+    const cerebras = (await h.router.hiddenProviders()).find((a) => a.id === 'cerebras')!;
+    assert.strictEqual(cerebras.reason, providerNeedsEndpointReason('cerebras', fixtureCatalog()));
+  });
+
+  it('an endpoint alone does not enable a provider without a key (key reason wins)', async () => {
+    const h = feedHarness();
+    h.settings.endpoints = { deepinfra: 'https://proxy.test/v1' };
+    const deepinfra = (await h.router.hiddenProviders()).find((a) => a.id === 'deepinfra')!;
+    assert.strictEqual(deepinfra.reason, providerNeedsKeyReason('deepinfra', fixtureCatalog()));
+  });
+
+  it('a feed provider with a URL needs no endpoint', async () => {
+    const h = feedHarness();
+    h.secrets.values.set('baiton.orchestrator.key.anthropic', 'a');
+    const anthropic = (await h.router.availability()).find((a) => a.id === 'anthropic')!;
+    assert.strictEqual(anthropic.enabled, true);
+  });
+
+  it('offline (snapshot only): an unknown provider is not reported endpoint-less', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed) });
+    const h = makeHarness({ lm: fakeLm([]), catalog });
+    h.secrets.values.set('baiton.orchestrator.key.deepinfra', 'di');
+    const deepinfra = (await h.router.availability()).find((a) => a.id === 'deepinfra');
+    assert.ok(deepinfra !== undefined && deepinfra.enabled, 'base URL unknown, not absent');
+  });
+
+  it('the real client of a no-endpoint provider fails with MissingConfigError(endpoint)', async () => {
+    const catalog = mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed });
+    const h = makeHarness({ lm: fakeLm([]), catalog, defaultClients: true });
+    h.secrets.values.set('baiton.orchestrator.key.deepinfra', 'di');
+    assert.strictEqual(await h.router.select({ provider: 'deepinfra', model: 'deepseek-ai/DeepSeek-V3.2' }), true);
+    await assert.rejects(
+      h.router.complete(makeReq()),
+      (err: unknown) => err instanceof MissingConfigError && err.missing === 'endpoint',
+    );
+  });
+
+  describe('providerClientConfig', () => {
+    it('resolves a feed provider against the given catalog, read at call time', () => {
+      let current: ReturnType<typeof buildProviderCatalog> = [];
+      const deps = { ...makeDeps(new FakeSecrets(), makeSettings()), catalog: () => current };
+      const cfg = providerClientConfig('anthropic', deps);
+      assert.strictEqual(cfg.getEndpoint(), undefined, 'no feed yet: no base URL');
+      current = fixtureCatalog();
+      assert.strictEqual(cfg.getEndpoint(), 'https://api.anthropic.com/v1', 'the landed feed supplies it');
+    });
+
+    it('without a catalog a feed id has no base URL (the old behaviour)', () => {
+      const cfg = providerClientConfig('anthropic', makeDeps(new FakeSecrets(), makeSettings()));
+      assert.strictEqual(cfg.getEndpoint(), undefined);
+    });
+
+    it('a user endpoint overrides even a known feed URL, and is trimmed', () => {
+      const settings = makeSettings();
+      const deps = { ...makeDeps(new FakeSecrets(), settings), catalog: fixtureCatalog };
+      const cfg = providerClientConfig('anthropic', deps);
+      settings.endpoints = { anthropic: ' https://proxy.test/anthropic ' };
+      assert.strictEqual(cfg.getEndpoint(), 'https://proxy.test/anthropic');
+      settings.endpoints = {};
+      assert.strictEqual(cfg.getEndpoint(), 'https://api.anthropic.com/v1');
+    });
+
+    it('a user endpoint overrides a builtin URL too, but never openai', () => {
+      const settings = makeSettings();
+      settings.endpoints = { mistral: 'https://proxy.test/mistral', openai: 'https://ignored.test' };
+      settings.endpoint = 'https://openai.test/v1';
+      const deps = makeDeps(new FakeSecrets(), settings);
+      assert.strictEqual(providerClientConfig('mistral', deps).getEndpoint(), 'https://proxy.test/mistral');
+      assert.strictEqual(providerClientConfig('openai', deps).getEndpoint(), 'https://openai.test/v1');
+    });
+
+    it('a no-api provider reaches exactly the user endpoint', () => {
+      const settings = makeSettings();
+      const deps = { ...makeDeps(new FakeSecrets(), settings), catalog: fixtureCatalog };
+      const cfg = providerClientConfig('deepinfra', deps);
+      assert.strictEqual(cfg.getEndpoint(), undefined);
+      settings.endpoints = { deepinfra: 'https://api.deepinfra.com/v1/openai' };
+      assert.strictEqual(cfg.getEndpoint(), 'https://api.deepinfra.com/v1/openai');
+    });
+
+    it('resolveProviderEndpoint: user value, else catalog URL, else undefined', () => {
+      const settings = makeSettings();
+      const deepinfra = providerInfo('deepinfra', fixtureCatalog());
+      assert.strictEqual(resolveProviderEndpoint(deepinfra, settings), undefined);
+      settings.endpoints = { deepinfra: 'https://x.test' };
+      assert.strictEqual(resolveProviderEndpoint(deepinfra, settings), 'https://x.test');
+      assert.strictEqual(resolveProviderEndpoint(providerInfo('google'), settings), providerInfo('google').defaultBaseUrl);
+    });
   });
 });

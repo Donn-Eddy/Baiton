@@ -31,6 +31,10 @@
  *     storing/clearing a key refreshes the Provider & Model dropdown;
  *     `baiton.setOrchestratorApiKey` is kept as an alias of it for existing
  *     key bindings (Req 17).
+ *   - `baiton.setProviderEndpoint` — set or clear one provider's base URL in
+ *     the `baiton.orchestrator.endpoints` user setting, for feed providers
+ *     models.dev publishes no URL for (or to route one through a proxy); the
+ *     Chat view's inline "Set endpoint…" fix opens it pre-selected.
  *   - The Spec_Explorer tree view (with its filesystem watcher) whose inline
  *     actions forward to the same `baiton.plan/execute/review/replan/stop/
  *     approve` commands with `[slug, todoId]` / `[slug]` (Req 2, 5, 6, 18.4).
@@ -126,10 +130,12 @@ import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
 import { openChat } from './openChat';
 import { planPath } from './specLister';
 import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
+import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEndpoint';
 import { ProviderRouter } from './providerRouter';
 import type { ProviderSettings } from './providerRouter';
 import { findProviderInfo, isProviderId, providerCatalog } from '../orchestrator/providers';
 import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
+import type { FixAction } from '../orchestrator/webviewProtocol';
 import { revealConfigPanel } from './openConfigPanelView';
 // The window's model catalog seams. This closes an `extension -> activation ->
 // commands -> extension` import cycle, which is harmless under tsc's CommonJS
@@ -167,6 +173,7 @@ export const COMMANDS = {
   openChat: 'baiton.openChat',
   setApiKey: 'baiton.setOrchestratorApiKey',
   setProviderApiKey: 'baiton.setProviderApiKey',
+  setProviderEndpoint: 'baiton.setProviderEndpoint',
   openConfigPanel: 'baiton.openConfigPanel',
   refreshModels: 'baiton.refreshModels',
 } as const;
@@ -510,6 +517,11 @@ export function registerCommands(
   const orchCfg = () => vscode.workspace.getConfiguration(SETTINGS_NS);
   const providerSettings: ProviderSettings = {
     getEndpoint: () => orchCfg().get<string>('orchestrator.endpoint') || undefined,
+    // Read per call and sanitised: the map is hand-editable settings JSON.
+    getProviderEndpoint: (id) => {
+      const endpoints = normalizeEndpoints(orchCfg().get<unknown>(ENDPOINTS_KEY));
+      return Object.prototype.hasOwnProperty.call(endpoints, id) ? endpoints[id] : undefined;
+    },
     getModel: () => orchCfg().get<string>('orchestrator.model') || undefined,
     isStreaming: () => orchCfg().get<boolean>('orchestrator.streaming') ?? true,
     getMaxTokens: () => orchCfg().get('orchestrator.maxTokens'),
@@ -590,6 +602,26 @@ export function registerCommands(
         catalog: providerCatalogNow,
       },
     );
+
+  // The endpoint counterpart of promptProviderKey: availability is refreshed
+  // right after a write so the dropdown does not wait on the configuration
+  // event below.
+  const promptProviderEndpoint = (provider?: ProviderId): Promise<void> =>
+    setProviderEndpoint(provider, () => router.refresh(), { catalog: providerCatalogNow });
+
+  // Endpoints decide availability too, and the settings can change outside
+  // the command (a hand edit of settings.json), so re-read availability
+  // whenever either endpoint setting changes. refresh() never rejects.
+  disposables.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (
+        e.affectsConfiguration(`${SETTINGS_NS}.${ENDPOINTS_KEY}`) ||
+        e.affectsConfiguration(`${SETTINGS_NS}.orchestrator.endpoint`)
+      ) {
+        void router.refresh();
+      }
+    }),
+  );
 
   // Assemble the tool definitions advertised to the model, validating every
   // registered tool's `description` (Req 10.3, 10.5). If assembly is rejected —
@@ -729,7 +761,8 @@ export function registerCommands(
     roundBound: () => readRoundBound(),
     config: readOrchestratorConfig(),
     providers: router,
-    triggerFix: (action, provider) => triggerFix(action, provider, promptProviderKey),
+    triggerFix: (action, provider) =>
+      triggerFix(action, provider, promptProviderKey, promptProviderEndpoint),
     log: (message) => surface.log(message),
     confirmDelete: async (message: string) =>
       (await vscode.window.showWarningMessage(message, { modal: true }, 'Delete')) === 'Delete',
@@ -807,6 +840,15 @@ export function registerCommands(
     ),
     // Kept as an alias so existing key bindings and the README keep working.
     vscode.commands.registerCommand(COMMANDS.setApiKey, () => promptProviderKey()),
+    // Same membership gate as the key command; setProviderEndpoint itself
+    // falls back to its quick pick for an id it cannot set an endpoint for.
+    vscode.commands.registerCommand(COMMANDS.setProviderEndpoint, (arg?: unknown) =>
+      promptProviderEndpoint(
+        typeof arg === 'string' && findProviderInfo(arg, providerCatalogNow()) !== undefined
+          ? arg
+          : undefined,
+      ),
+    ),
   );
 
   // --- spec explorer tree provider + active-spec tracking (Req 2, 6, 7) ---
@@ -1748,17 +1790,22 @@ function readOrchestratorConfig(): OrchestratorConfig {
 /**
  * Handle an inline-error fix action from the Chat_View (Req 13.4):
  * `openSettings` opens the Baiton orchestrator settings; `setApiKey` opens
- * the per-provider key prompt — pre-selecting the provider the failing
- * completion named, or falling back to the provider quick-pick when the
- * error carried none.
+ * the per-provider key prompt and `setEndpoint` the per-provider endpoint
+ * prompt — each pre-selecting the provider the failing completion named, or
+ * falling back to its quick-pick when the error carried none.
  */
 function triggerFix(
-  action: 'openSettings' | 'setApiKey',
+  action: FixAction,
   provider: ProviderId | undefined,
   promptProviderKey: (provider?: ProviderId) => Promise<void>,
+  promptProviderEndpoint: (provider?: ProviderId) => Promise<void>,
 ): void {
   if (action === 'setApiKey') {
     void promptProviderKey(provider);
+    return;
+  }
+  if (action === 'setEndpoint') {
+    void promptProviderEndpoint(provider);
     return;
   }
   void vscode.commands.executeCommand(

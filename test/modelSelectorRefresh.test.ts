@@ -495,10 +495,11 @@ describe('model selector refresh (T15 end to end)', () => {
     };
   }
 
-  /** The four `baiton.orchestrator.*` settings the router reads. */
+  /** The `baiton.orchestrator.*` settings the router reads. */
   function fakeSettings(overrides: Partial<ProviderSettings> = {}): ProviderSettings {
     return {
       getEndpoint: () => undefined,
+      getProviderEndpoint: () => undefined,
       getModel: () => undefined,
       isStreaming: () => false,
       getMaxTokens: () => undefined,
@@ -962,7 +963,7 @@ describe('model selector refresh (T15 end to end)', () => {
       );
     });
 
-    it('an offline window falls back to the five builtin providers', async () => {
+    it('an offline window falls back to the six builtin providers', async () => {
       const secrets = fakeSecrets({ [providerSecretKey('google')!]: 'sk-google' });
       const router = buildRouter({ secrets, workspaceState: fakeWorkspaceState() });
       await router.init();
@@ -979,7 +980,7 @@ describe('model selector refresh (T15 end to end)', () => {
       );
       assert.deepStrictEqual(
         (await router.hiddenProviders()).map((e) => e.id),
-        ['copilot', 'opencode', 'mistral', 'openai'],
+        ['copilot', 'opencode-go', 'opencode', 'mistral', 'openai'],
       );
     });
   });

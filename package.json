@@ -84,6 +84,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.setProviderEndpoint",
+        "title": "Set Provider Endpoint",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.openConfigPanel",
         "title": "Open Config Panel",
         "category": "Baiton"
@@ -201,6 +206,10 @@
         {
           "command": "baiton.setProviderApiKey",
           "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.setProviderEndpoint",
+          "when": "baiton.activated"
         }
       ],
       "view/item/context": [
@@ -297,7 +306,16 @@
         "baiton.orchestrator.endpoint": {
           "type": "string",
           "default": "",
-          "description": "Base URL of the OpenAI-compatible chat-completions endpoint used by the 'OpenAI / Custom' orchestrator provider. The other providers (GitHub Copilot, Google AI Studio, OpenCode Go, Mistral AI) use their own built-in endpoints and ignore this setting."
+          "description": "Base URL of the OpenAI-compatible chat-completions endpoint used by the 'OpenAI / Custom' orchestrator provider. Only 'OpenAI / Custom' reads this setting: GitHub Copilot runs in-window, the builtin providers (Google AI Studio, OpenCode Go, OpenCode Zen, Mistral AI) and models.dev providers use their catalog base URL, and any other provider's URL is set per provider in baiton.orchestrator.endpoints."
+        },
+        "baiton.orchestrator.endpoints": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "scope": "application",
+          "markdownDescription": "Per-provider base URLs of OpenAI-compatible chat-completions endpoints, keyed by provider id (for example `{ \"deepinfra\": \"https://api.deepinfra.com/v1/openai\" }`). Required for a models.dev provider whose feed entry publishes no URL (the Chat view lists it as needing an endpoint); when set for any other provider it overrides the catalog URL, e.g. to route through a proxy. `/chat/completions` is appended for you. Does not apply to GitHub Copilot or 'OpenAI / Custom' (use `#baiton.orchestrator.endpoint#`). User settings only, since the provider's API key is sent to this URL. Easiest to edit with **Baiton: Set Provider Endpoint**."
         },
         "baiton.orchestrator.model": {
           "type": "string",

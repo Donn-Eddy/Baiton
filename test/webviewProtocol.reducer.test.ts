@@ -107,6 +107,20 @@ describe('webview protocol reducer', () => {
     assert.strictEqual(seed.activeSessionId, '');
   });
 
+  it('showError carries the setEndpoint fix action and its provider', () => {
+    const next = reduce(initialWebviewState(), {
+      type: 'showError',
+      message: 'The Deep Infra endpoint is not configured.',
+      action: 'setEndpoint',
+      provider: 'deepinfra',
+    });
+    assert.deepStrictEqual(next.error, {
+      message: 'The Deep Infra endpoint is not configured.',
+      action: 'setEndpoint',
+      provider: 'deepinfra',
+    });
+  });
+
   it('showError sets the inline error with its optional fix action', () => {
     const withAction = reduce(initialWebviewState(), {
       type: 'showError',

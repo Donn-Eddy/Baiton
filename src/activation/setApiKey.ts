@@ -165,6 +165,63 @@ function isKeyedProvider(info: ProviderInfo): boolean {
 }
 
 /**
+ * One entry of the key quick pick: every keyed provider that resolves to the
+ * same SecretStorage slot, collapsed into one item.
+ */
+export interface ProviderKeyGroup {
+  /** The first member's id, in catalog order; the id the pick reports. */
+  id: ProviderId;
+  /** Every member id, in catalog order. */
+  ids: readonly ProviderId[];
+  /** The member labels joined with " / " (e.g. "OpenCode Go / OpenCode Zen"). */
+  label: string;
+  /** The shared `baiton.orchestrator.key.<slot>` SecretStorage key. */
+  secretKey: string;
+}
+
+/**
+ * The keyed providers of `catalog` grouped by resolved SecretStorage key, in
+ * catalog order of each group's first member. Pure.
+ *
+ * Ids aliased onto one slot (`opencode-go` onto `opencode`, see
+ * `PROVIDER_SECRET_ALIAS`) share a single key, so offering them as two pick
+ * items would suggest two independent keys where writing either overwrites
+ * both. One item labelled by both names makes the sharing visible instead.
+ */
+export function providerKeyGroups(catalog: readonly ProviderInfo[]): ProviderKeyGroup[] {
+  const groups: Array<{ id: ProviderId; ids: ProviderId[]; labels: string[]; secretKey: string }> = [];
+  const bySecret = new Map<string, (typeof groups)[number]>();
+  for (const info of catalog) {
+    if (!isKeyedProvider(info)) {
+      continue;
+    }
+    const secretKey = providerSecretKey(info.id)!;
+    const existing = bySecret.get(secretKey);
+    if (existing === undefined) {
+      const group = { id: info.id, ids: [info.id], labels: [info.label], secretKey };
+      bySecret.set(secretKey, group);
+      groups.push(group);
+    } else if (!existing.ids.includes(info.id)) {
+      existing.ids.push(info.id);
+      if (!existing.labels.includes(info.label)) {
+        existing.labels.push(info.label);
+      }
+    }
+  }
+  return groups.map((g) => ({ id: g.id, ids: g.ids, label: g.labels.join(' / '), secretKey: g.secretKey }));
+}
+
+/**
+ * The label naming `id`'s key in prompts and messages: its group's joined
+ * label when `id` shares a slot with other providers in `catalog`, else its
+ * own catalog label (an id absent from the catalog names itself). Pure.
+ */
+export function providerKeyLabel(id: ProviderId, catalog: readonly ProviderInfo[]): string {
+  const group = providerKeyGroups(catalog).find((g) => g.ids.includes(id));
+  return group !== undefined ? group.label : providerInfo(id, catalog).label;
+}
+
+/**
  * The catalog to offer: the injected live catalog when it yields at least one
  * keyed provider, else the builtin catalog. Never throws — a supplier that
  * throws is treated as "no live catalog".
@@ -189,7 +246,8 @@ function resolveCatalog(options?: SetProviderApiKeyOptions): readonly ProviderIn
  * Chat webview's "Set API key…" action uses) or, when omitted, through a quick
  * pick over the keyed providers of the *live* catalog — the builtins plus every
  * models.dev-derived provider — in catalog order. `copilot` and any keyless or
- * unkeyable feed entry are excluded since they need no key. Providers the Chat
+ * unkeyable feed entry are excluded since they need no key, and providers that
+ * share one SecretStorage slot appear as a single item. Providers the Chat
  * dropdown hides are offered here too, so they can be configured *before* they
  * can appear there. Each quick-pick item carries only an id, a label and a
  * `description` reflecting whether a key is currently stored: no part of a
@@ -229,7 +287,8 @@ export async function setProviderApiKey(
   options?: SetProviderApiKeyOptions,
 ): Promise<void> {
   const catalog = resolveCatalog(options);
-  const candidates = catalog.filter(isKeyedProvider);
+  // One item per SecretStorage slot: aliased ids share a key (see providerKeyGroups).
+  const candidates = providerKeyGroups(catalog);
 
   let picked: ProviderId;
   if (providerId !== undefined && providerSecretKey(providerId) !== undefined) {
@@ -241,7 +300,7 @@ export async function setProviderApiKey(
     const stored = await Promise.all(
       candidates.map(async (info) => {
         try {
-          return await secrets.get(providerSecretKey(info.id)!);
+          return await secrets.get(info.secretKey);
         } catch {
           return undefined; // an unreadable slot reads as "no key set"
         }
@@ -269,9 +328,10 @@ export async function setProviderApiKey(
   }
 
   const key = providerSecretKey(picked)!;
-  // Resolved from the offered catalog so a feed provider gets its feed label;
-  // an id absent from the catalog degrades to a label equal to the id.
-  const label = providerInfo(picked, catalog).label;
+  // Resolved from the offered catalog so a feed provider gets its feed label
+  // and a shared slot names every provider it unlocks; an id absent from the
+  // catalog degrades to a label equal to the id.
+  const label = providerKeyLabel(picked, catalog);
 
   const input = await vscode.window.showInputBox({
     prompt: providerKeyPrompt(label),

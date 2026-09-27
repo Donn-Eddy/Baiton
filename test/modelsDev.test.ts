@@ -40,13 +40,13 @@ function opts(fetchFn: FeedFetch, rest: Omit<FetchModelsDevOptions, 'fetch'> = {
 
 describe('orchestrator/modelsDev', () => {
   describe('parseModelsDevFeed', () => {
-    it('parses the fixture into the eight providers in fixture order', () => {
+    it('parses the fixture into the nine providers in fixture order', () => {
       const result = parseModelsDevFeed(JSON.parse(fixtureText));
       assert.strictEqual(result.ok, true);
       const feed = result.value as ModelsDevFeed;
       assert.deepStrictEqual(
         feed.map((provider) => provider.id),
-        ['anthropic', 'deepinfra', 'cerebras', 'baseten', 'deepseek', 'google', 'mistral', 'opencode'],
+        ['anthropic', 'deepinfra', 'cerebras', 'baseten', 'deepseek', 'google', 'mistral', 'opencode', 'opencode-go'],
       );
     });
 
@@ -229,7 +229,7 @@ describe('orchestrator/modelsDev', () => {
       const feed = result.value as ModelsDevFeed;
       assert.deepStrictEqual(
         feed.map((provider) => provider.id),
-        ['anthropic', 'deepinfra', 'cerebras', 'baseten', 'deepseek', 'google', 'mistral', 'opencode'],
+        ['anthropic', 'deepinfra', 'cerebras', 'baseten', 'deepseek', 'google', 'mistral', 'opencode', 'opencode-go'],
       );
       assert.strictEqual(calls.length, 1);
       assert.strictEqual(calls[0].url, MODELS_DEV_URL);
