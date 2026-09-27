@@ -540,6 +540,20 @@ cases.push({
   ],
 });
 
+// (44b) showError with a provider-scoped endpoint action (a feed provider
+// whose models.dev entry publishes no URL)
+cases.push({
+  name: 'showError with a provider-scoped endpoint action',
+  messages: [
+    {
+      type: 'showError',
+      message: 'The Deep Infra endpoint is not configured.',
+      action: 'setEndpoint',
+      provider: 'deepinfra',
+    },
+  ],
+});
+
 // (45) setProviders carries the catalog refresh time
 cases.push({
   name: 'setProviders carries refreshedAt',

@@ -22,12 +22,13 @@ import type { ModelsDevFeed, FeedProvider } from './modelsDev';
 export type ProviderId = string;
 
 /** The providers this build ships without any feed: the offline/builtin base. */
-export type BuiltinProviderId = 'copilot' | 'google' | 'opencode' | 'mistral' | 'openai';
+export type BuiltinProviderId = 'copilot' | 'google' | 'opencode-go' | 'opencode' | 'mistral' | 'openai';
 
 /** The builtin vocabulary, in dropdown order. */
 export const BUILTIN_PROVIDER_IDS: readonly BuiltinProviderId[] = [
   'copilot',
   'google',
+  'opencode-go',
   'opencode',
   'mistral',
   'openai',
@@ -62,7 +63,13 @@ export interface ProviderInfo {
   id: ProviderId;
   /** Human label shown as the <optgroup> label in the Chat dropdown. */
   label: string;
-  /** Default OpenAI-compatible base URL, or undefined when the provider is not HTTP-based (`copilot`) or takes its base URL from settings (`openai`). */
+  /**
+   * Default OpenAI-compatible base URL, or undefined when the provider is not
+   * HTTP-based (`copilot`), takes its base URL from settings (`openai`), or is
+   * a feed provider whose models.dev entry discloses no `api` — the user must
+   * then supply one through `baiton.orchestrator.endpoints` (see
+   * {@link providerNeedsEndpoint}).
+   */
   defaultBaseUrl?: string;
   /** True when the provider needs an API key in SecretStorage before it can be used. */
   requiresKey: boolean;
@@ -72,7 +79,7 @@ export interface ProviderInfo {
   models: readonly string[];
   /** The wire shaping applied to messages before serialisation; `gemini` fixes Google's tool-chaining rejections. */
   dialect: DialectId;
-  /** Extra headers added to every request; `opencode` adds User-Agent and x-opencode-session. */
+  /** Extra headers added to every request; `opencode` (both OpenCode gateways) adds User-Agent and x-opencode-session. */
   headerStyle: HeaderStyleId;
   /** Where the entry came from; a missing value is treated as `'builtin'`. */
   readonly source?: 'builtin' | 'feed' | 'custom';
@@ -100,9 +107,10 @@ export type HeaderStyleId = 'default' | 'opencode';
  * The builtin provider catalog, one record per {@link BuiltinProviderId}.
  *
  * This is the offline base and the legacy-id compatibility set: when the
- * models.dev feed is unavailable the catalog still offers exactly these five
+ * models.dev feed is unavailable the catalog still offers exactly these six
  * providers, and the legacy ids `google`/`mistral`/`opencode` keep their
- * `baiton.orchestrator.key.<id>` secrets.
+ * `baiton.orchestrator.key.<id>` secrets (`opencode-go` shares the `opencode`
+ * slot — see {@link PROVIDER_SECRET_ALIAS}).
  *
  * Base URLs are the prefix `completionsUrl()` (src/orchestrator/modelClient.ts)
  * appends `/chat/completions` to: `normalizeBase` strips every trailing slash
@@ -133,17 +141,34 @@ export const PROVIDERS: Readonly<Record<BuiltinProviderId, ProviderInfo>> = {
     dialect: 'gemini',
     headerStyle: 'default',
   },
-  // Base URL and model list follow the hosted Go gateway; the model ids are
-  // documented at OPENCODE_MODEL_DOC_URL (src/adapter/opencode.ts,
-  // 'https://opencode.ai/docs/go/'). Keep both here so a later correction is
-  // a one-line edit.
+  // OpenCode runs TWO hosted gateways that models.dev lists as separate
+  // providers with disjoint model sets: Go (the subscription tier, documented
+  // at https://opencode.ai/docs/go — the same page OPENCODE_MODEL_DOC_URL in
+  // src/adapter/opencode.ts points the CLI adapter at) and Zen (pay-as-you-go,
+  // https://opencode.ai/docs/zen). They used to be conflated under one
+  // `opencode` entry labelled "Go" but pointing at Zen, so the dropdown showed
+  // Zen's models under the Go label. The id `opencode` stays Zen because its
+  // base URL was always Zen's and the feed uses the same id for Zen.
+  //
+  // The model lists are only the offline fallback — a landed feed replaces
+  // them (see buildProviderCatalog) — taken from the live feed in 2026-09.
+  'opencode-go': {
+    id: 'opencode-go',
+    label: 'OpenCode Go',
+    defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
+    requiresKey: true,
+    usesSettings: false,
+    models: ['kimi-k2.7-code', 'qwen3.7-plus', 'glm-5.3', 'minimax-m3', 'deepseek-v4-pro', 'grok-4.7'],
+    dialect: 'openai',
+    headerStyle: 'opencode',
+  },
   opencode: {
     id: 'opencode',
-    label: 'OpenCode Go',
+    label: 'OpenCode Zen',
     defaultBaseUrl: 'https://opencode.ai/zen/v1',
     requiresKey: true,
     usesSettings: false,
-    models: ['grok-code', 'qwen3-coder', 'kimi-k2', 'claude-sonnet-4-5', 'gpt-5-codex'],
+    models: ['claude-sonnet-5', 'gpt-5.5', 'gemini-3.5-flash', 'kimi-k2.7-code', 'qwen3-coder', 'grok-code'],
     dialect: 'openai',
     headerStyle: 'opencode',
   },
@@ -190,8 +215,9 @@ export const PROVIDER_DIALECTS: Readonly<Record<string, DialectId>> = {
 
 /** Providers needing extra request headers; everything else is `'default'`. */
 export const PROVIDER_HEADER_STYLES: Readonly<Record<string, HeaderStyleId>> = {
-  // The hosted OpenCode gateway wants User-Agent + x-opencode-session.
+  // Both hosted OpenCode gateways (Zen and Go) want User-Agent + x-opencode-session.
   opencode: 'opencode',
+  'opencode-go': 'opencode',
 };
 
 /** Base URLs that must win over the feed's `api`. */
@@ -231,8 +257,15 @@ function feedModelIds(provider: FeedProvider): readonly string[] {
  *
  * Total and never throws, whatever a {@link FeedProvider} contains. A feed
  * provider is skipped when its id trims to empty, its id is in
- * {@link FEED_PROVIDER_DENY}, it discloses no `api` (so it is not reachable over
- * an OpenAI-compatible HTTP base) or it lists no usable models.
+ * {@link FEED_PROVIDER_DENY} or it lists no usable models.
+ *
+ * A provider that discloses no `api` is still emitted, with `defaultBaseUrl`
+ * undefined. models.dev dropped `api` for many providers whose SDK package
+ * knows the URL (deepinfra, cerebras, groq, xai, …); skipping them hid real,
+ * OpenAI-compatible providers entirely. They now appear and ask for an
+ * endpoint instead ({@link providerNeedsEndpoint}). Known URLs are
+ * deliberately NOT pre-seeded here: the feed is the source of truth, and a
+ * guessed URL would silently send the user's key somewhere unverified.
  */
 export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] {
   const providers = Array.isArray(feed) ? feed : [];
@@ -246,18 +279,20 @@ export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] 
       continue;
     }
     const api = typeof provider.api === 'string' ? provider.api.trim() : '';
-    if (api.length === 0) {
-      continue;
-    }
     const models = feedModelIds(provider);
     if (models.length === 0) {
       continue;
     }
     const label = typeof provider.name === 'string' && provider.name.trim().length > 0 ? provider.name : id;
+    const baseUrl = hasOwn(PROVIDER_BASE_URL_OVERRIDES, id)
+      ? PROVIDER_BASE_URL_OVERRIDES[id]
+      : api.length > 0
+        ? api
+        : undefined;
     const entry: ProviderInfo & { env?: readonly string[]; doc?: string } = {
       id,
       label,
-      defaultBaseUrl: hasOwn(PROVIDER_BASE_URL_OVERRIDES, id) ? PROVIDER_BASE_URL_OVERRIDES[id] : api,
+      ...(baseUrl !== undefined ? { defaultBaseUrl: baseUrl } : {}),
       requiresKey: true,
       usesSettings: false,
       models,
@@ -278,7 +313,7 @@ export function providersFromFeed(feed: ModelsDevFeed): readonly ProviderInfo[] 
  * The full catalog in dropdown order: builtins, then feed-only providers,
  * `openai` (OpenAI / Custom) last.
  *
- * With no feed (or an empty one) this is exactly today's five builtin entries,
+ * With no feed (or an empty one) this is exactly today's six builtin entries,
  * same order and same object identities, so an offline window behaves as
  * before. For an id present in both sets the builtin entry wins on label, base
  * URL, key policy, dialect and header style — those encode host behaviour the
@@ -382,12 +417,28 @@ export function providerCatalog(feed?: ModelsDevFeed): readonly ProviderInfo[] {
 export const PROVIDER_SECRET_KEY_PREFIX = 'baiton.orchestrator.key.';
 
 /**
+ * Provider ids that read ANOTHER provider's SecretStorage slot.
+ *
+ * OpenCode Go and OpenCode Zen are two gateways behind one OpenCode account:
+ * the same API key authenticates both, and the models.dev feed lists the same
+ * `OPENCODE_API_KEY` env var for each. Keying them separately would make the
+ * user paste one key twice and let the two copies drift, so `opencode-go`
+ * reuses the pre-existing `opencode` slot — which also means a key stored
+ * before the split lights up both groups with no migration.
+ */
+export const PROVIDER_SECRET_ALIAS: Readonly<Record<string, string>> = {
+  'opencode-go': 'opencode',
+};
+
+/**
  * The SecretStorage key holding `id`'s API key, or undefined for a blank id or
  * a builtin provider that needs none (`copilot`).
  *
  * This is the legacy-key compatibility guarantee: `google`/`opencode`/`mistral`/
  * `openai` keep resolving to `baiton.orchestrator.key.<id>` exactly as before,
- * and a feed-derived provider gets a key of the same shape.
+ * and a feed-derived provider gets a key of the same shape. An id listed in
+ * {@link PROVIDER_SECRET_ALIAS} resolves to its target's slot, so two ids can
+ * share one key.
  */
 export function providerSecretKey(id: ProviderId): string | undefined {
   if (typeof id !== 'string' || id.trim().length === 0) {
@@ -397,7 +448,8 @@ export function providerSecretKey(id: ProviderId): string | undefined {
   if (builtin !== undefined && !builtin.requiresKey) {
     return undefined;
   }
-  return `${PROVIDER_SECRET_KEY_PREFIX}${id}`;
+  const slot = hasOwn(PROVIDER_SECRET_ALIAS, id) ? PROVIDER_SECRET_ALIAS[id] : id;
+  return `${PROVIDER_SECRET_KEY_PREFIX}${slot}`;
 }
 
 /**
@@ -471,6 +523,33 @@ export function providerNeedsKeyReason(id: ProviderId, catalog?: readonly Provid
 /** The user-facing reason shown when `openai` has no `baiton.orchestrator.endpoint`. */
 export const PROVIDER_NEEDS_ENDPOINT_REASON =
   'Set baiton.orchestrator.endpoint to use OpenAI / Custom.';
+
+/**
+ * True when `info` is an HTTP provider the catalog cannot reach on its own: it
+ * needs a key, is not the settings-backed `openai`, is not the non-HTTP
+ * `copilot`, and has no catalog base URL — typically a models.dev provider
+ * whose feed entry discloses no `api`. Such a provider becomes usable once the
+ * user sets its URL in `baiton.orchestrator.endpoints`. Pure; this says
+ * nothing about whether a user endpoint is already set.
+ */
+export function providerNeedsEndpoint(info: ProviderInfo): boolean {
+  return (
+    info.requiresKey === true &&
+    info.usesSettings !== true &&
+    info.id !== 'copilot' &&
+    info.defaultBaseUrl === undefined
+  );
+}
+
+/**
+ * The user-facing reason shown when provider `id` has a key but no endpoint to
+ * send it to (no catalog base URL and no `baiton.orchestrator.endpoints`
+ * entry). Names the command that fixes it; an id absent from `catalog` names
+ * itself.
+ */
+export function providerNeedsEndpointReason(id: ProviderId, catalog?: readonly ProviderInfo[]): string {
+  return `Set an endpoint URL for ${providerInfo(id, catalog).label} to use it (Baiton: Set Provider Endpoint).`;
+}
 
 /**
  * The user-facing reason shown when GitHub Copilot is unavailable in the

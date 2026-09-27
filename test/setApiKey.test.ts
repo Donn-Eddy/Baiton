@@ -192,11 +192,14 @@ function feedEntry(id: string, label: string): ProviderInfo {
   };
 }
 
-/** The four builtin keyed provider labels, in catalog order. */
+/**
+ * The four builtin keyed quick-pick labels, in catalog order: OpenCode Go and
+ * OpenCode Zen share one key slot and so one item.
+ */
 function builtinKeyedLabels(): string[] {
   return [
     providerInfo('google').label,
-    providerInfo('opencode').label,
+    'OpenCode Go / OpenCode Zen',
     providerInfo('mistral').label,
     providerInfo('openai').label,
   ];
@@ -395,12 +398,7 @@ describe('setProviderApiKey', () => {
     assert.strictEqual(items.length, 4, 'exactly the four keyed providers');
     assert.deepStrictEqual(
       items.map((i) => i.label),
-      [
-        providerInfo('google').label,
-        providerInfo('opencode').label,
-        providerInfo('mistral').label,
-        providerInfo('openai').label,
-      ],
+      builtinKeyedLabels(),
     );
     assert.ok(items.every((i) => i.label !== 'GitHub Copilot'), 'no GitHub Copilot item');
     assert.strictEqual(items[0].description, PROVIDER_KEY_SET_DETAIL);
@@ -522,6 +520,98 @@ describe('setProviderApiKey', () => {
     assert.strictEqual(secrets.values.get('baiton.orchestrator.key.google'), 'g-key');
     assert.deepStrictEqual(vscodeFake.messages, [
       { kind: 'error', message: providerKeySaveFailedMessage('Google AI Studio') },
+    ]);
+  });
+});
+
+describe('setProviderApiKey shared OpenCode key', () => {
+  let providerKeyGroups: SetApiKeyModule['providerKeyGroups'];
+
+  before(async () => {
+    const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
+    setProviderApiKey = mod.setProviderApiKey;
+    providerKeyGroups = mod.providerKeyGroups;
+  });
+
+  beforeEach(() => {
+    vscodeFake = makeVscodeFake();
+    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
+  });
+
+  it('providerKeyGroups collapses ids sharing a slot, in catalog order', () => {
+    const groups = providerKeyGroups(providerCatalog());
+    assert.deepStrictEqual(
+      groups.map((g) => [g.id, [...g.ids], g.label, g.secretKey]),
+      [
+        ['google', ['google'], 'Google AI Studio', 'baiton.orchestrator.key.google'],
+        [
+          'opencode-go',
+          ['opencode-go', 'opencode'],
+          'OpenCode Go / OpenCode Zen',
+          'baiton.orchestrator.key.opencode',
+        ],
+        ['mistral', ['mistral'], 'Mistral AI', 'baiton.orchestrator.key.mistral'],
+        ['openai', ['openai'], 'OpenAI / Custom', 'baiton.orchestrator.key.openai'],
+      ],
+    );
+  });
+
+  it('offers one OpenCode item, marked set by the shared key', async () => {
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.opencode', 'oc');
+
+    await setProviderApiKey(asSecrets(secrets));
+
+    const items = vscodeFake.lastQuickPickItems!;
+    const openCode = items.filter((i) => i.label.includes('OpenCode'));
+    assert.strictEqual(openCode.length, 1, 'exactly one OpenCode item');
+    assert.strictEqual(openCode[0].label, 'OpenCode Go / OpenCode Zen');
+    assert.strictEqual(openCode[0].description, PROVIDER_KEY_SET_DETAIL);
+  });
+
+  it('picking the OpenCode item stores under the shared slot with the joined label', async () => {
+    const secrets = new FakeSecretStorage();
+    vscodeFake.quickPickResult = { label: 'OpenCode Go / OpenCode Zen', id: 'opencode-go' };
+    vscodeFake.inputResult = 'oc-new';
+    const changed: string[] = [];
+
+    await setProviderApiKey(asSecrets(secrets), undefined, (id) => {
+      changed.push(id);
+    });
+
+    assert.deepStrictEqual(secrets.storeCalls, [{ key: 'baiton.orchestrator.key.opencode', value: 'oc-new' }]);
+    assert.ok((vscodeFake.lastInputOptions?.prompt ?? '').includes('OpenCode Go / OpenCode Zen'));
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeySavedMessage('OpenCode Go / OpenCode Zen') },
+    ]);
+    assert.deepStrictEqual(changed, ['opencode-go']);
+  });
+
+  for (const id of ['opencode-go', 'opencode']) {
+    it(`an explicit ${id} argument skips the pick and writes the shared slot`, async () => {
+      const secrets = new FakeSecretStorage();
+      vscodeFake.inputResult = 'oc-key';
+
+      await setProviderApiKey(asSecrets(secrets), id);
+
+      assert.strictEqual(vscodeFake.quickPickCalls, 0);
+      assert.deepStrictEqual(secrets.storeCalls, [{ key: 'baiton.orchestrator.key.opencode', value: 'oc-key' }]);
+      assert.deepStrictEqual(vscodeFake.messages, [
+        { kind: 'info', message: providerKeySavedMessage('OpenCode Go / OpenCode Zen') },
+      ]);
+    });
+  }
+
+  it('clearing through either id deletes the one shared key and names both', async () => {
+    const secrets = new FakeSecretStorage();
+    secrets.values.set('baiton.orchestrator.key.opencode', 'oc');
+    vscodeFake.inputResult = '';
+
+    await setProviderApiKey(asSecrets(secrets), 'opencode-go');
+
+    assert.deepStrictEqual(secrets.deleteCalls, ['baiton.orchestrator.key.opencode']);
+    assert.deepStrictEqual(vscodeFake.messages, [
+      { kind: 'info', message: providerKeyClearedMessage('OpenCode Go / OpenCode Zen') },
     ]);
   });
 });

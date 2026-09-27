@@ -1142,8 +1142,14 @@
       errorMessage.textContent = state.error.message;
       if (state.error.action) {
         errorFix.style.display = '';
+        // One label per FixAction (src/orchestrator/webviewProtocol.ts); an
+        // unknown action falls back to the settings label.
         errorFix.textContent =
-          state.error.action === 'setApiKey' ? 'Set Orchestrator API Key' : 'Open Baiton Settings';
+          state.error.action === 'setApiKey'
+            ? 'Set Orchestrator API Key'
+            : state.error.action === 'setEndpoint'
+              ? 'Set Provider Endpoint'
+              : 'Open Baiton Settings';
         errorFix.dataset.action = state.error.action;
         if (state.error.provider) {
           errorFix.dataset.provider = state.error.provider;

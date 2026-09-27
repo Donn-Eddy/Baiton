@@ -40,7 +40,11 @@ export const commands = {
 export const workspace = {
   createFileSystemWatcher: (pattern, ...args) =>
     fake().workspace.createFileSystemWatcher(pattern, ...args),
+  getConfiguration: (section, scope) => fake().workspace.getConfiguration(section, scope),
 };
+
+/** Where a configuration update is written; the values match the host enum. */
+export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
 
 export class RelativePattern {
   constructor(base, pattern) {

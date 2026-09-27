@@ -163,7 +163,8 @@ export interface OrchestratorConfig {
  * error's fix. `openSettings` opens the relevant Baiton settings; `setApiKey`
  * invokes the Set Orchestrator API Key command (Req 13.1–13.4). `setApiKey`
  * with a provider opens that provider's key prompt directly; without one it
- * opens the provider quick-pick.
+ * opens the provider quick-pick. `setEndpoint` does the same for the Set
+ * Provider Endpoint prompt.
  */
 export type TriggerFix = (action: FixAction, provider?: ProviderId) => void | Promise<void>;
 
@@ -1377,8 +1378,21 @@ export class ChatController {
    */
   private surfaceError(err: unknown): void {
     if (err instanceof MissingConfigError) {
+      const active = this.deps.providers?.getSelection()?.provider;
+      if (err.missing === 'endpoint' && active !== undefined && active !== 'openai') {
+        // A non-settings provider with no base URL: its fix is the per-provider
+        // endpoint prompt, not the OpenAI / Custom `orchestrator.endpoint`
+        // setting that `openSettings` would land on.
+        this.deps.webview.post({
+          type: 'showError',
+          message: missingProviderEndpointMessage(active),
+          action: 'setEndpoint',
+          provider: active,
+        });
+        return;
+      }
       const action: FixAction = err.missing === 'apiKey' ? 'setApiKey' : 'openSettings';
-      const provider = err.missing === 'apiKey' ? this.deps.providers?.getSelection()?.provider : undefined;
+      const provider = err.missing === 'apiKey' ? active : undefined;
       this.deps.webview.post({
         type: 'showError',
         message: provider !== undefined ? missingProviderKeyMessage(provider) : missingConfigMessage(err.missing),
@@ -1549,6 +1563,11 @@ function describeAnswer(answer: InterventionAnswer | undefined): string {
  */
 function missingProviderKeyMessage(provider: ProviderId): string {
   return `The ${providerInfo(provider).label} API key is not configured.`;
+}
+
+/** The inline message for a non-settings provider that has no endpoint to call. */
+function missingProviderEndpointMessage(provider: ProviderId): string {
+  return `The ${providerInfo(provider).label} endpoint is not configured.`;
 }
 
 /** The inline message naming the missing configuration value (Req 13.1, 13.2). */
