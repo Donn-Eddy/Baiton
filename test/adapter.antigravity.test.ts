@@ -8,6 +8,10 @@ import {
   ANTIGRAVITY_PLAN_MODE,
   ANTIGRAVITY_ACCEPT_EDITS_MODE,
   ANTIGRAVITY_MODELS,
+  ANTIGRAVITY_EFFORTS,
+  ANTIGRAVITY_EFFORT_VOCABULARY,
+  ANTIGRAVITY_MODELS_ARGS,
+  antigravityModelsFromCliOutput,
   ANTIGRAVITY_HOOK_ALLOW_GRANTS,
   ANTIGRAVITY_SKIP_PERMISSIONS_FLAG,
   ANTIGRAVITY_RELAY_HOOK_NAME,
@@ -20,8 +24,8 @@ import {
   antigravityModeFlags,
   antigravityModelFlags,
 } from '../src/adapter/antigravity';
-import type { AskRelayDescriptor, LaunchRequest } from '../src/adapter/adapter';
-import { AGENT_BINARY, AdapterLaunchError } from '../src/adapter/adapter';
+import type { AskRelayDescriptor, DiscoveryContext, LaunchRequest } from '../src/adapter/adapter';
+import { AGENT_BINARY, AdapterLaunchError, DEFAULT_DISCOVERY_TIMEOUT_MS } from '../src/adapter/adapter';
 import { isReadOnlyRole, shellQuote } from '../src/adapter/permissions';
 import { ROLES } from '../src/model/role';
 import { askRelayDescriptor, parseAsk } from '../src/engine/askRelay';
@@ -40,7 +44,12 @@ import { askRelayDescriptor, parseAsk } from '../src/engine/askRelay';
  *   (Req 15.1-15.4);
  * - one documented degrade: `req.sessionId` is ignored on a fresh launch;
  * - the native ask relay: the launcher-written `hooks.json`, the guarded
- *   `--dangerously-skip-permissions`, and the hook script's deny degrade.
+ *   `--dangerously-skip-permissions`, and the hook script's deny degrade;
+ * - model discovery: the pure `agy models` parser (family grouping from the
+ *   `low|medium|high|max` id suffixes, fixed ids, labels, totality) and
+ *   `discoverModels`'s never-reject / never-fall-back-to-the-curated-table
+ *   contract, always through an injected `runModelsCli` so no test spawns the
+ *   real `agy`.
  */
 
 /** Build a launch request with sensible defaults, overridable per test. */
@@ -589,5 +598,228 @@ describe('AntigravityAdapter native ask relay (probe findings, agy 1.2.8)', () =
     assert.strictEqual(code, 0);
     assert.strictEqual((JSON.parse(stdout) as { decision: string }).decision, 'deny');
     assert.deepStrictEqual(written, []);
+  });
+});
+
+/** The checked-in `agy models` listing the discovery suites read. */
+const AGY_MODELS_FIXTURE = fs.readFileSync(path.join(__dirname, 'fixtures', 'agyModels.sample.txt'), 'utf8');
+
+/** A discovery context with sensible defaults, overridable per test. */
+function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+  return { timeoutMs: 1_000, ...overrides };
+}
+
+describe('antigravityModelsFromCliOutput (codex-opencode-dropdown-fix T04)', () => {
+  const entries = antigravityModelsFromCliOutput(AGY_MODELS_FIXTURE);
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+
+  it('groups sibling suffixed ids into one family carrying its levels in listing order', () => {
+    for (const family of ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash']) {
+      assert.deepStrictEqual([...(byId.get(family)?.efforts ?? [])], ['low', 'medium', 'high'], family);
+    }
+    assert.deepStrictEqual([...(byId.get('gemini-3.1-pro')?.efforts ?? [])], ['low', 'high']);
+    for (const member of ['gemini-3.8-flash-low', 'gemini-3.8-flash-high', 'gemini-3.1-pro-low']) {
+      assert.strictEqual(byId.has(member), false, member);
+    }
+  });
+
+  it('takes the family label from its first member with the trailing level parenthesis removed', () => {
+    assert.strictEqual(byId.get('gemini-3.8-flash')?.label, 'Gemini 3.8 Flash');
+    assert.strictEqual(byId.get('gemini-3.7-flash')?.label, 'Gemini 3.7 Flash');
+    assert.strictEqual(byId.get('gemini-3.6-flash')?.label, 'Gemini 3.6 Flash');
+    assert.strictEqual(byId.get('gemini-3.1-pro')?.label, 'Gemini 3.1 Pro');
+  });
+
+  it('keeps a fixed id as its own entry with no efforts, and a lone suffix forms no family', () => {
+    for (const fixed of ['claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']) {
+      assert.deepStrictEqual([...(byId.get(fixed)?.efforts ?? ['missing'])], [], fixed);
+    }
+    assert.strictEqual(byId.has('gpt-oss-120b'), false);
+    // An unrelated trailing parenthesis is NOT a level, so it stays.
+    assert.strictEqual(byId.get('claude-opus-4-6-thinking')?.label, 'Claude Opus 4.6 (Thinking)');
+  });
+
+  it('reproduces the curated ANTIGRAVITY_MODELS table exactly (drift guard)', () => {
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.id),
+      Object.keys(ANTIGRAVITY_MODELS),
+    );
+    for (const entry of entries) {
+      assert.deepStrictEqual([...(entry.efforts ?? [])], ANTIGRAVITY_MODELS[entry.id], entry.id);
+    }
+    const union: string[] = [];
+    for (const entry of entries) {
+      for (const effort of entry.efforts ?? []) {
+        if (!union.includes(effort)) {
+          union.push(effort);
+        }
+      }
+    }
+    assert.deepStrictEqual(union, [...ANTIGRAVITY_EFFORTS]);
+  });
+
+  it('carries no defaultEffort, provider or custom key', () => {
+    for (const entry of entries) {
+      for (const key of ['defaultEffort', 'provider', 'custom']) {
+        assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, key), false, `${entry.id}.${key}`);
+      }
+    }
+  });
+
+  it('strips ANSI escapes around ids and labels', () => {
+    const coloured = AGY_MODELS_FIXTURE.split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => `\u001B[32m${line}\u001B[0m`)
+      .join('\n');
+    assert.deepStrictEqual(antigravityModelsFromCliOutput(coloured), entries);
+  });
+
+  it('ignores blank, whitespace-only, bulleted and duplicate lines', () => {
+    const noisy =
+      '\n   \n' +
+      AGY_MODELS_FIXTURE.split('\n')
+        .filter((line) => line.length > 0)
+        .map((line, index) => (index === 0 ? `  * ${line}\n${line}` : line))
+        .join('\n') +
+      '\n\n';
+    assert.deepStrictEqual(antigravityModelsFromCliOutput(noisy), entries);
+  });
+
+  it('omits the label own key for a line with no tab', () => {
+    const [entry] = antigravityModelsFromCliOutput('some-model\n');
+    assert.strictEqual(entry?.id, 'some-model');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entry ?? {}, 'label'), false);
+  });
+
+  it('yields [] for empty, blank-only and prose-only output', () => {
+    assert.deepStrictEqual(antigravityModelsFromCliOutput(''), []);
+    assert.deepStrictEqual(antigravityModelsFromCliOutput('\n\n'), []);
+    assert.deepStrictEqual(
+      antigravityModelsFromCliOutput('Loading models, please wait...\nyou are not signed in\n'),
+      [],
+    );
+  });
+
+  it('never throws on adversarial input', () => {
+    // A bare `-low` loses its leading dash to the bullet/marker strip, so it is
+    // an unsuffixed id (`low`) rather than a zero-length stem.
+    assert.deepStrictEqual(
+      antigravityModelsFromCliOutput('-low\n').map((entry) => entry.id),
+      ['low'],
+    );
+    // A zero-length stem reached without the bullet strip is skipped as a family.
+    assert.deepStrictEqual(
+      antigravityModelsFromCliOutput('x\t-low\nn-low\tN (Low)\nn-high\tN (High)\n').map((entry) => entry.id),
+      ['x', 'n'],
+    );
+    assert.deepStrictEqual(
+      antigravityModelsFromCliOutput('weird-1-max\tWeird 1 (Max)\n').map((entry) => entry.id),
+      ['weird-1-max'],
+    );
+    const withMax = antigravityModelsFromCliOutput('m-low\tM (Low)\nm-max\tM (Max)\n');
+    assert.deepStrictEqual(withMax, [{ id: 'm', label: 'M', efforts: ['low', 'max'] }]);
+    assert.deepStrictEqual(antigravityModelsFromCliOutput('\t\t\n'), []);
+    // A stem that is also listed bare: the family entry wins, emitted once.
+    assert.deepStrictEqual(
+      antigravityModelsFromCliOutput('m\tM\nm-low\tM (Low)\nm-high\tM (High)\n').map((entry) => entry.id),
+      ['m'],
+    );
+  });
+});
+
+describe('AntigravityAdapter.discoverModels (codex-opencode-dropdown-fix T04)', () => {
+  it('spawns plain `agy models` with no undocumented flag', () => {
+    assert.deepStrictEqual([...ANTIGRAVITY_MODELS_ARGS], ['models']);
+    assert.deepStrictEqual([...ANTIGRAVITY_EFFORT_VOCABULARY], ['low', 'medium', 'high', 'max']);
+  });
+
+  it('turns the fixture listing into capabilities with per-family efforts and no provenance', async () => {
+    const adapter = new AntigravityAdapter({ runModelsCli: async () => AGY_MODELS_FIXTURE });
+    const caps = await adapter.discoverModels(ctx());
+    assert.ok(caps !== undefined);
+    assert.deepStrictEqual([...caps.models], Object.keys(ANTIGRAVITY_MODELS));
+    assert.deepStrictEqual([...caps.efforts], ['low', 'medium', 'high']);
+    assert.deepStrictEqual(
+      (caps.modelEntries ?? []).map((entry) => [entry.id, [...(entry.efforts ?? [])]]),
+      Object.entries(ANTIGRAVITY_MODELS).map(([id, efforts]) => [id, [...efforts]]),
+    );
+    for (const key of ['source', 'stale', 'staleReason', 'fetchedAt', 'modelLink']) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(caps, key), false, key);
+    }
+  });
+
+  it('never inspects the exit code: stdout from a failed run still yields the entries', async () => {
+    // The seam resolves stdout regardless of how the process exited, so a
+    // non-zero exit with a good listing must still be parsed (agy exits 0 even
+    // on an error, so the code carries no signal at all).
+    const adapter = new AntigravityAdapter({ runModelsCli: async () => AGY_MODELS_FIXTURE });
+    const caps = await adapter.discoverModels(ctx());
+    assert.deepStrictEqual([...(caps?.models ?? [])], Object.keys(ANTIGRAVITY_MODELS));
+  });
+
+  it('resolves undefined — never the curated table — for no output, empty output and prose', async () => {
+    for (const stdout of [undefined, '', 'agy: not signed in\n']) {
+      const adapter = new AntigravityAdapter({ runModelsCli: async () => stdout });
+      assert.strictEqual(await adapter.discoverModels(ctx()), undefined, String(stdout));
+    }
+  });
+
+  it('resolves undefined when the runner rejects or throws synchronously', async () => {
+    const rejecting = new AntigravityAdapter({ runModelsCli: async () => Promise.reject(new Error('boom')) });
+    assert.strictEqual(await rejecting.discoverModels(ctx()), undefined);
+    const throwing = new AntigravityAdapter({
+      runModelsCli: () => {
+        throw new Error('boom');
+      },
+    });
+    assert.strictEqual(await throwing.discoverModels(ctx()), undefined);
+  });
+
+  it('spawns nothing for an already-aborted signal', async () => {
+    let calls = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const adapter = new AntigravityAdapter({
+      runModelsCli: async () => {
+        calls += 1;
+        return AGY_MODELS_FIXTURE;
+      },
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx({ signal: controller.signal })), undefined);
+    assert.strictEqual(calls, 0);
+  });
+
+  it('resolves undefined when the signal aborts while the runner is pending', async () => {
+    const controller = new AbortController();
+    const adapter = new AntigravityAdapter({
+      runModelsCli: () =>
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve(AGY_MODELS_FIXTURE), 5_000).unref?.();
+        }),
+    });
+    const pending = adapter.discoverModels(ctx({ signal: controller.signal }));
+    controller.abort();
+    assert.strictEqual(await pending, undefined);
+  });
+
+  it('resolves undefined on a timeout without hanging', async () => {
+    const adapter = new AntigravityAdapter({
+      runModelsCli: () => new Promise<string>(() => undefined),
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx({ timeoutMs: 20 })), undefined);
+  });
+
+  it('passes ctx.cwd through and clamps the timeout to DEFAULT_DISCOVERY_TIMEOUT_MS', async () => {
+    const seen: { cwd?: string; timeoutMs: number }[] = [];
+    const adapter = new AntigravityAdapter({
+      runModelsCli: async (options) => {
+        seen.push(options);
+        return AGY_MODELS_FIXTURE;
+      },
+    });
+    await adapter.discoverModels(ctx({ cwd: '/repo', timeoutMs: 10 * DEFAULT_DISCOVERY_TIMEOUT_MS }));
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0]?.cwd, '/repo');
+    assert.ok((seen[0]?.timeoutMs ?? 0) <= DEFAULT_DISCOVERY_TIMEOUT_MS);
   });
 });

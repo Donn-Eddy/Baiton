@@ -13,13 +13,14 @@
 import type { Result } from '../model/result';
 
 /** Where a catalog snapshot's model list came from. */
-export type CatalogSourceId = 'claude' | 'codex' | 'opencode' | 'models.dev';
+export type CatalogSourceId = 'claude' | 'codex' | 'opencode' | 'antigravity' | 'models.dev';
 
 /** Refresh order, top to bottom. */
 export const CATALOG_SOURCE_IDS: readonly CatalogSourceId[] = [
   'claude',
   'codex',
   'opencode',
+  'antigravity',
   'models.dev',
 ] as const;
 

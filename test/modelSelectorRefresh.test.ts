@@ -320,8 +320,10 @@ describe('model selector refresh (T15 end to end)', () => {
         },
         runModelsCli: async () => undefined,
       }),
-      // No `discoverModels`: antigravity is never overlaid.
-      antigravity: new AntigravityAdapter(),
+      // The `agy models` CLI is stubbed out exactly as the claude reader and
+      // the opencode CLI are: the real listing would make these expectations
+      // machine-dependent. The live agy leg belongs to the end-to-end todo.
+      antigravity: new AntigravityAdapter({ runModelsCli: async () => undefined }),
     };
     return {
       get: (agent: string): Adapter | undefined => map[agent as AgentId],
@@ -611,18 +613,15 @@ describe('model selector refresh (T15 end to end)', () => {
       );
       // opencode: `provider/model` ids from `/api/model`.
       assert.ok(byAgent.opencode.models.includes('anthropic/claude-sonnet-5'));
-      // antigravity: never overlaid (no AGENT_CATALOG_SOURCE entry).
+      // antigravity: the stubbed-out `agy models` fails, so the curated seed
+      // survives the refresh and is marked stale.
       assert.deepStrictEqual(
         byAgent.antigravity.models,
         builtinAgentCapabilities().antigravity.models,
       );
-      for (const key of ['source', 'stale', 'fetchedAt']) {
-        assert.strictEqual(
-          hasOwnKey(byAgent.antigravity, key),
-          false,
-          `antigravity carries no own ${key} key`,
-        );
-      }
+      assert.strictEqual(byAgent.antigravity.source, 'builtin');
+      assert.strictEqual(byAgent.antigravity.stale, true);
+      assert.ok((byAgent.antigravity.staleReason ?? '').length > 0, 'antigravity names a stale reason');
     });
 
     it('the persisted snapshots come back as cached on the next window, before any fetch', async () => {
@@ -740,7 +739,8 @@ describe('model selector refresh (T15 end to end)', () => {
       assert.deepStrictEqual(caps.claude.models, builtinAgentCapabilities().claude.models);
       assert.strictEqual(caps.claude.stale, true);
       assert.strictEqual(caps.claude.source, 'builtin');
-      assert.strictEqual(hasOwnKey(caps.antigravity, 'stale'), false);
+      assert.strictEqual(caps.antigravity.stale, true);
+      assert.deepStrictEqual(caps.antigravity.models, builtinAgentCapabilities().antigravity.models);
 
       // models.dev has no builtin seed, so a never-successful source records
       // nothing at all — the documented `applyResult` contract.

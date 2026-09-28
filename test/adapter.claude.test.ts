@@ -1237,9 +1237,8 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
     assert.ok(!(CLAUDE_MODELS as readonly string[]).includes('claude-opus-5'), 'claude-opus-5 is not curated');
   });
 
-  it('the registry wires discoverModels for claude only, and the old constructor forms still compile', () => {
+  it('the registry wires discoverModels for claude, and the old constructor forms still compile', () => {
     assert.strictEqual(typeof createAdapterRegistry().require('claude').discoverModels, 'function');
-    assert.strictEqual(typeof createAdapterRegistry().require('antigravity').discoverModels, 'undefined');
     // Additive-parameter compile guarantees: both older call sites construct.
     const defaultsOnly = new ClaudeAdapter();
     const modeOnly = new ClaudeAdapter(DEFAULT_PERMISSION_MODE);

@@ -817,8 +817,21 @@ module as the offline fallback.
     `/provider` and `/config/providers`, are **never** requested: both return the
     configured provider API keys in clear text. Ids are `provider/model`. Both
     sources unusable keeps the previous list and marks it stale.
-  - `antigravity` (`agy`) — unchanged: its curated catalogue and model/effort
-    mapping are never overlaid (it has no `AGENT_CATALOG_SOURCE` entry).
+  - `antigravity` (`agy`) — **`agy models`**, which prints one `id<TAB>label`
+    line per model. Two or more sibling ids sharing a stem with distinct
+    `low|medium|high|max` suffixes become **one family** whose suffixes are its
+    effort list and whose label drops the trailing `(Level)`
+    (`gemini-3.8-flash-low|-medium|-high` → `gemini-3.8-flash`, efforts `low,
+    medium, high`, label `Gemini 3.8 Flash`); every other id — including a lone
+    suffixed one like `gpt-oss-120b-medium` — is a **fixed id with no effort**,
+    because agy rejects `--effort` for it. The agent-level effort list is the
+    ordered union of the families' levels. agy exits 0 even on an error and
+    prints its spinner on stderr, so only **stdout** is judged and the exit code
+    is never inspected; agy needs its own sign-in and no Baiton credential. A
+    failure, timeout or empty listing keeps the previous list and marks it stale.
+    The launch argv is unchanged: `antigravityModelFlags` still maps
+    model+effort through the curated `ANTIGRAVITY_MODELS` table, which stays the
+    builtin seed and fallback and is still refreshed by hand.
   - models.dev additionally backs the orchestrator's **provider** catalog — see
     **Providers and models**.
 - **How a refresh behaves**: `ModelDiscoveryService`
@@ -839,7 +852,9 @@ module as the offline fallback.
 - **Privacy**: discovery reads no secret, credential or API key. The OpenCode
   verbose listing is read only for ids, each model's `name` and its `variants`
   keys — never for provider credentials, which is why the key-bearing
-  `/provider` and `/config/providers` endpoints are never requested. Only model
+  `/provider` and `/config/providers` endpoints are never requested. The
+  `agy models` listing is likewise read only for model ids and labels, and agy
+  signs in on its own so no Baiton credential is involved. Only model
   ids, labels and effort names leave the host, and webviews receive ids, labels,
   effort names and stale metadata only.
 - **CLI capabilities** (probe findings that still hold):
@@ -849,7 +864,9 @@ module as the offline fallback.
     cache described above, which is the authoritative list its own model picker
     shows — so discovery reads that file instead of asking the CLI.
   - `antigravity` (`agy`) provides `agy models`, which queries the available
-    Gemini and Claude models from the API.
+    Gemini and Claude models from the API — Baiton's antigravity discovery
+    source. It prints `id<TAB>label` lines in which the effort levels are
+    encoded as id suffixes (`-low|-medium|-high`), not as a separate column.
   - `codex` provides no `models` subcommand; positional arguments launch
     interactive sessions. `codex doctor` reports status.
   - `opencode` provides `opencode models --verbose`, listing provider-prefixed

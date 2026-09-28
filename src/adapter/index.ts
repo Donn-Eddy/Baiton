@@ -25,7 +25,12 @@ import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS, OPENCODE_MODEL_DOC_
 import { AntigravityAdapter, ANTIGRAVITY_MODELS, ANTIGRAVITY_EFFORTS } from './antigravity';
 import { CodexAdapter, CODEX_MODELS, CODEX_EFFORTS } from './codex';
 import { mergePreservingExisting, modelIds } from '../orchestrator/modelCatalog';
-import type { ModelCatalogSnapshot, ModelCatalogTable, SnapshotSource } from '../orchestrator/modelCatalog';
+import type {
+  ModelCatalogSnapshot,
+  ModelCatalogTable,
+  ModelEntry,
+  SnapshotSource,
+} from '../orchestrator/modelCatalog';
 import { capabilitiesFromEntries } from './adapter';
 import type { Role } from '../model/role';
 
@@ -185,12 +190,20 @@ const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5';
  * For claude, antigravity, and codex, models and efforts are enumerated starting
  * sets rendered as dropdowns with an always-present "Other…" escape.
  * For opencode, both lists are empty (free text) with a link to model documentation.
+ * antigravity additionally carries `modelEntries`
+ * ({@link antigravityBuiltinEntries}) so the curated fallback renders each
+ * family's own efforts.
  *
  * Also the builtin seeds the discovery service hands its `CatalogStore`.
  *
  * Returns a fresh object with newly copied arrays on every call, matching defaultConfig()'s
  * factory convention so mutation or appending in a consumer does not leak across calls.
  */
+/** The curated antigravity table as ModelEntry records: each family's suffixes as its own efforts, `[]` for a fixed id. */
+function antigravityBuiltinEntries(): ModelEntry[] {
+  return Object.entries(ANTIGRAVITY_MODELS).map(([id, efforts]) => ({ id, efforts: [...efforts] }));
+}
+
 export function builtinAgentCapabilities(): Record<AgentId, AgentCapabilities> {
   return {
     claude: {
@@ -205,6 +218,7 @@ export function builtinAgentCapabilities(): Record<AgentId, AgentCapabilities> {
     antigravity: {
       models: Object.keys(ANTIGRAVITY_MODELS),
       efforts: [...ANTIGRAVITY_EFFORTS],
+      modelEntries: antigravityBuiltinEntries(),
     },
     codex: {
       models: [...CODEX_MODELS],
@@ -221,8 +235,9 @@ export function builtinAgentCapabilities(): Record<AgentId, AgentCapabilities> {
  * builtinAgentCapabilities}) — the fallback used at activation before any
  * refresh lands. With a {@link ModelCatalogTable} it overlays the refreshed
  * per-source lists (`AGENT_CATALOG_SOURCE` maps each agent to its source) and
- * carries `source`/`stale`/`staleReason`/`fetchedAt` through; antigravity is
- * never overlaid (no `AGENT_CATALOG_SOURCE` entry); `claude-sonnet-5` is
+ * carries `source`/`stale`/`staleReason`/`fetchedAt` through; the antigravity
+ * snapshot overlays like every other one, with no claude-style required-model
+ * merge; `claude-sonnet-5` is
  * always present for claude exactly once; an empty refreshed list never wipes
  * a curated one (that snapshot keeps `source: 'builtin'` and its stale
  * metadata over the curated models/efforts).
@@ -269,7 +284,10 @@ export function agentCapabilities(snapshots?: ModelCatalogTable): Record<AgentId
  * too, taken from the Claude CLI's own local model catalog, so the
  * union-of-entry-efforts path is the normal claude path and not codex-only; a
  * feed-sourced claude snapshot still arrives with the capability-level
- * `CLAUDE_EFFORTS` and takes the snapshot-level branch.
+ * `CLAUDE_EFFORTS` and takes the snapshot-level branch. It is also the
+ * antigravity path: an `agy models` snapshot carries per-family levels on its
+ * entries, and an empty antigravity snapshot keeps the curated
+ * models/efforts with the snapshot's stale metadata.
  */
 function overlayCapabilities(
   agent: AgentId,

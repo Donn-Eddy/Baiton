@@ -1726,9 +1726,8 @@ describe('CodexAdapter.discoverModels (model-selector-refresh T05)', () => {
     assert.deepStrictEqual([...caps.models], ['gpt-6-astra', 'internal-x']);
   });
 
-  it('the registry wires discoverModels for codex (not antigravity), and the no-arg constructor still works', () => {
+  it('the registry wires discoverModels for codex, and the no-arg constructor still works', () => {
     assert.strictEqual(typeof createAdapterRegistry().require('codex').discoverModels, 'function');
-    assert.strictEqual(createAdapterRegistry().require('antigravity').discoverModels, undefined);
 
     // The additive, optional constructor parameter keeps every no-arg call
     // site (src/adapter/index.ts, the launch property test, engineFacade

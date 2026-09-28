@@ -72,7 +72,7 @@ function fakeAdapter(
   return { adapter, calls };
 }
 
-/** An adapter fake with no discovery seam at all (the antigravity shape). */
+/** An adapter fake with no discovery seam at all (a hypothetical adapter without one). */
 function seamlessAdapter(id: AgentId): Adapter {
   return { id, discoverModels: undefined } as unknown as Adapter;
 }
@@ -541,13 +541,12 @@ describe('T07 ModelDiscoveryService supersede and dispose', () => {
 });
 
 describe('T07 builtinCatalogFetches', () => {
-  it('seeds exactly the three CLI sources with fresh objects on every call', () => {
+  it('seeds exactly the four CLI sources with fresh objects on every call', () => {
     const first = builtinCatalogFetches();
-    assert.deepStrictEqual(Object.keys(first).sort(), ['claude', 'codex', 'opencode']);
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(first, 'antigravity'),
-      false,
-      'antigravity has no catalog source and is never seeded',
+    assert.deepStrictEqual(Object.keys(first).sort(), ['antigravity', 'claude', 'codex', 'opencode']);
+    assert.ok(
+      (first['antigravity']?.models ?? []).some((entry) => (entry.efforts ?? []).length > 0),
+      "antigravity's seed carries per-family efforts on its entries",
     );
     assert.strictEqual(first['models.dev'], undefined, 'there is no curated feed fallback');
     assert.ok(
