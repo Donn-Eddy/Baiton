@@ -730,13 +730,31 @@ The configuration form is the **Configuration** section of the Baiton view in th
 
 - **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
-  populated from installed adapters, a per-agent model dropdown with curated
-  suggestions and an "Other…" free-form escape hatch (along with documentation
-  links for open-ended ecosystems like OpenCode), a per-agent effort dropdown
-  (`(default)` when unset, curated supported levels, or free-form entry where
-  open); the three numeric limits with their bounds (`plan_review_rounds` 0–10,
-  `exec_attempts` 1–10, `stall_notice_minutes` 1–1440); and `git.remote` and
-  `git.base`.
+  populated from installed adapters; a **per-agent model dropdown populated from
+  the refreshed per-agent list** — Codex, Claude, OpenCode and Antigravity alike,
+  OpenCode included now that `opencode models --verbose` makes its list
+  discoverable — with each agent's curated table as the offline fallback and
+  documentation links for open-ended ecosystems like OpenCode; and a per-agent
+  **effort dropdown offering the SELECTED model's own levels** when its source
+  discloses them (a Codex model's `supportedReasoningEfforts`, a Claude model's
+  `thinking.effort_options`, an OpenCode model's `variants` keys, an Antigravity
+  family's suffixes) and the agent-level union otherwise. That control shows
+  `(default: <effort>)` when the source names a default for the selected model,
+  leaves only `(default)` for a model that discloses no levels at all (a
+  `thinking: none` Claude model, an Antigravity fixed id such as
+  `gpt-oss-120b-medium`), and stays a free-text field only while the agent-level
+  union is empty. Validation is always against the **agent-level** union, so an
+  effort that is valid for another model of the same agent is never rejected.
+  Alongside these: the three numeric limits with their bounds
+  (`plan_review_rounds` 0–10, `exec_attempts` 1–10, `stall_notice_minutes`
+  1–1440); and `git.remote` and `git.base`.
+- **Configured values the list lacks** — a configured model (or effort) that the
+  refreshed list does not carry renders as an editable **"Other…"** entry rather
+  than as an ordinary option: the select shows `Other…`, the text input keeps the
+  value and stays editable, and that choice is sticky across refreshes — a later
+  refresh whose list happens to contain the typed value does not snap the control
+  back to a dropdown mid-edit. The value stays inside the validated set, so
+  saving is never blocked by it.
 - **Preservation of unmanaged keys** — every key outside the form's managed set
   (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
   agent, model, or effort values) is preserved on save. Written JSON is formatted
@@ -843,12 +861,25 @@ module as the offline fallback.
   the next window shows those lists immediately (`source: 'cached'`) before any
   fetch. A failed refresh keeps the previous list and marks it `stale` with a
   reason; a later success clears both. **Baiton: Refresh Model Lists**
-  (`baiton.refreshModels`) re-runs the whole thing on demand.
+  (`baiton.refreshModels`) re-runs the whole thing on demand. The **config panel
+  is wired to that live catalog** — `registerConfigPanel` receives
+  `getCapabilities: () => agentCapabilities(catalogStore.table())` and
+  `onDidChangeCapabilities` over the `ModelDiscoveryService`, and
+  `src/extension.ts` builds the store and the service *before* registering the
+  panel — so the panel's FIRST `loaded` already shows the rehydrated `cached`
+  lists, and every later refresh reaches an open panel as an in-place
+  `optionsChanged` option update that never re-posts `loaded` and never disturbs
+  unsaved edits, focus or caret position.
 - **What survives**: existing `.baiton/config.json` values and the persisted
   `ModelSelection` always round-trip. An agent, model or effort that is
   configured but missing from a refreshed list is appended to the dropdown and
   stays editable and saveable, and the config panel shows a per-agent
-  "stale — showing last known models" note beside it.
+  "stale — showing last known models" note beside it. A refresh that **fails,
+  times out or returns malformed data never blanks a selector and never rewrites
+  a custom value**: the last known-good list — ids, labels, per-model effort
+  levels and defaults alike — stays on screen behind that note with its
+  last-successful `fetchedAt`, and the appended configured value stays selected
+  as its editable "Other…" entry.
 - **Privacy**: discovery reads no secret, credential or API key. The OpenCode
   verbose listing is read only for ids, each model's `name` and its `variants`
   keys — never for provider credentials, which is why the key-bearing
