@@ -1041,6 +1041,101 @@ describe('ConfigPanelController (config-panel T05)', () => {
       }
     });
 
+    /** A config document with every role on claude with `model`, written to `dir`. */
+    function writeRolesOnClaude(dir: string, model: string): void {
+      const base = defaultConfig();
+      const roles = Object.fromEntries(
+        Object.keys(base.roles).map((role) => [role, { agent: 'claude', model, effort: 'high' }]),
+      );
+      writeConfigFile(dir, `${JSON.stringify({ ...base, roles }, null, 2)}\n`);
+    }
+
+    /** A controller wired to `source` over `dir`, started and readied. */
+    async function startWith(
+      dir: string,
+      source: ReturnType<typeof makeCapabilitySource>,
+    ): Promise<RecordingWebview> {
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: dir,
+        agentIds: ['claude'],
+        getCapabilities: source.getCapabilities,
+        onDidChangeCapabilities: source.onDidChangeCapabilities,
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+      await webview.send({ type: 'ready' });
+      return webview;
+    }
+
+    /** The live capability table for the modelEntries cases (codex-opencode-dropdown-fix T06). */
+    function listedSource() {
+      return makeCapabilitySource({
+        claude: {
+          models: ['m-listed'],
+          efforts: ['low', 'high'],
+          modelEntries: [{ id: 'm-listed', label: 'Listed', efforts: ['low', 'high'], defaultEffort: 'high' }],
+        },
+      });
+    }
+
+    it('loaded carries modelEntries from the live capability table', async () => {
+      const dir = newDir();
+      writeRolesOnClaude(dir, 'm-listed');
+
+      const webview = await startWith(dir, listedSource());
+      const options = loadedMessages(webview)[0].options;
+
+      assert.deepStrictEqual(options.byAgent.claude.modelEntries, [
+        { id: 'm-listed', label: 'Listed', efforts: ['low', 'high'], defaultEffort: 'high' },
+      ]);
+      // The payload really is postMessage-safe, and no entry leaks `provider`.
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(options)), options);
+      for (const entry of options.byAgent.claude.modelEntries ?? []) {
+        assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, 'provider'), false);
+      }
+    });
+
+    it('a configured model missing from the list arrives as a custom entry', async () => {
+      const dir = newDir();
+      writeRolesOnClaude(dir, 'm-configured');
+
+      const webview = await startWith(dir, listedSource());
+      const cap = loadedMessages(webview)[0].options.byAgent.claude;
+
+      assert.deepStrictEqual(cap.models, ['m-listed', 'm-configured']);
+      assert.deepStrictEqual(cap.modelEntries, [
+        { id: 'm-listed', label: 'Listed', efforts: ['low', 'high'], defaultEffort: 'high' },
+        { id: 'm-configured', custom: true },
+      ]);
+    });
+
+    it('optionsChanged carries the refreshed modelEntries', async () => {
+      const dir = newDir();
+      writeRolesOnClaude(dir, 'm-configured');
+
+      const source = listedSource();
+      const webview = await startWith(dir, source);
+
+      source.set({
+        claude: {
+          models: ['m-refreshed'],
+          efforts: ['low', 'high'],
+          modelEntries: [{ id: 'm-refreshed', label: 'Refreshed', efforts: ['low'], defaultEffort: 'low' }],
+        },
+      });
+      source.fire();
+
+      const cap = optionsChanged(webview)[0].options.byAgent.claude;
+      assert.deepStrictEqual(cap.modelEntries, [
+        { id: 'm-refreshed', label: 'Refreshed', efforts: ['low'], defaultEffort: 'low' },
+        { id: 'm-configured', custom: true },
+      ]);
+      assert.deepStrictEqual(cap.models, ['m-refreshed', 'm-configured']);
+    });
+
     it('start() twice subscribes once: one change yields one optionsChanged', async () => {
       const dir = newDir();
       writeConfigFile(dir, defaultConfigJson());

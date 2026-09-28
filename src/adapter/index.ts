@@ -270,7 +270,10 @@ export function agentCapabilities(snapshots?: ModelCatalogTable): Record<AgentId
  * claude first gets `mergePreservingExisting(snapshot, [CLAUDE_DEFAULT_MODEL])`
  * so the `defaultConfig()` default stays selectable even when the feed omits
  * it. An empty refreshed list never replaces the curated one: the builtin
- * models/efforts/modelLink stay (no `modelEntries`) while the snapshot's
+ * models/efforts/modelLink stay — together with the builtin's own
+ * `modelEntries` when it has them (antigravity's curated per-family efforts
+ * survive a failed refresh; an agent with no curated entries still carries
+ * none) — while the snapshot's
  * `source`/`stale`/`staleReason`/`fetchedAt` are still carried — this is the
  * normal, correct path for an opencode snapshot with no models, whose
  * free-text shape (`models: []`, `efforts: []`, `modelLink`) survives.
@@ -300,6 +303,7 @@ function overlayCapabilities(
       models: readonly string[];
       efforts: readonly string[];
       modelLink?: string;
+      modelEntries?: readonly ModelEntry[];
       source?: SnapshotSource;
       stale?: boolean;
       staleReason?: string;
@@ -312,6 +316,9 @@ function overlayCapabilities(
     };
     if (builtin.modelLink !== undefined) {
       empty.modelLink = builtin.modelLink;
+    }
+    if (builtin.modelEntries !== undefined) {
+      empty.modelEntries = [...builtin.modelEntries];
     }
     if (effective.staleReason !== undefined) {
       empty.staleReason = effective.staleReason;

@@ -350,6 +350,21 @@ describe('agentCapabilities snapshot overlay', () => {
     assert.strictEqual(antigravity.source, 'builtin');
     assert.strictEqual(antigravity.stale, true);
     assert.strictEqual(antigravity.staleReason, 'agy models failed');
+
+    // The curated per-family detail survives a failed refresh, as a fresh copy
+    // (codex-opencode-dropdown-fix T06).
+    assert.deepStrictEqual(
+      antigravity.modelEntries?.map((entry) => entry.id),
+      Object.keys(ANTIGRAVITY_MODELS),
+    );
+    for (const entry of antigravity.modelEntries ?? []) {
+      assert.deepStrictEqual(
+        [...(entry.efforts ?? [])],
+        ANTIGRAVITY_MODELS[entry.id as keyof typeof ANTIGRAVITY_MODELS],
+        entry.id,
+      );
+    }
+    assert.notStrictEqual(antigravity.modelEntries, builtinAgentCapabilities().antigravity.modelEntries);
   });
 
   it('the overlay path still returns fresh, non-aliased objects on every call', () => {

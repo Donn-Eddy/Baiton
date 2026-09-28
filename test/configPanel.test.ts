@@ -1,9 +1,11 @@
 import * as assert from 'assert';
 import {
+  AgentFormCapability,
   AgentStaleness,
   ConfigFieldError,
   ConfigForm,
   ConfigFormOptions,
+  FormModelEntry,
   agentStaleness,
   applyFormToDocument,
   configFormOptions,
@@ -301,6 +303,21 @@ describe('config panel core (config-panel T03)', () => {
   });
 
   describe('configFormOptions', () => {
+    /** The `modelEntries` the form carries for a builtin agent: its curated entries minus `provider`, else bare ids. */
+    function expectedEntries(agent: string): FormModelEntry[] {
+      const entries = CAPABILITIES[agent as keyof typeof CAPABILITIES].modelEntries;
+      if (entries === undefined) {
+        return CAPABILITIES[agent as keyof typeof CAPABILITIES].models.map((id) => ({ id }));
+      }
+      return entries.map((entry) => ({
+        id: entry.id,
+        ...(entry.label !== undefined ? { label: entry.label } : {}),
+        ...(entry.efforts !== undefined ? { efforts: [...entry.efforts] } : {}),
+        ...(entry.defaultEffort !== undefined ? { defaultEffort: entry.defaultEffort } : {}),
+        ...(entry.custom !== undefined ? { custom: entry.custom } : {}),
+      }));
+    }
+
     it('with no form, returns installed agents and clones capabilities into byAgent', () => {
       const before = createAdapterRegistry().ids;
       const result = configFormOptions(AGENTS, CAPABILITIES);
@@ -314,6 +331,7 @@ describe('config panel core (config-panel T03)', () => {
           ...(CAPABILITIES[agent].modelLink !== undefined
             ? { modelLink: CAPABILITIES[agent].modelLink }
             : {}),
+          ...(CAPABILITIES[agent].models.length > 0 ? { modelEntries: expectedEntries(agent) } : {}),
         });
       }
 
@@ -537,6 +555,7 @@ describe('config panel core (config-panel T03)', () => {
       assert.deepStrictEqual(result.byAgent.claude, {
         models: ['claude-opus-5-5'],
         efforts: ['low', 'high'],
+        modelEntries: [{ id: 'claude-opus-5-5' }],
         modelLink: 'https://example.invalid/models',
         source: 'live',
         stale: true,
@@ -551,7 +570,7 @@ describe('config panel core (config-panel T03)', () => {
       for (const added of ['source', 'stale', 'staleReason', 'fetchedAt']) {
         assert.strictEqual(keys.includes(added), false, `unexpected key ${added}`);
       }
-      assert.deepStrictEqual(keys.sort(), ['efforts', 'models'].sort());
+      assert.deepStrictEqual(keys.sort(), ['efforts', 'models', 'modelEntries'].sort());
     });
 
     it('agentStaleness returns {} for the curated builtins', () => {
@@ -616,6 +635,143 @@ describe('config panel core (config-panel T03)', () => {
       assert.ok(result.byAgent.claude.models.includes('claude-opus-5'));
       assert.ok(result.byAgent.claude.efforts.includes('ultra'));
       assert.deepStrictEqual(validateConfigForm(form, result), []);
+    });
+  });
+
+  describe('configFormOptions modelEntries (codex-opencode-dropdown-fix T06)', () => {
+    /** A capability whose entries carry `provider`, built through a typed variable so tsc accepts it. */
+    function richCapability(): AgentFormCapability {
+      const entries: {
+        id: string;
+        label?: string;
+        efforts?: string[];
+        defaultEffort?: string;
+        provider?: string;
+      }[] = [
+        { id: 'a', label: 'A', efforts: ['low', 'high'], defaultEffort: 'high', provider: 'p' },
+        { id: 'b' },
+      ];
+      return { models: ['a', 'b'], efforts: ['low', 'high'], modelEntries: entries };
+    }
+
+    /** A form with every role on `x`, and `planner` carrying `model`/`effort`. */
+    function formOnX(model: string, effort = ''): ConfigForm {
+      const form = validForm();
+      for (const role of ROLES) {
+        form.roles[role] = { agent: 'x', model: 'a', effort: 'low' };
+      }
+      form.roles.planner = { agent: 'x', model, effort };
+      return form;
+    }
+
+    it("copies a capability's entries verbatim minus provider", () => {
+      const result = configFormOptions(['x'], { x: richCapability() });
+
+      assert.deepStrictEqual(result.byAgent.x.modelEntries, [
+        { id: 'a', label: 'A', efforts: ['low', 'high'], defaultEffort: 'high' },
+        { id: 'b' },
+      ]);
+      const entries = result.byAgent.x.modelEntries ?? [];
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'provider'), false);
+    });
+
+    it('synthesises bare { id } entries when the capability carries none', () => {
+      const result = configFormOptions(['x'], { x: { models: ['m1', 'm2'], efforts: [] } });
+      assert.deepStrictEqual(result.byAgent.x.modelEntries, [{ id: 'm1' }, { id: 'm2' }]);
+    });
+
+    it('appends a configured-but-unlisted model as { id, custom: true } at the end', () => {
+      const result = configFormOptions(['x'], { x: richCapability() }, formOnX('c', 'low'));
+
+      assert.deepStrictEqual(result.byAgent.x.models, ['a', 'b', 'c']);
+      assert.deepStrictEqual(result.byAgent.x.modelEntries, [
+        { id: 'a', label: 'A', efforts: ['low', 'high'], defaultEffort: 'high' },
+        { id: 'b' },
+        { id: 'c', custom: true },
+      ]);
+      assert.deepStrictEqual(
+        (result.byAgent.x.modelEntries ?? []).map((entry) => entry.id),
+        [...result.byAgent.x.models],
+      );
+    });
+
+    it('never duplicates: the same custom model on two roles appends exactly one entry', () => {
+      const form = formOnX('c', 'low');
+      form.roles.reviewer = { agent: 'x', model: 'c', effort: 'low' };
+
+      const result = configFormOptions(['x'], { x: richCapability() }, form);
+      assert.deepStrictEqual(result.byAgent.x.models, ['a', 'b', 'c']);
+      assert.strictEqual(result.byAgent.x.modelEntries?.length, 3);
+    });
+
+    it('a configured model already in the list appends nothing and keeps its detail', () => {
+      const result = configFormOptions(['x'], { x: richCapability() }, formOnX('a', 'low'));
+
+      assert.deepStrictEqual(result.byAgent.x.models, ['a', 'b']);
+      assert.deepStrictEqual(result.byAgent.x.modelEntries, [
+        { id: 'a', label: 'A', efforts: ['low', 'high'], defaultEffort: 'high' },
+        { id: 'b' },
+      ]);
+      const entries = result.byAgent.x.modelEntries ?? [];
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entries[0], 'custom'), false);
+    });
+
+    it('a blank or whitespace-only model appends nothing', () => {
+      for (const model of ['', '   ']) {
+        const result = configFormOptions(['x'], { x: richCapability() }, formOnX(model, 'low'));
+        assert.deepStrictEqual(result.byAgent.x.models, ['a', 'b'], model);
+        assert.strictEqual(result.byAgent.x.modelEntries?.length, 2, model);
+      }
+    });
+
+    it('an out-of-set effort is still appended to efforts only and adds no entry', () => {
+      const result = configFormOptions(['x'], { x: richCapability() }, formOnX('a', 'ultra'));
+
+      assert.deepStrictEqual(result.byAgent.x.efforts, ['low', 'high', 'ultra']);
+      assert.strictEqual(result.byAgent.x.modelEntries?.length, 2);
+    });
+
+    it('an agent with no models carries no modelEntries own key', () => {
+      const form = validForm();
+      form.roles.planner = { agent: 'unknown-agent', model: 'whatever', effort: '' };
+
+      const result = configFormOptions(AGENTS, CAPABILITIES, form);
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result.byAgent['unknown-agent'], 'modelEntries'),
+        false,
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result.byAgent.opencode, 'modelEntries'),
+        false,
+      );
+    });
+
+    it('mutating the result does not disturb the input capability', () => {
+      const capability = richCapability();
+      const before = clone(capability);
+      const result = configFormOptions(['x'], { x: capability });
+
+      (result.byAgent.x.modelEntries as FormModelEntry[]).push({ id: 'mutated' });
+      ((result.byAgent.x.modelEntries?.[0].efforts ?? []) as string[]).push('mutated');
+      assert.deepStrictEqual(capability, before);
+    });
+
+    it('validation and models are unchanged by the entry carry-through', () => {
+      const form = validForm();
+      form.roles.planner = { agent: 'claude', model: 'claude-opus-5', effort: 'low' };
+
+      const refreshed = {
+        ...CAPABILITIES,
+        claude: { models: ['claude-sonnet-5'], efforts: ['low', 'medium', 'high'] },
+      };
+      const result = configFormOptions(AGENTS, refreshed, form);
+
+      assert.deepStrictEqual(validateConfigForm(form, result), []);
+      assert.ok(result.byAgent.claude.models.includes('claude-opus-5'));
+      assert.deepStrictEqual(result.byAgent.claude.modelEntries, [
+        { id: 'claude-sonnet-5' },
+        { id: 'claude-opus-5', custom: true },
+      ]);
     });
   });
 });
