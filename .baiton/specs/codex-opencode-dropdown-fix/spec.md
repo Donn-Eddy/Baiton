@@ -1,12 +1,13 @@
 ---
 version: 1
 name: codex-opencode-dropdown-fix
-status: approved
+status: pr
 mode: manual
 base: main
 base_commit: 6c942e15eeb5b2ca216e8f8059c3ed32d67fc7f0
 branch: baiton/codex-opencode-dropdown-fix
 approved_rev: 4a2f45da8d8d5cc5d4c4aa791b61c7e88ae4c5f827ea9cb8318ad317fc1c2fca
+pr: https://github.com/Donn-Eddy/Baiton/pull/11
 ---
 
 # OVERVIEW
