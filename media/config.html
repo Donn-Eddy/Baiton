@@ -18,6 +18,14 @@
   The provider also sets retainContextWhenHidden at registration time. No UI
   framework is used; the view is plain markup plus media/config.js. All colors
   come from VS Code theme CSS variables so the view follows the active theme.
+
+  The per-role controls are built entirely by media/config.js; this file only
+  supplies the shell and the styling they land in. Every agent renders its model
+  as a dropdown plus an "Other…" entry once a model list exists — OpenCode
+  included — and the free-text input beside the dropdown is the fallback shown
+  only while that list is still empty. The effort control follows the same rule
+  against the agent-level efforts union: a select plus "Other…" whenever the
+  union is non-empty, a free-text input only while it is empty.
 -->
 <html lang="en">
   <head>
