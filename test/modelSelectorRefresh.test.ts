@@ -14,7 +14,10 @@
  * 1. reload refresh      — a window reload refreshes every source, the config
  *                          panel picks it up with no second `loaded`, and the
  *                          persisted snapshots come back as `cached` before any
- *                          fetch in the next window.
+ *                          fetch in the next window — the panel's first
+ *                          `loaded` already shows that rehydrated list, because
+ *                          the host builds the store before registering the
+ *                          panel.
  * 2. discovery fallback  — every source failing keeps the curated builtin lists
  *                          and marks them stale; a failure after a success keeps
  *                          the last good list byte for byte; a later success
@@ -448,7 +451,12 @@ describe('model selector refresh (T15 end to end)', () => {
     }
   }
 
-  /** Wire a config panel over a harness the way the host is documented to. */
+  /**
+   * Wire a config panel over a harness, mirroring the real wiring in
+   * `src/extension.ts`: `registerConfigPanel({ getCapabilities: () =>
+   * agentCapabilities(catalogStore.table()), onDidChangeCapabilities: (l) =>
+   * discovery.onDidChange(() => l()) })`.
+   */
   function buildPanel(
     harness: Harness,
     dir: string,
@@ -651,6 +659,53 @@ describe('model selector refresh (T15 end to end)', () => {
       // that one, then confirm the rehydrated store agreed before the fetch.
       await second.discovery.refresh();
       assert.strictEqual(second.store.get('claude')?.source, 'live');
+    });
+
+    it("a seeded store reaches the panel's first loaded, and a later refresh arrives as optionsChanged only", async () => {
+      // Window one: refresh so the memento holds real snapshots.
+      const memento = fakeMemento();
+      const first = buildDiscovery({ memento });
+      await first.discovery.refresh();
+
+      // Window two: the store rehydrates in its constructor — i.e. exactly the
+      // state the host is in when `registerConfigPanel` runs, because
+      // `src/extension.ts` builds the store BEFORE registering the panel.
+      const second = buildDiscovery({ memento });
+      const dir = newDir();
+      writeConfigFile(dir, defaultConfigJson());
+      const { webview } = buildPanel(second, dir);
+
+      await webview.send({ type: 'ready' });
+
+      assert.strictEqual(webview.loaded().length, 1, 'exactly one loaded');
+      const claude = webview.loaded()[0].options.byAgent.claude;
+      assert.strictEqual(
+        claude.source,
+        'cached',
+        "the panel's first load shows the rehydrated list, not the curated builtin one",
+      );
+      assert.strictEqual(claude.stale, false);
+      assert.strictEqual(
+        hasOwnKey(claude, 'staleReason'),
+        false,
+        'a rehydrated capability carries no own staleReason key',
+      );
+      assert.deepStrictEqual(
+        claude.models,
+        agentCapabilities(second.store.table()).claude.models,
+        'the last known-good list is on screen before any fetch',
+      );
+
+      await second.discovery.refresh();
+
+      assert.strictEqual(webview.loaded().length, 1, 'a refresh never re-posts loaded');
+      const changes = webview.optionsChanged();
+      assert.ok(changes.length >= 1, 'the refresh reaches the open panel as optionsChanged');
+      assert.strictEqual(
+        changes[changes.length - 1].options.byAgent.claude.source,
+        'live',
+        'the final optionsChanged carries the freshly discovered claude list',
+      );
     });
 
     it('refresh never blocks and never rejects', async function () {

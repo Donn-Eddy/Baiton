@@ -205,11 +205,12 @@ export interface RegisterConfigPanelDeps {
   capabilities?: Readonly<Record<string, AgentCapabilities>>;
   /**
    * The live capability table and its change event (model-selector-refresh T08).
-   * The caller wires these to `agentCapabilities(store.table())` and
-   * `discovery.onDidChange(...)`. Both are optional: with neither passed the
-   * panel keeps today's static behaviour, which is why `src/extension.ts` needs
-   * no change here — it builds the `CatalogStore`/`ModelDiscoveryService` AFTER
-   * calling `registerConfigPanel`, so that wiring is a separate step.
+   * Both are optional: a caller passing neither keeps the static behaviour
+   * (which is what test/configPanel.view.test.ts does). `src/extension.ts` DOES
+   * pass them — it builds the `CatalogStore`/`ModelDiscoveryService` before
+   * calling `registerConfigPanel`, binding `getCapabilities` to
+   * `agentCapabilities(store.table())` and `onDidChangeCapabilities` to
+   * `discovery.onDidChange`.
    */
   getCapabilities?(): Readonly<Record<string, AgentCapabilities>>;
   onDidChangeCapabilities?(listener: () => void): vscode.Disposable;

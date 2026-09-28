@@ -115,7 +115,8 @@ export function getActivationState(): ActivationState | undefined {
 
 /**
  * The window's model catalog store, the single source of truth for refreshed
- * model lists (the config panel and provider router read it in later todos).
+ * model lists. The config panel reads it through the `getCapabilities` seam
+ * wired in {@link activate}; the provider router reads it in a later todo.
  */
 export function getModelCatalogStore(): CatalogStore | undefined {
   return modelCatalogStore;
@@ -184,17 +185,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // or config-load failure, and the view's error state plus Reset to defaults
   // is exactly what repairs an absent or unparseable `.baiton/config.json`.
   const adapterRegistry = createAdapterRegistry();
-  context.subscriptions.push(
-    registerConfigPanel({
-      extensionUri: context.extensionUri,
-      resolveBaitonDir: resolveBaitonDirForCommands,
-      agentIds: adapterRegistry.ids,
-      capabilities: agentCapabilities(),
-      log: (m) => surface.log(m),
-      applyConfig: scopedApplyConfig,
-    }),
-  );
-  context.subscriptions.push(registerConfigPanelCommand());
 
   // The model catalog and its discovery service, also ahead of the gate: model
   // lists must refresh (and `Baiton: Refresh Model Lists` must work) even in an
@@ -202,6 +192,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // fails by design. The store rehydrates the persisted snapshots and seeds the
   // curated builtins in its constructor; the discovery service only ever calls
   // `applyResult`.
+  //
+  // Ordering matters: the store is built and seeded (rehydrated `cached`
+  // snapshots, else the curated `builtinCatalogFetches()`) BEFORE
+  // `registerConfigPanel`, so the panel's first `load()` already shows the last
+  // known-good lists, and every later `applyResult` reaches an open panel as
+  // `optionsChanged` without touching in-progress edits.
   const catalogStore = new CatalogStore({
     memento: context.globalState,
     builtins: builtinCatalogFetches(),
@@ -217,6 +213,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   modelCatalogStore = catalogStore;
   modelDiscovery = discovery;
+
+  context.subscriptions.push(
+    registerConfigPanel({
+      extensionUri: context.extensionUri,
+      resolveBaitonDir: resolveBaitonDirForCommands,
+      agentIds: adapterRegistry.ids,
+      capabilities: agentCapabilities(),
+      // The live table: read per load/refresh, never frozen, so every
+      // `applyResult` the discovery service lands reaches an open panel.
+      getCapabilities: () => agentCapabilities(catalogStore.table()),
+      onDidChangeCapabilities: (listener) => {
+        const sub = discovery.onDidChange(() => listener());
+        return new vscode.Disposable(() => sub.dispose());
+      },
+      log: (m) => surface.log(m),
+      applyConfig: scopedApplyConfig,
+    }),
+  );
+  context.subscriptions.push(registerConfigPanelCommand());
 
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMANDS.refreshModels, () =>
