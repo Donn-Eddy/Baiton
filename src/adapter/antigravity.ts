@@ -1,7 +1,17 @@
 import { execFile } from 'child_process';
 import * as path from 'path';
-import type { Adapter, AskRelayDescriptor, LaunchRequest, LaunchSpec, ProbeResult, RelayFile } from './adapter';
-import { AGENT_BINARY, AdapterLaunchError } from './adapter';
+import type {
+  Adapter,
+  AgentCapabilities,
+  AskRelayDescriptor,
+  DiscoveryContext,
+  LaunchRequest,
+  LaunchSpec,
+  ProbeResult,
+  RelayFile,
+} from './adapter';
+import { AGENT_BINARY, AdapterLaunchError, DEFAULT_DISCOVERY_TIMEOUT_MS, capabilitiesFromEntries } from './adapter';
+import type { ModelEntry } from '../orchestrator/modelCatalog';
 import type { Role } from '../model/role';
 import { isReadOnlyRole, runDirGrant, shellQuote } from './permissions';
 import { runDirPattern } from './roleProfile';
@@ -26,6 +36,27 @@ export const ANTIGRAVITY_PLAN_MODE = 'plan';
 /** The agy `--mode` value used for write-capable roles. */
 export const ANTIGRAVITY_ACCEPT_EDITS_MODE = 'accept-edits';
 
+/** The agy subcommand that lists the available models. */
+export const ANTIGRAVITY_MODELS_SUBCOMMAND = 'models';
+
+/**
+ * The argv of the discovery command: plain `agy models`, no flag agy does not
+ * document.
+ */
+export const ANTIGRAVITY_MODELS_ARGS: readonly string[] = [ANTIGRAVITY_MODELS_SUBCOMMAND];
+
+/**
+ * The CLI-wide `--effort` vocabulary from `agy --help`. No model in the current
+ * listing offers `max`; this vocabulary is only what a trailing id suffix is
+ * recognised against by {@link antigravityModelsFromCliOutput}, while
+ * {@link ANTIGRAVITY_EFFORTS} stays the curated union actually offered
+ * (`low, medium, high`).
+ */
+export const ANTIGRAVITY_EFFORT_VOCABULARY = ['low', 'medium', 'high', 'max'] as const;
+
+/** Output cap for `agy models`; the listing is a handful of lines. */
+const ANTIGRAVITY_MODELS_MAX_BUFFER = 1024 * 1024;
+
 /**
  * The agy model catalogue, as listed by `agy models` (v1.2.2), keyed by the
  * bare family name Baiton config uses. agy has no separate effort control
@@ -40,12 +71,13 @@ export const ANTIGRAVITY_ACCEPT_EDITS_MODE = 'accept-edits';
  * the config panel offers for antigravity (see `agentCapabilities()`), with
  * "Other…" for anything newer.
  *
- * This curated catalogue is authoritative: the antigravity adapter implements
- * no `Adapter.discoverModels`, `AGENT_CATALOG_SOURCE` has no `antigravity`
- * entry, and `agentCapabilities(snapshots)` therefore never overlays
- * refreshed models onto it — because `antigravityModelFlags` maps model+effort
- * to agy's suffixed ids and a discovered id list could not carry that mapping.
- * Refresh it by hand from `agy models`.
+ * This curated catalogue is the builtin SEED and FALLBACK: it supplies the
+ * antigravity `modelEntries` of `builtinAgentCapabilities()`, and `agy models`
+ * is discovered live ({@link AntigravityAdapter.discoverModels}) and overlaid
+ * on top of it. `antigravityModelFlags` still validates a launch's model+effort
+ * against this table; a discovered family that is absent from it passes through
+ * as `--model <family> --effort <level>`, which agy accepts. Refresh the
+ * curated table by hand from `agy models` when agy adds a model.
  */
 export const ANTIGRAVITY_MODELS: Readonly<Record<string, readonly string[]>> = {
   'gemini-3.8-flash': ['low', 'medium', 'high'],
@@ -56,6 +88,169 @@ export const ANTIGRAVITY_MODELS: Readonly<Record<string, readonly string[]>> = {
   'claude-opus-4-6-thinking': [],
   'gpt-oss-120b-medium': [],
 };
+
+/** Strip ANSI escapes and any leading bullet/marker from one `agy models` line. */
+function cleanAgyLine(line: string): string {
+  return (
+    line
+      // The ESC byte is intentional: it is exactly what a coloured listing line
+      // hides its id behind.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\u001B\[[0-9;]*m/g, '')
+      .replace(/^[\s>*•-]+/, '')
+      .trim()
+  );
+}
+
+/** One raw `id<TAB>label` record of the listing, before grouping. */
+interface AgyRecord {
+  readonly id: string;
+  readonly label?: string;
+}
+
+/**
+ * The trailing `-<level>` suffix of `id` when `<level>` is in
+ * {@link ANTIGRAVITY_EFFORT_VOCABULARY} and the stem is non-empty.
+ */
+function agySuffix(id: string): { stem: string; level: string } | undefined {
+  for (const level of ANTIGRAVITY_EFFORT_VOCABULARY) {
+    if (!id.endsWith(`-${level}`)) {
+      continue;
+    }
+    const stem = id.slice(0, id.length - level.length - 1);
+    if (stem.length === 0) {
+      return undefined;
+    }
+    return { stem, level };
+  }
+  return undefined;
+}
+
+/**
+ * Drop a trailing `(Level)` parenthesis from a family member's label, but only
+ * when the parenthesised text is that member's own level suffix (so
+ * `Gemini 3.8 Flash (High)` → `Gemini 3.8 Flash`, while an unrelated trailing
+ * parenthesis such as `(Thinking)` is kept).
+ */
+function agyFamilyLabel(label: string, level: string): string {
+  const paren = /\s*\(([^()]*)\)$/.exec(label);
+  if (paren === null || paren[1]?.trim().toLowerCase() !== level.toLowerCase()) {
+    return label;
+  }
+  return label.slice(0, paren.index).trim();
+}
+
+/**
+ * Parse an `agy models` listing into {@link ModelEntry} records.
+ *
+ * Pure and total: never throws, never mutates its input, and yields `[]` for
+ * empty or unrecognised output. It reads model IDS AND LABELS only — nothing
+ * else on a line is interpreted — and the process's exit code and stderr are
+ * irrelevant to it (agy exits 0 even on an error and prints its spinner on
+ * stderr, so only stdout is judged; see {@link AntigravityAdapter.discoverModels}).
+ *
+ * Each line has its ANSI escapes and any leading bullet/marker stripped, is
+ * split on its FIRST tab into `id` and `label`, and is dropped when the id is
+ * blank or contains whitespace (a spinner or prose line that reached stdout).
+ * Raw ids are de-duplicated by first occurrence. Ids are then grouped by stem:
+ * a stem with TWO OR MORE distinct {@link ANTIGRAVITY_EFFORT_VOCABULARY}
+ * suffixes becomes ONE family entry (`id` the stem, `efforts` its levels in
+ * listing order, `label` the first member's label with the trailing level
+ * parenthesis removed) and its member ids are not emitted separately; every
+ * other id — an unsuffixed one, and a lone suffixed one such as
+ * `gpt-oss-120b-medium` — is a fixed entry with `efforts: []`, because agy
+ * rejects `--effort` for it. Entries come out in the order the listing first
+ * mentions them, and never carry `defaultEffort` (agy defines no default),
+ * `provider` or `custom`.
+ *
+ * On the current `agy models` listing this reproduces {@link ANTIGRAVITY_MODELS}
+ * exactly (see test/fixtures/agyModels.sample.txt).
+ */
+export function antigravityModelsFromCliOutput(stdout: string): ModelEntry[] {
+  // 1–3: clean, split on the first tab, de-duplicate raw ids by first occurrence.
+  const records: AgyRecord[] = [];
+  const seenIds = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const cleaned = cleanAgyLine(line);
+    if (cleaned.length === 0) {
+      continue;
+    }
+    const tab = cleaned.indexOf('\t');
+    const id = (tab === -1 ? cleaned : cleaned.slice(0, tab)).trim();
+    const label = tab === -1 ? '' : cleaned.slice(tab + 1).trim();
+    if (id.length === 0 || /\s/.test(id) || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    records.push(label.length > 0 ? { id, label } : { id });
+  }
+
+  // 4: group the suffixed ids by stem, remembering each stem's first member.
+  interface Family {
+    readonly levels: string[];
+    readonly firstIndex: number;
+    readonly firstLabel?: string;
+    readonly firstLevel: string;
+  }
+  const families = new Map<string, Family>();
+  records.forEach((record, index) => {
+    const suffix = agySuffix(record.id);
+    if (suffix === undefined) {
+      return;
+    }
+    const existing = families.get(suffix.stem);
+    if (existing === undefined) {
+      const family: Family = {
+        levels: [suffix.level],
+        firstIndex: index,
+        firstLevel: suffix.level,
+        ...(record.label !== undefined ? { firstLabel: record.label } : {}),
+      };
+      families.set(suffix.stem, family);
+      return;
+    }
+    if (!existing.levels.includes(suffix.level)) {
+      existing.levels.push(suffix.level);
+    }
+  });
+
+  // 5–8: emit in first-mention order; a family wins over a bare stem id.
+  const entries: ModelEntry[] = [];
+  const emitted = new Set<string>();
+  const push = (id: string, label: string | undefined, efforts: readonly string[]): void => {
+    if (emitted.has(id)) {
+      return;
+    }
+    emitted.add(id);
+    const entry: { id: string; label?: string; efforts: readonly string[] } = { id, efforts: [...efforts] };
+    if (label !== undefined && label.length > 0 && label !== id) {
+      entry.label = label;
+    }
+    entries.push(entry);
+  };
+  records.forEach((record, index) => {
+    const suffix = agySuffix(record.id);
+    if (suffix !== undefined) {
+      const family = families.get(suffix.stem);
+      if (family !== undefined && family.levels.length > 1) {
+        if (family.firstIndex !== index) {
+          return;
+        }
+        const label =
+          family.firstLabel === undefined ? undefined : agyFamilyLabel(family.firstLabel, family.firstLevel);
+        push(suffix.stem, label, family.levels);
+        return;
+      }
+    }
+    const own = families.get(record.id);
+    if (own !== undefined && own.levels.length > 1) {
+      // A bare id that is also a family stem: the family entry already covers it.
+      return;
+    }
+    push(record.id, record.label, []);
+  });
+  return entries;
+}
 
 /**
  * Resolve a config `model` + `effort` pair to the `--model <id>` agy needs
@@ -289,6 +484,54 @@ export function antigravityAskRelayHooks(relay: AskRelayDescriptor): Record<stri
 }
 
 /**
+ * Runs `agy models` and resolves its stdout, or `undefined` when the run
+ * produced no usable output. Never rejects.
+ */
+export type AntigravityModelsCli = (options: { cwd?: string; timeoutMs: number }) => Promise<string | undefined>;
+
+/** Optional construction options of {@link AntigravityAdapter}; every field has a default. */
+export interface AntigravityAdapterOptions {
+  /** The `agy models` runner; defaults to {@link defaultRunAntigravityModelsCli}. */
+  readonly runModelsCli?: AntigravityModelsCli;
+}
+
+/**
+ * Run `agy models` ({@link ANTIGRAVITY_MODELS_ARGS}) in `cwd` and resolve its
+ * stdout; the default {@link AntigravityModelsCli}. Never rejects.
+ *
+ * The exit code is deliberately NOT inspected — agy exits 0 even on an error,
+ * so the code carries no signal and stdout is what is judged. stderr is ignored
+ * entirely (agy prints its spinner there). Only a failure that means there is
+ * no usable output at all resolves `undefined`: a spawn failure (`ENOENT`) or a
+ * kill/timeout.
+ */
+function defaultRunAntigravityModelsCli(options: { cwd?: string; timeoutMs: number }): Promise<string | undefined> {
+  return new Promise<string | undefined>((resolve) => {
+    execFile(
+      ANTIGRAVITY_BIN,
+      [...ANTIGRAVITY_MODELS_ARGS],
+      {
+        cwd: options.cwd,
+        timeout: options.timeoutMs,
+        windowsHide: true,
+        maxBuffer: ANTIGRAVITY_MODELS_MAX_BUFFER,
+      },
+      (error, stdout) => {
+        if (error !== null && error !== undefined) {
+          const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+          const signalled = failure.signal !== null && failure.signal !== undefined;
+          if (failure.code === 'ENOENT' || failure.killed === true || signalled) {
+            resolve(undefined);
+            return;
+          }
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+/**
  * The antigravity (`agy`) CLI adapter (Requirement 14.1). Flags verified
  * against `agy` v1.2.2 via `agy --version`/`agy --help`.
  *
@@ -390,14 +633,71 @@ export function antigravityAskRelayHooks(relay: AskRelayDescriptor): Record<stri
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;
 
+  /** The `agy models` runner; injectable so no test ever spawns the real binary. */
+  private readonly runModelsCli: AntigravityModelsCli;
+
+  constructor(options: AntigravityAdapterOptions = {}) {
+    this.runModelsCli = options.runModelsCli ?? defaultRunAntigravityModelsCli;
+  }
+
   /**
    * antigravity mints its own session id and has no flag to pre-assign one,
    * so Baiton's journal `sessionId` is not resumable with it.
    */
   readonly acceptsSessionId = false;
 
-  // No `discoverModels`: see ANTIGRAVITY_MODELS — the curated catalogue plus
-  // `antigravityModelFlags` stays the sole source of agy model/effort options.
+  /**
+   * Discover agy's model list by parsing `agy models`
+   * ({@link antigravityModelsFromCliOutput}).
+   *
+   * Never rejects: the whole body is wrapped so any internal error — including
+   * a runner that throws synchronously or returns a rejected promise —
+   * resolves `undefined`, which means "keep the last known-good list". The
+   * curated {@link ANTIGRAVITY_MODELS} table is NEVER returned here; it is the
+   * builtin seed and fallback the store already holds. An already-aborted
+   * `ctx.signal` spawns nothing; the run is raced against the signal and
+   * bounded by `min(ctx.timeoutMs, DEFAULT_DISCOVERY_TIMEOUT_MS)`, and a loser
+   * of either race, a missing binary, an empty listing and unparseable output
+   * all resolve `undefined`.
+   *
+   * stderr and the exit code are ignored: agy exits 0 even on an error (so the
+   * code carries no signal) and prints its spinner on stderr, so stdout alone
+   * is judged. Only model ids and labels are read; no credential is touched at
+   * all (agy uses its own sign-in). The result carries exactly
+   * `models`/`efforts`/`modelEntries`: snapshot provenance
+   * (`source`/`stale`/`staleReason`/`fetchedAt`) is stamped by the
+   * `CatalogStore`, agy has no `modelLink`, and no entry carries a
+   * `defaultEffort` because agy defines no default.
+   */
+  async discoverModels(ctx: DiscoveryContext): Promise<AgentCapabilities | undefined> {
+    try {
+      if (ctx.signal?.aborted === true) {
+        return undefined;
+      }
+      const timeoutMs = Math.min(
+        ctx.timeoutMs > 0 ? ctx.timeoutMs : DEFAULT_DISCOVERY_TIMEOUT_MS,
+        DEFAULT_DISCOVERY_TIMEOUT_MS,
+      );
+      // `Promise.resolve().then(...)` so a runner throwing synchronously is
+      // caught by the race, not the outer try.
+      const stdout = await this.raceTimeout(
+        this.raceAbort(
+          Promise.resolve().then(() =>
+            this.runModelsCli({ ...(ctx.cwd !== undefined ? { cwd: ctx.cwd } : {}), timeoutMs }),
+          ),
+          ctx.signal,
+        ),
+        timeoutMs,
+      );
+      if (ctx.signal?.aborted) {
+        return undefined;
+      }
+      const entries = antigravityModelsFromCliOutput(stdout ?? '');
+      return entries.length > 0 ? capabilitiesFromEntries(entries) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   /**
    * Run `agy --version` and report readiness (Requirements 14.2–14.4). A
@@ -502,6 +802,68 @@ export class AntigravityAdapter implements Adapter {
     ];
 
     return { shellPath: ANTIGRAVITY_BIN, shellArgs: args };
+  }
+
+  /**
+   * Race `promise` against `signal`: resolves `undefined` on the signal's
+   * `abort` event (or immediately when the signal is already aborted on entry
+   * — no event will fire again), else resolves `promise`'s value (or
+   * `undefined` when `promise` rejects). The `abort` listener is ALWAYS
+   * removed, and the losing promise's rejection is consumed here, so no
+   * unhandled rejection ever escapes to unrelated suites.
+   */
+  private raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
+    if (signal?.aborted === true) {
+      promise.catch(() => undefined);
+      return Promise.resolve(undefined);
+    }
+    if (signal === undefined) {
+      return promise;
+    }
+    return new Promise<T | undefined>((resolve) => {
+      const onAbort = (): void => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        () => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(undefined);
+        },
+      );
+    });
+  }
+
+  /**
+   * Race `promise` against a `timeoutMs` timer: resolves `undefined` when the
+   * timer fires first, else `promise`'s value (or `undefined` when it rejects).
+   * The timer is cleared on EVERY settle path and `unref`'d so a still-pending
+   * one can never keep the host (or the mocha process) alive, and the losing
+   * promise's rejection is consumed here so none escapes unhandled.
+   */
+  private raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+    return new Promise<T | undefined>((resolve) => {
+      const timer = setTimeout(() => {
+        promise.catch(() => undefined);
+        resolve(undefined);
+      }, timeoutMs);
+      timer.unref?.();
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(undefined);
+        },
+      );
+    });
   }
 
   /** Execute `agy --version`, resolving stdout or rejecting on failure. */

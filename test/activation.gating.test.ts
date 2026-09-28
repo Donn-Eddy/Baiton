@@ -65,6 +65,13 @@ import type { RunManifest } from '../src/engine/runStore';
  *   kind to `refused` with the error's message; and a rejecting `completed`
  *   promise reaches the injected `report` (naming the run id) without becoming
  *   an unhandled rejection, and is equally safe with no `report` bound.
+ * - Config panel live catalog wiring: over `src/extension.ts`'s source text,
+ *   the `CatalogStore`/`ModelDiscoveryService` are built before
+ *   `registerConfigPanel`, that call passes both live seams
+ *   (`getCapabilities` bound to `catalogStore.table()`,
+ *   `onDidChangeCapabilities` to `discovery.onDidChange`) while keeping the
+ *   static `capabilities` fallback, and `void discovery.refresh()` still
+ *   follows the registration (model-selector-refresh T05).
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -519,6 +526,86 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       initPalette,
       undefined,
       'baiton.initialize must not be in commandPalette (must remain visible when baiton.activated is false)',
+    );
+  });
+});
+
+describe('config panel live catalog wiring (model-selector-refresh T05)', () => {
+  let source = '';
+  /** The text of the `registerConfigPanel({ ... })` call, braces balanced. */
+  let call = '';
+
+  before(() => {
+    source = fs.readFileSync(path.join(REPO_ROOT, 'src', 'extension.ts'), 'utf8');
+    const start = source.indexOf('registerConfigPanel({');
+    assert.ok(start >= 0, 'src/extension.ts must call registerConfigPanel({...})');
+    const open = source.indexOf('{', start);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    assert.ok(end > open, 'the registerConfigPanel call must have balanced braces');
+    call = source.slice(open, end + 1);
+  });
+
+  it('builds the catalog store and discovery service before registering the config panel', () => {
+    const store = source.indexOf('new CatalogStore(');
+    const discovery = source.indexOf('new ModelDiscoveryService(');
+    const register = source.indexOf('registerConfigPanel({');
+    assert.ok(store >= 0, 'expected a `new CatalogStore(` construction');
+    assert.ok(discovery >= 0, 'expected a `new ModelDiscoveryService(` construction');
+    assert.ok(
+      store < register,
+      'the CatalogStore must be built before registerConfigPanel so the first load() shows the seeded list',
+    );
+    assert.ok(
+      discovery < register,
+      'the ModelDiscoveryService must be built before registerConfigPanel so onDidChangeCapabilities can bind to it',
+    );
+  });
+
+  it('passes getCapabilities bound to the store table', () => {
+    assert.match(
+      call,
+      /getCapabilities:\s*\(\)\s*=>\s*agentCapabilities\(\s*catalogStore\.table\(\)\s*\)/,
+      'getCapabilities must re-read catalogStore.table() per call, not a frozen snapshot',
+    );
+  });
+
+  it('passes onDidChangeCapabilities bound to the discovery service', () => {
+    assert.ok(
+      call.includes('onDidChangeCapabilities:'),
+      'expected onDidChangeCapabilities in the registerConfigPanel call',
+    );
+    assert.match(
+      call,
+      /discovery\.onDidChange\(/,
+      'onDidChangeCapabilities must subscribe to discovery.onDidChange',
+    );
+  });
+
+  it('keeps the static capabilities fallback', () => {
+    assert.match(
+      call,
+      /capabilities:\s*agentCapabilities\(\)/,
+      'the static capabilities fallback must still be passed',
+    );
+  });
+
+  it('still kicks the refresh off without awaiting it, after the panel is registered', () => {
+    const refresh = source.indexOf('void discovery.refresh()');
+    assert.ok(refresh >= 0, 'activate() must kick discovery.refresh() off without awaiting it');
+    assert.ok(
+      refresh > source.indexOf('registerConfigPanel({'),
+      'refresh must run after the panel is registered so the first optionsChanged cannot be lost',
     );
   });
 });

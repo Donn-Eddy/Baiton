@@ -157,4 +157,50 @@ describe('config panel browser mirror (config-panel T09)', () => {
     assert.deepStrictEqual(jsPlain, tsPlain, 'Mirror and TS disagree without metadata');
     assert.deepStrictEqual(jsMeta, tsMeta, 'Mirror and TS disagree with metadata');
   });
+
+  it('per-model entries are render-only: both validators keep checking the agent-level union', () => {
+    // codex-opencode-dropdown-fix T07: the effort dropdown narrows to the
+    // SELECTED model's own levels, but validation must not follow it — an
+    // effort belonging to another model of the same agent renders through
+    // `Other…` and stays valid.
+    const roles = {} as ConfigForm['roles'];
+    for (const role of ROLES) {
+      roles[role] = { agent: 'codex', model: 'gpt-5', effort: 'high' };
+    }
+    const form: ConfigForm = {
+      roles,
+      limits: { plan_review_rounds: '1', exec_attempts: '3', stall_notice_minutes: '10' },
+      git: { remote: 'origin', base: 'main' },
+    };
+
+    const plain: ConfigFormOptions = {
+      agents: ['codex'],
+      byAgent: { codex: { models: ['gpt-5-codex', 'gpt-5'], efforts: ['low', 'medium', 'high', 'minimal'] } },
+    };
+    const withEntries: ConfigFormOptions = {
+      agents: ['codex'],
+      byAgent: {
+        codex: {
+          models: ['gpt-5-codex', 'gpt-5', 'my-model'],
+          efforts: ['low', 'medium', 'high', 'minimal'],
+          modelEntries: [
+            { id: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+            { id: 'gpt-5', efforts: ['minimal', 'low'] },
+            { id: 'my-model', custom: true },
+          ],
+        },
+      },
+    };
+
+    const tsPlain = validateConfigForm(form, plain);
+    const tsEntries = validateConfigForm(form, withEntries);
+    const jsPlain = mirror.validateConfigForm(form, plain);
+    const jsEntries = mirror.validateConfigForm(form, withEntries);
+
+    assert.deepStrictEqual(tsPlain, [], 'an effort in the agent-level union must be valid');
+    assert.deepStrictEqual(tsEntries, tsPlain, 'TS validator reacted to per-model entries');
+    assert.deepStrictEqual(jsEntries, jsPlain, 'Mirror validator reacted to per-model entries');
+    assert.deepStrictEqual(jsPlain, tsPlain, 'Mirror and TS disagree without entries');
+    assert.deepStrictEqual(jsEntries, tsEntries, 'Mirror and TS disagree with entries');
+  });
 });

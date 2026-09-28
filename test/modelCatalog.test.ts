@@ -106,7 +106,10 @@ function snapshot(overrides: Partial<ModelCatalogSnapshot> = {}): ModelCatalogSn
 describe('orchestrator/modelCatalog', () => {
   describe('vocabulary', () => {
     it('CATALOG_SOURCE_IDS is exactly the known source order', () => {
-      assert.deepStrictEqual([...CATALOG_SOURCE_IDS], ['claude', 'codex', 'opencode', 'models.dev']);
+      assert.deepStrictEqual(
+        [...CATALOG_SOURCE_IDS],
+        ['claude', 'codex', 'opencode', 'antigravity', 'models.dev'],
+      );
     });
 
     it('isCatalogSourceId accepts each known id', () => {

@@ -19,6 +19,26 @@ import { Role, ROLES } from '../model';
 import { Config, LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from './types';
 
 /**
+ * One model behind `AgentFormCapability.models`, as the webview receives it
+ * (codex-opencode-dropdown-fix T06). Structurally a subset of `ModelEntry`
+ * from `src/orchestrator/modelCatalog`, declared locally to keep this module
+ * import-free of adapter/orchestrator code. `provider` is deliberately NOT
+ * mirrored: only ids, labels and effort names cross to the webview.
+ */
+export interface FormModelEntry {
+  /** The model id itself, exactly as written into configuration. */
+  readonly id: string;
+  /** Human label shown as the option text; absent when the id is the label. */
+  readonly label?: string;
+  /** This model's own reasoning levels, when the source discloses them. */
+  readonly efforts?: readonly string[];
+  /** This model's default reasoning level, when the source discloses it. */
+  readonly defaultEffort?: string;
+  /** True when this entry came from user configuration, not from the list; rendered as "Other…". */
+  readonly custom?: boolean;
+}
+
+/**
  * Per-agent capability descriptor as held by the config panel (T10).
  * Structurally identical to `AgentCapabilities` from `src/adapter/adapter`
  * but declared locally to keep this module import-free of adapter dependencies.
@@ -27,6 +47,12 @@ export interface AgentFormCapability {
   readonly models: readonly string[];
   readonly efforts: readonly string[];
   readonly modelLink?: string;
+  /**
+   * Rich per-model detail behind `models` — same order and length as `models`
+   * when present, absent when `models` is empty. `custom: true` marks a value
+   * that came from the configuration rather than the list.
+   */
+  readonly modelEntries?: readonly FormModelEntry[];
   /**
    * Where this list came from in this window (model-selector-refresh T08).
    * Absent means the curated builtin table with no refresh applied.
@@ -148,6 +174,13 @@ export type ConfigPanelWebviewToHost =
  * agent value already present in the form that is not an installed id, and
  * a copy of the capability catalogue with out-of-table models and efforts
  * appended for agents with closed sets (T10 round-trip rule).
+ *
+ * A capability's `modelEntries` are copied through (minus `provider`), or
+ * synthesised as one bare `{ id }` per model when the capability carries none;
+ * an agent with no models carries no `modelEntries` own key at all. A
+ * configured-but-unlisted model is appended both to `models` and to
+ * `modelEntries`, as `{ id, custom: true }` at the end, so the webview can
+ * render it as an editable "Other…" entry (codex-opencode-dropdown-fix T06).
  */
 export function configFormOptions(
   agentIds: readonly string[],
@@ -160,6 +193,7 @@ export function configFormOptions(
     {
       models: string[];
       efforts: string[];
+      modelEntries: FormModelEntry[];
       modelLink?: string;
       source?: 'live' | 'cached' | 'builtin';
       stale?: boolean;
@@ -170,9 +204,12 @@ export function configFormOptions(
 
   if (capabilities) {
     for (const [agent, cap] of Object.entries(capabilities)) {
+      const entries: FormModelEntry[] =
+        cap.modelEntries !== undefined ? cap.modelEntries.map(formModelEntry) : cap.models.map((id) => ({ id }));
       byAgent[agent] = {
         models: [...cap.models],
         efforts: [...cap.efforts],
+        modelEntries: entries,
         ...(cap.modelLink !== undefined ? { modelLink: cap.modelLink } : {}),
         // Refresh metadata is copied conditionally so an untouched builtin entry keeps
         // exactly its old key set (T08).
@@ -184,7 +221,7 @@ export function configFormOptions(
     }
   } else {
     for (const agent of agentIds) {
-      byAgent[agent] = { models: [], efforts: [] };
+      byAgent[agent] = { models: [], efforts: [], modelEntries: [] };
     }
   }
 
@@ -200,12 +237,13 @@ export function configFormOptions(
       const trimmedAgent = entry.agent.trim();
       if (trimmedAgent !== '') {
         if (!byAgent[trimmedAgent]) {
-          byAgent[trimmedAgent] = { models: [], efforts: [] };
+          byAgent[trimmedAgent] = { models: [], efforts: [], modelEntries: [] };
         }
         const cap = byAgent[trimmedAgent];
         const trimmedModel = entry.model.trim();
         if (cap.models.length > 0 && trimmedModel !== '' && !cap.models.includes(trimmedModel)) {
           cap.models.push(trimmedModel);
+          cap.modelEntries.push({ id: trimmedModel, custom: true });
         }
         const trimmedEffort = entry.effort.trim();
         if (cap.efforts.length > 0 && trimmedEffort !== '' && !cap.efforts.includes(trimmedEffort)) {
@@ -215,7 +253,26 @@ export function configFormOptions(
     }
   }
 
+  // An agent with no models carries no `modelEntries` own key at all, mirroring
+  // `capabilitiesFromEntries` and keeping the `{ models: [], efforts: [] }` shape.
+  for (const cap of Object.values(byAgent)) {
+    if (cap.modelEntries.length === 0) {
+      delete (cap as { modelEntries?: FormModelEntry[] }).modelEntries;
+    }
+  }
+
   return { agents, byAgent };
+}
+
+/** One capability model entry as the form carries it: id, label, efforts, defaultEffort, custom — nothing else. */
+function formModelEntry(entry: FormModelEntry): FormModelEntry {
+  return {
+    id: entry.id,
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+    ...(entry.efforts !== undefined ? { efforts: [...entry.efforts] } : {}),
+    ...(entry.defaultEffort !== undefined ? { defaultEffort: entry.defaultEffort } : {}),
+    ...(entry.custom !== undefined ? { custom: entry.custom } : {}),
+  };
 }
 
 /**

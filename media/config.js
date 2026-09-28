@@ -16,6 +16,17 @@
  * by `ConfigPanelWebviewToHost`. The webview never constructs a config
  * document itself — `applyFormToDocument` (unknown-key preservation) is
  * host-side only.
+ *
+ * Per-agent capabilities carry `modelEntries` (codex-opencode-dropdown-fix
+ * T06/T07): one entry per model with an `id`, an optional `label` (the option
+ * TEXT, while the option value is always the id), an optional per-model
+ * `efforts` list (Codex/Claude reasoning levels, OpenCode variant keys, an
+ * Antigravity family's levels), an optional `defaultEffort` (shown as
+ * `(default: <effort>)`) and an optional `custom` flag. A `custom: true` entry
+ * is a configured-but-unlisted value: it is NEVER rendered as an ordinary
+ * `<option>` and reaches the user exclusively through `Other…` plus the
+ * free-text input. A payload without `modelEntries` renders exactly as before,
+ * one bare `{ id }` entry per model.
  */
 (function () {
   'use strict';
@@ -230,6 +241,12 @@
    * the `Other…` inputs (model-selector-refresh T09). Only the static
    * `(default)` and `Other…` options are created here, marked `data-static` so
    * the sync leaves them alone.
+   *
+   * The `(default)` option's TEXT is rewritten on every render from the
+   * selected model's `defaultEffort` (`(default: medium)` and so on); its value
+   * stays `''` and it keeps its `data-static` marker, so the sync never removes
+   * it. Dynamic model options carry the entry's label as their text while their
+   * value is always the model id.
    */
   function buildRoleRows() {
     if (rolesBuilt) {
@@ -382,30 +399,48 @@
     }
   }
 
+  /** One dynamic option, from a plain id or a `{ value, text }` pair. */
+  function optionSpec(item) {
+    if (item !== null && typeof item === 'object') {
+      var value = String(item.value);
+      return {
+        value: value,
+        text: item.text === undefined || item.text === null || item.text === '' ? value : String(item.text),
+      };
+    }
+    var v = String(item);
+    return { value: v, text: v };
+  }
+
   /**
    * Replace a select's DYNAMIC options (those without `data-static`) with
-   * `values`, in place, leaving the static `(default)`/`Other…` options where
-   * they are. A no-op when the rendered list already matches — that early
-   * return is what keeps focus, an open dropdown and the caret intact across
-   * the render that runs on every keystroke.
+   * `values` — plain ids or `{ value, text }` pairs — in place, leaving the
+   * static `(default)`/`Other…` options where they are. A no-op when the
+   * rendered list already matches on BOTH value and text — that early return is
+   * what keeps focus, an open dropdown and the caret intact across the render
+   * that runs on every keystroke, while a label-only change still rebuilds.
    */
   function syncSelectOptions(selectEl, values) {
     if (!selectEl) {
       return;
     }
-    var desired = values || [];
-    var current = [];
+    var source = values || [];
+    var desired = [];
     var i;
+    for (i = 0; i < source.length; i++) {
+      desired.push(optionSpec(source[i]));
+    }
+    var current = [];
     for (i = 0; i < selectEl.children.length; i++) {
       var child = selectEl.children[i];
       if (child.tagName === 'OPTION' && !child.dataset.static) {
-        current.push(child.value);
+        current.push({ value: child.value, text: child.textContent });
       }
     }
     if (current.length === desired.length) {
       var same = true;
       for (i = 0; i < current.length; i++) {
-        if (current[i] !== desired[i]) {
+        if (current[i].value !== desired[i].value || current[i].text !== desired[i].text) {
           same = false;
           break;
         }
@@ -431,8 +466,8 @@
     }
     for (i = 0; i < desired.length; i++) {
       var opt = document.createElement('option');
-      opt.value = desired[i];
-      opt.textContent = desired[i];
+      opt.value = desired[i].value;
+      opt.textContent = desired[i].text;
       selectEl.insertBefore(opt, otherOption);
     }
     var stillThere = Array.prototype.some.call(selectEl.options || [], function (o) {
@@ -443,7 +478,100 @@
     }
   }
 
-  /** Sync every role's option lists and documentation link from state.options. */
+  /** The capability for an agent id, never undefined. */
+  function capabilityFor(agent) {
+    return (state.options.byAgent && state.options.byAgent[agent]) || { models: [], efforts: [] };
+  }
+
+  /**
+   * The rich entries behind a capability's `models`: the host's `modelEntries`
+   * (codex-opencode-dropdown-fix T06) when present, else one bare `{ id }` per
+   * model so an older/leaner payload renders exactly as before.
+   */
+  function capabilityEntries(cap) {
+    if (cap && Array.isArray(cap.modelEntries)) {
+      return cap.modelEntries;
+    }
+    var models = (cap && cap.models) || [];
+    var out = [];
+    for (var i = 0; i < models.length; i++) {
+      out.push({ id: models[i] });
+    }
+    return out;
+  }
+
+  /**
+   * The dynamic model options for a capability: every entry EXCEPT the ones
+   * marked `custom: true`, as `{ value: id, text: label || id }`. A custom entry
+   * is a configured-but-unlisted value and is rendered through `Other…`, never
+   * as an ordinary option.
+   */
+  function modelOptionsFor(cap) {
+    var entries = capabilityEntries(cap);
+    var out = [];
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      if (!e || typeof e.id !== 'string' || e.id === '' || e.custom === true) {
+        continue;
+      }
+      out.push({ value: e.id, text: typeof e.label === 'string' && e.label !== '' ? e.label : e.id });
+    }
+    return out;
+  }
+
+  /** The entry describing one model id (first match, custom entries included), or undefined. */
+  function modelEntryFor(cap, modelId) {
+    var entries = capabilityEntries(cap);
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i].id === modelId) {
+        return entries[i];
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The dynamic effort options for a role: the SELECTED model's own levels when
+   * its entry discloses them (Codex/Claude reasoning efforts, OpenCode variant
+   * keys, an Antigravity family's levels) — including an explicitly EMPTY list,
+   * which leaves only the static `(default)` and `Other…` options — else the
+   * agent-level union.
+   */
+  function effortOptionsFor(cap, modelId) {
+    var entry = modelEntryFor(cap, modelId);
+    if (entry && Array.isArray(entry.efforts)) {
+      return entry.efforts.slice();
+    }
+    return ((cap && cap.efforts) || []).slice();
+  }
+
+  /** The static `(default)` option's text: `(default: <effort>)` when the model declares one. */
+  function defaultEffortText(cap, modelId) {
+    var entry = modelEntryFor(cap, modelId);
+    if (entry && typeof entry.defaultEffort === 'string' && entry.defaultEffort !== '') {
+      return '(default: ' + entry.defaultEffort + ')';
+    }
+    return '(default)';
+  }
+
+  /** True when `value` is one of the rendered `{ value, text }` options. */
+  function listedValue(options, value) {
+    for (var i = 0; i < options.length; i++) {
+      if (options[i].value === value) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Sync every role's option lists and documentation link from state.options.
+   *
+   * Model options carry the entry's `label` as their text while their value
+   * stays the model id; effort options come from the SELECTED model's own list
+   * when its entry discloses one, and the static `(default)` option's text is
+   * rewritten from that model's `defaultEffort`.
+   */
   function renderOptionLists() {
     if (!state.form) {
       return;
@@ -464,9 +592,21 @@
       }
       syncSelectOptions(document.getElementById('role-' + role + '-agent'), agents);
 
-      var cap = (state.options.byAgent && state.options.byAgent[entry.agent]) || { models: [], efforts: [] };
-      syncSelectOptions(document.getElementById('role-' + role + '-model-select'), cap.models || []);
-      syncSelectOptions(document.getElementById('role-' + role + '-effort-select'), cap.efforts || []);
+      var cap = capabilityFor(entry.agent);
+      syncSelectOptions(document.getElementById('role-' + role + '-model-select'), modelOptionsFor(cap));
+      var effortSelect = document.getElementById('role-' + role + '-effort-select');
+      syncSelectOptions(effortSelect, effortOptionsFor(cap, entry.model));
+      if (effortSelect) {
+        for (var k = 0; k < effortSelect.children.length; k++) {
+          if (effortSelect.children[k].dataset.static === 'default') {
+            var wanted = defaultEffortText(cap, entry.model);
+            if (effortSelect.children[k].textContent !== wanted) {
+              effortSelect.children[k].textContent = wanted;
+            }
+            break;
+          }
+        }
+      }
 
       var link = document.getElementById('role-' + role + '-model-link');
       if (link) {
@@ -544,14 +684,15 @@
         agentEl.value = entry.agent;
       }
 
-      var cap = (state.options.byAgent && state.options.byAgent[entry.agent]) || { models: [], efforts: [] };
-      var models = cap.models || [];
-      var efforts = cap.efforts || [];
+      var cap = capabilityFor(entry.agent);
+      var modelOptions = modelOptionsFor(cap);
+      var effortOptions = effortOptionsFor(cap, entry.model);
+      var agentEfforts = cap.efforts || [];
 
       var modelSelect = /** @type {HTMLSelectElement} */ (document.getElementById('role-' + role + '-model-select'));
       var modelInput = /** @type {HTMLInputElement} */ (document.getElementById('role-' + role + '-model-input'));
       if (modelSelect && modelInput) {
-        if (models.length === 0) {
+        if (modelOptions.length === 0) {
           modelSelect.style.display = 'none';
           modelInput.style.display = '';
           if (modelInput !== active) {
@@ -560,7 +701,7 @@
         } else {
           // Sticky: once the user picked `Other…` the free-text input stays
           // shown, even if a refreshed list now contains the typed value.
-          var showInput = !!state.otherModel[role] || models.indexOf(entry.model) === -1;
+          var showInput = !!state.otherModel[role] || !listedValue(modelOptions, entry.model);
           modelSelect.style.display = '';
           if (!showInput) {
             if (modelSelect !== active) {
@@ -585,7 +726,7 @@
       var effortSelect = /** @type {HTMLSelectElement} */ (document.getElementById('role-' + role + '-effort-select'));
       var effortInput = /** @type {HTMLInputElement} */ (document.getElementById('role-' + role + '-effort-input'));
       if (effortSelect && effortInput) {
-        if (efforts.length === 0) {
+        if (agentEfforts.length === 0) {
           effortSelect.style.display = 'none';
           effortInput.style.display = '';
           if (effortInput !== active) {
@@ -593,7 +734,7 @@
           }
         } else {
           var showEffortInput =
-            !!state.otherEffort[role] || !(entry.effort === '' || efforts.indexOf(entry.effort) !== -1);
+            !!state.otherEffort[role] || !(entry.effort === '' || effortOptions.indexOf(entry.effort) !== -1);
           effortSelect.style.display = '';
           if (!showEffortInput) {
             if (effortSelect !== active) {

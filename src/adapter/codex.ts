@@ -154,8 +154,61 @@ export const CODEX_APP_SERVER_MODEL_LIST_METHOD = 'model/list';
 /** The JSON-RPC request id of the `initialize` request, so the reader (and tests) can assert framing. */
 export const CODEX_APP_SERVER_INITIALIZE_ID = 1;
 
-/** The JSON-RPC request id of `model/list`, so the reader (and tests) can assert framing. */
+/**
+ * The JSON-RPC request id of the FIRST `model/list` page, so the reader (and
+ * tests) can assert framing. Follow-up pages use the consecutive ids 3, 4, …,
+ * so every reply is matched to exactly one request.
+ */
 export const CODEX_APP_SERVER_MODEL_LIST_ID = 2;
+
+/**
+ * Sent as `params.includeHidden` on every `model/list` page. Hidden models are
+ * kept: the id is still a valid `--model` value, and the curated list must not
+ * silently omit one.
+ */
+export const CODEX_APP_SERVER_MODEL_LIST_INCLUDE_HIDDEN = true;
+
+/** Sent as `params.limit` on every `model/list` page. */
+export const CODEX_APP_SERVER_MODEL_LIST_PAGE_SIZE = 100;
+
+/**
+ * A hard page cap, so a server that keeps handing back a cursor can never loop
+ * forever (20 x 100 ids is far beyond any real catalogue).
+ */
+export const CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES = 20;
+
+/**
+ * The `params` of one `model/list` page: always `includeHidden` and `limit`,
+ * plus `cursor` ONLY for a follow-up page whose cursor is a non-empty string.
+ *
+ * Pure and total: never throws, and never writes an own `undefined` key (same
+ * conditional-key discipline as {@link codexModelsFromAppServer}'s entries).
+ */
+export function codexModelListParams(cursor?: string): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    includeHidden: CODEX_APP_SERVER_MODEL_LIST_INCLUDE_HIDDEN,
+    limit: CODEX_APP_SERVER_MODEL_LIST_PAGE_SIZE,
+  };
+  if (typeof cursor === 'string' && cursor.length > 0) {
+    params.cursor = cursor;
+  }
+  return params;
+}
+
+/**
+ * The pagination cursor of a `model/list` result: the first non-empty trimmed
+ * string of `nextCursor`, `next_cursor`, else `undefined`.
+ *
+ * Pure and total: `undefined` for any non-object payload, an array included —
+ * a bare array carries no pagination.
+ */
+export function codexNextCursor(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return undefined;
+  }
+  const obj = payload as Record<string, unknown>;
+  return firstNonEmptyString([obj['nextCursor'], obj['next_cursor']]);
+}
 
 /**
  * The client identity sent as `params.clientInfo` of the `initialize` request.
@@ -173,16 +226,19 @@ export const CODEX_APP_SERVER_CLIENT_INFO = { name: 'baiton', version: '1.0.0' }
  * failing the whole refresh, and an unusable item is skipped rather than
  * rejected:
  *
- * - The payload is a bare array, or an object whose `models` (preferred) or
- *   `items` (fallback) property is an array; anything else → `[]`.
+ * - The payload is a bare array, or an object whose `data` (preferred — what
+ *   the app-server's `result.data` sends), `models` or `items` property is an
+ *   array; anything else → `[]`.
  * - Per item: a string becomes `{ id: trimmed }`; an object's id is the first
- *   non-empty trimmed string of `id`, `model`, `slug`. An item with no usable
+ *   non-empty trimmed string of `model`, `id`, `slug`. An item with no usable
  *   id is skipped.
  * - `label` is the first non-empty trimmed string of `displayName`, `name`,
  *   set ONLY when it differs from the id (same rule as `claudeModelsFromFeed`).
  * - `efforts` comes from `supportedReasoningEfforts` when it is an array — each
- *   element a non-empty trimmed string, or an object whose `effort`/`id`/`name`
- *   is one; blanks skipped, duplicates dropped keeping first-seen order. Set
+ *   element a non-empty trimmed string, or an object whose
+ *   `effort`/`reasoningEffort`/`id`/`name` is one (the app-server sends
+ *   `{ reasoningEffort, description }` elements); blanks skipped, duplicates
+ *   dropped keeping first-seen order. Set
  *   only when the resulting list is non-empty.
  * - `defaultEffort` is the first non-empty trimmed string of
  *   `defaultReasoningEffort`, `defaultEffort`; kept only when `efforts` is
@@ -218,6 +274,9 @@ function appServerModelItems(payload: unknown): readonly unknown[] {
     return [];
   }
   const obj = payload as Record<string, unknown>;
+  if (Array.isArray(obj['data'])) {
+    return obj['data'];
+  }
   if (Array.isArray(obj['models'])) {
     return obj['models'];
   }
@@ -239,7 +298,7 @@ function codexEntryFromItem(item: unknown): ModelEntry | undefined {
     id = trimmed.length > 0 ? trimmed : undefined;
   } else if (typeof item === 'object' && item !== null) {
     const raw = item as Record<string, unknown>;
-    id = firstNonEmptyString([raw['id'], raw['model'], raw['slug']]);
+    id = firstNonEmptyString([raw['model'], raw['id'], raw['slug']]);
     label = firstNonEmptyString([raw['displayName'], raw['name']]);
     efforts = effortsFromSupported(raw['supportedReasoningEfforts']);
     defaultEffort = firstNonEmptyString([raw['defaultReasoningEffort'], raw['defaultEffort']]);
@@ -277,7 +336,8 @@ function effortsFromSupported(value: unknown): readonly string[] | undefined {
   for (const element of value) {
     let effort: unknown = element;
     if (typeof element === 'object' && element !== null) {
-      effort = (element as Record<string, unknown>)['effort'] ?? (element as Record<string, unknown>)['id'] ?? (element as Record<string, unknown>)['name'];
+      const raw = element as Record<string, unknown>;
+      effort = raw['effort'] ?? raw['reasoningEffort'] ?? raw['id'] ?? raw['name'];
     }
     if (typeof effort !== 'string') {
       continue;
@@ -704,8 +764,17 @@ export class CodexAdapter implements Adapter {
    * failure — `undefined` means "keep the curated `CODEX_MODELS`/`CODEX_EFFORTS`
    * list"; returning the curated list here would falsely mark it refreshed.
    *
+   * `model/list` is sent with `includeHidden` and `limit`
+   * ({@link codexModelListParams}), and a non-empty `nextCursor` is followed on
+   * the next consecutive request id — up to
+   * {@link CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES} pages, all within the SAME
+   * wall-clock timebox — so a paged catalogue arrives whole; a repeated cursor
+   * ends pagination. A failed or timed-out FOLLOW-UP page settles with the
+   * pages already received, while a first-page failure still resolves
+   * `undefined` (keep the curated list, marked stale).
+   *
    * Framing is line-delimited JSON (JSONL), one object per line, never
-   * `Content-Length` framing. Only the two responses carrying our request ids
+   * `Content-Length` framing. Only the responses carrying our own request ids
    * are consumed: server notifications and server→client requests are ignored,
    * never answered. The child is killed and its stdin ended on EVERY exit path
    * (success, error, timeout, abort) via the single idempotent `finish`, and
@@ -735,6 +804,15 @@ export class CodexAdapter implements Adapter {
         let buffer = '';
         let settled = false;
         let abortListener: (() => void) | undefined;
+        // Page accumulation: the entries collected so far, their ids for
+        // cross-page de-duplication, the id the NEXT model/list reply must
+        // carry, the page count against the hard cap, and the cursors already
+        // followed (a repeated cursor ends pagination).
+        const collected: ModelEntry[] = [];
+        const collectedIds = new Set<string>();
+        let pendingListId = CODEX_APP_SERVER_MODEL_LIST_ID;
+        let pageCount = 0;
+        const seenCursors = new Set<string>();
 
         // Single idempotent settle path: clears the timer, detaches the abort
         // listener, ends stdin, kills the child on EVERY path, and resolves.
@@ -763,12 +841,27 @@ export class CodexAdapter implements Adapter {
           resolve(result);
         };
 
+        // A failure, exit, close or timeout AFTER at least one page settles
+        // with the pages already received; with no page at all it still
+        // settles `undefined` (keep the curated list).
+        const settleWithPages = (reason?: string): void => finish(collected.length > 0 ? [...collected] : undefined, reason);
+
+        // Append one page's entries, first occurrence of an id winning.
+        const appendPage = (payload: unknown): void => {
+          for (const entry of codexModelsFromAppServer(payload)) {
+            if (!collectedIds.has(entry.id)) {
+              collectedIds.add(entry.id);
+              collected.push(entry);
+            }
+          }
+        };
+
         // The hard wall-clock timebox; unref'd so a stray timer can never hold
         // the host process open. Never invoked before `timer` is initialized:
         // every settle path is asynchronous (or, for a throwing write, runs
         // after this line below).
         const timer = setTimeout(() => {
-          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after ${timeoutMs}ms`);
+          settleWithPages(`${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} timed out after ${timeoutMs}ms`);
         }, timeoutMs);
         timer.unref?.();
 
@@ -776,8 +869,9 @@ export class CodexAdapter implements Adapter {
           try {
             child.stdin.write(`${JSON.stringify(message)}\n`);
           } catch {
-            // A write to a dead pipe finishes `undefined`, never throws.
-            finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} stdin write failed`);
+            // A write to a dead pipe settles with the pages already received
+            // (none on the first page → `undefined`), never throws.
+            settleWithPages(`${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} stdin write failed`);
             return;
           }
         };
@@ -801,22 +895,44 @@ export class CodexAdapter implements Adapter {
           }
           const raw = message as { id?: unknown; error?: unknown; result?: unknown };
           // Only a *truthy* `error` property counts as a failure; anything
-          // without one of our two ids (server notifications, server→client
-          // requests) never reaches here and is never answered.
+          // without one of our own ids (server notifications, server→client
+          // requests, a late reply for an already-collected page) never reaches
+          // here and is never answered.
           if (raw.id === CODEX_APP_SERVER_INITIALIZE_ID) {
             if (raw.error) {
               finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} initialize failed`);
               return;
             }
             writeMessage({ jsonrpc: '2.0', method: CODEX_APP_SERVER_INITIALIZED_NOTIFICATION, params: {} });
-            writeMessage({ jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, method: CODEX_APP_SERVER_MODEL_LIST_METHOD, params: {} });
+            writeMessage({
+              jsonrpc: '2.0',
+              id: CODEX_APP_SERVER_MODEL_LIST_ID,
+              method: CODEX_APP_SERVER_MODEL_LIST_METHOD,
+              params: codexModelListParams(),
+            });
             return;
           }
-          if (raw.id === CODEX_APP_SERVER_MODEL_LIST_ID) {
-            finish(
-              codexModelsFromAppServer(raw.result),
-              raw.error ? `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} model/list failed` : undefined,
-            );
+          if (raw.id === pendingListId) {
+            if (raw.error) {
+              settleWithPages(`${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} model/list failed`);
+              return;
+            }
+            appendPage(raw.result);
+            pageCount += 1;
+            const cursor = codexNextCursor(raw.result);
+            if (cursor !== undefined && !seenCursors.has(cursor) && pageCount < CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES) {
+              seenCursors.add(cursor);
+              pendingListId += 1;
+              writeMessage({
+                jsonrpc: '2.0',
+                id: pendingListId,
+                method: CODEX_APP_SERVER_MODEL_LIST_METHOD,
+                params: codexModelListParams(cursor),
+              });
+              return;
+            }
+            // An absent, blank, repeated or cap-exceeding cursor ends pagination.
+            finish([...collected]);
           }
         };
 
@@ -852,8 +968,7 @@ export class CodexAdapter implements Adapter {
         child.on('error', (...args: unknown[]) => {
           const err = args[0];
           const code = err !== null && typeof err === 'object' && 'code' in err ? (err as { code?: unknown }).code : undefined;
-          finish(
-            undefined,
+          settleWithPages(
             code === 'ENOENT'
               ? `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} was not found on PATH`
               : `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} spawn failed${err instanceof Error && err.message.length > 0 ? `: ${err.message}` : ''}`,
@@ -861,11 +976,11 @@ export class CodexAdapter implements Adapter {
         });
 
         child.on('exit', (...args: unknown[]) => {
-          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} exited (code ${String(args[0])}) before the model list arrived`);
+          settleWithPages(`${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} exited (code ${String(args[0])}) before the model list arrived`);
         });
 
         child.on('close', () => {
-          finish(undefined, `${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} closed before the model list arrived`);
+          settleWithPages(`${CODEX_BIN} ${CODEX_APP_SERVER_SUBCOMMAND} closed before the model list arrived`);
         });
 
         if (ctx.signal !== undefined) {

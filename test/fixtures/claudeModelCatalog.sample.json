@@ -1,0 +1,81 @@
+{
+  "version": 2,
+  "fetchedAt": 1790549038273,
+  "staleAt": 1790552298140,
+  "catalog": {
+    "id": "cc-catalog-fixture",
+    "surface": "cc",
+    "state": {},
+    "config": {
+      "id": "cc",
+      "models": [
+        {
+          "id": "claude-opus-5-5",
+          "name": "Opus 5.5",
+          "short_name": "Opus",
+          "section": "main",
+          "thinking": {
+            "type": "effort",
+            "effort_options": [
+              { "id": "low", "name": "Low" },
+              { "id": "medium", "name": "Medium", "badge": { "message": "Default", "variant": "neutral" } },
+              { "id": "high", "name": "High" },
+              { "id": "xhigh", "name": "Extra" },
+              { "id": "max", "name": "Max" }
+            ]
+          }
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Opus 4.7",
+          "section": "overflow",
+          "thinking": {
+            "type": "effort",
+            "effort_options": [
+              { "id": "low" },
+              { "id": "high", "badge": { "message": "Default" } }
+            ]
+          }
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Sonnet 5",
+          "section": "main",
+          "thinking": {
+            "type": "effort",
+            "effort_options": [
+              { "id": "low", "name": "Low" },
+              { "id": "high", "name": "High", "badge": { "message": "Default" } }
+            ]
+          }
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Haiku 4.5",
+          "section": "main",
+          "thinking": { "type": "none" }
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Sonnet 5 duplicate",
+          "section": "overflow"
+        },
+        {
+          "id": "gpt-5",
+          "name": "Not Claude",
+          "section": "main"
+        },
+        {
+          "id": "claude-label-equals-id",
+          "name": "claude-label-equals-id",
+          "section": "overflow"
+        },
+        {
+          "id": "   ",
+          "name": "blank",
+          "section": "main"
+        }
+      ]
+    }
+  }
+}

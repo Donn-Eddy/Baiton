@@ -168,8 +168,9 @@ describe('askRelayKind selection', () => {
 
 /**
  * The snapshot overlay (model-selector-refresh T03): `agentCapabilities(table)`
- * overlays the refreshed per-source lists onto the curated builtin table while
- * antigravity stays untouched, `claude-sonnet-5` always remains selectable for
+ * overlays the refreshed per-source lists onto the curated builtin table —
+ * antigravity included since codex-opencode-dropdown-fix T04 —
+ * `claude-sonnet-5` always remains selectable for
  * claude, an empty refreshed list never wipes a curated one, and staleness
  * metadata is carried through. The no-argument path stays byte-identical to
  * the pre-T03 behaviour (no metadata keys, fresh non-aliased arrays).
@@ -179,13 +180,27 @@ describe('agentCapabilities snapshot overlay', () => {
     const caps = agentCapabilities();
     assert.deepStrictEqual(caps, builtinAgentCapabilities());
     for (const [agent, entry] of Object.entries(caps)) {
-      for (const key of ['modelEntries', 'source', 'stale', 'staleReason', 'fetchedAt']) {
+      for (const key of ['source', 'stale', 'staleReason', 'fetchedAt']) {
         assert.strictEqual(
           Object.prototype.hasOwnProperty.call(entry, key),
           false,
           `${agent} must not carry a ${key} key on the no-snapshot path`,
         );
       }
+      // `modelEntries` is a per-agent rule: only antigravity's curated table
+      // carries per-model detail (its families' own effort suffixes).
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(entry, 'modelEntries'),
+        agent === 'antigravity',
+        `${agent} modelEntries presence on the no-snapshot path`,
+      );
+    }
+    assert.deepStrictEqual(
+      caps.antigravity.modelEntries?.map((entry) => entry.id),
+      Object.keys(ANTIGRAVITY_MODELS),
+    );
+    for (const entry of caps.antigravity.modelEntries ?? []) {
+      assert.deepStrictEqual([...(entry.efforts ?? [])], ANTIGRAVITY_MODELS[entry.id], entry.id);
     }
   });
 
@@ -215,6 +230,31 @@ describe('agentCapabilities snapshot overlay', () => {
       claude: snap('claude', ['claude-sonnet-5', 'claude-opus-5-5']),
     }).claude;
     assert.strictEqual(withDefault.models.filter((m) => m === 'claude-sonnet-5').length, 1);
+  });
+
+  it('a claude snapshot carrying per-model efforts (the local catalog) uses the union, not the builtin list', () => {
+    const entries: ModelEntry[] = [
+      { id: 'claude-opus-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+      { id: 'claude-sonnet-5', efforts: ['low', 'high'], defaultEffort: 'high' },
+    ];
+    const claude = agentCapabilities({ claude: snap('claude', entries) }).claude;
+    // The union of the entries' own levels, not the snapshot-less builtin path.
+    assert.deepStrictEqual(claude.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.strictEqual(claude.modelEntries?.[0].defaultEffort, 'medium');
+    assert.deepStrictEqual([...(claude.modelEntries?.[1].efforts ?? [])], ['low', 'high']);
+  });
+
+  it('the builtin claude table exposes the corrected curated ids and effort vocabulary', () => {
+    const curated = ['claude-sonnet-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001'];
+    assert.deepStrictEqual([...builtinAgentCapabilities().claude.models], curated);
+    assert.deepStrictEqual([...builtinAgentCapabilities().claude.efforts], [...CLAUDE_EFFORTS]);
+    assert.deepStrictEqual([...agentCapabilities().claude.models], curated);
+    // An empty claude snapshot keeps the curated efforts (and the required
+    // default is still appended by the overlay's mergePreservingExisting).
+    const empty = agentCapabilities({ claude: snap('claude', [], { source: 'builtin', stale: true }) }).claude;
+    assert.deepStrictEqual([...empty.efforts], [...CLAUDE_EFFORTS]);
+    assert.strictEqual(empty.source, 'builtin');
+    assert.ok(empty.models.includes('claude-sonnet-5'));
   });
 
   it('codex falls back to the per-model efforts union; snapshot-level efforts win', () => {
@@ -279,15 +319,52 @@ describe('agentCapabilities snapshot overlay', () => {
     assert.strictEqual(Object.prototype.hasOwnProperty.call(codex, 'modelEntries'), false);
   });
 
-  it('antigravity is never overlaid, even with a fully populated table', () => {
+  it('antigravity is overlaid from its own snapshot', () => {
     const table: ModelCatalogTable = {
       claude: snap('claude', ['claude-opus-5-5']),
       codex: snap('codex', ['gpt-6-astra']),
       opencode: snap('opencode', ['anthropic/claude-sonnet-5']),
+      antigravity: snap('antigravity', [
+        { id: 'gemini-4.0-flash', efforts: ['low', 'high'] },
+        { id: 'claude-sonnet-5-0' },
+      ]),
       'models.dev': snap('models.dev', ['some-model']),
     };
-    assert.deepStrictEqual(agentCapabilities(table).antigravity, agentCapabilities().antigravity);
-    assert.deepStrictEqual(agentCapabilities(table).antigravity.models, Object.keys(ANTIGRAVITY_MODELS));
+    const antigravity = agentCapabilities(table).antigravity;
+    assert.deepStrictEqual(antigravity.models, ['gemini-4.0-flash', 'claude-sonnet-5-0']);
+    assert.deepStrictEqual(antigravity.efforts, ['low', 'high']);
+    assert.deepStrictEqual(
+      antigravity.modelEntries?.map((entry) => entry.id),
+      ['gemini-4.0-flash', 'claude-sonnet-5-0'],
+    );
+    assert.strictEqual(antigravity.source, 'live');
+    assert.strictEqual(antigravity.stale, false);
+  });
+
+  it('an empty antigravity snapshot keeps the curated list with the snapshot metadata', () => {
+    const antigravity = agentCapabilities({
+      antigravity: { ...snap('antigravity', []), stale: true, staleReason: 'agy models failed' },
+    }).antigravity;
+    assert.deepStrictEqual(antigravity.models, builtinAgentCapabilities().antigravity.models);
+    assert.deepStrictEqual(antigravity.efforts, builtinAgentCapabilities().antigravity.efforts);
+    assert.strictEqual(antigravity.source, 'builtin');
+    assert.strictEqual(antigravity.stale, true);
+    assert.strictEqual(antigravity.staleReason, 'agy models failed');
+
+    // The curated per-family detail survives a failed refresh, as a fresh copy
+    // (codex-opencode-dropdown-fix T06).
+    assert.deepStrictEqual(
+      antigravity.modelEntries?.map((entry) => entry.id),
+      Object.keys(ANTIGRAVITY_MODELS),
+    );
+    for (const entry of antigravity.modelEntries ?? []) {
+      assert.deepStrictEqual(
+        [...(entry.efforts ?? [])],
+        ANTIGRAVITY_MODELS[entry.id as keyof typeof ANTIGRAVITY_MODELS],
+        entry.id,
+      );
+    }
+    assert.notStrictEqual(antigravity.modelEntries, builtinAgentCapabilities().antigravity.modelEntries);
   });
 
   it('the overlay path still returns fresh, non-aliased objects on every call', () => {
@@ -313,12 +390,12 @@ describe('agentCapabilities snapshot overlay', () => {
 });
 
 /**
- * The agent→source mapping (model-selector-refresh T03): only the three
- * discovery-capable agents are mapped, every value is a valid
- * {@link CatalogSourceId}, and antigravity is deliberately absent.
+ * The agent→source mapping (model-selector-refresh T03, widened by
+ * codex-opencode-dropdown-fix T04): every agent is mapped — antigravity's
+ * source is `agy models` — and every value is a valid {@link CatalogSourceId}.
  */
 describe('AGENT_CATALOG_SOURCE', () => {
-  it('maps only claude/codex/opencode to valid catalog source ids', () => {
+  it('maps every agent to a valid catalog source id', () => {
     const keys = Object.keys(AGENT_CATALOG_SOURCE);
     for (const key of keys) {
       assert.ok(
@@ -326,10 +403,11 @@ describe('AGENT_CATALOG_SOURCE', () => {
         `${key} must be a known agent id`,
       );
     }
-    for (const agent of ['claude', 'codex', 'opencode']) {
+    for (const agent of ['claude', 'codex', 'opencode', 'antigravity']) {
       assert.ok(keys.includes(agent), `${agent} must be mapped`);
     }
-    assert.strictEqual(AGENT_CATALOG_SOURCE.antigravity, undefined);
+    assert.strictEqual(AGENT_CATALOG_SOURCE.antigravity, 'antigravity');
+    assert.deepStrictEqual([...keys].sort(), [...createAdapterRegistry().ids].sort());
     for (const sourceId of Object.values(AGENT_CATALOG_SOURCE)) {
       assert.ok(isCatalogSourceId(sourceId), `${String(sourceId)} must be a catalog source id`);
     }
@@ -337,17 +415,16 @@ describe('AGENT_CATALOG_SOURCE', () => {
 });
 
 /**
- * The `Adapter.discoverModels` seam (model-selector-refresh T03): optional,
- * and no adapter implements it yet — antigravity deliberately never will.
+ * The `Adapter.discoverModels` seam (model-selector-refresh T03): still
+ * optional on the interface, but every shipped adapter now implements it —
+ * antigravity included (codex-opencode-dropdown-fix T04).
  */
 describe('discoverModels seam', () => {
-  it('no adapter implements discoverModels yet; antigravity never will', () => {
+  it('every adapter implements discoverModels', () => {
     const registry = createAdapterRegistry();
     for (const id of registry.ids) {
-      const seam = registry.require(id).discoverModels;
-      assert.ok(seam === undefined || typeof seam === 'function');
+      assert.strictEqual(typeof registry.require(id).discoverModels, 'function', id);
     }
-    assert.strictEqual(createAdapterRegistry().require('antigravity').discoverModels, undefined);
   });
 });
 

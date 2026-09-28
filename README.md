@@ -730,13 +730,31 @@ The configuration form is the **Configuration** section of the Baiton view in th
 
 - **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
-  populated from installed adapters, a per-agent model dropdown with curated
-  suggestions and an "Other…" free-form escape hatch (along with documentation
-  links for open-ended ecosystems like OpenCode), a per-agent effort dropdown
-  (`(default)` when unset, curated supported levels, or free-form entry where
-  open); the three numeric limits with their bounds (`plan_review_rounds` 0–10,
-  `exec_attempts` 1–10, `stall_notice_minutes` 1–1440); and `git.remote` and
-  `git.base`.
+  populated from installed adapters; a **per-agent model dropdown populated from
+  the refreshed per-agent list** — Codex, Claude, OpenCode and Antigravity alike,
+  OpenCode included now that `opencode models --verbose` makes its list
+  discoverable — with each agent's curated table as the offline fallback and
+  documentation links for open-ended ecosystems like OpenCode; and a per-agent
+  **effort dropdown offering the SELECTED model's own levels** when its source
+  discloses them (a Codex model's `supportedReasoningEfforts`, a Claude model's
+  `thinking.effort_options`, an OpenCode model's `variants` keys, an Antigravity
+  family's suffixes) and the agent-level union otherwise. That control shows
+  `(default: <effort>)` when the source names a default for the selected model,
+  leaves only `(default)` for a model that discloses no levels at all (a
+  `thinking: none` Claude model, an Antigravity fixed id such as
+  `gpt-oss-120b-medium`), and stays a free-text field only while the agent-level
+  union is empty. Validation is always against the **agent-level** union, so an
+  effort that is valid for another model of the same agent is never rejected.
+  Alongside these: the three numeric limits with their bounds
+  (`plan_review_rounds` 0–10, `exec_attempts` 1–10, `stall_notice_minutes`
+  1–1440); and `git.remote` and `git.base`.
+- **Configured values the list lacks** — a configured model (or effort) that the
+  refreshed list does not carry renders as an editable **"Other…"** entry rather
+  than as an ordinary option: the select shows `Other…`, the text input keeps the
+  value and stays editable, and that choice is sticky across refreshes — a later
+  refresh whose list happens to contain the typed value does not snap the control
+  back to a dropdown mid-edit. The value stays inside the validated set, so
+  saving is never blocked by it.
 - **Preservation of unmanaged keys** — every key outside the form's managed set
   (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
   agent, model, or effort values) is preserved on save. Written JSON is formatted
@@ -774,20 +792,64 @@ sources on every window reload, with the curated catalogues in each adapter
 module as the offline fallback.
 
 - **Sources**:
-  - `claude` — the `anthropic` provider of the models.dev feed
-    (`https://models.dev/api.json?type=all`, `src/orchestrator/modelsDev.ts`),
-    filtered to `claude-*` ids. Effort levels stay the CLI's own
-    `low|medium|high`, and `claude-sonnet-5` (the `defaultConfig()` default) is
-    always present in the list.
+  - `claude` — **the Claude CLI's own local model catalog first**:
+    `$CLAUDE_CONFIG_DIR`/`~/.claude/cache/model-catalog/*-cc.json` (version 2,
+    `catalog.surface: "cc"`), the freshest file by `fetchedAt`. It is read for
+    ids, labels and per-model effort levels only, with `main` section entries
+    before `overflow` ones, and each model's `thinking.effort_options` becoming
+    its own effort list with the `Default`-badged option as its default. No
+    network and no credential are needed for this path, and a catalog past its
+    `staleAt` is still used — it is the CLI's own last-known-good picker list,
+    and refreshing it is the CLI's job. The `anthropic` provider of the
+    models.dev feed (`https://models.dev/api.json?type=all`,
+    `src/orchestrator/modelsDev.ts`), filtered to `claude-*` ids and carrying no
+    per-model levels, is the **fallback only**, used when the local catalog is
+    missing, unreadable, malformed or empty; both unusable keeps the previous
+    list and marks it stale. The CLI-wide effort vocabulary is
+    `low|medium|high|xhigh|max` (`claude --help`), and `claude-sonnet-5` (the
+    `defaultConfig()` default) is always present in the list.
   - `codex` — `codex app-server` over stdio JSON-RPC (`initialize` →
-    `initialized` → `model/list`, JSONL framed). Each model's
-    `supportedReasoningEfforts` becomes its effort list, and the union of those
-    levels becomes the agent's effort dropdown.
-  - `opencode` — `GET /api/model` from a running or freshly started server,
-    with `opencode models` stdout as the fallback and validation source. Ids are
-    `provider/model` and effort stays free text (`--variant`).
-  - `antigravity` (`agy`) — unchanged: its curated catalogue and model/effort
-    mapping are never overlaid (it has no `AGENT_CATALOG_SOURCE` entry).
+    `initialized` → `model/list`, JSONL framed). `model/list` is sent with
+    `includeHidden: true` and a `limit`, and a non-empty `nextCursor` is
+    followed within the same timebox, so a paged catalogue arrives whole. The
+    reply is read from `result.data` (or `models`/`items`), each model's id from
+    its `model` field, and each model's `supportedReasoningEfforts` (string or
+    `{ reasoningEffort }` elements) becomes its effort list, whose union becomes
+    the agent's effort dropdown. A failed or timed-out follow-up page keeps the
+    pages already received; a first-page failure keeps the previous list and
+    marks it stale.
+  - `opencode` — **`opencode models --verbose` first**. After each
+    `provider/model` line the verbose listing prints that model's JSON, from
+    which Baiton reads only `name` (the label) and the **keys** of `variants` —
+    which are exactly the values `--variant` accepts for that model. A model
+    whose `variants` is `{}` has no reasoning levels, and the agent-level effort
+    list is the ordered union of the per-model keys. OpenCode marks no default
+    variant, so no effort is ever defaulted, and an empty effort still emits no
+    `--variant` flag (Baiton never emits `--variant default`, which OpenCode
+    reserves for "no variant"). `GET /api/model` — from a server named by
+    `serverBaseUrl`/`OPENCODE_SERVER`, else one freshly started `opencode serve
+    --hostname 127.0.0.1 --port 0` — is the **ids-and-labels-only fallback**,
+    used only when the CLI is unavailable, fails, times out or yields nothing
+    (its `variants` is empty in this build); on the primary path no server is
+    started at all. The two endpoints that *do* carry the variant map,
+    `/provider` and `/config/providers`, are **never** requested: both return the
+    configured provider API keys in clear text. Ids are `provider/model`. Both
+    sources unusable keeps the previous list and marks it stale.
+  - `antigravity` (`agy`) — **`agy models`**, which prints one `id<TAB>label`
+    line per model. Two or more sibling ids sharing a stem with distinct
+    `low|medium|high|max` suffixes become **one family** whose suffixes are its
+    effort list and whose label drops the trailing `(Level)`
+    (`gemini-3.8-flash-low|-medium|-high` → `gemini-3.8-flash`, efforts `low,
+    medium, high`, label `Gemini 3.8 Flash`); every other id — including a lone
+    suffixed one like `gpt-oss-120b-medium` — is a **fixed id with no effort**,
+    because agy rejects `--effort` for it. The agent-level effort list is the
+    ordered union of the families' levels. agy exits 0 even on an error and
+    prints its spinner on stderr, so only **stdout** is judged and the exit code
+    is never inspected; agy needs its own sign-in and no Baiton credential. A
+    failure, timeout or empty listing keeps the previous list and marks it stale.
+    The launch argv is unchanged: `antigravityModelFlags` still maps
+    model+effort through the curated `ANTIGRAVITY_MODELS` table, which stays the
+    builtin seed and fallback and is still refreshed by hand.
   - models.dev additionally backs the orchestrator's **provider** catalog — see
     **Providers and models**.
 - **How a refresh behaves**: `ModelDiscoveryService`
@@ -799,25 +861,51 @@ module as the offline fallback.
   the next window shows those lists immediately (`source: 'cached'`) before any
   fetch. A failed refresh keeps the previous list and marks it `stale` with a
   reason; a later success clears both. **Baiton: Refresh Model Lists**
-  (`baiton.refreshModels`) re-runs the whole thing on demand.
+  (`baiton.refreshModels`) re-runs the whole thing on demand. The **config panel
+  is wired to that live catalog** — `registerConfigPanel` receives
+  `getCapabilities: () => agentCapabilities(catalogStore.table())` and
+  `onDidChangeCapabilities` over the `ModelDiscoveryService`, and
+  `src/extension.ts` builds the store and the service *before* registering the
+  panel — so the panel's FIRST `loaded` already shows the rehydrated `cached`
+  lists, and every later refresh reaches an open panel as an in-place
+  `optionsChanged` option update that never re-posts `loaded` and never disturbs
+  unsaved edits, focus or caret position.
 - **What survives**: existing `.baiton/config.json` values and the persisted
   `ModelSelection` always round-trip. An agent, model or effort that is
   configured but missing from a refreshed list is appended to the dropdown and
   stays editable and saveable, and the config panel shows a per-agent
-  "stale — showing last known models" note beside it.
-- **Privacy**: discovery reads no secret, credential or API key. Only model ids
-  and labels leave the host, and webviews receive ids, labels and stale
-  metadata only.
+  "stale — showing last known models" note beside it. A refresh that **fails,
+  times out or returns malformed data never blanks a selector and never rewrites
+  a custom value**: the last known-good list — ids, labels, per-model effort
+  levels and defaults alike — stays on screen behind that note with its
+  last-successful `fetchedAt`, and the appended configured value stays selected
+  as its editable "Other…" entry.
+- **Privacy**: discovery reads no secret, credential or API key. The OpenCode
+  verbose listing is read only for ids, each model's `name` and its `variants`
+  keys — never for provider credentials, which is why the key-bearing
+  `/provider` and `/config/providers` endpoints are never requested. The
+  `agy models` listing is likewise read only for model ids and labels, and agy
+  signs in on its own so no Baiton credential is involved. Only model
+  ids, labels and effort names leave the host, and webviews receive ids, labels,
+  effort names and stale metadata only.
 - **CLI capabilities** (probe findings that still hold):
   - `claude` provides no `models` subcommand; non-flag arguments launch an
     interactive prompt session. Health and auth are probed via `claude doctor`.
+    The CLI nonetheless maintains the local `cache/model-catalog/*-cc.json`
+    cache described above, which is the authoritative list its own model picker
+    shows — so discovery reads that file instead of asking the CLI.
   - `antigravity` (`agy`) provides `agy models`, which queries the available
-    Gemini and Claude models from the API.
+    Gemini and Claude models from the API — Baiton's antigravity discovery
+    source. It prints `id<TAB>label` lines in which the effort levels are
+    encoded as id suffixes (`-low|-medium|-high`), not as a separate column.
   - `codex` provides no `models` subcommand; positional arguments launch
     interactive sessions. `codex doctor` reports status.
-  - `opencode` provides `opencode models`, listing provider-prefixed model
-    identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`). Any
-    provider/model string is accepted and effort is open-ended.
+  - `opencode` provides `opencode models --verbose`, listing provider-prefixed
+    model identifiers (e.g. `anthropic/claude-3-7-sonnet`, `openai/o3-mini`)
+    each followed by that model's JSON, whose `name` is its label and whose
+    `variants` keys are its accepted `--variant` values. Any provider/model
+    string is still accepted, and a model that discloses no variants keeps an
+    open-ended effort.
 
 The curated catalogues remain the builtin fallback: a first-ever window with no
 persisted snapshot and no network still renders every dropdown, and the

@@ -9,12 +9,15 @@ import {
   type FeedFetcher,
 } from '../src/activation/modelDiscovery';
 import {
+  CATALOG_SOURCE_IDS,
   CatalogStore,
   MODEL_CATALOG_MEMENTO_KEY,
   MODEL_CATALOG_PERSIST_VERSION,
   type ModelCatalogTable,
+  type ModelEntry,
 } from '../src/orchestrator/modelCatalog';
 import { parseModelsDevFeed, type ModelsDevFeed } from '../src/orchestrator/modelsDev';
+import { AGENT_CATALOG_SOURCE, capabilitiesFromEntries } from '../src/adapter/adapter';
 import type {
   Adapter,
   AgentCapabilities,
@@ -72,7 +75,7 @@ function fakeAdapter(
   return { adapter, calls };
 }
 
-/** An adapter fake with no discovery seam at all (the antigravity shape). */
+/** An adapter fake with no discovery seam at all (a hypothetical adapter without one). */
 function seamlessAdapter(id: AgentId): Adapter {
   return { id, discoverModels: undefined } as unknown as Adapter;
 }
@@ -98,6 +101,15 @@ function fakeRegistry(map: Partial<Record<AgentId, Adapter>>): DiscoveryRegistry
 /** Capabilities with the given model ids (and optional efforts). */
 function caps(models: readonly string[], efforts: readonly string[] = []): AgentCapabilities {
   return { models: [...models], efforts: [...efforts] };
+}
+
+/**
+ * Capabilities built from per-model {@link ModelEntry} records, so a source can
+ * return a family entry with its own `efforts` beside a fixed entry with an
+ * explicitly empty one.
+ */
+function entryCaps(entries: readonly ModelEntry[], efforts?: readonly string[]): AgentCapabilities {
+  return capabilitiesFromEntries(entries, efforts !== undefined ? { efforts } : undefined);
 }
 
 /** A manually settled promise, so a refresh can be held mid-flight. */
@@ -397,6 +409,56 @@ describe('T07 ModelDiscoveryService.refresh', () => {
     assert.strictEqual(codex.calls[1].cwd, '/tmp/workspace');
     service.dispose();
   });
+
+  it('drives the antigravity source through the same per-agent loop', async () => {
+    const spy = feedSpy(fakeFeed());
+    const antigravity = fakeAdapter('antigravity', async () =>
+      entryCaps([
+        { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro', efforts: ['low', 'high'] },
+        { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', efforts: [] },
+      ]),
+    );
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({
+        antigravity: antigravity.adapter,
+        codex: fakeAdapter('codex', async () => caps(['gpt-5-codex'], ['high'])).adapter,
+      }),
+      fetchFeed: spy.fetchFeed,
+    });
+
+    const table = await service.refresh();
+
+    assert.strictEqual(antigravity.calls.length, 1, 'the antigravity adapter runs exactly once');
+    assert.strictEqual(
+      antigravity.calls[0].feed,
+      undefined,
+      'only claude is handed the shared feed',
+    );
+    assert.strictEqual(table['antigravity']?.source, 'live');
+    assert.strictEqual(table['antigravity']?.stale, false);
+    assert.deepStrictEqual(table['antigravity']?.models, [
+      { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro', efforts: ['low', 'high'] },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', efforts: [] },
+    ]);
+    assert.deepStrictEqual(
+      table['antigravity']?.efforts,
+      ['low', 'high'],
+      'the snapshot-level efforts are the union of the per-entry levels',
+    );
+    assert.deepStrictEqual(Object.keys(table).sort(), ['antigravity', 'codex', 'models.dev']);
+
+    // antigravity is the fifth catalog source, mapped like every other agent.
+    assert.strictEqual(AGENT_CATALOG_SOURCE['antigravity'], 'antigravity');
+    assert.deepStrictEqual(CATALOG_SOURCE_IDS, [
+      'claude',
+      'codex',
+      'opencode',
+      'antigravity',
+      'models.dev',
+    ]);
+    service.dispose();
+  });
 });
 
 describe('T07 ModelDiscoveryService.onDidChange', () => {
@@ -470,6 +532,45 @@ describe('T07 ModelDiscoveryService persistence', () => {
     assert.deepStrictEqual(rehydrated['codex']?.models, [{ id: 'gpt-5-codex' }]);
     second.dispose();
   });
+
+  it('per-model efforts and defaults survive the persistence round-trip, an empty list excepted', async () => {
+    const memento = fakeMemento();
+    const service = new ModelDiscoveryService({
+      store: makeStore(memento),
+      registry: fakeRegistry({
+        antigravity: fakeAdapter('antigravity', async () =>
+          entryCaps([
+            { id: 'fam', efforts: ['low', 'high'], defaultEffort: 'high' },
+            { id: 'fixed', efforts: [] },
+          ]),
+        ).adapter,
+      }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+    });
+
+    await service.refresh();
+    service.dispose();
+
+    const second = new ModelDiscoveryService({
+      store: makeStore(memento),
+      registry: fakeRegistry({}),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+    });
+    const cached = second.table()['antigravity'];
+    assert.strictEqual(cached?.source, 'cached');
+    assert.deepStrictEqual(cached?.models[0], {
+      id: 'fam',
+      efforts: ['low', 'high'],
+      defaultEffort: 'high',
+    });
+    // `optionalStringArray` in src/orchestrator/modelCatalog.ts deliberately
+    // drops an EMPTY array, so the "this model has no levels" marker does NOT
+    // survive a reload: the rehydrated entry carries no `efforts` key at all and
+    // the webview falls back to the agent-level union for it. That is the
+    // recorded behaviour, not a defect to fix here.
+    assert.deepStrictEqual(cached?.models[1], { id: 'fixed' });
+    second.dispose();
+  });
 });
 
 describe('T07 ModelDiscoveryService supersede and dispose', () => {
@@ -541,13 +642,12 @@ describe('T07 ModelDiscoveryService supersede and dispose', () => {
 });
 
 describe('T07 builtinCatalogFetches', () => {
-  it('seeds exactly the three CLI sources with fresh objects on every call', () => {
+  it('seeds exactly the four CLI sources with fresh objects on every call', () => {
     const first = builtinCatalogFetches();
-    assert.deepStrictEqual(Object.keys(first).sort(), ['claude', 'codex', 'opencode']);
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(first, 'antigravity'),
-      false,
-      'antigravity has no catalog source and is never seeded',
+    assert.deepStrictEqual(Object.keys(first).sort(), ['antigravity', 'claude', 'codex', 'opencode']);
+    assert.ok(
+      (first['antigravity']?.models ?? []).some((entry) => (entry.efforts ?? []).length > 0),
+      "antigravity's seed carries per-family efforts on its entries",
     );
     assert.strictEqual(first['models.dev'], undefined, 'there is no curated feed fallback');
     assert.ok(

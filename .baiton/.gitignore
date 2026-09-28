@@ -3,6 +3,7 @@
 /chat.jsonl
 /chat/
 /runs/
+/worktrees/
 specs/*/chat.jsonl
 specs/*/chat/
 specs/*/runs.jsonl

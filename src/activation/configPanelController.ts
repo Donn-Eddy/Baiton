@@ -17,7 +17,10 @@
  * same applies to {@link ConfigPanelController.refreshOptions}, which rebuilds
  * the options from the live capability table plus the last form read from disk:
  * a model or effort that is configured but missing from a refreshed list is
- * appended again, exactly as on load (model-selector-refresh T08).
+ * appended again, exactly as on load (model-selector-refresh T08). That same
+ * round-trip pass is what marks a configured-but-unlisted model `custom: true`
+ * in `modelEntries`, so the webview can render it as an editable "Other…" entry
+ * instead of an ordinary option (codex-opencode-dropdown-fix T06).
  */
 import * as path from 'path';
 import { mkdir } from 'fs/promises';

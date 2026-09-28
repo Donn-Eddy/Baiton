@@ -18,8 +18,12 @@ import {
   CODEX_APP_SERVER_MODEL_LIST_METHOD,
   CODEX_APP_SERVER_INITIALIZE_ID,
   CODEX_APP_SERVER_MODEL_LIST_ID,
+  CODEX_APP_SERVER_MODEL_LIST_PAGE_SIZE,
+  CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES,
   CODEX_APP_SERVER_CLIENT_INFO,
+  codexModelListParams,
   codexModelsFromAppServer,
+  codexNextCursor,
   codexPermissionFlags,
   codexEffortFlags,
   codexSystemPromptFlags,
@@ -1011,6 +1015,75 @@ describe('codexModelsFromAppServer (model-selector-refresh T05)', () => {
     });
     assert.deepStrictEqual(codexModelsFromAppServer(frozen), [{ id: 'c' }]);
   });
+
+  it('prefers result.data over models/items and parses its entries', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ data: [{ model: 'gpt-6-astra' }], models: [{ id: 'ignored' }] }),
+      [{ id: 'gpt-6-astra' }],
+    );
+    // Without `data`, `models` still wins over `items`.
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ models: [{ id: 'from-models' }], items: [{ id: 'ignored' }] }),
+      [{ id: 'from-models' }],
+    );
+  });
+
+  it('takes the id from model before id and slug', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({ data: [{ model: ' m ', id: 'i', slug: 's' }] }),
+      [{ id: 'm' }],
+    );
+  });
+
+  it('reads reasoningEffort objects in supportedReasoningEfforts', () => {
+    assert.deepStrictEqual(
+      codexModelsFromAppServer({
+        data: [
+          {
+            model: 'm',
+            supportedReasoningEfforts: [
+              { reasoningEffort: 'low', description: 'x' },
+              { reasoningEffort: ' high ' },
+              { reasoningEffort: '' },
+              { reasoningEffort: 'low' },
+            ],
+            defaultReasoningEffort: 'low',
+          },
+        ],
+      }),
+      [{ id: 'm', efforts: ['low', 'high'], defaultEffort: 'low' }],
+    );
+  });
+
+  it('codexNextCursor reads nextCursor/next_cursor and nothing else', () => {
+    assert.strictEqual(codexNextCursor({ nextCursor: ' c1 ' }), 'c1');
+    assert.strictEqual(codexNextCursor({ next_cursor: 'c2' }), 'c2');
+    assert.strictEqual(codexNextCursor({ nextCursor: 'first', next_cursor: 'second' }), 'first');
+    assert.strictEqual(codexNextCursor({ nextCursor: '   ' }), undefined);
+    assert.strictEqual(codexNextCursor({ nextCursor: 42 }), undefined);
+    assert.strictEqual(codexNextCursor({ cursor: 'c' }), undefined);
+    assert.strictEqual(codexNextCursor({}), undefined);
+    // An array carries no pagination, and neither does a non-object.
+    assert.strictEqual(codexNextCursor([{ nextCursor: 'c' }]), undefined);
+    assert.strictEqual(codexNextCursor(undefined), undefined);
+    assert.strictEqual(codexNextCursor(null), undefined);
+    assert.strictEqual(codexNextCursor('c1'), undefined);
+    assert.strictEqual(codexNextCursor(7), undefined);
+  });
+
+  it('codexModelListParams sends includeHidden and limit, and cursor only when non-empty', () => {
+    assert.deepStrictEqual(codexModelListParams(), {
+      includeHidden: true,
+      limit: CODEX_APP_SERVER_MODEL_LIST_PAGE_SIZE,
+    });
+    assert.deepStrictEqual(codexModelListParams('c1'), {
+      includeHidden: true,
+      limit: CODEX_APP_SERVER_MODEL_LIST_PAGE_SIZE,
+      cursor: 'c1',
+    });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(codexModelListParams(''), 'cursor'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(codexModelListParams(undefined), 'cursor'), false);
+  });
 });
 
 /**
@@ -1234,7 +1307,7 @@ describe('CodexAdapter.discoverModels (model-selector-refresh T05)', () => {
     assert.deepStrictEqual(parsedWrites(fake), [
       { jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, method: CODEX_APP_SERVER_INITIALIZE_METHOD, params: { clientInfo: CODEX_APP_SERVER_CLIENT_INFO } },
       { jsonrpc: '2.0', method: CODEX_APP_SERVER_INITIALIZED_NOTIFICATION, params: {} },
-      { jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, method: CODEX_APP_SERVER_MODEL_LIST_METHOD, params: {} },
+      { jsonrpc: '2.0', id: CODEX_APP_SERVER_MODEL_LIST_ID, method: CODEX_APP_SERVER_MODEL_LIST_METHOD, params: codexModelListParams() },
     ]);
     assert.ok(fake.kills() >= 1);
     // A late exit after the settlement is a no-op: the result must not change.
@@ -1498,9 +1571,163 @@ describe('CodexAdapter.discoverModels (model-selector-refresh T05)', () => {
     );
   });
 
-  it('the registry wires discoverModels for codex (not antigravity), and the no-arg constructor still works', () => {
+  /**
+   * Build a script whose `initialize` succeeds and whose `model/list` pages are
+   * answered in order from `pages`, keyed by the consecutive request ids
+   * starting at CODEX_APP_SERVER_MODEL_LIST_ID. A page given as `undefined`
+   * is never answered; a page given as a function is invoked with the api so
+   * the test can exit, close or error instead of replying.
+   */
+  function pagedScript(pages: readonly unknown[]): AppServerScript {
+    return {
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+          return;
+        }
+        if (typeof message.id !== 'number' || message.id < CODEX_APP_SERVER_MODEL_LIST_ID) {
+          return;
+        }
+        const page = pages[message.id - CODEX_APP_SERVER_MODEL_LIST_ID];
+        if (page === undefined) {
+          return; // never answered
+        }
+        if (typeof page === 'function') {
+          (page as (api: FakeApi, id: number) => void)(api, message.id);
+          return;
+        }
+        api.reply({ jsonrpc: '2.0', id: message.id, result: page });
+      },
+    };
+  }
+
+  /** The parsed `model/list` requests among a fake's writes. */
+  function modelListWrites(fake: { writes: string[] }): Array<{ id?: unknown; params?: unknown }> {
+    return parsedWrites(fake).filter(
+      (message): message is { id?: unknown; params?: unknown; method?: unknown } =>
+        typeof message === 'object'
+        && message !== null
+        && (message as { method?: unknown }).method === CODEX_APP_SERVER_MODEL_LIST_METHOD,
+    );
+  }
+
+  it('follows nextCursor across pages, concatenating and de-duplicating the ids', async () => {
+    const fake = fakeAppServer(pagedScript([
+      { data: [{ model: 'a' }, { model: 'b' }], nextCursor: 'c1' },
+      { data: [{ model: 'b' }, { model: 'c' }], nextCursor: '' },
+    ]));
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined, 'a paged catalogue must resolve capabilities');
+    assert.deepStrictEqual([...caps.models], ['a', 'b', 'c']);
+    const writes = parsedWrites(fake);
+    assert.strictEqual(writes.length, 4, `expected initialize, initialized and two model/list pages: ${JSON.stringify(writes)}`);
+    assert.deepStrictEqual(writes[3], {
+      jsonrpc: '2.0',
+      id: CODEX_APP_SERVER_MODEL_LIST_ID + 1,
+      method: CODEX_APP_SERVER_MODEL_LIST_METHOD,
+      params: codexModelListParams('c1'),
+    });
+  });
+
+  it('a failed follow-up page settles with the pages already received', async () => {
+    const logs: string[] = [];
+    const fake = fakeAppServer(pagedScript([
+      { data: [{ model: 'a' }], nextCursor: 'c1' },
+      (api: FakeApi, id: number) => api.reply({ jsonrpc: '2.0', id, error: { code: -32000, message: 'nope' } }),
+    ]));
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(
+      ctx({ log: (message) => logs.push(message) }),
+    );
+    assert.ok(caps !== undefined, 'a failed follow-up must keep the first page');
+    assert.deepStrictEqual([...caps.models], ['a']);
+    assert.ok(logs.length > 0 && logs.every((message) => message.length > 0), `expected a logged reason: ${JSON.stringify(logs)}`);
+  });
+
+  it('a timed-out follow-up page settles with the pages already received', async () => {
+    const fake = fakeAppServer(pagedScript([
+      { data: [{ model: 'a' }], nextCursor: 'c1' },
+      undefined, // the second page is never answered: the timebox expires
+    ]));
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(
+      ctx({ timeoutMs: 40 }),
+    );
+    assert.ok(caps !== undefined, 'a timed-out follow-up must keep the first page');
+    assert.deepStrictEqual([...caps.models], ['a']);
+    assert.ok(fake.kills() >= 1);
+  });
+
+  it('an early exit after one page settles with that page, and before any page resolves undefined', async () => {
+    const afterFake = fakeAppServer(pagedScript([
+      { data: [{ model: 'a' }], nextCursor: 'c1' },
+      (api: FakeApi) => api.exit(1),
+    ]));
+    const afterCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: afterFake.spawner }).discoverModels(ctx());
+    assert.ok(afterCaps !== undefined, 'an exit after a page must keep that page');
+    assert.deepStrictEqual([...afterCaps.models], ['a']);
+    assert.ok(afterFake.kills() >= 1);
+
+    const beforeFake = fakeAppServer(pagedScript([(api: FakeApi) => api.exit(1)]));
+    assert.strictEqual(
+      await new CodexAdapter({ spawnAppServer: beforeFake.spawner }).discoverModels(ctx()),
+      undefined,
+      'an exit before any page must keep the curated list',
+    );
+    assert.ok(beforeFake.kills() >= 1);
+  });
+
+  it('a repeated cursor and the page cap both end pagination', async () => {
+    // The same cursor every time: the second page sees a cursor it already
+    // followed and stops, so exactly two model/list requests are written.
+    const repeatFake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (typeof message.id === 'number' && message.id >= CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({ jsonrpc: '2.0', id: message.id, result: { data: [{ model: `m-${message.id}` }], nextCursor: 'same' } });
+        }
+      },
+    });
+    const repeatCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: repeatFake.spawner }).discoverModels(ctx());
+    assert.ok(repeatCaps !== undefined, 'a repeated cursor must settle, not hang');
+    assert.deepStrictEqual([...repeatCaps.models], ['m-2', 'm-3']);
+    const repeatWrites = modelListWrites(repeatFake);
+    assert.strictEqual(repeatWrites.length, 2, `a repeated cursor stops after one follow-up: ${JSON.stringify(repeatWrites)}`);
+    assert.ok(repeatWrites.length <= CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES);
+
+    // A fresh cursor every time is bounded only by the hard page cap.
+    const cappedFake = fakeAppServer({
+      onLine(line, api) {
+        const message = line as { id?: unknown };
+        if (message.id === CODEX_APP_SERVER_INITIALIZE_ID) {
+          api.reply({ jsonrpc: '2.0', id: CODEX_APP_SERVER_INITIALIZE_ID, result: {} });
+        } else if (typeof message.id === 'number' && message.id >= CODEX_APP_SERVER_MODEL_LIST_ID) {
+          api.reply({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { data: [{ model: `m-${message.id}` }], nextCursor: `c-${message.id}` },
+          });
+        }
+      },
+    });
+    const cappedCaps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: cappedFake.spawner }).discoverModels(ctx());
+    assert.ok(cappedCaps !== undefined, 'an endless cursor must settle at the page cap, not hang');
+    assert.strictEqual(cappedCaps.models.length, CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES);
+    assert.strictEqual(modelListWrites(cappedFake).length, CODEX_APP_SERVER_MODEL_LIST_MAX_PAGES);
+  });
+
+  it('keeps a hidden model in the list', async () => {
+    const fake = fakeAppServer(pagedScript([
+      { data: [{ model: 'gpt-6-astra' }, { model: 'internal-x', hidden: true }] },
+    ]));
+    const caps: AgentCapabilities | undefined = await new CodexAdapter({ spawnAppServer: fake.spawner }).discoverModels(ctx());
+    assert.ok(caps !== undefined);
+    assert.deepStrictEqual([...caps.models], ['gpt-6-astra', 'internal-x']);
+  });
+
+  it('the registry wires discoverModels for codex, and the no-arg constructor still works', () => {
     assert.strictEqual(typeof createAdapterRegistry().require('codex').discoverModels, 'function');
-    assert.strictEqual(createAdapterRegistry().require('antigravity').discoverModels, undefined);
 
     // The additive, optional constructor parameter keeps every no-arg call
     // site (src/adapter/index.ts, the launch property test, engineFacade

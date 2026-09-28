@@ -58,13 +58,17 @@ export interface DiscoveryContext {
 /**
  * Which {@link CatalogSourceId} an agent's models come from.
  *
- * `antigravity` is deliberately ABSENT — its curated `ANTIGRAVITY_MODELS`
- * catalogue and `antigravityModelFlags` mapping are never overlaid.
+ * Every agent is mapped: the `antigravity` source's list comes from
+ * `agy models` (`AntigravityAdapter.discoverModels`), while
+ * `antigravityModelFlags` still maps a launch's model+effort through the
+ * curated `ANTIGRAVITY_MODELS` table, which stays the builtin seed and
+ * fallback.
  */
 export const AGENT_CATALOG_SOURCE: Readonly<Partial<Record<AgentId, CatalogSourceId>>> = {
   claude: 'claude',
   codex: 'codex',
   opencode: 'opencode',
+  antigravity: 'antigravity',
 };
 
 /**
@@ -294,8 +298,8 @@ export interface Adapter {
    * work and resolve `undefined` once aborted) and finish within
    * `ctx.timeoutMs`, tearing down any child process or socket they started;
    * and they MUST NOT read secrets — only model ids and labels leave the
-   * host. No adapter implements it yet (the per-CLI implementations land in
-   * later todos, and antigravity never will — see `AGENT_CATALOG_SOURCE`).
+   * host. Every adapter implements it: claude, codex, opencode and
+   * antigravity.
    */
   discoverModels?(ctx: DiscoveryContext): Promise<AgentCapabilities | undefined>;
 }

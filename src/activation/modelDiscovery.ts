@@ -56,9 +56,9 @@ import type { Result } from '../model/result';
  * the curated lists as `source: 'builtin'`.
  *
  * Derived from {@link builtinAgentCapabilities} through
- * {@link AGENT_CATALOG_SOURCE}: an agent with no catalog source is skipped,
- * which is exactly what keeps `antigravity`'s curated catalogue out of the
- * store, and `'models.dev'` gets no entry because there is no curated feed
+ * {@link AGENT_CATALOG_SOURCE}: every agent is mapped, so all four CLI sources
+ * (claude, codex, opencode, antigravity) are seeded, and only `'models.dev'`
+ * gets no entry because there is no curated feed
  * fallback. Pure, never throws, and returns a fresh object on every call
  * (the factory convention of `builtinAgentCapabilities`/`defaultConfig`).
  */
@@ -232,8 +232,10 @@ export class ModelDiscoveryService {
   }
 
   /**
-   * Refresh one agent-backed source. An adapter with no `discoverModels` seam
-   * (antigravity) never touches the store at all: no snapshot, no stale mark.
+   * Refresh one agent-backed source. Every agent is mapped to a source and
+   * every shipped adapter implements `discoverModels`; a hypothetical adapter
+   * without that seam never touches the store at all: no snapshot, no stale
+   * mark.
    */
   private async refreshAgent(
     agent: AgentId,
