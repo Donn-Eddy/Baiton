@@ -30,6 +30,9 @@
  * src/orchestrator/copilotClient.ts documents: this module and its test load
  * with no running host, even though its siblings under `src/activation/`
  * legally import the host.
+ *
+ * Every client it builds reports failed calls to the injected `apiLog` (the
+ * provider id as surface); the router itself logs nothing to it.
  */
 import type * as vscode from 'vscode';
 import {
@@ -64,6 +67,7 @@ import {
   providerSecretKey,
   sameModelSelection,
 } from '../orchestrator/providers';
+import type { ApiLog } from '../orchestrator/apiLog';
 import type { ModelCatalogSnapshot } from '../orchestrator/modelCatalog';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
 
@@ -154,6 +158,8 @@ export interface ProviderRouterConfig {
   /** Overrides client construction in tests; defaults to the real clients. */
   createClient?: (id: ProviderId, router: ProviderRouter) => ModelClient;
   log?: (message: string) => void;
+  /** Receives one entry per failed outbound completion call made by the clients this router builds; defaults to noopApiLog inside each client. Not consulted when `createClient` overrides construction. */
+  apiLog?: ApiLog;
 }
 
 /** One provider's current availability as reported to the webview. */
@@ -189,6 +195,8 @@ export interface ClientConfigDeps {
    * built still supplies the base URL on the next request.
    */
   catalog?: () => readonly ProviderInfo[];
+  /** Forwarded as ModelClientConfig.apiLog; the provider id becomes ModelClientConfig.surfaceId. */
+  apiLog?: ApiLog;
 }
 
 /**
@@ -224,7 +232,8 @@ export function resolveProviderEndpoint(
  *   the header style (`opencode` gets the OpenCode User-Agent / session
  *   headers, built ONCE per client so the `x-opencode-session` uuid stays
  *   stable per conversation);
- * - streaming and `max_tokens` pass through unchanged.
+ * - streaming and `max_tokens` pass through unchanged;
+ * - failed calls are reported to `deps.apiLog` with the provider id as `surfaceId`.
  *
  * Calling it with `id === 'copilot'` is a programmer error: Copilot is built
  * separately (see {@link ProviderRouter}).
@@ -251,7 +260,11 @@ export function providerClientConfig(id: ProviderId, deps: ClientConfigDeps): Mo
     isStreaming: () => deps.settings.isStreaming(),
     getMaxTokens: () => deps.settings.getMaxTokens(),
     dialect: dialectFor(info.dialect),
+    surfaceId: id,
   };
+  if (deps.apiLog !== undefined) {
+    config.apiLog = deps.apiLog;
+  }
   if (info.headerStyle === 'opencode') {
     config.extraHeaders = openCodeExtraHeaders({ version: deps.version });
   }
@@ -456,6 +469,7 @@ export class ProviderRouter implements ModelClient {
         client = new CopilotModelClient({
           api: this.config.lm,
           getModel: () => this.modelFor('copilot'),
+          ...(this.config.apiLog !== undefined ? { apiLog: this.config.apiLog } : {}),
         });
       } else {
         client = new OpenAiModelClient(
@@ -465,6 +479,7 @@ export class ProviderRouter implements ModelClient {
             version: this.config.version,
             getModel: () => this.modelFor(id),
             catalog: () => this.catalogEntries(),
+            apiLog: this.config.apiLog,
           }),
         );
       }
