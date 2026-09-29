@@ -18,9 +18,11 @@
  *   ask-then-agree-then-`draft_spec` flow (Req 11.2).
  * - **drive** — a spec whose `status` has moved past `draft`: the next-legal-
  *   stage table, one todo at a time, and `submit_pr` when every todo is done.
- * - **run** — a non-Spec Workspace conversation (Bug/Quick/Refactor/
+ * - **run** — a non-Spec Workspace conversation (Default/Bug/Quick/Refactor/
  *   Investigate): inspect with the read tools, state the work and the guessed
  *   files, then dispatch one spec-less run with `start_run` or `investigate`.
+ *   Default first recommends one concrete mode and confirms it with `ask_user`
+ *   before dispatching.
  *
  * The phase is derived from the spec content itself through {@link phaseFor},
  * which the activation layer also calls to pick the tool surface it advertises,
@@ -41,7 +43,7 @@
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
  */
-import { DEFAULT_MODE, isSpecless, RunMode } from '../model/mode';
+import { isSpecless, RunMode } from '../model/mode';
 import { parseSpec } from '../model/parser';
 import { OrchestratorPhase } from './guard';
 
@@ -97,8 +99,9 @@ const DRIVE_STATUSES: readonly string[] = [
  * `controlTools.ts` advertises both `start_run` and `investigate` on
  * `phases: ['run']`.
  *
- * @param mode The conversation's mode. Absent or `'spec'` means the phase is
- *   computed exactly as before. The spec-less branch is guarded on
+ * @param mode The conversation's mode. Absent means Spec (the literal `'spec'`,
+ *   not DEFAULT_MODE, which is now Default), so the phase is computed exactly
+ *   as before. The spec-less branch is guarded on
  *   `kind.kind === 'workspace'`, so a spec conversation ignores the argument
  *   entirely and keeps its gather/drive split even if a caller passes `'bug'`:
  *   that is the deliberate encoding of "a spec conversation is always Spec".
@@ -106,7 +109,7 @@ const DRIVE_STATUSES: readonly string[] = [
 export function phaseFor(
   kind: ConversationKind,
   specContent?: string,
-  mode: RunMode = DEFAULT_MODE,
+  mode: RunMode = 'spec',
 ): OrchestratorPhase {
   if (kind.kind === 'workspace' && isSpecless(mode)) {
     return 'run';
@@ -220,9 +223,29 @@ export type SpeclessMode = Exclude<RunMode, 'spec'>;
  * {@link RunMode} later fails to compile until its flow text exists. Each entry
  * follows the same beats the OVERVIEW names — inspect with the read tools, state
  * the work in one line, name the guessed files, call the run tool — and names
- * the tool call exactly as `controlTools.ts` declares it.
+ * the tool call exactly as `controlTools.ts` declares it. The `default` entry
+ * adds a recommend-and-confirm step before those beats: recommend one mode, one
+ * `ask_user` card, dispatch the pick with `start_run`/`investigate`; a Spec
+ * pick and a decline dispatch nothing.
  */
 export const RUN_FLOW_TEXT: Readonly<Record<SpeclessMode, string>> = {
+  default: [
+    'Default flow:',
+    '1. When the user describes work, inspect the repository with the read tools until you can state it in one line.',
+    '2. State the work in one line and name the files it most likely touches. A short, honest guess is better than a long one.',
+    '3. Recommend exactly one mode for it — Spec, Bug, Quick, Refactor or Investigate — with a one-line why.',
+    '4. Call `ask_user` once, with the five modes as `options` (ids `spec`, `bug`, `quick`, `refactor`, `investigate`), your recommendation first, and `allow_free_text` set.',
+    '5. Dispatch only the mode the user picks, from this conversation:',
+    '- Bug -> call `start_run` with `mode: "bug"`, the one-line defect as `statement`, the guessed `files`, and the reproduction as `reproduction`. Ask for the reproduction with `ask_user` first if the user has not said.',
+    '- Quick -> call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
+    '- Refactor -> call `start_run` with `mode: "refactor"`, the one-line statement of the restructure, and the guessed `files`.',
+    '- Investigate -> call `investigate` with the one-line `question` and the guessed `files`.',
+    '- Spec -> dispatch nothing. Tell the user to change the Mode control in the composer to Spec and send the request again.',
+    '6. If the user declines the question, dispatch nothing: quote the refusal and stop. If they type an answer instead of picking, dispatch nothing: respond to what they typed.',
+    '7. After a dispatch, tell the user what started: a run on its own branch and worktree that they can watch in the Runs view and merge when it passes, or an investigation whose finding will appear in the chat and under `.baiton/runs/`.',
+    'Never dispatch without the user\'s pick. The dispatch tool shows its own confirm card, and that card still decides whether the work starts.',
+    'Leave the Mode control as it is: a pick dispatches from Default and does not change this conversation\'s mode.',
+  ].join('\n'),
   bug: [
     'Bug flow:',
     '1. When the user reports a defect, inspect the repository with the read tools until you can state the defect in one line.',
@@ -339,7 +362,7 @@ const FRONTMATTER_TEXT = [
 export function buildSystemPrompt(
   kind: ConversationKind,
   specContent?: string,
-  mode: RunMode = DEFAULT_MODE,
+  mode: RunMode = 'spec',
 ): string {
   // The `run` phase — every spec-less mode on a workspace conversation. The
   // guard is written as `mode !== 'spec'` rather than `isSpecless(mode)` so
