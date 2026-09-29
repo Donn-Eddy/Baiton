@@ -17,6 +17,8 @@
  * `vscode` itself as the injected `api`.
  */
 import type * as vscode from 'vscode';
+import { noopApiLog } from './apiLog';
+import type { ApiFailureKind, ApiLog } from './apiLog';
 import {
   ChatMessage,
   CompletionRequest,
@@ -60,6 +62,8 @@ export interface CopilotClientConfig {
   getModel: ModelProvider;
   /** Consent justification; defaults to `COPILOT_JUSTIFICATION`. */
   justification?: string;
+  /** Receives one entry per failed Copilot call; defaults to {@link noopApiLog}. Successful calls never touch it. */
+  apiLog?: ApiLog;
 }
 
 /**
@@ -165,6 +169,13 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Reads an error's string `code` defensively; undefined when absent or not a string. */
+function copilotErrorCode(err: unknown): string | undefined {
+  return typeof (err as { code?: unknown } | null)?.code === 'string'
+    ? (err as { code: string }).code
+    : undefined;
+}
+
 /**
  * Maps a `vscode.lm` failure to the error classes the chat controller already
  * branches on. Codes are read defensively rather than via `instanceof
@@ -176,10 +187,7 @@ export function mapCopilotError(err: unknown): Error {
   if (err instanceof MissingConfigError || err instanceof UnreachableEndpointError) {
     return err;
   }
-  const code =
-    typeof (err as { code?: unknown } | null)?.code === 'string'
-      ? (err as { code: string }).code
-      : undefined;
+  const code = copilotErrorCode(err);
   if (code === 'NotFound') {
     // The saved model no longer exists (models change over time).
     return new MissingConfigError('model');
@@ -194,14 +202,50 @@ export function mapCopilotError(err: unknown): Error {
 }
 
 /**
+ * Classifies a `vscode.lm` failure for the API failure log. Returns undefined
+ * for failures that are config rather than call failures (a missing, stale or
+ * `NotFound` model), which are not logged.
+ */
+export function classifyCopilotFailure(err: unknown): ApiFailureKind | undefined {
+  if (err instanceof MissingConfigError) {
+    return undefined;
+  }
+  const code = copilotErrorCode(err);
+  if (code === 'NotFound') {
+    return undefined;
+  }
+  if (code === 'NoPermissions' || code === 'Blocked') {
+    return 'refused';
+  }
+  return 'connection';
+}
+
+/**
  * Copilot-backed {@link ModelClient} over `vscode.lm`. The `vscode` surface is
  * injected so the module stays host-import-free and testable against the fake.
+ * Failed calls are written to `config.apiLog`; a missing, stale or NotFound
+ * model and a pre-start abort are not logged, and successful calls never are.
  */
 export class CopilotModelClient implements ModelClient {
   private readonly config: CopilotClientConfig;
 
   constructor(config: CopilotClientConfig) {
     this.config = config;
+  }
+
+  /** Records one failed completion call. Never throws, so the caller's thrown error is unchanged. */
+  private logFailure(model: string, kind: ApiFailureKind, message: string): void {
+    try {
+      (this.config.apiLog ?? noopApiLog).failure({
+        surface: COPILOT_VENDOR,
+        operation: 'completion',
+        target: model,
+        kind,
+        message,
+      });
+    } catch {
+      /* logging must never change the call's outcome */
+    }
   }
 
   public async complete(req: CompletionRequest): Promise<CompletionResult> {
@@ -212,6 +256,7 @@ export class CopilotModelClient implements ModelClient {
       throw new MissingConfigError('model');
     }
     if (req.signal.aborted) {
+      // Not logged: no call has been made yet.
       throw new UnreachableEndpointError('request was aborted before it started');
     }
     let chat: vscode.LanguageModelChat;
@@ -222,7 +267,12 @@ export class CopilotModelClient implements ModelClient {
       }
       chat = found;
     } catch (err) {
-      throw mapCopilotError(err);
+      const mapped = mapCopilotError(err);
+      const kind = classifyCopilotFailure(err);
+      if (kind !== undefined) {
+        this.logFailure(model, kind, mapped.message);
+      }
+      throw mapped;
     }
 
     const tools = req.tools ?? [];
@@ -270,7 +320,16 @@ export class CopilotModelClient implements ModelClient {
         // Anything else (data parts, future parts) is ignored.
       }
     } catch (err) {
-      throw req.signal.aborted ? new UnreachableEndpointError('request was aborted') : mapCopilotError(err);
+      if (req.signal.aborted) {
+        this.logFailure(model, 'abort', 'request was aborted');
+        throw new UnreachableEndpointError('request was aborted');
+      }
+      const mapped = mapCopilotError(err);
+      const kind = classifyCopilotFailure(err);
+      if (kind !== undefined) {
+        this.logFailure(model, kind, mapped.message);
+      }
+      throw mapped;
     } finally {
       req.signal.removeEventListener('abort', onAbort);
       cts.dispose();

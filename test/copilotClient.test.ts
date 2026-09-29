@@ -33,6 +33,7 @@ import {
   toCopilotMessages,
   toCopilotTools,
 } from '../src/orchestrator/copilotClient';
+import { ApiLog, createApiLog } from '../src/orchestrator/apiLog';
 import {
   ChatMessage,
   CompletionRequest,
@@ -592,6 +593,142 @@ describe('Copilot orchestrator model client', () => {
       ]);
       const client = new CopilotModelClient({ api: clientApi, getModel: async () => 'fake-model' });
       await assert.rejects(client.complete(req()), UnreachableEndpointError);
+    });
+  });
+
+  describe('API failure log', () => {
+    function recordingLog(): { log: ApiLog; lines: string[] } {
+      const lines: string[] = [];
+      return { log: createApiLog((l) => lines.push(l), () => 'T'), lines };
+    }
+    function clientWith(log: ApiLog): CopilotModelClient {
+      return new CopilotModelClient({ api: clientApi, getModel: async () => 'fake-model', apiLog: log });
+    }
+
+    it('writes nothing on success', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [new fakeMod.LanguageModelTextPart('hi')] })]);
+      await clientWith(log).complete(req());
+      assert.strictEqual(lines.length, 0);
+    });
+
+    it('logs NoPermissions from sendRequest as refused', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [], rejectWith: fakeMod.LanguageModelError.NoPermissions('denied') })]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion refused'), lines[0]);
+      assert.ok(lines[0].includes(' fake-model '), lines[0]);
+      assert.ok(lines[0].includes('NoPermissions'), lines[0]);
+    });
+
+    it('logs Blocked from sendRequest as refused', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [], rejectWith: fakeMod.LanguageModelError.Blocked('quota') })]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion refused'), lines[0]);
+      assert.ok(lines[0].includes('Blocked'), lines[0]);
+    });
+
+    it('logs a plain sendRequest error as connection', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [], rejectWith: new Error('boom') })]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion connection'), lines[0]);
+      assert.ok(lines[0].includes('boom'), lines[0]);
+    });
+
+    it('logs a selectChatModels throw as connection', async () => {
+      const { log, lines } = recordingLog();
+      install([]);
+      const throwingApi = {
+        ...(clientApi as unknown as Record<string, unknown>),
+        lm: {
+          selectChatModels: async () => {
+            throw new Error('lm down');
+          },
+        },
+      } as unknown as CopilotVscodeApi;
+      const client = new CopilotModelClient({
+        api: throwingApi,
+        getModel: async () => 'fake-model',
+        apiLog: log,
+      });
+      await assert.rejects(client.complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion connection'), lines[0]);
+      assert.ok(lines[0].includes('lm down'), lines[0]);
+    });
+
+    it('logs an abort mid-stream as abort', async () => {
+      const { log, lines } = recordingLog();
+      const controller = new AbortController();
+      install([
+        new FakeChat({
+          parts: [new fakeMod.LanguageModelTextPart('first')],
+          throwMidStream: new Error('cancelled'),
+          onIterate: () => controller.abort(),
+        }),
+      ]);
+      await assert.rejects(
+        clientWith(log).complete(req({ signal: controller.signal })),
+        UnreachableEndpointError,
+      );
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion abort'), lines[0]);
+    });
+
+    it('logs a mid-stream Blocked throw as refused', async () => {
+      const { log, lines } = recordingLog();
+      install([
+        new FakeChat({
+          parts: [new fakeMod.LanguageModelTextPart('partial')],
+          throwMidStream: fakeMod.LanguageModelError.Blocked('quota'),
+        }),
+      ]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('copilot completion refused'), lines[0]);
+    });
+
+    it('does not log config failures or a pre-start abort', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [], rejectWith: fakeMod.LanguageModelError.NotFound('gone') })]);
+      await assert.rejects(clientWith(log).complete(req()), MissingConfigError);
+
+      install([]);
+      await assert.rejects(clientWith(log).complete(req()), MissingConfigError);
+
+      install([new FakeChat({ parts: [] })]);
+      const undef = new CopilotModelClient({ api: clientApi, getModel: async () => undefined, apiLog: log });
+      await assert.rejects(undef.complete(req()), MissingConfigError);
+
+      const controller = new AbortController();
+      controller.abort();
+      await assert.rejects(
+        clientWith(log).complete(req({ signal: controller.signal })),
+        UnreachableEndpointError,
+      );
+      assert.strictEqual(lines.length, 0);
+    });
+
+    it('redacts secrets in the logged line', async () => {
+      const { log, lines } = recordingLog();
+      install([new FakeChat({ parts: [], rejectWith: new Error('bad token Bearer abc.def.ghi') })]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes('[REDACTED]'), lines[0]);
+      assert.ok(!lines[0].includes('abc.def.ghi'), lines[0]);
+    });
+
+    it('a throwing sink does not change the rejection class', async () => {
+      const log = createApiLog(() => {
+        throw new Error('sink');
+      });
+      install([new FakeChat({ parts: [], rejectWith: new Error('boom') })]);
+      await assert.rejects(clientWith(log).complete(req()), UnreachableEndpointError);
     });
   });
 
