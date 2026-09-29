@@ -1,12 +1,12 @@
 ---
 version: 1
 name: api-error-log
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: ca295d490ab1fec41f8345a7052b2646841d7541
+branch: baiton/api-error-log
+approved_rev: b6d6439d5139694597b96a6ba326ef257b2089d346dfbd57b76f690648eeaeb2
 ---
 
 # OVERVIEW
