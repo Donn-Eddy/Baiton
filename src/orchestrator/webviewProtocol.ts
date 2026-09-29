@@ -13,7 +13,7 @@
  * host glue both speak this same contract.
  */
 
-import { DEFAULT_MODE, type RunMode } from '../model/mode';
+import type { RunMode } from '../model/mode';
 import type { InterventionAnswer, InterventionKind, InterventionOption } from './interventions';
 import type { ModelSelection, ProviderId } from './providers';
 
@@ -354,7 +354,10 @@ export function initialWebviewState(): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
-    mode: DEFAULT_MODE,
+    // Deliberately the literal 'spec', not DEFAULT_MODE: the seed is only a
+    // placeholder until the host echoes setMode, and media/protocol.js mirrors
+    // this literal by hand.
+    mode: 'spec',
     runActive: false,
     providers: [],
     selection: null,

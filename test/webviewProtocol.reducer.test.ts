@@ -885,10 +885,14 @@ describe('conversation mode and run activity', () => {
     { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }] },
   ];
 
-  it('a fresh state starts in the default mode with no run in flight', () => {
-    assert.strictEqual(initialWebviewState().mode, DEFAULT_MODE);
+  it('a fresh state starts in Spec (not DEFAULT_MODE) with no run in flight', () => {
     assert.strictEqual(initialWebviewState().mode, 'spec');
+    assert.notStrictEqual(initialWebviewState().mode, DEFAULT_MODE, 'the seed is deliberately decoupled from DEFAULT_MODE');
     assert.strictEqual(initialWebviewState().runActive, false);
+  });
+
+  it('setMode selects default', () => {
+    assert.strictEqual(reduce(initialWebviewState(), { type: 'setMode', mode: 'default' }).mode, 'default');
   });
 
   it('setMode sets every mode', () => {
