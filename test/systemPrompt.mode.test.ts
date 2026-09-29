@@ -17,9 +17,11 @@ import {
  * Unit tests for the mode-scoped system prompt (T10).
  *
  * Coverage:
- * - Spec output is byte-for-byte unchanged when `mode` is absent, `'spec'` or
- *   `DEFAULT_MODE`, for a workspace conversation and for a draft, approved and
- *   contentless spec conversation.
+ * - Spec output is byte-for-byte unchanged when `mode` is absent or `'spec'`
+ *   (and `DEFAULT_MODE` for spec conversations), for a workspace conversation
+ *   and for a draft, approved and contentless spec conversation.
+ * - `DEFAULT_MODE` on a workspace conversation is the Default run prompt.
+ * - Default's recommend-and-confirm flow text.
  * - `phaseFor` maps every spec-less mode on a workspace conversation to the
  *   single `run` phase, and Spec mode to today's `gather`.
  * - A spec conversation ignores the mode entirely: its gather/drive split and
@@ -66,12 +68,17 @@ const SPECLESS_MODES = RUN_MODES.filter(
 );
 
 describe('mode-scoped system prompt: Spec output is unchanged', () => {
-  it('builds an identical workspace prompt with no mode, "spec" and DEFAULT_MODE', () => {
+  it('builds an identical workspace prompt with no mode and "spec"', () => {
     assert.strictEqual(buildSystemPrompt(WORKSPACE), buildSystemPrompt(WORKSPACE, undefined, 'spec'));
+  });
+
+  it('builds the Default run prompt, not the Spec prompt, for DEFAULT_MODE on a workspace conversation', () => {
+    assert.strictEqual(DEFAULT_MODE, 'default');
     assert.strictEqual(
-      buildSystemPrompt(WORKSPACE),
       buildSystemPrompt(WORKSPACE, undefined, DEFAULT_MODE),
+      buildSystemPrompt(WORKSPACE, undefined, 'default'),
     );
+    assert.notStrictEqual(buildSystemPrompt(WORKSPACE, undefined, DEFAULT_MODE), buildSystemPrompt(WORKSPACE));
   });
 
   it('builds an identical draft-spec prompt with no mode, "spec" and DEFAULT_MODE', () => {
@@ -106,7 +113,10 @@ describe('mode-scoped system prompt: phaseFor mapping', () => {
   it('keeps a Spec-mode workspace conversation in gather', () => {
     assert.strictEqual(phaseFor(WORKSPACE), 'gather');
     assert.strictEqual(phaseFor(WORKSPACE, undefined, 'spec'), 'gather');
-    assert.strictEqual(phaseFor(WORKSPACE, undefined, DEFAULT_MODE), 'gather');
+  });
+
+  it('maps DEFAULT_MODE on a workspace conversation to the run phase', () => {
+    assert.strictEqual(phaseFor(WORKSPACE, undefined, DEFAULT_MODE), 'run');
   });
 
   for (const mode of SPECLESS_MODES) {
@@ -204,6 +214,79 @@ describe('mode-scoped system prompt: each mode names its own tool and framing', 
 
   it('says an investigation writes nothing', () => {
     assert.match(RUN_FLOW_TEXT.investigate, /changes nothing|read-only/i);
+  });
+});
+
+describe('mode-scoped system prompt: Default recommends and confirms', () => {
+  const flow = RUN_FLOW_TEXT.default;
+  const prompt = buildSystemPrompt(WORKSPACE, undefined, 'default');
+
+  it('puts the Default flow in the Default run prompt', () => {
+    assert.ok(prompt.includes(flow), 'flow in prompt');
+    assert.strictEqual(phaseFor(WORKSPACE, undefined, 'default'), 'run');
+  });
+
+  it('inspects with the read tools and states the work with guessed files', () => {
+    assert.match(flow, /read tools/);
+    assert.match(flow, /one line/);
+    assert.match(flow, /files/);
+  });
+
+  it('recommends exactly one mode with a why', () => {
+    assert.match(flow, /Recommend exactly one mode/);
+    assert.match(flow, /why/);
+  });
+
+  it('asks one ask_user card listing the five concrete modes, recommendation first, free text allowed', () => {
+    assert.match(flow, /`ask_user` once/);
+    assert.match(flow, /recommendation first/);
+    assert.match(flow, /allow_free_text/);
+    for (const name of ['Spec', 'Bug', 'Quick', 'Refactor', 'Investigate']) {
+      assert.ok(flow.includes(name), `names ${name}`);
+    }
+    for (const id of ['spec', 'bug', 'quick', 'refactor', 'investigate']) {
+      assert.ok(flow.includes('`' + id + '`'), `option id ${id}`);
+    }
+    assert.ok(!/`default`/.test(flow), 'Default is not offered as an option');
+  });
+
+  it('dispatches bug/quick/refactor through start_run with the picked mode and investigate through investigate', () => {
+    for (const m of ['bug', 'quick', 'refactor']) {
+      assert.ok(flow.includes('`start_run` with `mode: "' + m + '"`'), `start_run for ${m}`);
+    }
+    assert.match(flow, /call `investigate`/);
+    assert.ok(!/mode: "default"/.test(flow), 'never dispatches default');
+    assert.ok(!/mode: "spec"/.test(flow), 'never dispatches spec');
+  });
+
+  it('asks for the ask_user pick before any dispatch', () => {
+    const ask = flow.indexOf('`ask_user`');
+    assert.ok(ask >= 0 && ask < flow.indexOf('`start_run`'), 'ask before start_run');
+    assert.ok(ask < flow.indexOf('call `investigate`'), 'ask before investigate');
+  });
+
+  it('dispatches nothing for a Spec pick and points at the Mode control', () => {
+    assert.match(flow, /Spec -> dispatch nothing/);
+    assert.match(flow, /change the Mode control in the composer to Spec/);
+    assert.match(flow, /again/);
+  });
+
+  it('dispatches nothing on a decline or a typed answer', () => {
+    assert.match(flow, /declines[^\n]*dispatch nothing/);
+    assert.match(flow, /type an answer[^\n]*dispatch nothing/);
+  });
+
+  it('never dispatches without the pick and defers to the confirm card', () => {
+    assert.match(flow, /Never dispatch without the user's pick/);
+    assert.match(flow, /confirm card/);
+  });
+
+  it('leaves the Mode control as it is', () => {
+    assert.match(flow, /Leave the Mode control as it is/);
+  });
+
+  it('never mentions spec-writing tools', () => {
+    assert.ok(!/draft_spec/.test(flow), 'no draft_spec');
   });
 });
 

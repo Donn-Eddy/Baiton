@@ -678,6 +678,12 @@ cases.push({
   messages: [{ type: 'setMode', mode: 'refactor' }],
 });
 
+cases.push({
+  name: 'setMode moves Default to a concrete mode',
+  state: seed({ mode: 'default' }),
+  messages: [{ type: 'setMode', mode: 'bug' }],
+});
+
 // (54) setMode over a rich state: nothing but the mode moves
 cases.push({
   name: 'setMode leaves the rest of the state alone',

@@ -97,9 +97,9 @@ export const RUN_ID_TRAILER = 'Run-Id';
 
 /** One confirmed dispatch from the chat's run tool. */
 export interface RunPipelineRequest {
-  /** The mode the run executes as; never 'spec'. */
+  /** The mode the run executes as; never 'spec' or 'default'. */
   mode: RunMode;
-  /** What the composer's Mode select said when the run was confirmed. */
+  /** What the composer's Mode select said when the run was confirmed (may be 'default'). */
   composerMode: RunMode;
   /** True when the orchestrator proposed a mode other than composerMode. */
   explicitMode: boolean;
@@ -316,12 +316,21 @@ class DefaultRunPipeline implements RunPipeline {
   }
 
   async start(req: RunPipelineRequest): Promise<RunPipelineStart> {
-    // 1. Mode. Belt and braces: `isSpecless` is `mode !== 'spec'`, but a run
-    //    pipeline for a spec conversation would write under `.baiton/specs/`.
+    // 1. Mode. Neither 'spec' nor 'default' is ever a run. Belt and braces:
+    //    a run pipeline for a spec conversation would write under
+    //    `.baiton/specs/`, and 'default' is spec-less per `isSpecless` but only
+    //    recommends a concrete mode.
     if (req.mode === 'spec' || !isSpecless(req.mode)) {
       return refuse({
         kind: 'invalid-mode',
         message: 'mode "spec" has no run pipeline: a spec conversation dispatches draft_spec',
+      });
+    }
+    if (req.mode === 'default') {
+      return refuse({
+        kind: 'invalid-mode',
+        message:
+          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a spec conversation dispatches draft_spec',
       });
     }
 

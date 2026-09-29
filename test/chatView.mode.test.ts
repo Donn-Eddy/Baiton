@@ -375,16 +375,16 @@ function plainClone(value: unknown): unknown {
 }
 
 describe('chat view Mode select (dispatch-modes T12)', () => {
-  it('seed paint: the five modes in RUN_MODES order, Spec selected, enabled', () => {
+  it('seed paint: the six modes in RUN_MODES order, Spec selected, enabled', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     assert.deepStrictEqual(
       modes.options.map((o) => o.value),
-      ['spec', 'bug', 'quick', 'refactor', 'investigate'],
+      ['default', 'spec', 'bug', 'quick', 'refactor', 'investigate'],
     );
     assert.deepStrictEqual(
       modes.options.map((o) => o.textContent),
-      ['Spec', 'Bug', 'Quick', 'Refactor', 'Investigate'],
+      ['Default', 'Spec', 'Bug', 'Quick', 'Refactor', 'Investigate'],
     );
     for (const opt of modes.options) {
       assert.strictEqual(opt.dataset.mode, opt.value);
@@ -401,7 +401,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     assert.strictEqual(modes.value, 'bug');
     view.send({ type: 'setMode', mode: 'investigate' });
     assert.strictEqual(modes.value, 'investigate');
-    assert.strictEqual(modes.options.length, 5, 'the option list is built once');
+    assert.strictEqual(modes.options.length, 6, 'the option list is built once');
   });
 
   it('picking a mode posts exactly one setMode and does not move the control', () => {
@@ -481,6 +481,40 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     assert.strictEqual(modes.value, 'quick', "the host's mode survives the pinning");
   });
 
+  it('the host echo selects Default, and picking Default posts setMode default', () => {
+    const echoed = loadChatView();
+    echoed.send({ type: 'setMode', mode: 'default' });
+    assert.strictEqual(echoed.ids['mode-select'].value, 'default');
+    assert.strictEqual(echoed.ids['mode-select'].disabled, false);
+    assert.strictEqual(echoed.posted.length, 0);
+
+    const view = loadChatView();
+    const modes = view.ids['mode-select'];
+    modes.selectedIndex = modes.options.findIndex((o) => o.value === 'default');
+    modes.fire('change', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [{ type: 'setMode', mode: 'default' }]);
+    assert.strictEqual(modes.value, 'spec', 'snapped back; only the host echo moves it');
+  });
+
+  it('a spec conversation pins to Spec even when the host mode is Default', () => {
+    const view = loadChatView();
+    const modes = view.ids['mode-select'];
+    view.send({ type: 'setMode', mode: 'default' });
+    view.send({
+      type: 'setConversations',
+      items: [
+        { id: 'workspace', label: 'Workspace' },
+        { id: 'my-spec', label: 'my-spec' },
+      ],
+    });
+    view.send({ type: 'setActive', conversationId: 'my-spec' });
+    assert.strictEqual(modes.value, 'spec');
+    assert.strictEqual(modes.disabled, true);
+    view.send({ type: 'setActive', conversationId: 'workspace' });
+    assert.strictEqual(modes.value, 'default');
+    assert.strictEqual(modes.disabled, false);
+  });
+
   it('an unknown mode falls back to Spec rather than blanking the control', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
@@ -488,6 +522,6 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     // off-union value; the renderer must still show a mode.
     view.send({ type: 'setMode', mode: 'not-a-mode' } as unknown as HostToWebview);
     assert.strictEqual(modes.value, 'spec');
-    assert.strictEqual(modes.options.length, 5);
+    assert.strictEqual(modes.options.length, 6);
   });
 });

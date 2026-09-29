@@ -74,10 +74,11 @@
 
   const MAX_INPUT_CHARS = 100000;
 
-  // Mirrors RUN_MODES in src/model/mode.ts, in the same order (spec first). This
-  // is a plain browser script and cannot import it, so the list and its labels
-  // are kept in sync by hand, exactly as protocol.js keeps DEFAULT_MODE.
+  // Mirrors RUN_MODES in src/model/mode.ts, in the same order (default first,
+  // then spec). This is a plain browser script and cannot import it, so the list
+  // and its labels are kept in sync by hand.
   const MODE_OPTIONS = [
+    { id: 'default', label: 'Default' },
     { id: 'spec', label: 'Spec' },
     { id: 'bug', label: 'Bug' },
     { id: 'quick', label: 'Quick' },
@@ -1228,7 +1229,7 @@
     modeSelect.value = pinned ? 'spec' : state.mode;
     if (!modeSelect.value) {
       // An unknown mode matches no option and leaves the value empty; fall back
-      // to Spec rather than showing a blank control.
+      // to Spec (not DEFAULT_MODE) rather than showing a blank control.
       modeSelect.value = 'spec';
     }
     modeSelect.disabled = state.busy || state.runActive === true || pinned;

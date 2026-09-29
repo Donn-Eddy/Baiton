@@ -375,7 +375,8 @@ export function registerCommands(
    * persists it under the same `workspaceState` key (see its `modeMemory` dep
    * below), so reading the key is how the run-pipeline seam learns the composer
    * mode without reaching into the controller. A stale or off-union stored value
-   * falls back to Spec, exactly as the controller's own seeding does.
+   * falls back to DEFAULT_MODE (Default), exactly as the controller's own seeding does.
+   * A spec conversation never reaches this fallback: it does not dispatch spec-less runs.
    */
   const composerMode = (): RunMode => {
     const stored = context.workspaceState.get<string>(CHAT_MODE_KEY);

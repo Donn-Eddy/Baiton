@@ -22,8 +22,10 @@
       records: [],
       busy: false,
       autoMode: false,
-      // Mirrors DEFAULT_MODE in src/model/mode.ts; this is a plain browser
-      // script and cannot import it, so the literal is kept in sync by hand.
+      // Mirrors initialWebviewState() in src/orchestrator/webviewProtocol.ts: the
+      // literal 'spec', deliberately not DEFAULT_MODE (now 'default'); the host's
+      // setMode echo supplies the real mode. This is a plain browser script and
+      // cannot import it, so the literal is kept in sync by hand.
       mode: 'spec',
       runActive: false,
       providers: [],

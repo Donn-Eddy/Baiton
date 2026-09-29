@@ -3,8 +3,10 @@
 Spec-driven development with heterogeneous coding CLI agents. Baiton is an
 open-source VS Code extension: a chat orchestrator authors and drives spec
 files, and the editor renders those specs and their todos. A conversation also
-runs in one of five **modes** — Spec, Bug, Quick, Refactor and Investigate — and
-the non-Spec modes dispatch spec-less runs, each on its own branch and worktree.
+runs in one of six **modes** — Default, Spec, Bug, Quick, Refactor and
+Investigate. A Workspace conversation starts in Default, which recommends one of
+the other five, and the non-Spec modes dispatch spec-less runs, each on its own
+branch and worktree.
 
 ## The Baiton views
 
@@ -120,11 +122,14 @@ for the orchestrator to second-guess.
 
 ### Conversation modes
 
-A conversation runs in one of five modes, which decides the pipeline a dispatch
+A conversation runs in one of six modes, which decides the pipeline a dispatch
 from it runs. The composer's Mode control shows them by these labels, and the
-ids are `spec | bug | quick | refactor | investigate` (`RunMode` in
-`src/model/mode.ts`):
+ids are `default | spec | bug | quick | refactor | investigate` (`RunMode` in
+`src/model/mode.ts`, listed in this order by `RUN_MODES`):
 
+- **Default** — the mode a Workspace conversation starts in: it recommends one
+  of the five modes below and dispatches the one you pick. It is never itself a
+  run.
 - **Spec** — the unchanged spec flow: gather requirements → `draft_spec` →
   approve → one `run` per todo, writing under `.baiton/specs/`.
 - **Bug** — a defect with a reproduction.
@@ -132,9 +137,9 @@ ids are `spec | bug | quick | refactor | investigate` (`RunMode` in
 - **Refactor** — a behaviour-preserving restructure.
 - **Investigate** — a question to be answered rather than work to be done.
 
-`DEFAULT_MODE` is `spec`, and an absent or unknown stored value falls back to
-it, so a conversation that never touched the control behaves exactly as it
-always did. **Bug**, **Quick** and **Refactor** share ONE spec-less
+`DEFAULT_MODE` is `default`: the Workspace conversation starts in Default, and
+an absent or unknown stored value falls back to it. A spec conversation does
+not follow it — it is always Spec, exactly as before. **Bug**, **Quick** and **Refactor** share ONE spec-less
 plan → execute → review pipeline that differs only in the framing handed to the
 planner and the executor; **Investigate** is a read-only dispatch ending in a
 written finding. No non-Spec mode reads or writes anything under
@@ -171,6 +176,19 @@ change, and work needing several coordinated changes is offered a different mode
 instead. **Refactor** must not change behaviour, and the configured verify
 command is checked by the run's reviewer, not by the orchestrator.
 **Investigate** changes nothing: no branch, no worktree and no commit.
+
+**Default** is recommend-and-confirm. The orchestrator inspects the ask with
+the read tools, states it in one line with the files it most likely touches,
+recommends exactly one of the five modes with a one-line why, and asks once
+with an `ask_user` card whose options are the five modes, its recommendation
+first, with a typed answer allowed. It dispatches only what you pick, with the
+tools that already exist: `start_run` with `mode` `bug`, `quick` or `refactor`,
+or `investigate`; that tool's own confirm card still decides whether the work
+starts. Picking **Spec** dispatches nothing — change the Mode control to Spec
+and send the request again — and a decline or a typed answer dispatches
+nothing either. A run started from Default carries the picked mode in its run
+id and branch, while its manifest records `composerMode: default` and
+`explicitMode: true`.
 
 The mode is your choice and the model cannot change it. When the work does not
 fit the current mode it proposes the mode that does through `ask_user` and tells

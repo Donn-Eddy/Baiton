@@ -8,11 +8,12 @@
  *
  * Coverage:
  * 1. The stored mode seeds the first paint (`setMode`, `setRunActive`).
- * 2. An absent and an off-union stored value both seed Spec, writing nothing.
+ * 2. An absent and an off-union stored value both seed Default, writing nothing.
  * 3. A `setMode` from the view is echoed and persisted.
  * 4. A repeated `setMode` echoes but does not persist again.
  * 5. An off-union `setMode` is refused, echoing the unchanged mode.
- * 6. A spec conversation is pinned to Spec, and Workspace repaints the mode.
+ * 6. A spec conversation is pinned to the literal Spec (even though the default
+ *    is Default), and Workspace repaints the mode.
  * 7. A `setMode` while the chat is busy is refused.
  * 8. A `setMode` while a run is in flight is refused.
  * 9. The mode decides the phase, the tool surface and the system prompt.
@@ -24,6 +25,9 @@
  * 15. The promote card is posted once per run id, and never without the seam.
  * 16. Restricted Mode posts a note instead of the card.
  * 17. `dispose()` unsubscribes and a repeated `start()` leaves one subscription.
+ * 18. A fresh workspace opens in Default; a stored concrete mode wins.
+ * 19. Default maps to the run phase, run tools and the Default prompt.
+ * 20. A spec conversation stays pinned to Spec from a Default workspace.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -53,6 +57,7 @@ import type {
   TranscriptRecord,
   WebviewToHost,
 } from '../src/orchestrator';
+import { DEFAULT_MODE } from '../src/model/mode';
 import type { RunMode } from '../src/model/mode';
 import type {
   RunFinding,
@@ -321,15 +326,66 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.deepStrictEqual(modeSets, []);
   });
 
-  it('falls back to Spec for an absent or off-union stored mode', async () => {
+  it('falls back to Default for an absent or off-union stored mode', async () => {
+    assert.strictEqual(DEFAULT_MODE, 'default');
     await started();
-    assert.strictEqual(webview.all('setMode')[0].mode, 'spec');
+    assert.strictEqual(webview.all('setMode')[0].mode, 'default');
     assert.deepStrictEqual(modeSets, []);
 
     buildHarness({ storedMode: 'nonsense' });
     await started();
-    assert.strictEqual(webview.all('setMode')[0].mode, 'spec');
+    assert.strictEqual(webview.all('setMode')[0].mode, 'default');
     assert.deepStrictEqual(modeSets, []);
+  });
+
+  it('a fresh workspace opens in Default', async () => {
+    await started();
+    assert.strictEqual(webview.all('setMode')[0].mode, 'default');
+    assert.deepStrictEqual(modeSets, []);
+  });
+
+  it('a stored concrete mode wins over Default', async () => {
+    for (const m of ['spec', 'bug', 'quick', 'refactor', 'investigate']) {
+      cleanup?.();
+      buildHarness({ storedMode: m });
+      await started();
+      assert.strictEqual(webview.all('setMode')[0].mode, m);
+    }
+  });
+
+  it('Default maps to the run phase, run tools and the Default prompt', async () => {
+    await started();
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 1, 'the completion');
+    assert.deepStrictEqual(phases, ['run']);
+    const prompt = client.requests[0][0].content;
+    assert.strictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }, undefined, 'default'));
+    assert.notStrictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }));
+  });
+
+  it('a spec conversation stays pinned to Spec from a Default workspace', async () => {
+    const content = '---\nstatus: draft\n---\n# Alpha\n';
+    fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
+    fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
+    await started();
+    assert.strictEqual(webview.all('setMode')[0].mode, 'default');
+
+    controller.setActiveSpec('alpha');
+    await waitFor(() => webview.last('setMode')?.mode === 'spec', 'the pinned Spec paint');
+    await webview.send({ type: 'setMode', mode: 'bug' });
+    assert.strictEqual(webview.last('setMode')!.mode, 'spec');
+    assert.deepStrictEqual(modeSets, []);
+
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 1, 'the completion');
+    assert.deepStrictEqual(phases, ['gather']);
+    assert.strictEqual(
+      client.requests[0][0].content,
+      buildSystemPrompt({ kind: 'spec', slug: 'alpha' }, content),
+    );
+
+    controller.setActiveSpec(undefined);
+    await waitFor(() => webview.last('setMode')?.mode === 'default', 'Default to come back');
   });
 
   it('echoes and persists a mode picked in the composer', async () => {
@@ -414,7 +470,7 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
       buildSystemPrompt({ kind: 'workspace' }, undefined, 'bug'),
     );
 
-    buildHarness();
+    buildHarness({ storedMode: 'spec' });
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');

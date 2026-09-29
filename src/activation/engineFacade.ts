@@ -236,7 +236,9 @@ function outcomeRunId(result: Extract<DispatchResult, { ok: true }>): string {
  * select said, so this adapter fills `composerMode` from the host and derives
  * `explicitMode` — true exactly when the orchestrator dispatched a mode other
  * than the one the user selected (an Investigate dispatched from a Bug
- * conversation, say).
+ * conversation, say). A run dispatched from a Default conversation always
+ * records `composerMode: 'default'` with `explicitMode: true`, since Default is
+ * never itself a run mode.
  *
  * It resolves as soon as the run is launched: the pipeline's `completed`
  * promise is deliberately not awaited here (the chat mirrors completion through

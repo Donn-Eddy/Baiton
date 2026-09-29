@@ -243,6 +243,28 @@ describe('runStore', () => {
       assert.strictEqual(fs.existsSync(path.join(root, '.baiton', 'runs')), false);
     });
 
+    it('refuses a default mode, writing nothing', () => {
+      const d = store.create(inputFor('r1', { mode: 'default' }));
+      assert.ok(!d.ok);
+      assert.strictEqual(d.error.kind, 'invalid-id');
+      assert.match(d.error.message, /draft_spec/);
+      assert.strictEqual(fs.existsSync(path.join(root, '.baiton', 'runs')), false);
+    });
+
+    it('writes a valid run.json for a dispatch from Default', () => {
+      const id = 'bug-20260926-141501-a1b2';
+      const created = store.create(inputFor(id, { mode: 'bug', composerMode: 'default', explicitMode: true }));
+      assert.ok(created.ok);
+      assert.strictEqual(created.value.composerMode, 'default');
+      assert.strictEqual(created.value.explicitMode, true);
+      assert.strictEqual(created.value.mode, 'bug');
+      assert.strictEqual(created.value.branch, `baiton/bug/${id}`);
+      const parsed = parseRunManifest(fs.readFileSync(runManifestPathFor(root, id), 'utf8'));
+      assert.ok(parsed.ok);
+      assert.deepStrictEqual(parsed.value, created.value);
+      assert.ok(store.read(id).ok);
+    });
+
     it('omits the worktree dir for an investigate run', () => {
       const created = store.create(
         inputFor('r2', { mode: 'investigate', worktreeDir: undefined }),
@@ -294,6 +316,7 @@ describe('runStore', () => {
       const cases: Record<string, unknown> = {
         'bad state': { ...base, state: 'nope' },
         'spec mode': { ...base, mode: 'spec' },
+        'default mode': { ...base, mode: 'default' },
         'missing counter': { ...base, attempts: { plan: 0, execute: 0, investigate: 0 } },
         'wrong version': { ...base, version: 2 },
       };
@@ -303,6 +326,17 @@ describe('runStore', () => {
         assert.ok(!read.ok, `${label} should not read`);
         assert.strictEqual(read.error.kind, 'invalid', `${label} should be invalid`);
       }
+    });
+
+    it('accepts composerMode default', () => {
+      const base = validManifest();
+      const text = JSON.stringify({ ...base, composerMode: 'default', explicitMode: true }, null, 2) + '\n';
+      writeRaw('r1', text);
+      const read = store.read('r1');
+      assert.ok(read.ok);
+      assert.strictEqual(read.value.composerMode, 'default');
+      assert.strictEqual(read.value.explicitMode, true);
+      assert.ok(parseRunManifest(text).ok);
     });
 
     it('drops unknown keys', () => {
