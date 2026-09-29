@@ -396,6 +396,12 @@ export class CatalogStore {
    *
    * A failure never clears a previous success, and a later success clears
    * `stale`/`staleReason`.
+   *
+   * Deliberately NOT an API-failure logging point: the discovery service
+   * (src/activation/modelDiscovery.ts) and `fetchModelsDev` are the single
+   * choke point that writes `ApiLog` entries for catalog sources. Logging an
+   * ERR here as well would record one failure twice, so do not add an
+   * `apiLog` call to this method.
    */
   applyResult(
     sourceId: CatalogSourceId,

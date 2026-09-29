@@ -211,6 +211,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // `completeActivation()`, so every refresh re-reads the current root.
     cwd: () => getActivationState()?.workspace.root.fsPath,
     log: (m) => surface.log(m),
+    apiLog: surface.apiLog,
   });
   modelCatalogStore = catalogStore;
   modelDiscovery = discovery;
