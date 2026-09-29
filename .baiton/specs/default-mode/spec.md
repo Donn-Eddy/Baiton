@@ -1,12 +1,12 @@
 ---
 version: 1
 name: default-mode
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: ef589fc2d775f7e36c3aa2b2d575459f6f413f00
+branch: baiton/default-mode
+approved_rev: 1bad6d7aa4372fc8e4ca67effa45a077fe3308c5d8d908883245f236046f719c
 ---
 
 # OVERVIEW
