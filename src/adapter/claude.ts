@@ -16,6 +16,7 @@ import type {
 } from './adapter';
 import { fetchModelsDev } from '../orchestrator/modelsDev';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
+import type { ApiLog } from '../orchestrator/apiLog';
 import type { ModelEntry } from '../orchestrator/modelCatalog';
 import { isOk } from '../model/result';
 import type { Result } from '../model/result';
@@ -289,9 +290,11 @@ export function claudeSystemPromptFlags(role: Role): string[] {
 /**
  * The injectable feed fetcher seam: resolves the parsed models.dev `Result`.
  * The default is {@link fetchModelsDev}, the module's ONLY network path, so
- * tests inject a fake here instead of touching the network.
+ * tests inject a fake here instead of touching the network. The optional
+ * `apiLog` is the discovery context's failure log, which the default forwards
+ * to `fetchModelsDev` so the feed leg logs exactly once there.
  */
-export type ClaudeFeedFetcher = (options: { timeoutMs: number }) => Promise<Result<ModelsDevFeed, string>>;
+export type ClaudeFeedFetcher = (options: { timeoutMs: number; apiLog?: ApiLog }) => Promise<Result<ModelsDevFeed, string>>;
 
 /**
  * The injectable local-catalog reader seam: resolves the parsed JSON of the
@@ -355,7 +358,8 @@ export class ClaudeAdapter implements Adapter {
    *   `new ClaudeAdapter(mode)` compiles unchanged.
    */
   constructor(private readonly mode: PermissionMode = DEFAULT_PERMISSION_MODE, options: ClaudeAdapterOptions = {}) {
-    this.fetchFeed = options.fetchFeed ?? ((o) => fetchModelsDev({ timeoutMs: o.timeoutMs }));
+    this.fetchFeed = options.fetchFeed ??
+      ((o) => fetchModelsDev({ timeoutMs: o.timeoutMs, ...(o.apiLog !== undefined ? { apiLog: o.apiLog } : {}) }));
     this.readLocalCatalog = options.readLocalCatalog ?? defaultReadLocalCatalog;
   }
 
@@ -468,6 +472,9 @@ export class ClaudeAdapter implements Adapter {
    * feed leg discloses no per-model levels and keeps the capability-level
    * {@link CLAUDE_EFFORTS}.
    *
+   * The feed leg's failures are logged by `fetchModelsDev` through the forwarded
+   * `ctx.apiLog`; the adapter adds no entry of its own.
+   *
    * Never rejects: the whole body is wrapped so any internal error (including a
    * reader that throws synchronously or returns a rejected promise) resolves
    * `undefined` or falls through. Both legs are raced against `ctx.signal` and
@@ -518,9 +525,10 @@ export class ClaudeAdapter implements Adapter {
       // Leg 2 — the models.dev feed, unchanged.
       let feed: ModelsDevFeed | undefined = ctx.feed;
       if (feed === undefined) {
-        const result = await this.raceAbort(this.fetchFeed({ timeoutMs }), ctx.signal);
+        const result = await this.raceAbort(this.fetchFeed({ timeoutMs, ...(ctx.apiLog !== undefined ? { apiLog: ctx.apiLog } : {}) }), ctx.signal);
         if (result === undefined || !isOk(result)) {
           if (result !== undefined && !isOk(result)) {
+            // Already recorded in ctx.apiLog by fetchModelsDev; no entry of our own.
             ctx.log?.(result.error);
           }
           return undefined;

@@ -28,6 +28,8 @@ import {
   capabilitiesToCatalogFetch,
 } from '../src/adapter/adapter';
 import type { FeedFetch, FeedResponse } from '../src/orchestrator/modelsDev';
+import { createApiLog } from '../src/orchestrator/apiLog';
+import type { ApiFailureEntry, ApiLog } from '../src/orchestrator/apiLog';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 import { askRelayDescriptor } from '../src/engine/askRelay';
@@ -1251,5 +1253,147 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
       startServer: fakeServer().starter,
     });
     assert.strictEqual(await adapter.resolveSessionId('session-abc', '/ws'), 'ses_abc');
+  });
+});
+
+describe('OpencodeAdapter /api/model API failure log (api-error-log T08)', () => {
+  const BASE_URL = 'http://127.0.0.1:4096';
+  const API_PAYLOAD = { providers: { anthropic: { models: [{ id: 'claude-sonnet-5' }] } } };
+
+  function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+    return { timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS, ...overrides };
+  }
+
+  function recordingLog(): { log: ApiLog; entries: ApiFailureEntry[] } {
+    const entries: ApiFailureEntry[] = [];
+    return {
+      log: {
+        failure: (e) => {
+          entries.push(e);
+        },
+      },
+      entries,
+    };
+  }
+
+  function okResponse(body: string): FeedResponse {
+    return { ok: true, status: 200, text: async () => body };
+  }
+
+  function adapterWith(fetchModels: FeedFetch, stdout: string | undefined = undefined): OpencodeAdapter {
+    return new OpencodeAdapter(undefined, {
+      fetchModels,
+      serverBaseUrl: BASE_URL,
+      runModelsCli: async () => stdout,
+    });
+  }
+
+  const savedEnv = process.env[OPENCODE_SERVER_ENV_VAR];
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env[OPENCODE_SERVER_ENV_VAR];
+    } else {
+      process.env[OPENCODE_SERVER_ENV_VAR] = savedEnv;
+    }
+  });
+
+  it('logs a non-2xx response with status, URL and body excerpt', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith(async () => ({ ok: false, status: 503, text: async () => 'upstream down' }));
+    const caps = await adapter.discoverModels(ctx({ apiLog: log }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.surface, 'opencode');
+    assert.strictEqual(entries[0]?.operation, 'model list');
+    assert.strictEqual(entries[0]?.kind, 'http-status');
+    assert.strictEqual(entries[0]?.status, 503);
+    assert.strictEqual(entries[0]?.target, `${BASE_URL}/api/model`);
+    assert.ok(entries[0]?.bodyExcerpt?.includes('upstream down'));
+  });
+
+  it('logs a request failure as a connection failure', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    const caps = await adapter.discoverModels(ctx({ apiLog: log }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.kind, 'connection');
+    assert.strictEqual(entries[0]?.target, `${BASE_URL}/api/model`);
+    assert.ok(entries[0]?.message.includes('ECONNREFUSED'));
+  });
+
+  it('logs the local timeout as a timeout failure', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith(
+      (_url, init) =>
+        new Promise<FeedResponse>((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const caps = await adapter.discoverModels(ctx({ apiLog: log, timeoutMs: 30 }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.kind, 'timeout');
+  });
+
+  it('logs unparseable JSON as a malformed response', async () => {
+    const { log, entries } = recordingLog();
+    const caps = await adapterWith(async () => okResponse('not json{')).discoverModels(ctx({ apiLog: log }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.kind, 'malformed-response');
+  });
+
+  it('logs nothing on a successful /api/model call', async () => {
+    const { log, entries } = recordingLog();
+    const caps = await adapterWith(async () => okResponse(JSON.stringify(API_PAYLOAD))).discoverModels(
+      ctx({ apiLog: log }),
+    );
+    assert.ok(caps !== undefined);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('logs nothing when the CLI primary path succeeds', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith(async () => {
+      throw new Error('must not be requested');
+    }, VERBOSE_FIXTURE);
+    const caps = await adapter.discoverModels(ctx({ apiLog: log }));
+    assert.ok(caps !== undefined);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('logs nothing when the caller aborts mid-request', async () => {
+    const { log, entries } = recordingLog();
+    const controller = new AbortController();
+    const adapter = adapterWith(async () => {
+      controller.abort();
+      throw new Error('aborted');
+    });
+    const caps = await adapter.discoverModels(ctx({ apiLog: log, signal: controller.signal }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('records a secret-bearing body, which createApiLog redacts', async () => {
+    const lines: string[] = [];
+    const adapter = adapterWith(async () => ({
+      ok: false,
+      status: 401,
+      text: async () => 'Authorization: Bearer sk-abcdefghijklmnopqrstuv',
+    }));
+    await adapter.discoverModels(ctx({ apiLog: createApiLog((line) => lines.push(line)) }));
+    assert.strictEqual(lines.length, 1);
+    assert.ok(!lines[0]?.includes('sk-abcdefghijklmnopqrstuv'));
+  });
+
+  it('still resolves undefined without throwing when ctx has no apiLog', async () => {
+    const adapter = adapterWith(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    assert.strictEqual(await adapter.discoverModels(ctx()), undefined);
   });
 });

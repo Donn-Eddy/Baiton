@@ -19,6 +19,8 @@ import { URL } from 'url';
 import { StringDecoder } from 'string_decoder';
 import { randomUUID } from 'crypto';
 import type { DialectId } from './providers';
+import { noopApiLog } from './apiLog';
+import type { ApiLog, ApiFailureEntry } from './apiLog';
 
 /** A single chat message on the OpenAI chat-completions path. */
 export interface ChatMessage {
@@ -165,6 +167,10 @@ export interface ModelClientConfig {
   extraHeaders?: ExtraHeadersProvider;
   /** Connect budget in milliseconds; defaults to 30000 (Req 7.1). */
   connectTimeoutMs?: number;
+  /** Receives one entry per failed completion call; defaults to {@link noopApiLog}. Successful calls never touch it. */
+  apiLog?: ApiLog;
+  /** The `surface` recorded on API-log entries (the provider id); defaults to 'openai'. */
+  surfaceId?: string;
 }
 
 /** Extra request headers for one completion, keyed by lowercase header name. */
@@ -211,6 +217,12 @@ export function openCodeExtraHeaders(options: OpenCodeHeaderOptions): ExtraHeade
 
 /** The default connect budget: 30 seconds (Req 7.1). */
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+
+/** The default `surface` on API-log entries. */
+const DEFAULT_SURFACE_ID = 'openai';
+
+/** The per-call part of an API-log entry; surface/operation/target are filled in by `logFailure`. */
+type CallFailure = Pick<ApiFailureEntry, 'kind' | 'message' | 'status' | 'bodyExcerpt'>;
 
 /** Trims a trailing slash so we can safely append the completions path. */
 function normalizeBase(endpoint: string): string {
@@ -533,7 +545,8 @@ function parseNonStreamingContent(message: unknown): string | undefined {
 
 /**
  * OpenAI-compatible {@link ModelClient} backed by node's http/https so it runs
- * without DOM types and can be exercised against a mock server.
+ * without DOM types and can be exercised against a mock server. Failed calls are
+ * reported to `config.apiLog`; missing configuration is not a call failure.
  */
 export class OpenAiModelClient implements ModelClient {
   private readonly config: ModelClientConfig;
@@ -558,6 +571,7 @@ export class OpenAiModelClient implements ModelClient {
       throw new MissingConfigError('apiKey');
     }
 
+    // Not logged: no call has been made yet.
     if (req.signal.aborted) {
       throw new UnreachableEndpointError('request was aborted before it started');
     }
@@ -579,7 +593,7 @@ export class OpenAiModelClient implements ModelClient {
 
     if (!streaming) {
       const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra);
-      return this.parseNonStreaming(raw);
+      return this.parseNonStreaming(raw, url);
     }
 
     // Streaming: feed each response chunk to the SSE parser as it arrives so
@@ -589,11 +603,26 @@ export class OpenAiModelClient implements ModelClient {
     return parser.finish();
   }
 
+  /** Records one failed completion call. Never throws, so the caller's thrown error is unchanged. */
+  private logFailure(url: URL, failure: CallFailure): void {
+    try {
+      (this.config.apiLog ?? noopApiLog).failure({
+        surface: this.config.surfaceId ?? DEFAULT_SURFACE_ID,
+        operation: 'completion',
+        target: url.toString(),
+        ...failure,
+      });
+    } catch {
+      /* logging must never change the call's outcome */
+    }
+  }
+
   /**
    * Issues the POST and resolves with the raw response body text. Enforces the
    * 30s connect budget and maps connection/timeout/abort failures to
    * {@link UnreachableEndpointError} (Req 7.1, 7.6). When `onChunk` is given,
-   * each successful-status body chunk is also handed to it as it arrives.
+   * each successful-status body chunk is also handed to it as it arrives. Each
+   * rejection records exactly one API-log entry.
    */
   private postCompletion(
     url: URL,
@@ -608,12 +637,13 @@ export class OpenAiModelClient implements ModelClient {
 
     return new Promise<string>((resolve, reject) => {
       let settled = false;
-      const finishReject = (err: Error): void => {
+      const finishReject = (err: Error, failure: CallFailure): void => {
         if (settled) {
           return;
         }
         settled = true;
         cleanup();
+        this.logFailure(url, failure);
         request.destroy();
         reject(err);
       };
@@ -627,7 +657,10 @@ export class OpenAiModelClient implements ModelClient {
       };
 
       const onAbort = (): void => {
-        finishReject(new UnreachableEndpointError('request was aborted'));
+        finishReject(new UnreachableEndpointError('request was aborted'), {
+          kind: 'abort',
+          message: 'request was aborted',
+        });
       };
       const cleanup = (): void => {
         signal.removeEventListener('abort', onAbort);
@@ -673,13 +706,17 @@ export class OpenAiModelClient implements ModelClient {
             if (status < 200 || status >= 300) {
               finishReject(
                 new UnreachableEndpointError(`endpoint returned HTTP ${status}: ${text.slice(0, 500)}`),
+                { kind: 'http-status', status, message: `endpoint returned HTTP ${status}`, bodyExcerpt: text },
               );
               return;
             }
             finishResolve(text);
           });
           res.on('error', (err) =>
-            finishReject(new UnreachableEndpointError('response stream failed', { cause: err })),
+            finishReject(new UnreachableEndpointError('response stream failed', { cause: err }), {
+              kind: 'connection',
+              message: `response stream failed: ${err.message}`,
+            }),
           );
         },
       );
@@ -688,10 +725,14 @@ export class OpenAiModelClient implements ModelClient {
       request.setTimeout(connectTimeoutMs, () => {
         finishReject(
           new UnreachableEndpointError(`connection did not complete within ${connectTimeoutMs}ms`),
+          { kind: 'timeout', message: `connection did not complete within ${connectTimeoutMs}ms` },
         );
       });
       request.on('error', (err) =>
-        finishReject(new UnreachableEndpointError('connection failed', { cause: err })),
+        finishReject(new UnreachableEndpointError('connection failed', { cause: err }), {
+          kind: 'connection',
+          message: `connection failed: ${err.message}`,
+        }),
       );
 
       if (signal.aborted) {
@@ -706,11 +747,16 @@ export class OpenAiModelClient implements ModelClient {
   }
 
   /** Parses a non-streaming JSON completion body into a {@link CompletionResult}. */
-  private parseNonStreaming(raw: string): CompletionResult {
+  private parseNonStreaming(raw: string, url: URL): CompletionResult {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
+      this.logFailure(url, {
+        kind: 'malformed-response',
+        message: 'endpoint returned a non-JSON response',
+        bodyExcerpt: raw,
+      });
       throw new UnreachableEndpointError('endpoint returned a non-JSON response', { cause: err });
     }
     const choices = (parsed as { choices?: unknown }).choices;

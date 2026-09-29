@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as path from 'path';
 
 /**
@@ -56,6 +57,7 @@ import {
   providerClientConfig,
   resolveProviderEndpoint,
 } from '../src/activation/providerRouter';
+import type { ApiFailureEntry, ApiLog } from '../src/orchestrator/apiLog';
 import { ModelsDevFeed, parseModelsDevFeed } from '../src/orchestrator/modelsDev';
 import type { ModelCatalogSnapshot, ModelEntry } from '../src/orchestrator/modelCatalog';
 
@@ -331,6 +333,7 @@ function makeHarness(opts: {
   defaultClients?: boolean;
   /** The live catalog seam; absent means "no live catalog" (the builtin five). */
   catalog?: ModelCatalogSource;
+  apiLog?: ApiLog;
 } = {}): RouterHarness {
   const secrets = opts.secrets ?? new FakeSecrets();
   const memento = opts.memento ?? new FakeMemento();
@@ -345,6 +348,7 @@ function makeHarness(opts: {
     lm,
     version: '1.2.3',
     ...(opts.catalog !== undefined ? { catalog: opts.catalog } : {}),
+    ...(opts.apiLog !== undefined ? { apiLog: opts.apiLog } : {}),
     createClient:
       opts.defaultClients === true
         ? undefined
@@ -356,6 +360,17 @@ function makeHarness(opts: {
           },
   };
   return { router: new ProviderRouter(config), secrets, memento, settings, lm, clients, constructions };
+}
+
+/** An ApiLog that records every entry it is handed. */
+function recordingApiLog(): ApiLog & { entries: ApiFailureEntry[] } {
+  const entries: ApiFailureEntry[] = [];
+  return {
+    entries,
+    failure: (e) => {
+      entries.push(e);
+    },
+  };
 }
 
 /** Builds a `CompletionRequest` with identity-checkable parts. */
@@ -1655,5 +1670,130 @@ describe('ProviderRouter per-provider endpoints', () => {
       assert.strictEqual(resolveProviderEndpoint(deepinfra, settings), 'https://x.test');
       assert.strictEqual(resolveProviderEndpoint(providerInfo('google'), settings), providerInfo('google').defaultBaseUrl);
     });
+  });
+});
+
+describe('ProviderRouter API failure log', () => {
+  /** Runs `body` against a loopback server answering every request with `respond`. */
+  async function withServer(
+    respond: (res: http.ServerResponse) => void,
+    body: (base: string) => Promise<void>,
+  ): Promise<void> {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      respond(res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    try {
+      await body(`http://127.0.0.1:${port}/v1`);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  async function mistralHarness(log: ApiLog, base: string): Promise<RouterHarness> {
+    const h = makeHarness({ lm: fakeLm([]), defaultClients: true, apiLog: log });
+    h.secrets.values.set(providerSecretKey('mistral')!, 'm');
+    h.settings.endpoints = { mistral: base };
+    await h.router.select({ provider: 'mistral', model: 'm1' });
+    return h;
+  }
+
+  it('providerClientConfig forwards apiLog and tags surfaceId with the provider id', () => {
+    const log = recordingApiLog();
+    const deps = { ...makeDeps(new FakeSecrets(), makeSettings()), apiLog: log };
+    const google = providerClientConfig('google', deps);
+    assert.strictEqual(google.apiLog, log);
+    assert.strictEqual(google.surfaceId, 'google');
+    assert.strictEqual(providerClientConfig('openai', deps).surfaceId, 'openai');
+
+    const bare = providerClientConfig('google', makeDeps(new FakeSecrets(), makeSettings()));
+    assert.strictEqual(bare.apiLog, undefined);
+    assert.strictEqual(bare.surfaceId, 'google');
+  });
+
+  it('an HTTP 500 through the router yields exactly one entry', async () => {
+    const log = recordingApiLog();
+    await withServer(
+      (res) => {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('boom');
+      },
+      async (base) => {
+        const h = await mistralHarness(log, base);
+        await assert.rejects(h.router.complete(makeReq()));
+        assert.strictEqual(log.entries.length, 1);
+        const entry = log.entries[0];
+        assert.strictEqual(entry.surface, 'mistral');
+        assert.strictEqual(entry.operation, 'completion');
+        assert.strictEqual(entry.kind, 'http-status');
+        assert.strictEqual(entry.status, 500);
+        assert.ok(entry.target?.includes('127.0.0.1'), `target was ${entry.target}`);
+      },
+    );
+  });
+
+  it('a successful call produces no entry', async () => {
+    const log = recordingApiLog();
+    await withServer(
+      (res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+      },
+      async (base) => {
+        const h = await mistralHarness(log, base);
+        const result = await h.router.complete(makeReq());
+        assert.strictEqual(result.content, 'ok');
+        assert.strictEqual(log.entries.length, 0);
+      },
+    );
+  });
+
+  it('a Copilot sendRequest failure yields exactly one copilot entry', async () => {
+    const log = recordingApiLog();
+    const h = makeHarness({ defaultClients: true, apiLog: log });
+    await h.router.select({ provider: 'copilot', model: 'fake-model' });
+    await assert.rejects(
+      () => h.router.complete(makeReq()),
+      (err: unknown) => err instanceof UnreachableEndpointError,
+    );
+    assert.strictEqual(log.entries.length, 1);
+    assert.strictEqual(log.entries[0].surface, 'copilot');
+    assert.strictEqual(log.entries[0].kind, 'connection');
+    assert.strictEqual(log.entries[0].target, 'fake-model');
+  });
+
+  it('missing-config paths are not call failures', async () => {
+    const log = recordingApiLog();
+    const h = makeHarness({
+      defaultClients: true,
+      apiLog: log,
+      catalog: mutableCatalog({ snapshot: snapshotFromFeed(fixtureFeed), feed: fixtureFeed }),
+    });
+    h.secrets.values.set(providerSecretKey('deepinfra')!, 'k');
+    const model = (await h.router.availability()).find((p) => p.id === 'deepinfra')?.models[0] ?? 'm';
+    await h.router.select({ provider: 'deepinfra', model });
+    await assert.rejects(
+      () => h.router.complete(makeReq()),
+      (err: unknown) => err instanceof MissingConfigError && err.missing === 'endpoint',
+    );
+    assert.strictEqual(log.entries.length, 0);
+
+    const none = makeHarness({ defaultClients: true, apiLog: log });
+    await assert.rejects(
+      () => none.router.complete(makeReq()),
+      (err: unknown) => err instanceof MissingConfigError && err.missing === 'model',
+    );
+    assert.strictEqual(log.entries.length, 0);
+  });
+
+  it('the createClient override path leaves the log untouched', async () => {
+    const log = recordingApiLog();
+    const h = makeHarness({ apiLog: log });
+    await h.router.select({ provider: 'copilot', model: 'fake-model' });
+    await h.router.complete(makeReq());
+    assert.strictEqual(log.entries.length, 0);
   });
 });

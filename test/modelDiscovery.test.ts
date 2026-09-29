@@ -25,6 +25,7 @@ import type {
   DiscoveryContext,
 } from '../src/adapter/adapter';
 import { ok, err } from '../src/model/result';
+import type { ApiLog, ApiFailureEntry } from '../src/orchestrator/apiLog';
 
 // This module is host-free (no runtime `vscode` import), so it is imported
 // statically here with no loader dance — exactly as test/providerRouter.test.ts
@@ -150,6 +151,19 @@ function feedSpy(feed: ModelsDevFeed): {
     return ok(feed);
   };
   return { fetchFeed, calls };
+}
+
+/** An ApiLog spy recording every entry. */
+function apiLogSpy(): { apiLog: ApiLog; entries: ApiFailureEntry[] } {
+  const entries: ApiFailureEntry[] = [];
+  return {
+    apiLog: {
+      failure: (e) => {
+        entries.push(e);
+      },
+    },
+    entries,
+  };
 }
 
 /** A deterministic `now` for the store, so `fetchedAt` never varies. */
@@ -638,6 +652,184 @@ describe('T07 ModelDiscoveryService supersede and dispose', () => {
     const after = await service.refresh();
     assert.strictEqual(codex.calls.length, 1, 'a refresh after dispose calls no adapter');
     assert.deepStrictEqual(after, table);
+  });
+});
+
+describe('T07 ModelDiscoveryService apiLog', () => {
+  const okAdapter = (id: AgentId): FakeAdapter => fakeAdapter(id, async () => caps(['m']));
+
+  it('forwards apiLog into every adapter ctx', async () => {
+    const spy = apiLogSpy();
+    const a = { claude: okAdapter('claude'), codex: okAdapter('codex'), opencode: okAdapter('opencode') };
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ claude: a.claude.adapter, codex: a.codex.adapter, opencode: a.opencode.adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    for (const x of Object.values(a)) {
+      assert.strictEqual(x.calls[0].apiLog, spy.apiLog);
+    }
+    service.dispose();
+
+    const bare = okAdapter('codex');
+    const service2 = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ codex: bare.adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+    });
+    await service2.refresh();
+    assert.strictEqual('apiLog' in bare.calls[0], false);
+    service2.dispose();
+  });
+
+  it('a fully successful refresh writes no entry', async () => {
+    const spy = apiLogSpy();
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ claude: okAdapter('claude').adapter, codex: okAdapter('codex').adapter, opencode: okAdapter('opencode').adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 0);
+    service.dispose();
+  });
+
+  it('adapter timeout logs one timeout entry', async function () {
+    this.timeout(2_000);
+    const spy = apiLogSpy();
+    const hanging = fakeAdapter('codex', () => deferred<AgentCapabilities | undefined>().promise);
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ codex: hanging.adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      timeoutMs: 20,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 1);
+    assert.strictEqual(spy.entries[0].surface, 'codex');
+    assert.strictEqual(spy.entries[0].operation, 'model list');
+    assert.strictEqual(spy.entries[0].kind, 'timeout');
+    assert.match(spy.entries[0].message, /timed out after 20ms/);
+    service.dispose();
+  });
+
+  it('rejecting adapter and synchronously throwing adapter each log one connection entry', async () => {
+    const spy = apiLogSpy();
+    const codex = fakeAdapter('codex', async () => {
+      throw new Error('app-server died');
+    });
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ codex: codex.adapter, opencode: throwingAdapter('opencode', 'spawn failed') }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 2);
+    const bySurface = new Map(spy.entries.map((e) => [e.surface, e]));
+    assert.strictEqual(bySurface.get('codex')?.kind, 'connection');
+    assert.match(bySurface.get('codex')?.message ?? '', /app-server died/);
+    assert.strictEqual(bySurface.get('opencode')?.kind, 'connection');
+    assert.match(bySurface.get('opencode')?.message ?? '', /spawn failed/);
+    service.dispose();
+  });
+
+  it('adapter resolving undefined logs malformed-response', async () => {
+    const spy = apiLogSpy();
+    const claude = fakeAdapter('claude', async () => undefined);
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ claude: claude.adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 1);
+    assert.strictEqual(spy.entries[0].surface, 'claude');
+    assert.strictEqual(spy.entries[0].kind, 'malformed-response');
+    assert.strictEqual(spy.entries[0].message, 'claude model discovery returned no models');
+    service.dispose();
+  });
+
+  it('a feed Result error is not re-logged by the service', async () => {
+    const spy = apiLogSpy();
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ codex: okAdapter('codex').adapter }),
+      fetchFeed: async () => err('models.dev returned HTTP 503'),
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 0);
+    service.dispose();
+  });
+
+  it('a throwing feed fetcher logs one connection entry', async () => {
+    const spy = apiLogSpy();
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({}),
+      fetchFeed: async () => {
+        throw new Error('boom');
+      },
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 1);
+    assert.strictEqual(spy.entries[0].surface, 'models.dev');
+    assert.strictEqual(spy.entries[0].kind, 'connection');
+    assert.match(spy.entries[0].message, /boom/);
+    service.dispose();
+  });
+
+  it('a hanging feed fetcher logs one timeout entry', async function () {
+    this.timeout(2_000);
+    const spy = apiLogSpy();
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({}),
+      fetchFeed: () => deferred<Awaited<ReturnType<FeedFetcher>>>().promise,
+      timeoutMs: 20,
+      apiLog: spy.apiLog,
+    });
+    await service.refresh();
+    assert.strictEqual(spy.entries.length, 1);
+    assert.strictEqual(spy.entries[0].surface, 'models.dev');
+    assert.strictEqual(spy.entries[0].kind, 'timeout');
+    service.dispose();
+  });
+
+  it('a superseded refresh logs nothing for its aborted work', async () => {
+    const spy = apiLogSpy();
+    const pending: Deferred<AgentCapabilities | undefined>[] = [];
+    const codex = fakeAdapter('codex', () => {
+      const d = deferred<AgentCapabilities | undefined>();
+      pending.push(d);
+      return d.promise;
+    });
+    const service = new ModelDiscoveryService({
+      store: makeStore(fakeMemento()),
+      registry: fakeRegistry({ codex: codex.adapter }),
+      fetchFeed: feedSpy(fakeFeed()).fetchFeed,
+      apiLog: spy.apiLog,
+    });
+    const first = service.refresh();
+    const second = service.refresh();
+    pending[0].resolve(undefined);
+    pending[1].resolve(caps(['winning-model']));
+    await first;
+    await second;
+    assert.strictEqual(spy.entries.length, 0);
+    service.dispose();
+  });
+
+  it('keeps CatalogStore free of apiLog calls', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'orchestrator', 'modelCatalog.ts'), 'utf8');
+    assert.ok(!/apiLog\./.test(src));
   });
 });
 

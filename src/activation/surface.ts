@@ -11,12 +11,20 @@
  *
  * It is the one place in the wiring layer that imports `vscode` for
  * user-visible output, kept thin so the pure cores stay host-independent.
+ *
+ * Surface also owns a second, silent 'API' channel that records one line per
+ * failed outbound API call through the host-free `createApiLog`, and nothing on
+ * that path reveals the channel or notifies.
  */
 import * as vscode from 'vscode';
 import type { DispatchError } from '../engine';
+import { createApiLog, type ApiFailureEntry, type ApiLog } from '../orchestrator/apiLog';
 
 /** The display name of the shared Baiton output channel. */
 const OUTPUT_CHANNEL_NAME = 'Baiton';
+
+/** The display name of the silent API-failure output channel. */
+export const API_CHANNEL_NAME = 'API';
 
 /**
  * A thin façade over a `vscode.OutputChannel` plus notification helpers. One
@@ -26,15 +34,30 @@ const OUTPUT_CHANNEL_NAME = 'Baiton';
  */
 export class Surface {
   private readonly channel: vscode.OutputChannel;
+  private readonly apiChannel: vscode.OutputChannel;
+  public readonly apiLog: ApiLog;
 
-  constructor(channel?: vscode.OutputChannel) {
+  constructor(channel?: vscode.OutputChannel, apiChannel?: vscode.OutputChannel) {
     this.channel =
       channel ?? vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
+    this.apiChannel =
+      apiChannel ?? vscode.window.createOutputChannel(API_CHANNEL_NAME);
+    this.apiLog = createApiLog((line) => this.apiChannel.appendLine(line));
   }
 
   /** The underlying channel, so activation can register it for disposal. */
   public get outputChannel(): vscode.OutputChannel {
     return this.channel;
+  }
+
+  /** The API-failure channel, so activation can register it for disposal. */
+  public get apiOutputChannel(): vscode.OutputChannel {
+    return this.apiChannel;
+  }
+
+  /** Record one failed outbound API call on the silent API channel. Never reveals the channel or raises a notification. */
+  public logApiFailure(entry: ApiFailureEntry): void {
+    this.apiLog.failure(entry);
   }
 
   /** Append a timestamped line to the running log (design "output channel"). */

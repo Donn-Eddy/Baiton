@@ -29,7 +29,8 @@ import type {
   LaunchRequest,
 } from '../src/adapter/adapter';
 import type { FeedProvider, ModelsDevFeed } from '../src/orchestrator/modelsDev';
-import { parseModelsDevFeed } from '../src/orchestrator/modelsDev';
+import { fetchModelsDev, parseModelsDevFeed } from '../src/orchestrator/modelsDev';
+import type { ApiFailureEntry, ApiLog } from '../src/orchestrator/apiLog';
 import { err, isOk, ok } from '../src/model/result';
 import type { Result } from '../src/model/result';
 import {
@@ -1243,5 +1244,106 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
     const defaultsOnly = new ClaudeAdapter();
     const modeOnly = new ClaudeAdapter(DEFAULT_PERMISSION_MODE);
     assert.strictEqual(defaultsOnly.launch(req()).shellPath, modeOnly.launch(req()).shellPath);
+  });
+});
+
+describe('ClaudeAdapter feed fallback API failure log (api-error-log T08)', () => {
+  const fixtureText = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
+  const fixtureFeed: ModelsDevFeed = (() => {
+    const result = parseModelsDevFeed(JSON.parse(fixtureText));
+    assert.strictEqual(result.ok, true, 'the checked-in fixture feed must parse');
+    return (result as { value: ModelsDevFeed }).value;
+  })();
+
+  function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
+    return { timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS, ...overrides };
+  }
+
+  function recordingLog(): { log: ApiLog; entries: ApiFailureEntry[] } {
+    const entries: ApiFailureEntry[] = [];
+    return {
+      log: {
+        failure: (e) => {
+          entries.push(e);
+        },
+      },
+      entries,
+    };
+  }
+
+  function adapterWith(fetchFeed: ClaudeFeedFetcher, readLocalCatalog: () => Promise<unknown> = async () => undefined): ClaudeAdapter {
+    return new ClaudeAdapter(DEFAULT_PERMISSION_MODE, { fetchFeed, readLocalCatalog });
+  }
+
+  it('forwards ctx.apiLog to the fetcher by identity, and omits it when absent', async () => {
+    const seen: Array<{ has: boolean; apiLog: ApiLog | undefined }> = [];
+    const adapter = adapterWith(async (o) => {
+      seen.push({ has: Object.prototype.hasOwnProperty.call(o, 'apiLog'), apiLog: o.apiLog });
+      return ok(fixtureFeed);
+    });
+    const { log } = recordingLog();
+    await adapter.discoverModels(ctx({ apiLog: log }));
+    await adapter.discoverModels(ctx());
+    assert.strictEqual(seen[0]?.apiLog, log);
+    assert.strictEqual(seen[1]?.apiLog, undefined);
+    assert.strictEqual(seen[1]?.has, false);
+  });
+
+  it('a failed fetchModelsDev yields exactly one models.dev entry and none from the adapter', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith((o) =>
+      fetchModelsDev({
+        timeoutMs: o.timeoutMs,
+        ...(o.apiLog !== undefined ? { apiLog: o.apiLog } : {}),
+        fetch: async () => ({ ok: false, status: 502, text: async () => 'bad gateway' }),
+      }),
+    );
+    const caps = await adapter.discoverModels(ctx({ apiLog: log }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.surface, 'models.dev');
+    assert.strictEqual(entries[0]?.operation, 'model list');
+    assert.strictEqual(entries[0]?.kind, 'http-status');
+    assert.strictEqual(entries[0]?.status, 502);
+  });
+
+  it('a fetcher returning err() directly produces no entry from the adapter', async () => {
+    const { log, entries } = recordingLog();
+    const caps = await adapterWith(async () => err('boom')).discoverModels(ctx({ apiLog: log }));
+    assert.strictEqual(caps, undefined);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('a successful fetchModelsDev yields capabilities and no entries', async () => {
+    const { log, entries } = recordingLog();
+    const adapter = adapterWith((o) =>
+      fetchModelsDev({
+        timeoutMs: o.timeoutMs,
+        ...(o.apiLog !== undefined ? { apiLog: o.apiLog } : {}),
+        fetch: async () => ({ ok: true, status: 200, text: async () => fixtureText }),
+      }),
+    );
+    const caps = await adapter.discoverModels(ctx({ apiLog: log }));
+    assert.ok(caps !== undefined);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('never calls the fetcher nor logs when ctx.feed is supplied or the local catalog hits', async () => {
+    const { log, entries } = recordingLog();
+    let calls = 0;
+    const fetcher: ClaudeFeedFetcher = async () => {
+      calls += 1;
+      return ok(fixtureFeed);
+    };
+    assert.ok((await adapterWith(fetcher).discoverModels(ctx({ apiLog: log, feed: fixtureFeed }))) !== undefined);
+
+    const catalog: unknown = JSON.parse(
+      fs.readFileSync(path.join(__dirname, 'fixtures', 'claudeModelCatalog.sample.json'), 'utf8'),
+    );
+    const viaCatalog = adapterWith(fetcher, async () => catalog);
+    assert.ok((await viaCatalog.discoverModels(ctx({ apiLog: log }))) !== undefined);
+
+    assert.strictEqual(calls, 0);
+    assert.strictEqual(entries.length, 0);
   });
 });

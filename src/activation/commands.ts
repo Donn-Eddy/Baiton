@@ -627,6 +627,8 @@ export function registerCommands(
       feed: () => getModelDiscovery()?.feed(),
     },
     log: (message) => surface.log(message),
+    // Failed completion calls go to the silent 'Baiton: API' channel.
+    apiLog: surface.apiLog,
   });
   // Releases the router's `secrets.onDidChange` subscription (its key-presence memo).
   disposables.push(new vscode.Disposable(() => router.dispose()));

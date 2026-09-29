@@ -28,6 +28,10 @@
  *   `ModelSelection.model` stores; switching to a `provider/model` composite id
  *   later would break that round-trip.
  *
+ * Failures go to the injected `apiLog`: adapter outcomes keyed by agent id, and
+ * the service's own feed timeout/throw. A feed Result error is logged once by
+ * `fetchModelsDev`, never here.
+ *
  * Nothing here reads a secret, an environment variable or SecretStorage: only
  * model ids and labels ever leave the host.
  */
@@ -45,6 +49,8 @@ import type {
   ModelCatalogTable,
   ModelEntry,
 } from '../orchestrator/modelCatalog';
+import { noopApiLog } from '../orchestrator/apiLog';
+import type { ApiLog, ApiFailureKind } from '../orchestrator/apiLog';
 import { fetchModelsDev } from '../orchestrator/modelsDev';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
 import { ok, err } from '../model/result';
@@ -110,7 +116,12 @@ export interface ModelDiscoveryOptions {
   timeoutMs?: number;
   /** Diagnostic sink; absent means discard. */
   log?: (message: string) => void;
+  /** API failure log: forwarded to the default models.dev fetch and every adapter's ctx; the service also logs adapter-level discovery failures. Defaults to discard. */
+  apiLog?: ApiLog;
 }
+
+/** The `operation` of every service-level API failure entry. */
+const DISCOVERY_OPERATION = 'model list';
 
 /** The outcome of a {@link ModelDiscoveryService.withTimeout} race. */
 type Raced<T> =
@@ -136,6 +147,10 @@ export class ModelDiscoveryService {
   private disposed = false;
 
   constructor(private readonly options: ModelDiscoveryOptions) {}
+
+  private get apiLog(): ApiLog {
+    return this.options.apiLog ?? noopApiLog;
+  }
 
   /** The store's current snapshots, indexed by source id. */
   table(): ModelCatalogTable {
@@ -258,6 +273,7 @@ export class ModelDiscoveryService {
       signal,
       ...(cwd !== undefined ? { cwd } : {}),
       ...(feed !== undefined ? { feed } : {}),
+      ...(this.options.apiLog !== undefined ? { apiLog: this.options.apiLog } : {}),
       log: (m: string) => this.log(`${agent} model discovery: ${m}`),
     };
     let raced: Raced<AgentCapabilities | undefined>;
@@ -270,11 +286,17 @@ export class ModelDiscoveryService {
     }
     let result: Result<CatalogFetch, string>;
     if (raced.kind === 'timeout') {
-      result = err(`${agent} model discovery timed out after ${timeoutMs}ms`);
+      const msg = `${agent} model discovery timed out after ${timeoutMs}ms`;
+      this.logFailure(controller, agent, 'timeout', msg);
+      result = err(msg);
     } else if (raced.kind === 'error') {
-      result = err(`${agent} model discovery failed: ${raced.message}`);
+      const msg = `${agent} model discovery failed: ${raced.message}`;
+      this.logFailure(controller, agent, 'connection', msg);
+      result = err(msg);
     } else if (raced.value === undefined) {
-      result = err(`${agent} model discovery returned no models`);
+      const msg = `${agent} model discovery returned no models`;
+      this.logFailure(controller, agent, 'malformed-response', msg);
+      result = err(msg);
     } else {
       result = ok(capabilitiesToCatalogFetch(raced.value));
     }
@@ -291,8 +313,20 @@ export class ModelDiscoveryService {
     signal: AbortSignal,
     timeoutMs: number,
   ): Promise<ModelsDevFeed | undefined> {
+    let serviceTimedOut = false;
+    // The default fetcher logs its own Result errors through fetchModelsDev; the
+    // gate drops a late entry for a fetch the service's race already reported
+    // as a timeout, so one failure never produces two lines.
+    const gatedApiLog: ApiLog = {
+      failure: (entry) => {
+        if (!serviceTimedOut) {
+          this.apiLog.failure(entry);
+        }
+      },
+    };
     const fetchFeed: FeedFetcher =
-      this.options.fetchFeed ?? ((o) => fetchModelsDev({ timeoutMs: o.timeoutMs }));
+      this.options.fetchFeed ??
+      ((o) => fetchModelsDev({ timeoutMs: o.timeoutMs, apiLog: gatedApiLog }));
     let raced: Raced<Result<ModelsDevFeed, string>>;
     try {
       raced = await this.withTimeout(fetchFeed({ timeoutMs, signal }), timeoutMs);
@@ -300,14 +334,21 @@ export class ModelDiscoveryService {
       raced = { kind: 'error', message: describe(error) };
     }
     if (raced.kind === 'timeout') {
-      this.apply('models.dev', err(`models.dev fetch timed out after ${timeoutMs}ms`), controller);
+      serviceTimedOut = true;
+      const msg = `models.dev fetch timed out after ${timeoutMs}ms`;
+      this.logFailure(controller, 'models.dev', 'timeout', msg);
+      this.apply('models.dev', err(msg), controller);
       return undefined;
     }
     if (raced.kind === 'error') {
-      this.apply('models.dev', err(`models.dev fetch failed: ${raced.message}`), controller);
+      const msg = `models.dev fetch failed: ${raced.message}`;
+      this.logFailure(controller, 'models.dev', 'connection', msg);
+      this.apply('models.dev', err(msg), controller);
       return undefined;
     }
     if (!raced.value.ok) {
+      // Not logged here: fetchModelsDev already logged this Result error, and an
+      // injected fetcher's err is treated the same, so it is never logged twice.
       this.apply('models.dev', err(raced.value.error), controller);
       return undefined;
     }
@@ -339,6 +380,19 @@ export class ModelDiscoveryService {
         : `${sourceId} marked stale: ${result.error}`,
     );
     this.fire();
+  }
+
+  /** Writes one API failure entry, only for a live generation (mirrors {@link apply}). */
+  private logFailure(
+    controller: AbortController,
+    surface: string,
+    kind: ApiFailureKind,
+    message: string,
+  ): void {
+    if (controller.signal.aborted || this.disposed) {
+      return;
+    }
+    this.apiLog.failure({ surface, operation: DISCOVERY_OPERATION, kind, message });
   }
 
   /** Fires the change event once, defensively, with a copy of the listener set. */

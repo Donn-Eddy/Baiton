@@ -11,6 +11,8 @@ import { AGENT_BINARY, DEFAULT_DISCOVERY_TIMEOUT_MS, capabilitiesFromEntries } f
 import type { Role } from '../model/role';
 import type { ModelEntry } from '../orchestrator/modelCatalog';
 import type { FeedFetch, FeedResponse } from '../orchestrator/modelsDev';
+import { excerpt, noopApiLog } from '../orchestrator/apiLog';
+import type { ApiFailureKind } from '../orchestrator/apiLog';
 import { roleProfile, runDirPattern } from './roleProfile';
 import type { AgentAllowList, ToolAllowRule } from './roleProfile';
 
@@ -246,6 +248,10 @@ export const OPENCODE_MODELS_ARGS: readonly string[] = [
 
 /** The server route the primary discovery path GETs. */
 export const OPENCODE_MODEL_ENDPOINT_PATH = '/api/model';
+
+/** The `surface` and `operation` under which `/api/model` failures are written to `ctx.apiLog`. */
+const API_LOG_SURFACE = 'opencode';
+const API_LOG_OPERATION = 'model list';
 
 /**
  * When this environment variable already holds an `http://` / `https://` URL an
@@ -977,6 +983,9 @@ export class OpencodeAdapter implements Adapter {
    * (injected, pre-existing or freshly started), GET the model route inside the
    * remaining budget and parse the payload. Any failure yields `[]` so the CLI
    * path becomes the fallback; only a server this call started is disposed.
+   * Failures of the `/api/model` request (non-2xx, timeout, request failure,
+   * unparseable JSON) are recorded once in `ctx.apiLog` with the request URL as
+   * target; a caller abort is not logged.
    */
   private async discoverFromApi(
     ctx: DiscoveryContext,
@@ -1012,8 +1021,20 @@ export class OpencodeAdapter implements Adapter {
       }
 
       const url = `${baseUrl}${OPENCODE_MODEL_ENDPOINT_PATH}`;
+      const apiLog = ctx.apiLog ?? noopApiLog;
+      const logFailure = (
+        kind: ApiFailureKind,
+        message: string,
+        extra: { status?: number; bodyExcerpt?: string } = {},
+      ): void => {
+        apiLog.failure({ surface: API_LOG_SURFACE, operation: API_LOG_OPERATION, target: url, kind, message, ...extra });
+      };
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), remaining());
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, remaining());
       timer.unref?.();
       const onAbort = (): void => controller.abort();
       ctx.signal?.addEventListener('abort', onAbort);
@@ -1025,13 +1046,27 @@ export class OpencodeAdapter implements Adapter {
         });
         if (!response.ok || response.status < 200 || response.status > 299) {
           ctx.log?.(`${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} returned HTTP ${response.status}`);
+          let body: string | undefined;
+          try {
+            body = await response.text();
+          } catch {
+            body = undefined;
+          }
+          logFailure('http-status', `${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} returned HTTP ${response.status}`, {
+            status: response.status,
+            ...(body !== undefined && body.length > 0 ? { bodyExcerpt: excerpt(body) } : {}),
+          });
           return [];
         }
         text = await response.text();
       } catch (e) {
-        ctx.log?.(
-          `${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} request failed${e instanceof Error && e.message.length > 0 ? `: ${e.message}` : ''}`,
-        );
+        const message = `${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} request failed${e instanceof Error && e.message.length > 0 ? `: ${e.message}` : ''}`;
+        ctx.log?.(message);
+        if (timedOut) {
+          logFailure('timeout', `${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} request timed out`);
+        } else if (!isAborted(ctx.signal)) {
+          logFailure('connection', message);
+        }
         return [];
       } finally {
         clearTimeout(timer);
@@ -1042,6 +1077,7 @@ export class OpencodeAdapter implements Adapter {
         return opencodeModelsFromApi(JSON.parse(text));
       } catch {
         ctx.log?.(`${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} returned unparseable JSON`);
+        logFailure('malformed-response', `${OPENCODE_BIN} ${OPENCODE_MODEL_ENDPOINT_PATH} returned unparseable JSON`);
         return [];
       }
     } catch {

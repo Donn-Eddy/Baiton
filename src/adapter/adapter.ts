@@ -1,6 +1,7 @@
 import type { Role } from '../model/role';
 import type { CatalogFetch, CatalogSourceId, ModelEntry, SnapshotSource } from '../orchestrator/modelCatalog';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
+import type { ApiLog } from '../orchestrator/apiLog';
 
 /**
  * The adapter boundary. An adapter owns only a CLI's launch arguments per role,
@@ -53,6 +54,11 @@ export interface DiscoveryContext {
   readonly feed?: ModelsDevFeed;
   /** Diagnostic sink; absent means discard. */
   readonly log?: (message: string) => void;
+  /**
+   * API failure log for adapters with an HTTP leg (one entry per failed call,
+   * redacted by the log itself); absent means discard (use `noopApiLog`).
+   */
+  readonly apiLog?: ApiLog;
 }
 
 /**

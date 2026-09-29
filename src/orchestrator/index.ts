@@ -19,3 +19,4 @@ export * from './specWriteTools';
 export * from './controlTools';
 export * from './registry';
 export * from './webviewProtocol';
+export * from './apiLog';
