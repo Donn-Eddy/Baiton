@@ -10,6 +10,8 @@ import {
   parseModelsDevFeed,
 } from '../src/orchestrator/modelsDev';
 import type { FeedResponse } from '../src/orchestrator/modelsDev';
+import { createApiLog } from '../src/orchestrator/apiLog';
+import type { ApiLog } from '../src/orchestrator/apiLog';
 
 // test/fixtures/modelsDev.sample.json is a hand-trimmed excerpt of
 // https://models.dev/api.json?type=all in the real feed shape (an object
@@ -36,6 +38,12 @@ function fakeFetch(response: { ok: boolean; status: number; text: string }): {
 /** Options with the fake fetch injected (no unused keys). */
 function opts(fetchFn: FeedFetch, rest: Omit<FetchModelsDevOptions, 'fetch'> = {}): FetchModelsDevOptions {
   return { fetch: fetchFn, ...rest };
+}
+
+/** An ApiLog recording each formatted line (fixed timestamp 'T'). */
+function recordingLog(): { apiLog: ApiLog; lines: string[] } {
+  const lines: string[] = [];
+  return { apiLog: createApiLog((line) => lines.push(line), () => 'T'), lines };
 }
 
 describe('orchestrator/modelsDev', () => {
@@ -314,6 +322,158 @@ describe('orchestrator/modelsDev', () => {
       } finally {
         globalAny.fetch = original;
       }
+    });
+
+    describe('apiLog', () => {
+      it('success writes no entry', async () => {
+        const { apiLog, lines } = recordingLog();
+        const { fetchFn } = fakeFetch({ ok: true, status: 200, text: fixtureText });
+        const result = await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(result.ok, true);
+        assert.strictEqual(lines.length, 0);
+      });
+
+      it('non-2xx logs one http-status entry with the status and feed URL', async () => {
+        const { apiLog, lines } = recordingLog();
+        const { fetchFn } = fakeFetch({ ok: false, status: 503, text: '' });
+        const result = await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual((result as { error: string }).error, 'models.dev returned HTTP 503');
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].startsWith('[T] models.dev model list http-status HTTP 503 '), lines[0]);
+        assert.ok(lines[0].includes(MODELS_DEV_URL));
+        assert.ok(lines[0].includes('models.dev returned HTTP 503'));
+      });
+
+      it('logs the actual custom url as the target', async () => {
+        const { apiLog, lines } = recordingLog();
+        const { fetchFn } = fakeFetch({ ok: false, status: 500, text: '' });
+        await fetchModelsDev(opts(fetchFn, { apiLog, url: 'https://example.test/api.json' }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes('https://example.test/api.json'));
+      });
+
+      it('invalid JSON logs one malformed-response entry', async () => {
+        const { apiLog, lines } = recordingLog();
+        const { fetchFn } = fakeFetch({ ok: true, status: 200, text: '<html>not json</html>' });
+        const result = await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual((result as { error: string }).error, 'models.dev returned invalid JSON');
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' malformed-response '));
+        assert.ok(lines[0].includes('invalid JSON'));
+      });
+
+      it('an unparseable feed logs one malformed-response entry with the parser error', async () => {
+        for (const [text, expected] of [
+          ['{}', /no providers/],
+          ['42', /not an object/],
+        ] as const) {
+          const { apiLog, lines } = recordingLog();
+          const { fetchFn } = fakeFetch({ ok: true, status: 200, text });
+          const result = await fetchModelsDev(opts(fetchFn, { apiLog }));
+          assert.strictEqual(result.ok, false);
+          const error = (result as { error: string }).error;
+          assert.match(error, expected);
+          assert.strictEqual(lines.length, 1);
+          assert.ok(lines[0].includes(' malformed-response '));
+          assert.ok(lines[0].includes(error));
+        }
+      });
+
+      it('a rejecting fetch logs one connection entry', async () => {
+        const { apiLog, lines } = recordingLog();
+        const fetchFn: FeedFetch = async () => {
+          throw new Error('ECONNREFUSED');
+        };
+        await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' connection '));
+        assert.ok(lines[0].includes('ECONNREFUSED'));
+      });
+
+      it('a header timeout logs exactly one timeout entry', async function () {
+        this.timeout(2000);
+        const { apiLog, lines } = recordingLog();
+        const fetchFn: FeedFetch = (_url, init) =>
+          new Promise<FeedResponse>((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => {
+              reject(new Error('aborted by test'));
+            });
+          });
+        await fetchModelsDev(opts(fetchFn, { apiLog, timeoutMs: 10 }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' timeout '));
+        assert.ok(lines[0].includes('timed out after 10ms'));
+      });
+
+      it('a body timeout logs exactly one timeout entry', async function () {
+        this.timeout(2000);
+        const { apiLog, lines } = recordingLog();
+        const hangingBodyFetch: FeedFetch = async (_url, init) => ({
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init.signal.addEventListener('abort', () => {
+                reject(new Error('aborted while reading body'));
+              });
+            }),
+        });
+        await fetchModelsDev(opts(hangingBodyFetch, { apiLog, timeoutMs: 10 }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' timeout '));
+      });
+
+      it('a body read failure without abort logs one connection entry', async () => {
+        const { apiLog, lines } = recordingLog();
+        const fetchFn: FeedFetch = async () => ({
+          ok: true,
+          status: 200,
+          text: async () => {
+            throw new Error('reset');
+          },
+        });
+        await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' connection '));
+        assert.ok(lines[0].includes('reset'));
+      });
+
+      it('a missing global fetch logs one connection entry', async () => {
+        const { apiLog, lines } = recordingLog();
+        const globalAny = globalThis as { fetch?: unknown };
+        const original = globalAny.fetch;
+        delete globalAny.fetch;
+        try {
+          await fetchModelsDev({ apiLog });
+        } finally {
+          globalAny.fetch = original;
+        }
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' connection '));
+        assert.ok(lines[0].includes('unavailable in this runtime'));
+      });
+
+      it('redacts secrets in a transport error message', async () => {
+        const { apiLog, lines } = recordingLog();
+        const fetchFn: FeedFetch = async () => {
+          throw new Error('Authorization: Bearer sk-abcdefghijklmnopqrstuvwx');
+        };
+        await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(lines.length, 1);
+        assert.ok(!lines[0].includes('sk-abcdefghijklmnopqrstuvwx'));
+        assert.ok(lines[0].includes('[REDACTED]'));
+      });
+
+      it('a throwing sink never makes fetchModelsDev reject', async () => {
+        const apiLog = createApiLog(() => {
+          throw new Error('boom');
+        });
+        const { fetchFn } = fakeFetch({ ok: false, status: 503, text: '' });
+        const result = await fetchModelsDev(opts(fetchFn, { apiLog }));
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual((result as { error: string }).error, 'models.dev returned HTTP 503');
+      });
     });
   });
 

@@ -9,13 +9,20 @@
  * import, touches no host API and spawns nothing, so the host glue and the
  * unit tests both consume this same contract — like
  * src/orchestrator/modelCatalog.ts and src/orchestrator/providers.ts.
+ * Every failed fetch also writes exactly one entry to the injected
+ * {@link ApiLog}; successful fetches write nothing.
  */
 
 import type { Result } from '../model/result';
 import { ok, err } from '../model/result';
+import type { ApiLog, ApiFailureKind } from './apiLog';
+import { noopApiLog } from './apiLog';
 
 /** The models.dev feed endpoint. */
 export const MODELS_DEV_URL = 'https://models.dev/api.json?type=all';
+
+const API_SURFACE = 'models.dev';
+const API_OPERATION = 'model list';
 
 /** Context and output token limits of one feed model. */
 export interface FeedModelLimits {
@@ -329,6 +336,8 @@ export interface FetchModelsDevOptions {
   fetch?: FeedFetch;
   /** Abort timeout in milliseconds; defaults to 10_000. */
   timeoutMs?: number;
+  /** Failure log; one entry per failed fetch. Defaults to {@link noopApiLog}. */
+  apiLog?: ApiLog;
 }
 
 /**
@@ -347,13 +356,28 @@ function errorMessage(value: unknown): string {
  * snapshot via `CatalogStore.applyResult`). The transport is injected —
  * `fetch` defaults to a defensive read of the global `fetch` — and an
  * `AbortController` timer aborts the request after `timeoutMs`; the timer is
- * always cleared so no test leaks a pending timer.
+ * always cleared so no test leaks a pending timer. Every err path also writes
+ * exactly one entry to `options.apiLog` (surface 'models.dev', operation
+ * 'model list', target the feed URL); successful fetches write nothing and the
+ * returned `Result` is unchanged.
  */
 export async function fetchModelsDev(options: FetchModelsDevOptions = {}): Promise<Result<ModelsDevFeed, string>> {
   const url = options.url ?? MODELS_DEV_URL;
   const timeoutMs = options.timeoutMs ?? 10_000;
+  const apiLog = options.apiLog ?? noopApiLog;
+  const fail = (kind: ApiFailureKind, message: string, status?: number): Result<ModelsDevFeed, string> => {
+    apiLog.failure({
+      surface: API_SURFACE,
+      operation: API_OPERATION,
+      target: url,
+      kind,
+      message,
+      ...(status !== undefined ? { status } : {}),
+    });
+    return err(message);
+  };
   if (options.fetch === undefined && (globalThis as { fetch?: FeedFetch }).fetch === undefined) {
-    return err('models.dev fetch is unavailable in this runtime');
+    return fail('connection', 'models.dev fetch is unavailable in this runtime');
   }
   const fetchFn: FeedFetch =
     options.fetch ?? ((globalThis as { fetch?: FeedFetch }).fetch as FeedFetch);
@@ -366,29 +390,33 @@ export async function fetchModelsDev(options: FetchModelsDevOptions = {}): Promi
       response = await fetchFn(url, { signal: controller.signal, headers: { accept: 'application/json' } });
     } catch (error) {
       if (controller.signal.aborted) {
-        return err(`models.dev request timed out after ${timeoutMs}ms`);
+        return fail('timeout', `models.dev request timed out after ${timeoutMs}ms`);
       }
-      return err(`models.dev request failed: ${errorMessage(error)}`);
+      return fail('connection', `models.dev request failed: ${errorMessage(error)}`);
     }
     if (!response.ok || response.status < 200 || response.status > 299) {
-      return err(`models.dev returned HTTP ${response.status}`);
+      return fail('http-status', `models.dev returned HTTP ${response.status}`, response.status);
     }
     let text: string;
     try {
       text = await response.text();
     } catch (error) {
       if (controller.signal.aborted) {
-        return err(`models.dev request timed out after ${timeoutMs}ms`);
+        return fail('timeout', `models.dev request timed out after ${timeoutMs}ms`);
       }
-      return err(`models.dev request failed: ${errorMessage(error)}`);
+      return fail('connection', `models.dev request failed: ${errorMessage(error)}`);
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
     } catch {
-      return err('models.dev returned invalid JSON');
+      return fail('malformed-response', 'models.dev returned invalid JSON');
     }
-    return parseModelsDevFeed(parsed);
+    const feed = parseModelsDevFeed(parsed);
+    if (!feed.ok) {
+      return fail('malformed-response', feed.error);
+    }
+    return feed;
   } finally {
     clearTimeout(timer);
   }
