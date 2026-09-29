@@ -145,9 +145,9 @@ export interface RunManifest {
   version: number;
   /** The run id, which is also its directory's name. Never contains a dot. */
   id: string;
-  /** The mode the run actually runs as; never `spec`. */
+  /** The mode the run actually runs as; never `spec` or `default`. */
   mode: RunMode;
-  /** What the composer's Mode select said when the run was confirmed. */
+  /** What the composer's Mode select said when the run was confirmed (may be `default`). */
   composerMode: RunMode;
   /** True when the orchestrator proposed a mode other than `composerMode`. */
   explicitMode: boolean;
@@ -400,6 +400,9 @@ export function parseRunManifest(text: string): Result<RunManifest, string> {
   if (raw.mode === 'spec') {
     return err('mode "spec" has no run manifest');
   }
+  if (raw.mode === 'default') {
+    return err('mode "default" has no run manifest');
+  }
   if (typeof raw.composerMode !== 'string' || !isRunMode(raw.composerMode)) {
     return err(`composerMode ${JSON.stringify(raw.composerMode)} is not a known mode`);
   }
@@ -543,7 +546,7 @@ export class RunStore {
     return existsSync(this.manifestPath(runId));
   }
 
-  /** Write a new run's manifest, refusing a bad id, a spec mode, or a re-create. */
+  /** Write a new run's manifest, refusing a bad id, a spec or default mode, or a re-create. */
   public create(input: NewRunInput): Result<RunManifest, RunStoreError> {
     if (!isRunId(input.id)) {
       return err({
@@ -560,6 +563,14 @@ export class RunStore {
         runId: input.id,
         message:
           'mode "spec" has no run manifest: a spec conversation dispatches draft_spec, not a run.',
+      });
+    }
+    if (input.mode === 'default') {
+      return err({
+        kind: 'invalid-id',
+        runId: input.id,
+        message:
+          'mode "default" has no run manifest: Default dispatches the picked mode (start_run or investigate), and a spec conversation dispatches draft_spec, not a run.',
       });
     }
     if (this.exists(input.id)) {

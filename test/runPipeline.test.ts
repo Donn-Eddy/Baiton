@@ -11,7 +11,7 @@ import { Result, ok } from '../src/model/result';
 import type { RunMode } from '../src/model/mode';
 import type { Role } from '../src/model/role';
 import { parseJournal } from '../src/journal';
-import { createRunStore, type RunStore } from '../src/engine/runStore';
+import { createRunStore, parseRunManifest, type RunStore } from '../src/engine/runStore';
 import {
   createRunPipeline,
   type LiveRunStage,
@@ -1025,6 +1025,38 @@ describe('spec-less run pipeline (T07)', () => {
         assert.match(refused.error.message, /draft_spec/);
       }
       assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));
+    });
+
+    it('refuses mode "default"', async () => {
+      const h = track(makeHarness());
+      const refused = await h.pipeline.start(bugRequest({ mode: 'default' }));
+      assert.strictEqual(refused.ok, false);
+      if (!refused.ok) {
+        assert.strictEqual(refused.error.kind, 'invalid-mode');
+        assert.match(refused.error.message, /draft_spec/);
+        assert.match(refused.error.message, /default/);
+      }
+      assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));
+    });
+
+    it('records composerMode "default" for a dispatch from Default', async () => {
+      const h = track(makeHarness());
+      const started = await h.pipeline.start(bugRequest({ composerMode: 'default', explicitMode: true }));
+      assert.ok(started.ok, 'the run should start');
+      if (!started.ok) {
+        return;
+      }
+      assert.strictEqual(started.manifest.mode, 'bug');
+      assert.strictEqual(started.manifest.composerMode, 'default');
+      assert.strictEqual(started.manifest.explicitMode, true);
+      assert.strictEqual(started.manifest.branch, `baiton/bug/${started.runId}`);
+      const parsed = parseRunManifest(fs.readFileSync(path.join(h.runDir(started.runId), 'run.json'), 'utf8'));
+      assert.ok(parsed.ok);
+      assert.strictEqual(parsed.value.composerMode, 'default');
+      await h.settle(0, PLAN_RESULT);
+      await h.settle(1, EXECUTE_RESULT);
+      await h.settle(2, REVIEW_PASS);
+      await started.completed;
     });
 
     it('refuses a detached HEAD and a base branch with no commits', async () => {

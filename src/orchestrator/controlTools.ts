@@ -905,7 +905,8 @@ function readBoolean(args: unknown, key: string): { ok: true; value: boolean | u
 
 /**
  * The three build modes `start_run` accepts. `investigate` is dispatched by its
- * own tool and `spec` is the spec pipeline, so neither is accepted here.
+ * own tool, `spec` is the spec pipeline, and `default` only recommends one of
+ * these modes, so none of them is accepted here.
  */
 const RUN_TOOL_MODES: readonly RunMode[] = ['bug', 'quick', 'refactor'] as const;
 
