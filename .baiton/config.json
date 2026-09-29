@@ -27,8 +27,8 @@
       "effort": "medium"
     },
     "pr-writer": {
-      "agent": "codex",
-      "model": "gpt-6-luna",
+      "agent": "opencode",
+      "model": "opencode/space-bunny-free",
       "effort": "medium"
     }
   },
