@@ -412,7 +412,8 @@ export class ChatController {
       });
     this.autoMode = deps.autoModeMemory?.get() ?? false;
     // Validating host-side means an unknown or stale `workspaceState` value
-    // silently falls back to Spec rather than poisoning the phase.
+    // silently falls back to DEFAULT_MODE (the Default a fresh Workspace
+    // conversation starts in) rather than poisoning the phase.
     const stored = deps.modeMemory?.get();
     this.mode = stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
   }
@@ -689,12 +690,16 @@ export class ChatController {
     }
   }
 
-  /** The mode that actually governs the conversation in view: Spec on a spec conversation. */
+  /**
+   * The mode that actually governs the conversation in view. A spec conversation
+   * is always the literal Spec, deliberately not DEFAULT_MODE: the Workspace
+   * default no longer means Spec.
+   */
   private effectiveMode(): RunMode {
-    return this.activeSpec === undefined ? this.mode : DEFAULT_MODE;
+    return this.activeSpec === undefined ? this.mode : 'spec';
   }
 
-  /** Repaint the composer's Mode select from the host's state. */
+  /** Repaint the composer's Mode select from the host's state (a spec conversation always paints Spec). */
   private postMode(): void {
     this.deps.webview.post({ type: 'setMode', mode: this.effectiveMode() });
   }
