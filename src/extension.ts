@@ -145,6 +145,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // once and reused by the command layer and recovery (design "Error Handling").
   const surface = new Surface();
   context.subscriptions.push(surface.outputChannel);
+  context.subscriptions.push(surface.apiOutputChannel);
 
   // Register `Baiton: Initialize` before the activation gate so it still works
   // in an as-yet-uninitialized folder (where config load fails by design)
