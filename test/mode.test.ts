@@ -25,22 +25,26 @@ import { isErr, isOk } from '../src/model/result';
 /**
  * The run-mode vocabulary and the Investigate stage.
  *
- * Pins the new `RunMode` union and its `isSpecless` predicate, the wiring of the
+ * Pins the `RunMode` union (including the recommend-and-confirm `default` mode) and its `isSpecless` predicate, the wiring of the
  * `investigate` stage (schema, persistence path, artifact renderer, role), and —
  * as a regression guard — that adding the stage moved nothing about the six
  * stages that already existed.
  */
 describe('run modes and the investigate stage', () => {
   describe('RunMode', () => {
-    it('defaults to spec so every existing path keeps today\'s behaviour', () => {
-      assert.strictEqual(DEFAULT_MODE, 'spec');
+    it('defaults to default so a Workspace conversation starts in recommend-and-confirm', () => {
+      assert.strictEqual(DEFAULT_MODE, 'default');
     });
 
-    it('lists every mode, spec first', () => {
+    it('lists every mode, default first', () => {
       assert.deepStrictEqual(
         [...RUN_MODES],
-        ['spec', 'bug', 'quick', 'refactor', 'investigate'],
+        ['default', 'spec', 'bug', 'quick', 'refactor', 'investigate'],
       );
+    });
+
+    it('recognises default as a mode', () => {
+      assert.strictEqual(isRunMode('default'), true);
     });
 
     it('recognises every listed mode', () => {
@@ -53,10 +57,12 @@ describe('run modes and the investigate stage', () => {
       assert.strictEqual(isRunMode('bogus'), false);
       assert.strictEqual(isRunMode(''), false);
       assert.strictEqual(isRunMode('Spec'), false);
+      assert.strictEqual(isRunMode('Default'), false);
     });
 
     it('treats every mode but spec as spec-less', () => {
       assert.strictEqual(isSpecless('spec'), false);
+      assert.strictEqual(isSpecless('default'), true);
       for (const mode of RUN_MODES) {
         if (mode === 'spec') {
           continue;
