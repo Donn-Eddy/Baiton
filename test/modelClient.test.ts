@@ -17,6 +17,8 @@ import {
   geminiDialect,
   openCodeExtraHeaders,
 } from '../src/orchestrator/modelClient';
+import { createApiLog } from '../src/orchestrator/apiLog';
+import type { ApiLog } from '../src/orchestrator/apiLog';
 
 /**
  * Unit tests for the OpenAI-compatible model client against a local mock HTTP
@@ -115,6 +117,14 @@ const SAMPLE_TOOLS: ToolSpec[] = [
     parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   },
 ];
+
+const TS = '2026-01-01T00:00:00.000Z';
+function recordingLog(): { lines: string[]; apiLog: ApiLog } {
+  const lines: string[] = [];
+  return { lines, apiLog: createApiLog((l) => lines.push(l), () => TS) };
+}
+/** Let late socket events (e.g. the error after request.destroy()) fire before counting entries. */
+const settle = () => new Promise<void>((r) => setTimeout(r, 20));
 
 describe('OpenAiModelClient', () => {
   describe('non-streaming branch', () => {
@@ -1075,6 +1085,247 @@ describe('OpenAiModelClient', () => {
         { role: 'tool', tool_call_id: 'dup', content: 'never repeated' },
         { role: 'assistant', tool_calls: [wireCall('dup')] },
       ]);
+    });
+  });
+
+  describe('API failure log', () => {
+    const OK_BODY = JSON.stringify({ choices: [{ message: { content: 'ok' } }] });
+    const req = (signal: AbortSignal = liveSignal()) => ({
+      messages: SAMPLE_MESSAGES,
+      tools: SAMPLE_TOOLS,
+      signal,
+    });
+    const closeServer = (s: http.Server) => new Promise<void>((resolve) => s.close(() => resolve()));
+    const listen = async (s: http.Server): Promise<string> => {
+      await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve));
+      return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    };
+    const rejectsUnreachable = (p: Promise<unknown>, re?: RegExp) =>
+      assert.rejects(p, (err: unknown) => {
+        assert.ok(err instanceof UnreachableEndpointError);
+        if (re) {
+          assert.match(err.message, re);
+        }
+        return true;
+      });
+
+    it('writes nothing on a non-streaming success', async () => {
+      const mock = await startMockServer(() => ({ body: OK_BODY }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete(req());
+        await settle();
+        assert.strictEqual(lines.length, 0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('writes nothing on a streaming success', async () => {
+      const mock = await startMockServer(() => ({
+        headers: { 'content-type': 'text/event-stream' },
+        body: 'data: ' + JSON.stringify({ choices: [{ delta: { content: 'x' } }] }) + '\n\ndata: [DONE]\n\n',
+      }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await new OpenAiModelClient(makeConfig(mock.url, { apiLog, isStreaming: () => true })).complete(req());
+        await settle();
+        assert.strictEqual(lines.length, 0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('logs one line for an HTTP 500 and keeps the thrown error unchanged', async () => {
+      const mock = await startMockServer(() => ({ status: 500, body: 'boom\nline2' }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await assert.rejects(new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete(req()), (err: unknown) => {
+          assert.ok(err instanceof UnreachableEndpointError);
+          assert.strictEqual(
+            err.message,
+            'Orchestrator endpoint was unreachable: endpoint returned HTTP 500: boom\nline2',
+          );
+          return true;
+        });
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.match(
+          lines[0],
+          /^\[2026-01-01T00:00:00\.000Z\] openai completion http-status HTTP 500 http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions — endpoint returned HTTP 500 \| body: boom line2$/,
+        );
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('records the configured surfaceId', async () => {
+      const mock = await startMockServer(() => ({ status: 500, body: 'boom' }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(mock.url, { apiLog, surfaceId: 'deepseek' })).complete(req()),
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes('] deepseek completion http-status'), lines[0]);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('redacts a secret echoed in the response body', async () => {
+      const mock = await startMockServer(() => ({
+        status: 401,
+        body: 'bad Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz',
+      }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await rejectsUnreachable(new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete(req()));
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(!lines[0].includes('sk-abcdefghijklmnopqrstuvwxyz'), lines[0]);
+        assert.ok(lines[0].includes('[REDACTED]'), lines[0]);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('logs one connection line for a refused connection', async () => {
+      const idle = http.createServer();
+      const base = await listen(idle);
+      await closeServer(idle);
+      const { lines, apiLog } = recordingLog();
+      await rejectsUnreachable(new OpenAiModelClient(makeConfig(base, { apiLog })).complete(req()), /connection failed/);
+      await settle();
+      assert.strictEqual(lines.length, 1);
+      assert.ok(lines[0].includes(' completion connection '), lines[0]);
+      assert.ok(lines[0].includes('connection failed'), lines[0]);
+    });
+
+    it('logs exactly one timeout line when the connect budget elapses', async () => {
+      const silent = http.createServer(() => {});
+      const base = await listen(silent);
+      try {
+        const { lines, apiLog } = recordingLog();
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(base, { apiLog, connectTimeoutMs: 50 })).complete(req()),
+          /within 50ms/,
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' completion timeout '), lines[0]);
+        assert.ok(lines[0].includes('within 50ms'), lines[0]);
+      } finally {
+        silent.closeAllConnections();
+        await closeServer(silent);
+      }
+    });
+
+    it('logs one abort line when aborted mid-request', async () => {
+      const silent = http.createServer(() => {});
+      const base = await listen(silent);
+      try {
+        const { lines, apiLog } = recordingLog();
+        const ac = new AbortController();
+        setTimeout(() => ac.abort(), 20);
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(base, { apiLog, connectTimeoutMs: 5000 })).complete(req(ac.signal)),
+          /request was aborted/,
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' completion abort '), lines[0]);
+      } finally {
+        silent.closeAllConnections();
+        await closeServer(silent);
+      }
+    });
+
+    it('logs one malformed-response line for a non-JSON body', async () => {
+      const mock = await startMockServer(() => ({ body: 'not json' }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete(req()),
+          /non-JSON response/,
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' completion malformed-response '), lines[0]);
+        assert.ok(lines[0].includes('| body: not json'), lines[0]);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('logs one connection line when the response stream is cut off', async () => {
+      const server = http.createServer((_req, res) => {
+        _req.on('data', () => {});
+        _req.on('end', () => {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'content-length': '1000' });
+          res.write('data: {');
+          setTimeout(() => res.socket?.destroy(), 10);
+        });
+      });
+      const base = await listen(server);
+      try {
+        const { lines, apiLog } = recordingLog();
+        await rejectsUnreachable(
+          new OpenAiModelClient(
+            makeConfig(base, { apiLog, isStreaming: () => true, connectTimeoutMs: 2000 }),
+          ).complete(req()),
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes(' completion connection '), lines[0]);
+        assert.ok(/response stream failed|connection failed/.test(lines[0]), lines[0]);
+      } finally {
+        server.closeAllConnections();
+        await closeServer(server);
+      }
+    });
+
+    it('does not log missing configuration or an already-aborted signal', async () => {
+      const { lines, apiLog } = recordingLog();
+      await assert.rejects(
+        new OpenAiModelClient(makeConfig(undefined, { apiLog })).complete(req()),
+        (err: unknown) => err instanceof MissingConfigError,
+      );
+      const ac = new AbortController();
+      ac.abort();
+      await rejectsUnreachable(
+        new OpenAiModelClient(makeConfig('http://127.0.0.1:1', { apiLog })).complete(req(ac.signal)),
+        /aborted before it started/,
+      );
+      await settle();
+      assert.strictEqual(lines.length, 0);
+    });
+
+    it('still rejects with the same error when no apiLog is configured', async () => {
+      const mock = await startMockServer(() => ({ status: 500, body: 'boom' }));
+      try {
+        await rejectsUnreachable(new OpenAiModelClient(makeConfig(mock.url)).complete(req()), /HTTP 500: boom/);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('still rejects with the original error when the apiLog throws', async () => {
+      const mock = await startMockServer(() => ({ status: 500, body: 'boom' }));
+      try {
+        const apiLog: ApiLog = {
+          failure: () => {
+            throw new Error('sink exploded');
+          },
+        };
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete(req()),
+          /HTTP 500: boom/,
+        );
+      } finally {
+        await mock.close();
+      }
     });
   });
 });
