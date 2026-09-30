@@ -104,6 +104,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.compactContext",
+        "title": "Compact Chat Context",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.approve",
         "title": "Approve Spec",
         "category": "Baiton"
@@ -217,6 +222,10 @@
         },
         {
           "command": "baiton.openChat",
+          "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.compactContext",
           "when": "baiton.activated"
         },
         {

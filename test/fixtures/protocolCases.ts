@@ -738,4 +738,33 @@ cases.push({
   ],
 });
 
+// (59) setContextUsage
+cases.push({
+  name: 'setContextUsage sets the meter with a known window',
+  messages: [{ type: 'setContextUsage', loaded: 256000, window: 1000000, source: 'usage' }],
+});
+cases.push({
+  name: 'setContextUsage with an unknown window',
+  messages: [{ type: 'setContextUsage', loaded: 1200, window: null, source: 'estimate' }],
+});
+cases.push({
+  name: 'setContextUsage replaces a previous reading',
+  state: seed({ context: { loaded: 5, window: 10, source: 'usage' } }),
+  messages: [{ type: 'setContextUsage', loaded: 7, window: null, source: 'estimate' }],
+});
+cases.push({
+  name: 'setContextUsage leaves busy, mode, records and error alone',
+  state: seed({ busy: true, mode: 'bug', records: [{ role: 'user', content: 'hi' }] }),
+  messages: [{ type: 'setContextUsage', loaded: 10, window: 100, source: 'estimate' }],
+});
+cases.push({
+  name: 'setContextUsage interleaved with renderConversation and setBusy',
+  messages: [
+    { type: 'setBusy', busy: true },
+    { type: 'setContextUsage', loaded: 10, window: 100, source: 'estimate' },
+    { type: 'renderConversation', records: [] },
+    { type: 'setBusy', busy: false },
+  ],
+});
+
 export const PROTOCOL_CASES: readonly ProtocolCase[] = cases;

@@ -25,6 +25,8 @@
   host-authoritative Mode select over the six conversation modes (Default, Spec,
   Bug, Quick, Refactor, Investigate) that reflects `state.mode`, posts `setMode`,
   and is disabled while busy, while a run is active, or on a spec conversation.
+  The composer ends with a context meter (`~256K / 1M · usage`) and a Compact
+  link that posts `compactContext`.
   The composer also carries the provider-first model
   selection: a Provider select followed by a Model select, listing only the
   configured providers the host posts (never sorted or filtered here) and only
@@ -684,6 +686,11 @@
         justify-content: flex-end;
       }
 
+      /* Context meter: tokens the last request carried against the model's window. */
+      .context-bar { display: flex; align-items: center; justify-content: flex-end; gap: var(--baiton-gap); font-size: 0.9em; color: var(--vscode-descriptionForeground); }
+      .context-bar[hidden] { display: none; }
+      .context-meter.warn { color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground)); }
+
       button {
         font-family: var(--vscode-font-family);
         font-size: var(--vscode-font-size);
@@ -820,6 +827,10 @@
           >Auto: Off</button>
           <button id="stop" class="secondary" type="button" disabled>Stop</button>
           <button id="send" type="button">Send</button>
+        </div>
+        <div id="context-bar" class="context-bar">
+          <span id="context-meter" class="context-meter" aria-live="polite"></span>
+          <button id="compact-context" class="link-button" type="button" title="Compact the conversation: trim old tool results, then summarise older turns. The transcript keeps everything.">Compact</button>
         </div>
       </div>
     </div>

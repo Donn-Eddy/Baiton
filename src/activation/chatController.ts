@@ -63,7 +63,10 @@
  *    raises the ordinary run confirm card before anything is dispatched;
  *  - after trimming, summarise the messages older than the last two turns at
  *    `contextSummarizeAt` into a compaction record; the view keeps rendering
- *    the full transcript.
+ *    the full transcript;
+ *  - post the context meter (`setContextUsage`) after every completion,
+ *    compaction and render; compact on demand (`compactContext` /
+ *    `baiton.compactContext`), refused while busy.
  */
 import * as path from 'path';
 import { mkdir, readFile } from 'fs/promises';
@@ -723,6 +726,9 @@ export class ChatController {
       case 'setMode':
         await this.onSetMode(msg.mode);
         return;
+      case 'compactContext':
+        await this.compactContext();
+        return;
     }
   }
 
@@ -1142,6 +1148,8 @@ export class ChatController {
         const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
         if (compacted !== undefined) {
           history = compacted;
+          await this.seedContextEstimate(key, slug, history);
+          this.postContextUsage(key);
         }
       }
       await runToolLoop(history, {
@@ -1253,10 +1261,28 @@ export class ChatController {
     if (active === undefined) {
       // A fresh chat with no transcript yet: show the empty state.
       await this.renderConversation(undefined);
+      const window = this.deps.contextWindow?.();
+      this.deps.webview.post({
+        type: 'setContextUsage',
+        loaded: 0,
+        window: window !== undefined && Number.isInteger(window) && window > 0 ? window : null,
+        source: 'estimate',
+      });
       this.repostPendingCards(scopeId(scope));
       return;
     }
     await this.renderConversation(this.sessions.pathFor(scope, active));
+    const viewKey = `${scopeId(scope)}/${active}`;
+    if (!this.trackers.has(viewKey)) {
+      // Not measured in this window yet (e.g. after a reload): estimate it.
+      try {
+        const history = toHistory(await readTranscript(this.sessions.pathFor(scope, active)));
+        await this.seedContextEstimate(viewKey, this.activeSpec, history);
+      } catch (err) {
+        this.deps.log(`Baiton chat: could not estimate context: ${describe(err)}`);
+      }
+    }
+    this.postContextUsage(viewKey);
     this.repostPendingCards(scopeId(scope));
   }
 
@@ -1400,6 +1426,86 @@ export class ChatController {
     this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(message) });
   }
 
+  /** The key of the session in view, or undefined when none is active. */
+  private viewKey(): string | undefined {
+    const scope = this.activeScope();
+    const id = this.activeSessions.get(scopeId(scope));
+    return id === undefined ? undefined : `${scopeId(scope)}/${id}`;
+  }
+
+  /** Post the tracker's reading, only when `key` is the conversation in view. */
+  private postContextUsage(key: string): void {
+    if (key !== this.viewKey()) {
+      return;
+    }
+    const s = this.trackerFor(key).status();
+    this.deps.webview.post({
+      type: 'setContextUsage',
+      loaded: s.loaded,
+      window: s.window ?? null,
+      source: s.source,
+    });
+  }
+
+  /** Record a local estimate of what the next request would carry on the tracker. */
+  private async seedContextEstimate(
+    key: string,
+    slug: string | undefined,
+    history: readonly ChatMessage[],
+  ): Promise<void> {
+    const tools = this.deps.toolsFor(await this.phaseForConversation(slug));
+    const prompt = await this.buildPrompt(slug, this.effectiveMode());
+    this.trackerFor(key).record({ messages: [{ role: 'system', content: prompt }, ...history], tools }, {});
+  }
+
+  /**
+   * Trim-then-summarise the conversation in view on demand (the Compact button
+   * and `baiton.compactContext`). Refused while busy; the transcript keeps
+   * every record. Trim is round-local (it only shapes one request's payload and
+   * is re-applied by the loop's budget seam on every round), and the summary
+   * replaces every turn older than the last two — exactly the turns trim would
+   * stub — so the 'trim' here is realised by the next send's budget over the
+   * compacted history. Runs whether or not the window is known.
+   */
+  public async compactContext(): Promise<void> {
+    if (this.busy) {
+      this.deps.webview.post({ type: 'showError', message: 'Wait for the current run to finish before compacting.' });
+      return;
+    }
+    const slug = this.activeSpec;
+    const scope = this.activeScope();
+    const sessionId = this.activeSessions.get(scopeId(scope));
+    if (sessionId === undefined || (await this.sessions.meta(scope, sessionId)) === undefined) {
+      this.deps.webview.post({ type: 'showError', message: 'There is nothing to compact in this conversation yet.' });
+      return;
+    }
+    const transcript = this.transcriptFor(scope, sessionId);
+    const records = await readTranscript(transcript.path);
+    if (compactionCut(records, SUMMARY_KEEP_TURNS) === undefined) {
+      this.deps.webview.post({
+        type: 'showError',
+        message: `Nothing to compact: only the last ${SUMMARY_KEEP_TURNS} turns are in the conversation.`,
+      });
+      return;
+    }
+    const key = `${scopeId(scope)}/${sessionId}`;
+    this.setBusy(true);
+    this.runningKey = key;
+    this.abort = new AbortController();
+    try {
+      const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
+      const history = compacted ?? toHistory(await readTranscript(transcript.path));
+      await this.seedContextEstimate(key, slug, history);
+      this.postContextUsage(key);
+    } catch (err) {
+      this.surfaceError(err);
+    } finally {
+      this.abort = undefined;
+      this.runningKey = undefined;
+      this.setBusy(false);
+    }
+  }
+
   /** The conversation's context tracker, created on first use. */
   private trackerFor(key: string): ContextTracker {
     let tracker = this.trackers.get(key);
@@ -1435,6 +1541,7 @@ export class ChatController {
         const system = sent.messages[0];
         systemTokens = system?.role === 'system' ? estimateMessages([system]) : 0;
         tracker.record(sent, completion);
+        this.postContextUsage(key);
       },
     };
   }

@@ -142,7 +142,13 @@ export type HostToWebview =
    * control is disabled while it is true, so a run's mode cannot change under
    * it mid-flight.
    */
-  | { type: 'setRunActive'; active: boolean };
+  | { type: 'setRunActive'; active: boolean }
+  /**
+   * Set the context meter under the composer: tokens the last request carried,
+   * the model's window (null when unknown) and where `loaded` came from.
+   * Posted after every completion and every compaction.
+   */
+  | { type: 'setContextUsage'; loaded: number; window: number | null; source: 'usage' | 'estimate' };
 
 /** A message the webview sends back to the host in response to user actions. */
 export type WebviewToHost =
@@ -175,7 +181,12 @@ export type WebviewToHost =
    * whether the change takes: it persists the choice and echoes a host→webview
    * `setMode`, which is the only thing that moves the rendered control.
    */
-  | { type: 'setMode'; mode: RunMode };
+  | { type: 'setMode'; mode: RunMode }
+  /**
+   * The user pressed Compact: trim-then-summarise the conversation in view.
+   * The host refuses it while busy.
+   */
+  | { type: 'compactContext' };
 
 /**
  * One intervention card as the conversation renders it (pending or settled).
@@ -301,6 +312,20 @@ export interface RenderRecord {
   streaming?: boolean;
 }
 
+/** Where a context reading came from: the endpoint's usage report or the local estimate. */
+export type ContextUsageSource = 'usage' | 'estimate';
+
+/**
+ * A context measurement: tokens the last request carried, the model's window
+ * or null when unknown, and whether `loaded` came from the endpoint's usage
+ * report or the local estimate.
+ */
+export interface ContextUsageView {
+  loaded: number;
+  window: number | null;
+  source: ContextUsageSource;
+}
+
 /**
  * The webview's UI state. The rendered view is a pure projection of this
  * value, and {@link reduce} is the only way it changes.
@@ -337,6 +362,8 @@ export interface WebviewState {
   error?: { message: string; action?: FixAction; provider?: ProviderId };
   /** The empty-state descriptor, if the conversation has no messages. */
   empty?: { endpoint: string | null; model: string | null };
+  /** The last context measurement the host posted; absent until the first `setContextUsage`. */
+  context?: ContextUsageView;
 }
 
 /** Compile-time exhaustiveness check for a union switch's default branch. */
@@ -386,6 +413,7 @@ export function initialWebviewState(): WebviewState {
  * - `setAutoMode` sets the Auto-mode toggle.
  * - `setMode` sets the conversation's mode; the host is authoritative.
  * - `setRunActive` sets whether a spec-less run is in flight.
+ * - `setContextUsage` replaces the context meter reading.
  * - `setConversations` sets the selector entries.
  * - `setActive` sets the active conversation id.
  * - `setSessions` sets the session list; `setActiveSession` sets the active
@@ -490,6 +518,8 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
       return { ...state, mode: msg.mode };
     case 'setRunActive':
       return { ...state, runActive: msg.active };
+    case 'setContextUsage':
+      return { ...state, context: { loaded: msg.loaded, window: msg.window, source: msg.source } };
     case 'setConversations':
       return { ...state, conversations: [...msg.items] };
     case 'setActive':

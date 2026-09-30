@@ -24,6 +24,8 @@
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
  *     as an alias of the new Open Chat command.
+ *   - `baiton.compactContext` — trim-then-summarise the chat conversation in
+ *     view; refused while busy.
  *   - `baiton.setProviderApiKey` — set or clear one provider's API key in
  *     SecretStorage (pre-selecting the provider named by its argument, or
  *     picking through a quick-pick); the Chat view's inline "Set API key…"
@@ -210,6 +212,7 @@ export const COMMANDS = {
   setProviderEndpoint: 'baiton.setProviderEndpoint',
   openConfigPanel: 'baiton.openConfigPanel',
   refreshModels: 'baiton.refreshModels',
+  compactContext: 'baiton.compactContext',
   runsCancel: 'baiton.runs.cancel',
   runsViewDiff: 'baiton.runs.viewDiff',
   runsMerge: 'baiton.runs.merge',
@@ -937,6 +940,7 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(COMMANDS.chat, () => openChat()),
     vscode.commands.registerCommand(COMMANDS.openChat, () => openChat()),
+    vscode.commands.registerCommand(COMMANDS.compactContext, () => chatController.compactContext()),
     // A catalog member (builtin or feed-derived) pre-selects the provider; an
     // arbitrary string must never become a SecretStorage slot, so membership —
     // not mere string-ness — is the gate, with builtin ids as the offline

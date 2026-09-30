@@ -237,6 +237,101 @@ describe('ChatController context summarisation (context-budget T06)', () => {
     assert.ok(!firstLoop.messages.some((m) => m.content === big('a')));
   });
 
+  describe('context meter and manual compaction (T07)', () => {
+    const compactAndWait = async (): Promise<void> => {
+      const before = webview.all('setBusy').length;
+      await webview.send({ type: 'compactContext' });
+      await waitFor(
+        () => webview.all('setBusy').length > before && webview.last('setBusy')?.busy === false,
+        'the compaction to finish',
+      );
+    };
+
+    it('posts setContextUsage after a completion', async () => {
+      await build({ window: 100000, small: true });
+      client.queue.push({ content: 'ok', tool_calls: [], usage: { promptTokens: 1234, completionTokens: 5 } });
+      await send('hi');
+      assert.deepStrictEqual(webview.last('setContextUsage'), {
+        type: 'setContextUsage',
+        loaded: 1234,
+        window: 100000,
+        source: 'usage',
+      });
+    });
+
+    it('falls back to the estimate without usage and posts window null when unknown', async () => {
+      await build({ window: undefined, small: true });
+      await send('hi');
+      const last = webview.last('setContextUsage');
+      assert.strictEqual(last?.source, 'estimate');
+      assert.ok((last?.loaded ?? 0) > 0);
+      assert.strictEqual(last?.window, null);
+    });
+
+    it('posts an estimate on the first render of a reloaded conversation', async () => {
+      await build({ window: 100000, small: true });
+      const first = webview.all('setContextUsage')[0];
+      assert.ok(first, 'a reading was posted on render');
+      assert.strictEqual(first.source, 'estimate');
+      assert.ok(first.loaded > 0);
+    });
+
+    it('compactContext appends a compaction record and posts the new reading', async () => {
+      await build({ window: 100000 });
+      const pre = webview.last('setContextUsage')?.loaded ?? 0;
+      client.queue.push({ content: 'Goals: x', tool_calls: [] });
+      await compactAndWait();
+      const recs = await records();
+      assert.ok(recs[recs.length - 1].compaction !== undefined);
+      assert.strictEqual(client.requests.length, 1);
+      assert.strictEqual(client.requests[0].tools, undefined);
+      const post = webview.last('setContextUsage')?.loaded ?? Number.MAX_SAFE_INTEGER;
+      assert.ok(post < pre, `expected ${post} < ${pre}`);
+      const busy = webview.all('setBusy').map((m) => m.busy);
+      assert.deepStrictEqual(busy.slice(-2), [true, false]);
+    });
+
+    it('compactContext is refused while busy', async () => {
+      await build({ window: 100000, small: true });
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((r) => (release = r));
+      client.complete = async (req) => {
+        client.requests.push({ messages: req.messages, tools: req.tools });
+        await gate;
+        return { content: 'done', tool_calls: [] };
+      };
+      const sending = webview.send({ type: 'sendText', text: 'hi' });
+      await waitFor(() => client.requests.length === 1, 'the send to reach the client');
+      await webview.send({ type: 'compactContext' });
+      await waitFor(() => webview.all('showError').length > 0, 'the refusal');
+      assert.ok(webview.all('showError').some((e) => e.message.includes('Wait')));
+      assert.strictEqual(client.requests.length, 1);
+      release?.();
+      await sending;
+    });
+
+    it('compactContext on a too-short conversation posts a notice and calls nothing', async () => {
+      await build({ window: 100000, small: true });
+      const file = path.join(baitonDir, 'chat', 'seed.jsonl');
+      const short = seeded.slice(4);
+      fs.writeFileSync(file, short.map((r) => JSON.stringify(r)).join('\n') + '\n');
+      await webview.send({ type: 'compactContext' });
+      await waitFor(() => webview.all('showError').length > 0, 'the notice');
+      assert.ok(webview.all('showError').some((e) => e.message.toLowerCase().includes('nothing to compact')));
+      assert.strictEqual(client.requests.length, 0);
+    });
+
+    it('a failed manual summary leaves the transcript as it was', async () => {
+      await build({ window: 100000 });
+      client.queue.push(new Error('boom'));
+      await compactAndWait();
+      assert.ok(webview.all('showError').some((e) => e.message.includes('Compacting the conversation failed')));
+      const recs = await records();
+      assert.strictEqual(recs.length, seeded.length);
+      assert.strictEqual(webview.last('setBusy')?.busy, false);
+    });
+  });
+
   describe('resolveContextSummarizeAt', () => {
     it('falls back to 0.8 for unusable values and passes valid ones', () => {
       for (const v of [undefined, 0, -1, 1.5, 'x', NaN]) {
