@@ -1,12 +1,12 @@
 ---
 version: 1
 name: sub-agent-chats
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: bbc1747d1efaea39f16a6a826efc323d5e328d34
+branch: baiton/sub-agent-chats
+approved_rev: 10651bed56744460ba53c082bffbfcbab0368f3495fcdd13f41b448b96fdc401
 ---
 
 # OVERVIEW
