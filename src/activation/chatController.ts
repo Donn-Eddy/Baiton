@@ -84,6 +84,7 @@ import {
   resolveRoundBound,
   runToolLoop,
   settledInterventionView,
+  toHistory,
   toRenderRecords,
   toolUpdate,
 } from '../orchestrator';
@@ -1306,8 +1307,7 @@ export class ChatController {
 
   /** Read a conversation's persisted history as tool-loop {@link ChatMessage}s. */
   private async loadHistory(file: string): Promise<ChatMessage[]> {
-    const records = await readTranscript(file);
-    return records.map(toChatMessage);
+    return toHistory(await readTranscript(file));
   }
 
   /** Append one message to the transcript, containing any write failure (Req 8.7). */
@@ -1519,48 +1519,6 @@ function toRenderRecord(
   record: Pick<TranscriptRecord, 'role' | 'content' | 'tool_call_id'>,
 ): RenderRecord {
   return { role: record.role, content: record.content };
-}
-
-/** Turn a persisted transcript record into a tool-loop chat message. */
-function toChatMessage(record: TranscriptRecord): ChatMessage {
-  if (record.intervention !== undefined) {
-    // A persisted card re-enters the model history as the ask and its outcome,
-    // never as a bare prompt that would read like a fresh question.
-    return { role: 'assistant', content: interventionHistoryText(record.intervention) };
-  }
-  // Transcript records use the same role set the completions path expects,
-  // except that a persisted `system` role is not part of the history the loop
-  // sends (the loop prepends a fresh system prompt each round). Preserve the
-  // role and any tool-call id so a resumed conversation keeps its tool turns.
-  const role: ChatMessage['role'] = record.role === 'system' ? 'assistant' : record.role;
-  return {
-    role,
-    content: record.content,
-    ...(record.tool_call_id !== undefined ? { tool_call_id: record.tool_call_id } : {}),
-    ...(record.tool_calls !== undefined ? { tool_calls: record.tool_calls } : {}),
-  };
-}
-
-/** How a persisted card reads in the model history: the ask and what was decided. */
-function interventionHistoryText(view: InterventionView): string {
-  return `[intervention] ${view.prompt}\nDecision: ${describeAnswer(view.answer)}`;
-}
-
-/** A one-line description of an intervention answer. */
-function describeAnswer(answer: InterventionAnswer | undefined): string {
-  if (answer === undefined) {
-    return 'no answer was recorded';
-  }
-  switch (answer.kind) {
-    case 'approved':
-      return 'approved';
-    case 'declined':
-      return answer.reason === undefined ? 'declined' : `declined (${answer.reason})`;
-    case 'option':
-      return `chose "${answer.label ?? answer.optionId}"`;
-    case 'text':
-      return `answered: ${answer.text}`;
-  }
 }
 
 /**

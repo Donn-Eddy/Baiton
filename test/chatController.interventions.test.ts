@@ -26,6 +26,8 @@
  * 8. History projection — a settled card re-enters the model history as one
  *    assistant message `[intervention] <prompt>\nDecision: approved`, never as
  *    the bare prompt.
+ *    A reloaded conversation keeps each tool message directly after the
+ *    assistant `tool_calls` entry it answers, with the card after the tool.
  * 9. Provider selection — `start()` posts `setProviders` (router entries in
  *    order, before `setEmptyState`), `selectModel` switches the selection for
  *    the next turn without touching the transcript, a rejected switch repaints
@@ -60,6 +62,7 @@ import {
   toRenderRecords,
 } from '../src/orchestrator';
 import type {
+  ChatMessage,
   CompletionResult,
   FixAction,
   GuardContext,
@@ -448,6 +451,38 @@ describe('ChatController interventions', () => {
     assert.strictEqual(projected.length, 1);
     assert.ok(projected[0].content.includes('Decision: approved'));
     assert.ok(projected[0].content.includes('[intervention] Approve spec "x"?'));
+  });
+
+  it('replays a reloaded conversation with each tool message directly after its call', async () => {
+    startSend();
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');
+    const card = webview.last('showIntervention')!.intervention;
+    await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'approved' } });
+    await awaitRunEnd();
+
+    await webview.send({ type: 'sendText', text: 'continue' });
+    await awaitRunEnd(3);
+
+    const messages = client.requests[client.requests.length - 1] as unknown as ChatMessage[];
+    const callIdx = messages.findIndex((m) => m.tool_calls?.some((c) => c.id === 'c1'));
+    assert.ok(callIdx >= 0, 'the assistant tool_calls entry is replayed');
+    assert.strictEqual(messages[callIdx + 1].role, 'tool');
+    assert.strictEqual(messages[callIdx + 1].tool_call_id, 'c1');
+    const cardIdx = messages.findIndex((m) => m.content.startsWith('[intervention] Approve spec "x"?'));
+    assert.ok(cardIdx > callIdx + 1, 'the card follows the tool message');
+    messages.forEach((m, i) => {
+      if (m.role !== 'tool') {
+        return;
+      }
+      let j = i;
+      while (messages[j].role === 'tool') {
+        j--;
+      }
+      assert.ok(
+        messages[j].tool_calls?.some((c) => c.id === m.tool_call_id),
+        'a tool message follows the assistant carrying its call',
+      );
+    });
   });
 
   it('sends the same sessionId the transcript is written under, stable within a session and distinct after newChat', async () => {

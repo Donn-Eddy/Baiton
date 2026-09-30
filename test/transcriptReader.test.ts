@@ -2,7 +2,9 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { readTranscript } from '../src/orchestrator/transcriptReader';
+import * as fc from 'fast-check';
+import { readTranscript, toHistory } from '../src/orchestrator/transcriptReader';
+import type { ChatMessage } from '../src/orchestrator/modelClient';
 import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 import { toRenderRecords, type InterventionView } from '../src/orchestrator/webviewProtocol';
 
@@ -461,5 +463,223 @@ describe('intervention records (Task T03)', () => {
         'a plain system record still resets the call window',
       );
     });
+  });
+});
+
+describe('toHistory replay', () => {
+  let n = 0;
+  const ts = (): string => new Date(1_700_000_000_000 + n++ * 1000).toISOString();
+  const rec = (r: Omit<TranscriptRecord, 'ts'>): TranscriptRecord => ({ ts: ts(), ...r });
+  const call = (id: string) => ({ id, name: 'ask_user', arguments: '{"question":"Which?"}' });
+  const card = (
+    id: string,
+    status: 'pending' | 'resolved',
+    extra: Partial<InterventionView> = {},
+  ): TranscriptRecord =>
+    rec({
+      role: 'system',
+      content: 'Which?',
+      intervention: { id, kind: 'question', prompt: 'Which?', status, ...extra },
+    });
+
+  it('keeps the tool message right after its call and the card after the tool (2026-09-30 empty-body 400)', () => {
+    const records = [
+      rec({ role: 'user', content: 'hi' }),
+      rec({ role: 'assistant', content: '', tool_calls: [call('call_ask')] }),
+      card('q1', 'resolved', { answer: { kind: 'text', text: 'the blue one' } }),
+      rec({ role: 'tool', content: 'the blue one', tool_call_id: 'call_ask' }),
+      rec({ role: 'assistant', content: 'ok' }),
+      rec({ role: 'user', content: 'next' }),
+    ];
+    const out = toHistory(records);
+    assert.deepStrictEqual(out, [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', tool_calls: [call('call_ask')] },
+      { role: 'tool', content: 'the blue one', tool_call_id: 'call_ask' },
+      { role: 'assistant', content: '[intervention] Which?\nDecision: answered: the blue one' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'next' },
+    ]);
+    assert.strictEqual(out[2].role, 'tool');
+  });
+
+  it('collapses a pending/settled pair to one settled card after the window', () => {
+    const out = toHistory([
+      rec({ role: 'assistant', content: '', tool_calls: [call('c1'), call('c2')] }),
+      rec({ role: 'tool', content: 'r1', tool_call_id: 'c1' }),
+      card('p1', 'pending'),
+      card('p1', 'resolved', { answer: { kind: 'declined', reason: 'no' } }),
+      rec({ role: 'tool', content: 'r2', tool_call_id: 'c2' }),
+      rec({ role: 'assistant', content: 'done' }),
+    ]);
+    assert.deepStrictEqual(
+      out.map((m) => [m.role, m.content]),
+      [
+        ['assistant', ''],
+        ['tool', 'r1'],
+        ['tool', 'r2'],
+        ['assistant', '[intervention] Which?\nDecision: declined (no)'],
+        ['assistant', 'done'],
+      ],
+    );
+  });
+
+  it('replays a lone pending card as no answer recorded', () => {
+    const out = toHistory([rec({ role: 'user', content: 'hi' }), card('p', 'pending')]);
+    assert.strictEqual(out[1].content, '[intervention] Which?\nDecision: no answer was recorded');
+  });
+
+  it('replays plain system as assistant and maps a legacy transcript 1:1', () => {
+    const records = [
+      rec({ role: 'user', content: 'u' }),
+      rec({ role: 'system', content: 'note' }),
+      rec({ role: 'assistant', content: '', tool_calls: [call('c1')] }),
+      rec({ role: 'tool', content: 'r', tool_call_id: 'c1' }),
+    ];
+    assert.deepStrictEqual(toHistory(records), [
+      { role: 'user', content: 'u' },
+      { role: 'assistant', content: 'note' },
+      { role: 'assistant', content: '', tool_calls: [call('c1')] },
+      { role: 'tool', content: 'r', tool_call_id: 'c1' },
+    ]);
+  });
+
+  it('emits a trailing card after the last tool record', () => {
+    const out = toHistory([
+      rec({ role: 'assistant', content: '', tool_calls: [call('c1')] }),
+      rec({ role: 'tool', content: 'r', tool_call_id: 'c1' }),
+      card('q', 'resolved', { answer: { kind: 'approved' } }),
+    ]);
+    assert.deepStrictEqual(out.map((m) => m.role), ['assistant', 'tool', 'assistant']);
+    assert.ok(out[2].content.startsWith('[intervention] '));
+  });
+
+  it('drops an orphan tool record', () => {
+    const out = toHistory([
+      rec({ role: 'user', content: 'u' }),
+      rec({ role: 'tool', content: 'r', tool_call_id: 'zzz' }),
+    ]);
+    assert.deepStrictEqual(out, [{ role: 'user', content: 'u' }]);
+  });
+
+  it('property: tool messages stay adjacent to their call over random valid transcripts', () => {
+    const turnArb = fc.record({
+      rounds: fc.array(
+        fc.record({
+          calls: fc.integer({ min: 1, max: 3 }),
+          cards: fc.array(
+            fc.record({
+              pos: fc.nat(10),
+              pending: fc.boolean(),
+              answer: fc.constantFrom('approved', 'declined', 'text'),
+            }),
+            { maxLength: 2 },
+          ),
+        }),
+        { maxLength: 3 },
+      ),
+      reply: fc.boolean(),
+      note: fc.boolean(),
+      between: fc.array(fc.boolean(), { maxLength: 2 }),
+    });
+    fc.assert(
+      fc.property(fc.array(turnArb, { maxLength: 5 }), (turns) => {
+        n = 0;
+        const records: TranscriptRecord[] = [];
+        const resolvedText = new Map<string, string>();
+        let cardSeq = 0;
+        let toolCount = 0;
+        const userTexts: string[] = [];
+        const toolIds: string[] = [];
+        const mkResolved = (id: string, kind: string): TranscriptRecord => {
+          const answer: InterventionView['answer'] =
+            kind === 'approved'
+              ? { kind: 'approved' }
+              : kind === 'declined'
+                ? { kind: 'declined', reason: 'r' }
+                : { kind: 'text', text: `t-${id}` };
+          const c = card(id, 'resolved', { answer, prompt: `P ${id}` });
+          resolvedText.set(id, `[intervention] P ${id}\nDecision: ${
+            kind === 'approved' ? 'approved' : kind === 'declined' ? 'declined (r)' : `answered: t-${id}`
+          }`);
+          return c;
+        };
+        turns.forEach((turn, t) => {
+          userTexts.push(`u${t}`);
+          records.push(rec({ role: 'user', content: `u${t}` }));
+          turn.rounds.forEach((round, r) => {
+            const ids = Array.from({ length: round.calls }, (_, k) => `c${t}_${r}_${k}`);
+            const body: TranscriptRecord[] = ids.map((id) => {
+              toolIds.push(id);
+              toolCount++;
+              return rec({ role: 'tool', content: `res ${id}`, tool_call_id: id });
+            });
+            const inserts: { pos: number; recs: TranscriptRecord[] }[] = round.cards.map((c) => {
+              const id = `i${cardSeq++}`;
+              const recs = c.pending
+                ? [card(id, 'pending', { prompt: `P ${id}` }), mkResolved(id, c.answer)]
+                : [mkResolved(id, c.answer)];
+              return { pos: c.pos % (body.length + 1), recs };
+            });
+            records.push(
+              rec({ role: 'assistant', content: '', tool_calls: ids.map((id) => call(id)) }),
+            );
+            for (let i = 0; i <= body.length; i++) {
+              for (const ins of inserts) {
+                if (ins.pos === i) {
+                  records.push(...ins.recs);
+                }
+              }
+              if (i < body.length) {
+                records.push(body[i]);
+              }
+            }
+          });
+          if (turn.reply) {
+            records.push(rec({ role: 'assistant', content: `a${t}` }));
+          }
+          if (turn.note) {
+            records.push(rec({ role: 'system', content: `note${t}` }));
+          }
+          turn.between.forEach(() => {
+            records.push(mkResolved(`i${cardSeq++}`, 'approved'));
+          });
+        });
+
+        const out: ChatMessage[] = toHistory(records);
+        // (1) adjacency
+        out.forEach((m, i) => {
+          if (m.role !== 'tool') {
+            return;
+          }
+          let j = i;
+          while (j >= 0 && out[j].role === 'tool') {
+            j--;
+          }
+          assert.ok(j >= 0 && out[j].tool_calls?.some((c) => c.id === m.tool_call_id));
+        });
+        // (2) no tool record lost
+        assert.strictEqual(out.filter((m) => m.role === 'tool').length, toolCount);
+        // (3) one message per intervention id, with the resolved decision
+        const cards = out.filter((m) => m.content.startsWith('[intervention] '));
+        assert.strictEqual(cards.length, resolvedText.size);
+        assert.deepStrictEqual(
+          cards.map((m) => m.content).sort(),
+          [...resolvedText.values()].sort(),
+        );
+        // (4) no system role
+        assert.ok(out.every((m) => (m.role as string) !== 'system'));
+        // (5) order of users and tools preserved
+        assert.deepStrictEqual(
+          out.filter((m) => m.role === 'user').map((m) => m.content),
+          userTexts,
+        );
+        assert.deepStrictEqual(
+          out.filter((m) => m.role === 'tool').map((m) => m.tool_call_id),
+          toolIds,
+        );
+      }),
+      { numRuns: 200 },
+    );
   });
 });
