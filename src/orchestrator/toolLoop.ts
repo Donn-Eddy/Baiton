@@ -19,12 +19,23 @@
  * seams (`ModelClient`, the `call` function, the system-prompt builder, and the
  * transcript `append`), so it is directly unit- and property-testable (Req 9.9).
  */
-import { ChatMessage, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
+import { ChatMessage, CompletionResult, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
 import { ToolResult, boundToolResult } from './guard';
 import { TranscriptRecord } from './chatTranscript';
 
 /** The default round bound used when configuration is unset or invalid (Req 9.6). */
 export const DEFAULT_ROUND_BOUND = 20;
+
+/**
+ * Optional per-round context budget. `prepare` returns the history to send this
+ * round (it must not mutate `history`; the loop keeps appending to the real
+ * history and the transcript); `observe` sees what was sent and the completion.
+ * `observe` must not throw: an error propagates like any other loop error.
+ */
+export interface ContextBudget {
+  prepare(history: readonly ChatMessage[]): ChatMessage[];
+  observe(sent: { messages: readonly ChatMessage[]; tools: readonly ToolSpec[] }, completion: CompletionResult): void;
+}
 
 /**
  * The seams the tool loop depends on, all injected so the loop stays a pure,
@@ -57,6 +68,8 @@ export interface ToolLoopDeps {
   onDelta?: DeltaListener;
   /** The chat session id, forwarded to every completion so provider headers stay stable for a conversation. */
   sessionId?: string;
+  /** Optional context budget; absent, the loop sends the full history every round. */
+  budget?: ContextBudget;
 }
 
 /**
@@ -91,7 +104,8 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
 
   for (let round = 0; round < deps.roundBound; round += 1) {
     const system = await deps.systemPrompt();
-    const messages: ChatMessage[] = [{ role: 'system', content: system }, ...history];
+    const sendable = deps.budget !== undefined ? deps.budget.prepare(history) : history;
+    const messages: ChatMessage[] = [{ role: 'system', content: system }, ...sendable];
 
     let completion;
     try {
@@ -110,6 +124,8 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
       }
       throw err;
     }
+
+    deps.budget?.observe({ messages, tools: deps.tools }, completion);
 
     // The completion itself may have raced an abort (Req 14.7).
     if (deps.signal.aborted) {

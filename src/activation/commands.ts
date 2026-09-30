@@ -163,7 +163,9 @@ import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEnd
 import { ProviderRouter } from './providerRouter';
 import type { ProviderSettings } from './providerRouter';
 import { findProviderInfo, isProviderId, providerCatalog } from '../orchestrator/providers';
-import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
+import type { ModelSelection, ProviderId, ProviderInfo } from '../orchestrator/providers';
+import type { ModelEntry } from '../orchestrator/modelCatalog';
+import { resolveContextWindow } from '../orchestrator/contextBudget';
 import type { FixAction } from '../orchestrator/webviewProtocol';
 import { revealConfigPanel } from './openConfigPanelView';
 // The window's model catalog seams. This closes an `extension -> activation ->
@@ -849,6 +851,9 @@ export function registerCommands(
     baitonDir,
     specsDir,
     roundBound: () => readRoundBound(),
+    contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
+    contextWindow: () =>
+      resolveContextWindow(selectedCatalogEntry(router.getSelection()), orchCfg().get('orchestrator.contextWindow')),
     config: readOrchestratorConfig(),
     providers: router,
     triggerFix: (action, provider) =>
@@ -2038,4 +2043,16 @@ function modelForRole(config: Config, role: Role): { model: string; effort?: str
  */
 function adapterForRole(config: Config, adapters: AdapterRegistry, role: Role): Adapter | undefined {
   return adapters.get(config.roles[role].agent);
+}
+
+/** The models.dev catalog entry for the active selection (provider preferred, else id only). */
+function selectedCatalogEntry(selection: ModelSelection | undefined): ModelEntry | undefined {
+  if (selection === undefined) {
+    return undefined;
+  }
+  const models = getModelCatalogStore()?.get('models.dev')?.models ?? [];
+  return (
+    models.find((m) => m.id === selection.model && m.provider === selection.provider) ??
+    models.find((m) => m.id === selection.model)
+  );
 }

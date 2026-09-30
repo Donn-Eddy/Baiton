@@ -92,6 +92,7 @@ function makeDeps(
     roundBound: overrides.roundBound ?? DEFAULT_ROUND_BOUND,
     signal: overrides.signal ?? new AbortController().signal,
     ...(overrides.sessionId !== undefined ? { sessionId: overrides.sessionId } : {}),
+    ...(overrides.budget !== undefined ? { budget: overrides.budget } : {}),
   };
   return { deps, appended, calls };
 }
@@ -489,5 +490,105 @@ describe('resolveRoundBound', () => {
     assert.strictEqual(resolveRoundBound(1), 1);
     assert.strictEqual(resolveRoundBound(7), 7);
     assert.strictEqual(resolveRoundBound(100), 100);
+  });
+});
+
+describe('budget seam', () => {
+  it('sends prepare()\'s result while history and transcript keep the full messages', async () => {
+    const client = new ScriptedClient([
+      toolCallCompletion('c1', 'read_file', '{}'),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({
+      client,
+      call: async (): Promise<ToolResult> => ({ ok: true, data: 'full result' }),
+      budget: {
+        prepare: () => [{ role: 'user', content: 'trimmed' }],
+        observe: () => undefined,
+      },
+    });
+    const history: ChatMessage[] = [{ role: 'user', content: 'orig' }];
+    await runToolLoop(history, deps);
+
+    assert.deepStrictEqual(client.requests[0].messages, [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'trimmed' },
+    ]);
+    assert.strictEqual(history[0].content, 'orig');
+    assert.ok(history.some((m) => m.role === 'tool' && m.content === 'full result'));
+    assert.ok(appended.some((m) => m.role === 'tool' && m.content === 'full result'));
+  });
+
+  it('calls prepare once per round with the live history', async () => {
+    const client = new ScriptedClient([
+      toolCallCompletion('c1', 'read_file', '{}'),
+      finalCompletion('done'),
+    ]);
+    const lengths: number[] = [];
+    const { deps } = makeDeps({
+      client,
+      budget: {
+        prepare: (h) => {
+          lengths.push(h.length);
+          return [...h];
+        },
+        observe: () => undefined,
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.deepStrictEqual(lengths, [1, 3]);
+  });
+
+  it('observes each completion with what was sent', async () => {
+    const completion: CompletionResult = {
+      content: 'done',
+      tool_calls: [],
+      usage: { promptTokens: 7, completionTokens: 1, totalTokens: 8 },
+    } as CompletionResult;
+    const client = new ScriptedClient([completion]);
+    const seen: Array<{ sent: { messages: readonly ChatMessage[]; tools: unknown }; completion: CompletionResult }> = [];
+    const tools = [{ name: 't', description: 'd', parameters: {} }];
+    const { deps } = makeDeps({
+      client,
+      tools,
+      budget: {
+        prepare: (h) => [...h],
+        observe: (sent, c) => {
+          seen.push({ sent, completion: c });
+        },
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(seen.length, 1);
+    assert.deepStrictEqual(seen[0].sent.messages, client.requests[0].messages);
+    assert.strictEqual(seen[0].sent.tools, deps.tools);
+    assert.strictEqual(seen[0].completion, completion);
+  });
+
+  it('does not observe when the completion rejects on abort', async () => {
+    const controller = new AbortController();
+    const client: ModelClient = {
+      complete: async (): Promise<CompletionResult> => {
+        controller.abort();
+        throw new Error('aborted');
+      },
+    };
+    let observed = 0;
+    const { deps, appended } = makeDeps({
+      client,
+      signal: controller.signal,
+      budget: { prepare: (h) => [...h], observe: () => { observed += 1; } },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(observed, 0);
+    assert.deepStrictEqual(appended, [{ role: 'assistant', content: STOPPED_NOTICE }]);
+  });
+
+  it('sends [system, ...history] when no budget is given', async () => {
+    const client = new ScriptedClient([finalCompletion('ok')]);
+    const { deps } = makeDeps({ client });
+    const history: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+    await runToolLoop(history, deps);
+    assert.deepStrictEqual(client.requests[0].messages, [{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }]);
   });
 });

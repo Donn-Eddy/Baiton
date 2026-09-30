@@ -128,6 +128,9 @@ import type {
   WebviewToHost,
 } from '../orchestrator';
 import { ChatTranscript, scopeId } from '../orchestrator';
+import { ContextTracker, estimateMessages } from '../orchestrator/contextBudget';
+import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from '../orchestrator/contextTrim';
+import type { ContextBudget } from '../orchestrator/toolLoop';
 import { listSpecs } from './specLister';
 
 /** The conversation-selector id of the Workspace_Conversation. */
@@ -232,6 +235,13 @@ export interface ChatControllerDeps {
   specsDir: string;
   /** Reads the configured Round_Bound; resolved through {@link resolveRoundBound}. */
   roundBound(): unknown;
+  /**
+   * The selected model's context window in tokens (already resolved through
+   * `resolveContextWindow`), or undefined when unknown. Absent → unknown.
+   */
+  contextWindow?(): number | undefined;
+  /** The raw `baiton.orchestrator.contextTrimAt` value, resolved through `resolveContextTrimAt`. Absent → 0.5. */
+  contextTrimAt?(): unknown;
   /** Reads the configured endpoint/model for the empty state (Req 13.5). */
   config: OrchestratorConfig;
   /** Invoked on an inline-error fix action (Req 13.4). */
@@ -388,6 +398,9 @@ export class ChatController {
 
   /** `<scopeKey>/<sessionId>` of the session a run is in flight on, if any. */
   private runningKey: string | undefined;
+
+  /** One context tracker per conversation, keyed `<scopeKey>/<sessionId>`. */
+  private readonly trackers = new Map<string, ContextTracker>();
 
   /** The pending-ask registry every inline card settles through. */
   private readonly asks: PendingAskRegistry;
@@ -1034,7 +1047,9 @@ export class ChatController {
       this.activeSessions.get(scopeId(scope)) ?? this.newSessionId(scope);
     await this.setActiveSession(scope, sessionId);
     const transcript = this.transcriptFor(scope, sessionId);
-    const history = await this.loadHistory(transcript.path);
+    const records = await readTranscript(transcript.path);
+    const history = toHistory(records);
+    const autoApprovedLines = autoApprovedInterventionLines(records);
 
     // Append and render the user's message before the loop runs (Req 14.4).
     const userRecord: Omit<TranscriptRecord, 'ts'> = { role: 'user', content: text };
@@ -1047,12 +1062,14 @@ export class ChatController {
     // live; the whole conversation is re-rendered from the persisted transcript
     // once the loop ends so the view matches what was recorded (Req 8.6).
     this.setBusy(true);
-    this.runningKey = `${scopeId(scope)}/${sessionId}`;
+    const key = `${scopeId(scope)}/${sessionId}`;
+    this.runningKey = key;
+    const tools = this.deps.toolsFor(phase);
     this.abort = new AbortController();
     try {
       await runToolLoop(history, {
         client: this.deps.client,
-        tools: this.deps.toolsFor(phase),
+        tools,
         call: (name, args, callId, signal) =>
           this.callTool(name, args, callId, signal, phase),
         systemPrompt: () => this.buildPrompt(slug, mode),
@@ -1064,6 +1081,7 @@ export class ChatController {
         signal: this.abort.signal,
         onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
         sessionId,
+        budget: this.contextBudget(key, tools, autoApprovedLines),
       });
       await this.renderConversation(transcript.path);
     } catch (err) {
@@ -1305,9 +1323,43 @@ export class ChatController {
     this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(message) });
   }
 
-  /** Read a conversation's persisted history as tool-loop {@link ChatMessage}s. */
-  private async loadHistory(file: string): Promise<ChatMessage[]> {
-    return toHistory(await readTranscript(file));
+  /** The conversation's context tracker, created on first use. */
+  private trackerFor(key: string): ContextTracker {
+    let tracker = this.trackers.get(key);
+    if (tracker === undefined) {
+      tracker = new ContextTracker(() => this.deps.contextWindow?.());
+      this.trackers.set(key, tracker);
+    }
+    return tracker;
+  }
+
+  /**
+   * The per-send context budget: trims the round's payload once the local
+   * estimate passes `contextTrimAt` of a known window, and records each
+   * completion on the conversation's tracker. Unknown window → sends everything.
+   */
+  private contextBudget(key: string, tools: ToolSpec[], autoApprovedLines: ReadonlySet<string>): ContextBudget {
+    const tracker = this.trackerFor(key);
+    let systemTokens = 0; // last system prompt's estimate, learned in observe
+    const estimate = (h: readonly ChatMessage[]): number => systemTokens + estimateMessages(h, tools);
+    return {
+      prepare: (history) => {
+        const window = this.deps.contextWindow?.();
+        if (window === undefined || !Number.isInteger(window) || window <= 0) {
+          return [...history];
+        }
+        const trimAt = resolveContextTrimAt(this.deps.contextTrimAt?.());
+        if (estimate(history) / window <= trimAt) {
+          return [...history];
+        }
+        return trimHistory(history, { targetTokens: Math.floor(window * trimAt), estimate, autoApprovedLines });
+      },
+      observe: (sent, completion) => {
+        const system = sent.messages[0];
+        systemTokens = system?.role === 'system' ? estimateMessages([system]) : 0;
+        tracker.record(sent, completion);
+      },
+    };
   }
 
   /** Append one message to the transcript, containing any write failure (Req 8.7). */
