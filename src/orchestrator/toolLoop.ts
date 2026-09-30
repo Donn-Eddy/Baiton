@@ -22,6 +22,8 @@
 import { ChatMessage, CompletionResult, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
 import { ToolResult, boundToolResult } from './guard';
 import { TranscriptRecord } from './chatTranscript';
+import { contextOverflowNotice } from './contextBudget';
+import type { FitVerdict } from './contextBudget';
 
 /** The default round bound used when configuration is unset or invalid (Req 9.6). */
 export const DEFAULT_ROUND_BOUND = 20;
@@ -31,10 +33,18 @@ export const DEFAULT_ROUND_BOUND = 20;
  * round (it must not mutate `history`; the loop keeps appending to the real
  * history and the transcript); `observe` sees what was sent and the completion.
  * `observe` must not throw: an error propagates like any other loop error.
+ * The optional `preflight` runs after `prepare` and before each completion.
  */
 export interface ContextBudget {
   prepare(history: readonly ChatMessage[]): ChatMessage[];
   observe(sent: { messages: readonly ChatMessage[]; tools: readonly ToolSpec[] }, completion: CompletionResult): void;
+  /**
+   * Optional pre-flight run after prepare and before each completion. Resolves the
+   * request to send (possibly reduced), optionally a replacement history (after a
+   * summary), or an overflow verdict: the loop then appends the sized notice and
+   * stops without calling the endpoint.
+   */
+  preflight?(req: { messages: ChatMessage[]; history: readonly ChatMessage[]; tools: readonly ToolSpec[]; signal: AbortSignal }): Promise<FitVerdict>;
 }
 
 /**
@@ -105,7 +115,22 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
   for (let round = 0; round < deps.roundBound; round += 1) {
     const system = await deps.systemPrompt();
     const sendable = deps.budget !== undefined ? deps.budget.prepare(history) : history;
-    const messages: ChatMessage[] = [{ role: 'system', content: system }, ...sendable];
+    let messages: ChatMessage[] = [{ role: 'system', content: system }, ...sendable];
+    if (deps.budget?.preflight !== undefined) {
+      const verdict = await deps.budget.preflight({ messages, history, tools: deps.tools, signal: deps.signal });
+      if (deps.signal.aborted) {
+        await appendMessage(history, deps, { role: 'assistant', content: STOPPED_NOTICE });
+        return;
+      }
+      if (verdict.kind === 'overflow') {
+        await appendMessage(history, deps, { role: 'assistant', content: contextOverflowNotice(verdict.estimate, verdict.window) });
+        return;
+      }
+      if (verdict.history !== undefined) {
+        history.splice(0, history.length, ...verdict.history);
+      }
+      messages = verdict.messages;
+    }
 
     let completion;
     try {

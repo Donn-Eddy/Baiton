@@ -6,6 +6,9 @@ import {
   ContextTracker,
   MESSAGE_OVERHEAD_TOKENS,
   USAGE_IN_STREAM_SETTING,
+  contextOverflowNotice,
+  fitToWindow,
+  resolveOutputReserve,
   estimateMessages,
   estimateTokens,
   resolveContextWindow,
@@ -166,6 +169,91 @@ describe('orchestrator/contextBudget', () => {
       const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'orchestrator', 'contextBudget.ts'), 'utf8');
       assert.ok(!/from '.*vscode'/.test(source), 'contextBudget.ts must not import vscode');
       assert.ok(!/require\(.*vscode/.test(source), 'contextBudget.ts must not require vscode');
+    });
+  });
+
+  describe('resolveOutputReserve', () => {
+    it('picks max_tokens, then maxOutput, then 8192', () => {
+      assert.strictEqual(resolveOutputReserve(4096, 9999), 4096);
+      assert.strictEqual(resolveOutputReserve(0, 9999), 9999);
+      assert.strictEqual(resolveOutputReserve(undefined, undefined), 8192);
+      assert.strictEqual(resolveOutputReserve('x', 1.5), 8192);
+    });
+  });
+
+  describe('contextOverflowNotice', () => {
+    it('sizes the notice', () => {
+      assert.strictEqual(
+        contextOverflowNotice(5, 10),
+        "The conversation exceeds the model's context window (~5 of 10 tokens); compact it or start a new chat.",
+      );
+    });
+  });
+
+  describe('fitToWindow', () => {
+    // 'x'.repeat(n) content costs ceil(n/4) + 4 tokens.
+    const msg = (role: ChatMessage['role'], n: number): ChatMessage => ({ role, content: 'x'.repeat(n) });
+    const sys = msg('system', 40); // 14
+    const big = msg('user', 4000); // 1004
+    const small = msg('user', 40); // 14
+    const harness = (over: { window?: number; reserve?: number; trimmed?: ChatMessage[]; summary?: ChatMessage[] | undefined; messages?: ChatMessage[] }) => {
+      const calls = { trim: 0, summarise: 0 };
+      const opts = {
+        messages: over.messages ?? [sys, big],
+        history: [big],
+        window: 'window' in over ? over.window : 500,
+        reserve: over.reserve ?? 100,
+        trim: (h: readonly ChatMessage[]) => {
+          calls.trim += 1;
+          return over.trimmed ?? [...h];
+        },
+        summarise: async () => {
+          calls.summarise += 1;
+          return over.summary;
+        },
+      };
+      return { opts, calls };
+    };
+
+    it('sends unchanged when the window is unknown', async () => {
+      const { opts, calls } = harness({ window: undefined });
+      const v = await fitToWindow(opts);
+      assert.deepStrictEqual(v, { kind: 'send', messages: [sys, big] });
+      assert.deepStrictEqual(calls, { trim: 0, summarise: 0 });
+    });
+
+    it('sends unchanged when the payload fits', async () => {
+      const { opts, calls } = harness({ window: 2000, messages: [sys, big] });
+      const v = await fitToWindow(opts);
+      assert.deepStrictEqual(v, { kind: 'send', messages: [sys, big] });
+      assert.deepStrictEqual(calls, { trim: 0, summarise: 0 });
+    });
+
+    it('sends the trimmed history when trim is enough', async () => {
+      const { opts, calls } = harness({ trimmed: [small] });
+      const v = await fitToWindow(opts);
+      assert.deepStrictEqual(v, { kind: 'send', messages: [sys, small] });
+      assert.deepStrictEqual(calls, { trim: 1, summarise: 0 });
+    });
+
+    it('summarises when trim is not enough', async () => {
+      const { opts, calls } = harness({ summary: [small] });
+      const v = await fitToWindow(opts);
+      assert.deepStrictEqual(v, { kind: 'send', messages: [sys, small], history: [small] });
+      assert.strictEqual(calls.summarise, 1);
+    });
+
+    it('overflows with the trimmed estimate when summarise yields nothing', async () => {
+      const { opts } = harness({ summary: undefined });
+      const v = await fitToWindow(opts);
+      assert.deepStrictEqual(v, { kind: 'overflow', estimate: estimateMessages([sys, big]), window: 500 });
+    });
+
+    it('overflows when the summary is still too big', async () => {
+      const { opts } = harness({ summary: [big] });
+      const v = await fitToWindow(opts);
+      assert.strictEqual(v.kind, 'overflow');
+      assert.strictEqual(v.kind === 'overflow' ? v.estimate : 0, estimateMessages([sys, big]));
     });
   });
 });

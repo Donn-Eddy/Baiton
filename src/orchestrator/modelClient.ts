@@ -20,6 +20,7 @@ import { StringDecoder } from 'string_decoder';
 import { randomUUID } from 'crypto';
 import type { DialectId } from './providers';
 import { noopApiLog } from './apiLog';
+import { estimateMessages } from './contextBudget';
 import type { ApiLog, ApiFailureEntry } from './apiLog';
 
 /** A single chat message on the OpenAI chat-completions path. */
@@ -623,16 +624,17 @@ export class OpenAiModelClient implements ModelClient {
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
     });
     const extra = this.config.extraHeaders?.(req) ?? {};
+    const payloadTokens = estimateMessages(req.messages, req.tools ?? []);
 
     if (!streaming) {
-      const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra);
+      const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra, payloadTokens);
       return this.parseNonStreaming(raw, url);
     }
 
     // Streaming: feed each response chunk to the SSE parser as it arrives so
     // assistant text reaches `onDelta` incrementally rather than at end of body.
     const parser = new SseCompletionParser(req.onDelta);
-    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk), extra);
+    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk), extra, payloadTokens);
     return parser.finish();
   }
 
@@ -664,6 +666,7 @@ export class OpenAiModelClient implements ModelClient {
     signal: AbortSignal,
     onChunk?: (text: string) => void,
     extra: Record<string, string> = {},
+    payloadTokens?: number,
   ): Promise<string> {
     const connectTimeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const transport = url.protocol === 'https:' ? https : http;
@@ -737,10 +740,17 @@ export class OpenAiModelClient implements ModelClient {
             }
             const text = Buffer.concat(chunks).toString('utf8');
             if (status < 200 || status >= 300) {
-              finishReject(
-                new UnreachableEndpointError(`endpoint returned HTTP ${status}: ${text.slice(0, 500)}`),
-                { kind: 'http-status', status, message: `endpoint returned HTTP ${status}`, bodyExcerpt: text },
-              );
+              const emptyClientError =
+                status >= 400 && status < 500 && text.trim().length === 0 && payloadTokens !== undefined;
+              const detail = emptyClientError
+                ? `endpoint returned HTTP ${status} (empty body; payload ~${payloadTokens} tokens)`
+                : `endpoint returned HTTP ${status}: ${text.slice(0, 500)}`;
+              finishReject(new UnreachableEndpointError(detail), {
+                kind: 'http-status',
+                status,
+                message: emptyClientError ? detail : `endpoint returned HTTP ${status}`,
+                bodyExcerpt: text,
+              });
               return;
             }
             finishResolve(text);

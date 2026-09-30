@@ -19,6 +19,7 @@ import {
   openCodeExtraHeaders,
 } from '../src/orchestrator/modelClient';
 import { createApiLog } from '../src/orchestrator/apiLog';
+import { estimateMessages } from '../src/orchestrator/contextBudget';
 import type { ApiLog } from '../src/orchestrator/apiLog';
 
 /**
@@ -1274,6 +1275,54 @@ describe('OpenAiModelClient', () => {
           lines[0],
           /^\[2026-01-01T00:00:00\.000Z\] openai completion http-status HTTP 500 http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions — endpoint returned HTTP 500 \| body: boom line2$/,
         );
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('names the payload size on an empty-body HTTP 400', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: '' }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        const messages = [{ role: 'user' as const, content: 'x'.repeat(400) }];
+        const n = estimateMessages(messages, []);
+        assert.strictEqual(n, 104);
+        await assert.rejects(
+          new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete({ messages, signal: liveSignal() }),
+          (err: unknown) => {
+            assert.ok(err instanceof UnreachableEndpointError);
+            assert.strictEqual(
+              err.message,
+              'Orchestrator endpoint was unreachable: endpoint returned HTTP 400 (empty body; payload ~104 tokens)',
+            );
+            return true;
+          },
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes('(empty body; payload ~'), lines[0]);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('treats a whitespace-only 4xx body as empty and counts tools', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: '  \n' }));
+      try {
+        const n = estimateMessages(SAMPLE_MESSAGES, SAMPLE_TOOLS);
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(mock.url)).complete(req()),
+          new RegExp(`HTTP 400 \\(empty body; payload ~${n} tokens\\)$`),
+        );
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('keeps the body text on a non-empty 400', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: 'bad' }));
+      try {
+        await rejectsUnreachable(new OpenAiModelClient(makeConfig(mock.url)).complete(req()), /HTTP 400: bad$/);
       } finally {
         await mock.close();
       }

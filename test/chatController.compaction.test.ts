@@ -111,6 +111,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
       specsDir,
       roundBound: () => 4,
       contextWindow: () => opts.window,
+      maxTokens: () => 1,
       contextTrimAt: () => 0.5,
       contextSummarizeAt: () => 0.8,
       sessionMemory: { get: () => 'seed', set: async () => {} },
@@ -151,7 +152,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
   });
 
   it('summarises older turns over the threshold and keeps the full transcript visible', async () => {
-    await build({ window: 1000 });
+    await build({ window: 3000 });
     client.queue.push({ content: 'Goals: g', tool_calls: [] });
     await send('next');
 
@@ -189,7 +190,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
   });
 
   it('shows an inline error and proceeds unchanged when the summary fails', async () => {
-    await build({ window: 1000 });
+    await build({ window: 3000 });
     client.queue.push(new Error('boom'));
     await send('next');
 
@@ -204,7 +205,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
   });
 
   it('treats an empty summary as a failure', async () => {
-    await build({ window: 1000 });
+    await build({ window: 3000 });
     client.queue.push({ content: '   ', tool_calls: [] });
     await send('next');
     assert.ok(webview.all('showError').some((e) => e.message.startsWith('Compacting the conversation failed:')));
@@ -226,7 +227,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
   });
 
   it('replays the summary after a reload', async () => {
-    await build({ window: 1000 });
+    await build({ window: 3000 });
     client.queue.push({ content: 'Goals: g', tool_calls: [] });
     await send('next');
     await send('again');

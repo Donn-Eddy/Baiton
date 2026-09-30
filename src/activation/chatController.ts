@@ -136,7 +136,7 @@ import type {
   WebviewToHost,
 } from '../orchestrator';
 import { ChatTranscript, scopeId } from '../orchestrator';
-import { ContextTracker, estimateMessages, estimateTokens } from '../orchestrator/contextBudget';
+import { ContextTracker, estimateMessages, estimateTokens, fitToWindow, resolveOutputReserve } from '../orchestrator/contextBudget';
 import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from '../orchestrator/contextTrim';
 import { CONTEXT_SUMMARY_PREFIX } from '../orchestrator/transcriptReader';
 import type { CompactionMarker } from '../orchestrator/chatTranscript';
@@ -312,6 +312,10 @@ export interface ChatControllerDeps {
    * `resolveContextWindow`), or undefined when unknown. Absent → unknown.
    */
   contextWindow?(): number | undefined;
+  /** The raw `baiton.orchestrator.maxTokens` value; with maxOutput it sizes the pre-flight output reserve. */
+  maxTokens?(): unknown;
+  /** The selected model's catalog `maxOutput`, or undefined. */
+  maxOutput?(): number | undefined;
   /** The raw `baiton.orchestrator.contextTrimAt` value, resolved through `resolveContextTrimAt`. Absent → 0.5. */
   contextTrimAt?(): unknown;
   /** The raw `baiton.orchestrator.contextSummarizeAt` value, resolved through `resolveContextSummarizeAt`. Absent → 0.8. */
@@ -1166,7 +1170,7 @@ export class ChatController {
         signal: this.abort.signal,
         onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
         sessionId,
-        budget: this.contextBudget(key, tools, autoApprovedLines),
+        budget: this.contextBudget(key, tools, autoApprovedLines, transcript, sessionId),
       });
       await this.renderConversation(transcript.path);
     } catch (err) {
@@ -1520,8 +1524,16 @@ export class ChatController {
    * The per-send context budget: trims the round's payload once the local
    * estimate passes `contextTrimAt` of a known window, and records each
    * completion on the conversation's tracker. Unknown window → sends everything.
+   * Its pre-flight then re-checks the payload against window minus the output
+   * reserve (trim, summarise, re-estimate) and stops with a sized notice on overflow.
    */
-  private contextBudget(key: string, tools: ToolSpec[], autoApprovedLines: ReadonlySet<string>): ContextBudget {
+  private contextBudget(
+    key: string,
+    tools: ToolSpec[],
+    autoApprovedLines: ReadonlySet<string>,
+    transcript: ChatTranscript,
+    sessionId: string,
+  ): ContextBudget {
     const tracker = this.trackerFor(key);
     let systemTokens = 0; // last system prompt's estimate, learned in observe
     const estimate = (h: readonly ChatMessage[]): number => systemTokens + estimateMessages(h, tools);
@@ -1543,6 +1555,22 @@ export class ChatController {
         tracker.record(sent, completion);
         this.postContextUsage(key);
       },
+      preflight: (req) =>
+        fitToWindow({
+          messages: req.messages,
+          history: req.history,
+          tools: req.tools,
+          window: this.deps.contextWindow?.(),
+          reserve: resolveOutputReserve(this.deps.maxTokens?.(), this.deps.maxOutput?.()),
+          trim: (h, targetTokens, estimate) => trimHistory(h, { targetTokens, estimate, autoApprovedLines }),
+          summarise: async () => {
+            const compacted = await this.compact(transcript, key, req.signal, sessionId);
+            if (compacted !== undefined) {
+              this.postContextUsage(key);
+            }
+            return compacted;
+          },
+        }),
     };
   }
 

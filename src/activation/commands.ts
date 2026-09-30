@@ -858,6 +858,8 @@ export function registerCommands(
     contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
     contextWindow: () =>
       resolveContextWindow(selectedCatalogEntry(router.getSelection()), orchCfg().get('orchestrator.contextWindow')),
+    maxTokens: () => orchCfg().get('orchestrator.maxTokens'),
+    maxOutput: () => selectedCatalogEntry(router.getSelection())?.maxOutput,
     config: readOrchestratorConfig(),
     providers: router,
     triggerFix: (action, provider) =>

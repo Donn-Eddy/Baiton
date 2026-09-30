@@ -115,6 +115,71 @@ export class ContextTracker {
   }
 }
 
+/** Output tokens reserved when neither `max_tokens` nor the catalog `maxOutput` is known. */
+export const DEFAULT_OUTPUT_RESERVE = 8192;
+
+/** The output reserve: configured `max_tokens`, else the catalog `maxOutput`, else DEFAULT_OUTPUT_RESERVE. */
+export function resolveOutputReserve(maxTokens: unknown, maxOutput: unknown): number {
+  return positiveInteger(maxTokens) ?? positiveInteger(maxOutput) ?? DEFAULT_OUTPUT_RESERVE;
+}
+
+/** The message the loop appends when a request cannot fit the window even after trimming and summarising. */
+export function contextOverflowNotice(estimate: number, window: number): string {
+  return `The conversation exceeds the model's context window (~${estimate} of ${window} tokens); compact it or start a new chat.`;
+}
+
+export type FitVerdict =
+  | { kind: 'send'; messages: ChatMessage[]; history?: ChatMessage[] }
+  | { kind: 'overflow'; estimate: number; window: number };
+
+export interface FitOptions {
+  /** The request about to be sent: [system, ...sendable]. */
+  messages: readonly ChatMessage[];
+  /** The loop's full (untrimmed) history. */
+  history: readonly ChatMessage[];
+  tools?: readonly ToolSpec[];
+  window: number | undefined;
+  reserve: number;
+  /** Lossless trim of a history toward targetTokens under `estimate` (the controller binds trimHistory). */
+  trim(history: readonly ChatMessage[], targetTokens: number, estimate: (h: readonly ChatMessage[]) => number): ChatMessage[];
+  /** Lossy summarise; resolves the compacted history, or undefined when nothing was compacted / it failed. */
+  summarise(): Promise<ChatMessage[] | undefined>;
+}
+
+/**
+ * Pre-flight check before a completion: when the request exceeds `window - reserve`
+ * it is trimmed first, then (if still too big) summarised, then re-estimated. When
+ * nothing fits it returns an overflow verdict carrying the smallest estimate reached.
+ * An unknown window never blocks. Pure apart from the injected `trim`/`summarise`.
+ */
+export async function fitToWindow(opts: FitOptions): Promise<FitVerdict> {
+  const window = positiveInteger(opts.window);
+  if (window === undefined) {
+    return { kind: 'send', messages: [...opts.messages] };
+  }
+  const limit = window - opts.reserve;
+  const system = opts.messages[0]?.role === 'system' ? [opts.messages[0]] : [];
+  const estimate = (h: readonly ChatMessage[]): number =>
+    estimateMessages(system, undefined) + estimateMessages(h, opts.tools);
+  if (estimateMessages(opts.messages, opts.tools) <= limit) {
+    return { kind: 'send', messages: [...opts.messages] };
+  }
+  const target = Math.max(0, limit);
+  const trimmed = opts.trim(opts.history, target, estimate);
+  if (estimate(trimmed) <= limit) {
+    return { kind: 'send', messages: [...system, ...trimmed] };
+  }
+  let best = trimmed;
+  const compacted = await opts.summarise();
+  if (compacted !== undefined) {
+    best = estimate(compacted) <= limit ? compacted : opts.trim(compacted, target, estimate);
+    if (estimate(best) <= limit) {
+      return { kind: 'send', messages: [...system, ...best], history: compacted };
+    }
+  }
+  return { kind: 'overflow', estimate: estimate(best), window };
+}
+
 /** `value` when a positive finite integer, else undefined. */
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
