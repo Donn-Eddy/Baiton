@@ -27,7 +27,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { Adapter } from '../adapter';
 import type { GitService } from '../git';
-import { appendCompletion, appendStart, parseJournal } from '../journal';
+import { appendCompletion, appendStart, readSpecJournal } from '../journal';
 import type { PrCompletion, RunResultKind } from '../journal';
 import { approvalHash } from '../model/hash';
 import { parseSpec } from '../model/parser';
@@ -142,7 +142,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
 
   // 4. Launch the pr-writer with the cumulative diff and spec folder as context.
   const clock = deps.clock ?? Date.now;
-  const attempt = countPrStarts(journalPath) + 1;
+  const attempt = countPrStarts(deps.specsDir, slug) + 1;
   const runId = `${slug}-pr-${attempt}-${clock()}`;
   const sessionId = (deps.newSessionId ?? randomUUID)();
   const runDir = path.join(deps.workspaceRoot, '.baiton', 'runs', runId);
@@ -340,9 +340,9 @@ export function prContext(input: {
   ].join('\n\n');
 }
 
-function countPrStarts(journalPath: string): number {
+function countPrStarts(specsDir: string, slug: string): number {
   let count = 0;
-  for (const entry of parseJournal(journalPath)) {
+  for (const entry of readSpecJournal(specsDir, slug)) {
     if (entry.stage === 'pr') {
       count += 1;
     }

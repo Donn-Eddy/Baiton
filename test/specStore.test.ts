@@ -7,6 +7,7 @@ import * as path from 'path';
 import { createSpecStore } from '../src/activation/specStore';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
+import { appendCompletion, appendStart, todoJournalPathFor } from '../src/journal';
 
 const SPEC = [
   '---',
@@ -127,5 +128,29 @@ describe('createSpecStore (real repo)', () => {
     assert.strictEqual(fs.readFileSync(plan, 'utf8'), '# Plan T01\n');
     assert.ok(git(repo, 'ls-files').includes('.baiton/specs/s/todos/T01/plan.md'));
     assert.strictEqual(await store.readArtifact('s', 'T01', 'plan'), '# Plan T01\n');
+  });
+
+  it('latestExecuteCommit and plan Input_Rev read per-todo journals', async () => {
+    const file = todoJournalPathFor(specsDir, 's', 'T01');
+    appendStart(file, {
+      runId: 'r-plan',
+      todoId: 'T01',
+      stage: 'plan',
+      attempt: 1,
+      startHead: 'h',
+      inputRev: 'stale-rev',
+    });
+    appendStart(file, {
+      runId: 'r-exec',
+      todoId: 'T01',
+      stage: 'execute',
+      attempt: 1,
+      startHead: 'h',
+      inputRev: 'stale-rev',
+    });
+    appendCompletion(file, { runId: 'r-exec', result: 'completed', commit: 'abc123' });
+    assert.strictEqual(await store.latestExecuteCommit('s', 'T01'), 'abc123');
+    assert.strictEqual(await store.inputRevMatches('s', 'T01'), false);
+    assert.strictEqual(await store.latestExecuteCommit('s', 'T02'), undefined);
   });
 });

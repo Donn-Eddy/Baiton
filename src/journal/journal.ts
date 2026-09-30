@@ -11,7 +11,14 @@
  * All I/O is injectable for testing: every function takes the journal file
  * path and uses node `fs` directly, so a test can point it at a temp file.
  */
-import { appendFileSync, existsSync, readFileSync } from 'fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+} from 'fs';
+import { dirname, join } from 'path';
 import {
   CompletionRecord,
   JournalEntry,
@@ -22,6 +29,48 @@ import {
 } from './entry';
 import { Stage, isStage } from '../model/stage';
 import { TodoState, isTodoState } from '../model/todoState';
+
+/** File name of every run journal (spec-level and per-todo). */
+export const JOURNAL_FILE = 'runs.jsonl';
+
+/** Spec-level journal: spec-draft, pr and legacy todo entries. */
+export function specJournalPathFor(specsDir: string, slug: string): string {
+  return join(specsDir, slug, JOURNAL_FILE);
+}
+
+/** Per-todo journal `<specsDir>/<slug>/todos/<todoId>/runs.jsonl`. */
+export function todoJournalPathFor(
+  specsDir: string,
+  slug: string,
+  todoId: string,
+): string {
+  return join(specsDir, slug, 'todos', todoId, JOURNAL_FILE);
+}
+
+/**
+ * Every journal file of a spec: the spec-level path first (always included;
+ * parsing tolerates a missing file), then each existing per-todo journal in
+ * sorted todo-id order.
+ */
+export function specJournalPaths(specsDir: string, slug: string): string[] {
+  const paths = [specJournalPathFor(specsDir, slug)];
+  let ids: string[] = [];
+  try {
+    ids = readdirSync(join(specsDir, slug, 'todos'), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    // No todos/ directory (or unreadable): only the spec-level journal.
+  }
+  for (const id of ids) {
+    const p = todoJournalPathFor(specsDir, slug, id);
+    if (existsSync(p)) {
+      paths.push(p);
+    }
+  }
+  return paths;
+}
 
 /** The start metadata a caller supplies when a stage begins (Req 21.1). */
 export interface StartInput {
@@ -109,10 +158,45 @@ export function parseJournal(path: string): JournalEntry[] {
   if (!existsSync(path)) {
     return [];
   }
-  const raw = readFileSync(path, 'utf8');
   const byRunId = new Map<string, JournalEntry>();
   const order: string[] = [];
+  mergeRecords(readFileSync(path, 'utf8'), byRunId, order);
+  return order.map((runId) => byRunId.get(runId) as JournalEntry);
+}
 
+/**
+ * Reads a spec's merged journal: the spec-level `runs.jsonl` followed by every
+ * `todos/<id>/runs.jsonl` (see {@link specJournalPaths}), merged through one
+ * shared run-id map so a completion in a later file still attaches to a start
+ * recorded in an earlier one.
+ *
+ * Ordering: the spec-level file first, then per-todo files in sorted todo-id
+ * order. Legacy spec-level entries for a todo therefore precede that todo's
+ * per-todo entries (chronological per todo); cross-todo interleaving is NOT
+ * preserved, so callers must not rely on global order. Unreadable files are
+ * skipped.
+ */
+export function readSpecJournal(specsDir: string, slug: string): JournalEntry[] {
+  const byRunId = new Map<string, JournalEntry>();
+  const order: string[] = [];
+  for (const file of specJournalPaths(specsDir, slug)) {
+    try {
+      if (existsSync(file)) {
+        mergeRecords(readFileSync(file, 'utf8'), byRunId, order);
+      }
+    } catch {
+      // Unreadable journal file: skip it.
+    }
+  }
+  return order.map((runId) => byRunId.get(runId) as JournalEntry);
+}
+
+/** Merges each recognizable line of `raw` into `byRunId`/`order`. */
+function mergeRecords(
+  raw: string,
+  byRunId: Map<string, JournalEntry>,
+  order: string[],
+): void {
   for (const line of raw.split('\n')) {
     const record = parseRecord(line);
     if (record === undefined) {
@@ -132,8 +216,6 @@ export function parseJournal(path: string): JournalEntry[] {
       applyCompletion(existing, record);
     }
   }
-
-  return order.map((runId) => byRunId.get(runId) as JournalEntry);
 }
 
 /**
@@ -184,6 +266,7 @@ export function resumableSessionId(
 
 /** Serializes a record as a single JSON line and appends it to the file. */
 function appendRecord(path: string, record: JournalRecord): void {
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
 }
 

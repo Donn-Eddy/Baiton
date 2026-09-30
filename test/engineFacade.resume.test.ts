@@ -16,7 +16,13 @@ import { CodexAdapter } from '../src/adapter/codex';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { Role } from '../src/model/role';
-import { appendCompletion, appendStart } from '../src/journal';
+import {
+  appendCompletion,
+  appendStart,
+  readSpecJournal,
+  specJournalPathFor,
+  todoJournalPathFor,
+} from '../src/journal';
 import { ok } from '../src/model/result';
 
 /**
@@ -429,5 +435,81 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
       '--resume',
       'baiton-session-0',
     ]);
+  });
+});
+
+describe('engine facade: per-todo journals (sub-agent chats)', () => {
+  let tmpDir: string;
+  let specsDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-resume-pertodo-'));
+    specsDir = path.join(tmpDir, '.baiton', 'specs');
+    fs.mkdirSync(path.join(specsDir, 'demo'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeQueue(): {
+    queue: ReturnType<typeof createRunQueue>;
+    terminalHost: ReturnType<typeof makeTerminalHost>;
+    adapterForRole: () => Adapter;
+  } {
+    const terminalHost = makeTerminalHost();
+    let sessionCounter = 0;
+    const adapterForRole = (): Adapter => new ClaudeAdapter();
+    const deps: RunQueueDeps = {
+      workspaceRoot: tmpDir,
+      adapterForRole,
+      git: makeGit(),
+      terminalHost,
+      watcherFactory: makeCompletingWatcherFactory(),
+      specStore,
+      journalPath: specJournalPathFor(specsDir, 'demo'),
+      journalPathFor: (id) => todoJournalPathFor(specsDir, 'demo', id),
+      readJournal: () => readSpecJournal(specsDir, 'demo'),
+      modelForRole: (_role: Role) => ({ model: 'test-model' }),
+      report: () => {},
+      newSessionId: () => `session-${sessionCounter++}`,
+    };
+    return { queue: createRunQueue(deps), terminalHost, adapterForRole };
+  }
+
+  it('journals to todos/<id>/runs.jsonl and resumes on the second execute', async () => {
+    const { queue, terminalHost, adapterForRole } = makeQueue();
+    const trigger = { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' } as const;
+    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    await flush();
+    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    await flush();
+
+    assert.deepStrictEqual(terminalHost.launches[1].shellArgs.slice(0, 2), ['--resume', 'session-0']);
+    const todoFile = todoJournalPathFor(specsDir, 'demo', 't1');
+    assert.ok(fs.existsSync(todoFile));
+    assert.ok(!fs.existsSync(specJournalPathFor(specsDir, 'demo')));
+    assert.strictEqual(readSpecJournal(specsDir, 'demo').length, 2);
+  });
+
+  it('resumes a session recorded in a legacy spec-level journal', async () => {
+    appendStart(specJournalPathFor(specsDir, 'demo'), {
+      runId: 'run-legacy',
+      todoId: 't6',
+      stage: 'execute',
+      attempt: 1,
+      startHead: 'h',
+      inputRev: 'r',
+      sessionId: 'legacy-session',
+    });
+    const { queue, terminalHost, adapterForRole } = makeQueue();
+    const trigger = { kind: 'stage', slug: 'demo', todoId: 't6', stage: 'execute' } as const;
+    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    await flush();
+
+    assert.deepStrictEqual(terminalHost.launches[0].shellArgs.slice(0, 2), ['--resume', 'legacy-session']);
+    const entries = readSpecJournal(specsDir, 'demo').filter((e) => e.todoId === 't6');
+    assert.strictEqual(entries.length, 2);
+    assert.strictEqual(entries[1].attempt, 2);
   });
 });

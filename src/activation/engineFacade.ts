@@ -11,7 +11,7 @@
  * resume flag — so this facade derives those from the stage and the run journal
  * and dispatches a single {@link RunRequest} (Req 10.3, 19.1).
  *
- * Attempt/round derivation reads the per-spec journal so numbered artifacts and
+ * Attempt/round derivation reads the merged spec journal (spec-level + per-todo files) so numbered artifacts and
  * the executor continue flag are consistent across triggers:
  *   - plan → attempt 1 (a single plan artifact, `plan.md`).
  *   - execute → one past the count of prior execute starts for the todo, and
@@ -30,7 +30,6 @@
  * `RunQueueDeps.askWatcherFactory` dependency wired in `commands.ts`, so all
  * triggers reaching the queue relay asks identically.
  */
-import * as path from 'path';
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -50,7 +49,7 @@ import type {
   StartRunRequest,
 } from '../orchestrator';
 import type { Adapter } from '../adapter';
-import { latestStart, parseJournal, resumableSessionId, JournalEntry } from '../journal';
+import { latestStart, readSpecJournal, resumableSessionId, JournalEntry } from '../journal';
 
 /**
  * Resolves the adapter a role's configured agent maps to — the same lookup the
@@ -142,8 +141,7 @@ export function dispatchTrigger(
     });
   }
 
-  const journalPath = path.join(specsDir, trigger.slug, 'runs.jsonl');
-  const entries = parseJournal(journalPath);
+  const entries = readSpecJournal(specsDir, trigger.slug);
   const priorStarts = countStageStarts(entries, trigger.todoId, trigger.stage);
   const attempt = priorStarts + 1;
   const role = STAGE_ROLE[trigger.stage];

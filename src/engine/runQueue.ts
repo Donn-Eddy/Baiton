@@ -60,7 +60,13 @@ import {
   type Transition,
   type TransitionAction,
 } from './transitions';
-import { appendCompletion, appendStart, latestStart, parseJournal } from '../journal';
+import {
+  appendCompletion,
+  appendStart,
+  latestStart,
+  parseJournal,
+  type JournalEntry,
+} from '../journal';
 import type { RunResultKind } from '../journal';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
@@ -305,6 +311,17 @@ export interface RunQueueDeps {
   specStore: SpecStore;
   /** Absolute path of the run journal `runs.jsonl` (Req 21.1, 21.2). */
   journalPath: string;
+  /**
+   * Per-todo journal file for a todo's stage records
+   * (`.baiton/specs/<slug>/todos/<id>/runs.jsonl`); absent → every record goes
+   * to `journalPath`.
+   */
+  journalPathFor?: (todoId: string) => string;
+  /**
+   * The merged journal the queue reads (spec-level + per-todo files, see
+   * readSpecJournal); absent → `parseJournal(journalPath)`.
+   */
+  readJournal?: () => JournalEntry[];
   /** Per-role model, resolved from config; selects the adapter `--model`. */
   modelForRole(role: Role): { model: string; effort?: string };
   /**
@@ -486,7 +503,7 @@ class SerialRunQueue implements RunQueue {
       state === 'executing'
         ? {
             executeFrom: latestStart(
-              parseJournal(this.deps.journalPath),
+              this.readJournal(),
               req.todoId,
               'execute',
             )?.fromState,
@@ -715,7 +732,7 @@ class SerialRunQueue implements RunQueue {
 
     // 4. Journal the start (Req 21.1). The pid is best-effort.
     const terminalPid = await resolvePid(terminal);
-    appendStart(this.deps.journalPath, {
+    appendStart(this.journalFor(req.todoId), {
       runId,
       todoId: req.todoId,
       stage,
@@ -800,7 +817,7 @@ class SerialRunQueue implements RunQueue {
       try {
         await persistArtifact(req.slug, artifactPath, contents);
       } catch {
-        appendCompletion(this.deps.journalPath, { runId, result: 'completed' });
+        appendCompletion(this.journalFor(req.todoId), { runId, result: 'completed' });
         return this.refuse({
           kind: 'spec-write-failed',
           message: `could not persist the ${stage} artifact for "${req.todoId}"`,
@@ -985,7 +1002,7 @@ class SerialRunQueue implements RunQueue {
     // Every completion record for this run carries the discovered session id,
     // whatever the outcome kind.
     const journalDone = (result: RunResultKind, commit?: string): void => {
-      appendCompletion(this.deps.journalPath, {
+      appendCompletion(this.journalFor(req.todoId), {
         runId,
         result,
         ...(commit !== undefined ? { commit } : {}),
@@ -1180,6 +1197,14 @@ class SerialRunQueue implements RunQueue {
   }
 
   /** Refuse a dispatch: report the error and resolve with it. */
+  private journalFor(todoId: string): string {
+    return this.deps.journalPathFor?.(todoId) ?? this.deps.journalPath;
+  }
+
+  private readJournal(): JournalEntry[] {
+    return this.deps.readJournal?.() ?? parseJournal(this.deps.journalPath);
+  }
+
   private refuse(error: DispatchError): DispatchResult {
     this.report(error);
     return { ok: false, error };

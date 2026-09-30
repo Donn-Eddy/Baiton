@@ -21,7 +21,8 @@
  *
  * Approval is true iff the spec's `approved_rev` byte-equals the current
  * Approval_Hash and is non-empty (Req 5.3, 5.4). Input-rev match compares the
- * plan's recorded Input_Rev — journaled at the todo's most recent plan start
+ * plan's recorded Input_Rev — journaled at the todo's most recent plan start (looked up in the merged spec journal,
+ * spec-level + per-todo files)
  * (Req 21.1) — against the current Input_Rev; with no recorded plan rev there is
  * nothing to invalidate, so it matches (Req 18.9).
  */
@@ -37,7 +38,7 @@ import type { Stage } from '../model/stage';
 import type { GitWorktreeService } from '../git';
 import { createSpecBranchWriter, type SpecBranchWriter, type SpecStore } from '../engine';
 import { persistencePathForStage, stageArtifactIsNumbered } from '../schema';
-import { parseJournal } from '../journal';
+import { readSpecJournal, type JournalEntry } from '../journal';
 
 /**
  * Build a {@link SpecStore} rooted at a repository's `.baiton/specs/` directory,
@@ -54,8 +55,6 @@ export function createSpecStore(
 ): SpecStore {
   const specPath = (slug: string): string =>
     path.join(specsDir, slug, 'spec.md');
-  const journalPath = (slug: string): string =>
-    path.join(specsDir, slug, 'runs.jsonl');
   const todoDir = (slug: string, todoId: string): string =>
     path.join(specsDir, slug, 'todos', todoId);
 
@@ -94,7 +93,7 @@ export function createSpecStore(
 
     async latestExecuteCommit(slug, todoId): Promise<string | undefined> {
       let commit: string | undefined;
-      for (const entry of parseJournal(journalPath(slug))) {
+      for (const entry of readSpecJournal(specsDir, slug)) {
         if (
           entry.stage === 'execute' &&
           entry.todoId === todoId &&
@@ -142,7 +141,7 @@ export function createSpecStore(
         return false;
       }
       const current = computeInputRev(spec, todoId);
-      const recorded = recordedPlanInputRev(journalPath(slug), todoId);
+      const recorded = recordedPlanInputRev(readSpecJournal(specsDir, slug), todoId);
       // No recorded plan rev: nothing to invalidate against, so it matches.
       return recorded === undefined || recorded === current;
     },
@@ -223,14 +222,14 @@ function baseName(relativePath: string): string {
 
 /**
  * The Input_Rev recorded at the todo's most recent plan start, or `undefined`
- * when the journal records no plan run for the todo (Req 18.9, 21.1).
+ * when the merged spec journal records no plan run for the todo (Req 18.9, 21.1).
  */
 function recordedPlanInputRev(
-  journalFile: string,
+  entries: JournalEntry[],
   todoId: string,
 ): string | undefined {
   let latest: string | undefined;
-  for (const entry of parseJournal(journalFile)) {
+  for (const entry of entries) {
     if (entry.stage === 'plan' && entry.todoId === todoId) {
       latest = entry.inputRev;
     }

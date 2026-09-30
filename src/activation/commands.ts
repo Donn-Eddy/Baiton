@@ -93,7 +93,14 @@ import type {
   SubmitPrError,
   TerminalHost,
 } from '../engine';
-import { latestStart, parseJournal, resumableSessionId } from '../journal';
+import {
+  latestStart,
+  readSpecJournal,
+  resumableSessionId,
+  specJournalPathFor,
+  todoJournalPathFor,
+  type JournalEntry,
+} from '../journal';
 import {
   PendingAskRegistry,
   confirmSeamFrom,
@@ -453,9 +460,10 @@ export function registerCommands(
     (detail) => surface.warn(`Baiton: ${detail}`),
   );
 
-  // The run journal is per spec (`.baiton/specs/<slug>/runs.jsonl`, Req 21), so
-  // one serialized queue is built per slug — each bound to its own journal —
-  // and cached. Manual mode runs one stage per trigger and the queue itself
+  // Spec-scoped stages keep the spec-level journal
+  // (`.baiton/specs/<slug>/runs.jsonl`, Req 21); todo stages journal to
+  // `todos/<id>/runs.jsonl`, and the queue reads the merged spec journal. One
+  // serialized queue is built per slug and cached. Manual mode runs one stage per trigger and the queue itself
   // refuses a second while one is running (Req 19.1, 20.1). Every refusal/halt
   // is surfaced through the shared Surface (Req 5.3, 10.3, 14.5, 19.1).
   const queues = new Map<string, RunQueue>();
@@ -464,12 +472,7 @@ export function registerCommands(
     if (existing !== undefined) {
       return existing;
     }
-    const journalPath = vscode.Uri.joinPath(
-      workspace.baitonDir,
-      'specs',
-      slug,
-      'runs.jsonl',
-    ).fsPath;
+    const journalPath = specJournalPathFor(specsDir, slug);
     const queue = createRunQueue({
       workspaceRoot: repoRoot,
       git,
@@ -478,6 +481,8 @@ export function registerCommands(
       askWatcherFactory,
       specStore,
       journalPath,
+      journalPathFor: (todoId) => todoJournalPathFor(specsDir, slug, todoId),
+      readJournal: () => readSpecJournal(specsDir, slug),
       modelForRole: (role) => modelForRole(cfg(), role),
       adapterForRole: adapterFor,
       report: (error) => surface.reportDispatchError(error),
@@ -1336,8 +1341,7 @@ async function runView(
     return;
   }
 
-  const journalPath = path.join(specsDir, slug, 'runs.jsonl');
-  const entry = latestStart(parseJournal(journalPath), todoId);
+  const entry = latestStart(readSpecJournal(specsDir, slug), todoId);
   if (entry === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
     return;
@@ -1724,7 +1728,7 @@ const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
  * A CodeLens provider that puts the state-gated actions inline above each todo
  * line of a spec's `spec.md`. Each todo emits exactly `legalActions(todo.state,
  * hasSession)`, so the tree and the CodeLens cannot disagree (Req 4.2, 4.3);
- * `hasSession` comes from one read of the spec's `runs.jsonl` per provide call.
+ * `hasSession` comes from one merged read of the spec's journals per provide call.
  * Each lens invokes a stage/action/view command with the spec's slug and the
  * todo id, wiring the editor surface to the run queue and tools (Req 10.3).
  */
@@ -1737,8 +1741,7 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
       return [];
     }
     const spec = parseSpec(document.getText());
-    const journalPath = path.join(this.specsDir, slug, 'runs.jsonl');
-    const sessions = sessionSet(parseJournal(journalPath));
+    const sessions = sessionSet(readSpecJournal(this.specsDir, slug));
     const lenses: vscode.CodeLens[] = [];
     for (const todo of spec.todos) {
       const line = document.lineAt(todo.lineIndex);
@@ -1754,7 +1757,7 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
 }
 
 /** The set of todo ids the journal records a Session_Id for (Req 4.4). */
-function sessionSet(entries: ReturnType<typeof parseJournal>): Set<string> {
+function sessionSet(entries: JournalEntry[]): Set<string> {
   const sessions = new Set<string>();
   for (const entry of entries) {
     if (entry.sessionId !== undefined) {
