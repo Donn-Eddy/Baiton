@@ -40,6 +40,11 @@
  * Compact link that posts `compactContext` (host-authoritative, disabled while
  * busy or on an empty conversation).
  *
+ * The view also renders sub-agent chats: children appear as collapsible rows
+ * under their parent (collapse state is kept in the webview state), and when
+ * `state.readOnly` is set the composer (input, Send, Stop, Mode, Auto, Compact)
+ * is hidden, cards show no controls and delete is not offered.
+ *
  * The input box characters survive hide/show because they are persisted to the
  * webview state via acquireVsCodeApi().setState (Req 16.5) — retained across
  * the retainContextWhenHidden lifecycle and restored on load.
@@ -78,6 +83,9 @@
   const compactBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('compact-context'));
   const newChatBtn = /** @type {HTMLButtonElement} */ (document.getElementById('new-chat'));
   const sessionListEl = /** @type {HTMLElement} */ (document.getElementById('session-list'));
+  // Null-tolerant: fake DOMs in some tests do not define these.
+  const composerEl = document.getElementById('composer');
+  const readOnlyNote = document.getElementById('readonly-note');
 
   const MAX_INPUT_CHARS = 100000;
 
@@ -104,6 +112,14 @@
   let state = protocol.initialWebviewState();
   if (persisted.inputDraft) {
     inputEl.value = persisted.inputDraft;
+  }
+  // Session ids whose sub-agent chats are collapsed in the list (id -> true).
+  let collapsedSessions =
+    persisted.collapsedSessions && typeof persisted.collapsedSessions === 'object'
+      ? Object.assign({}, persisted.collapsedSessions)
+      : {};
+  function persistCollapsed() {
+    vscode.setState(Object.assign({}, vscode.getState() || {}, { collapsedSessions: collapsedSessions }));
   }
   // Track which tool rows the user has expanded, keyed by record index, so a
   // re-render preserves their open/closed state across state updates.
@@ -473,6 +489,8 @@
     }
 
     const pending = card.status !== 'resolved';
+    // A read-only (sub-agent) view renders no answer controls.
+    const interactive = pending && state.readOnly !== true;
     const options = card.options || [];
     const locked = Boolean(answeredInterventions[card.id]);
     // Tag every focusable control so a re-render can restore focus/caret.
@@ -481,7 +499,7 @@
       el.dataset.interventionField = field;
     }
 
-    if (pending && card.kind === 'question' && options.length > 0 && card.allowFreeText !== true) {
+    if (interactive && card.kind === 'question' && options.length > 0 && card.allowFreeText !== true) {
       // Option buttons only: one click answers outright.
       const opts = document.createElement('div');
       opts.className = 'intervention-options';
@@ -507,7 +525,7 @@
         opts.appendChild(btn);
       }
       wrap.appendChild(opts);
-    } else if (pending && card.kind === 'question' && options.length > 0 && card.allowFreeText === true) {
+    } else if (interactive && card.kind === 'question' && options.length > 0 && card.allowFreeText === true) {
       // Radios plus a free-text row: typed text wins over a selected radio.
       const draft = cardDraft(card.id);
       const opts = document.createElement('fieldset');
@@ -604,7 +622,7 @@
       row.appendChild(input);
       row.appendChild(submit);
       wrap.appendChild(row);
-    } else if (pending && card.kind === 'question') {
+    } else if (interactive && card.kind === 'question') {
       // Free text only.
       const row = document.createElement('div');
       row.className = 'intervention-answer-row';
@@ -645,7 +663,7 @@
       row.appendChild(input);
       row.appendChild(submit);
       wrap.appendChild(row);
-    } else if (pending && (card.kind === 'confirm' || card.kind === 'permission')) {
+    } else if (interactive && (card.kind === 'confirm' || card.kind === 'permission')) {
       const actions = document.createElement('div');
       actions.className = 'intervention-actions';
       const approve = document.createElement('button');
@@ -668,6 +686,16 @@
       actions.appendChild(approve);
       actions.appendChild(decline);
       wrap.appendChild(actions);
+    }
+
+    if (pending && !interactive) {
+      const waiting = document.createElement('div');
+      waiting.className = 'intervention-settled';
+      const note = document.createElement('span');
+      note.className = 'intervention-decision';
+      note.textContent = 'Waiting for an answer in the parent chat';
+      waiting.appendChild(note);
+      wrap.appendChild(waiting);
     }
 
     if (!pending) {
@@ -1075,14 +1103,98 @@
     return (date.getMonth() + 1) + '/' + date.getDate();
   }
 
+  /** @returns {Object<string, any>} */
+  function sessionsById() {
+    const byId = {};
+    state.sessions.forEach(function (s) {
+      byId[s.id] = s;
+    });
+    return byId;
+  }
+
+  function hasChildren(id) {
+    return state.sessions.some(function (s) {
+      return s.parentId === id;
+    });
+  }
+
+  /** True when `ancestorId` is a strict ancestor of `id` via the parentId chain. */
+  function isAncestorOf(ancestorId, id, byId) {
+    let cur = byId[id];
+    let guard = 0;
+    while (cur && cur.parentId !== undefined && guard++ < 100) {
+      if (cur.parentId === ancestorId) {
+        return true;
+      }
+      cur = byId[cur.parentId];
+    }
+    return false;
+  }
+
+  /** Hidden when a collapsed ancestor does not lead to the active session. */
+  function isSessionHidden(session, byId) {
+    let cur = session;
+    let guard = 0;
+    while (cur && cur.parentId !== undefined && guard++ < 100) {
+      const parentId = cur.parentId;
+      if (
+        collapsedSessions[parentId] &&
+        parentId !== state.activeSessionId &&
+        !isAncestorOf(parentId, state.activeSessionId, byId)
+      ) {
+        return true;
+      }
+      cur = byId[parentId];
+    }
+    return false;
+  }
+
+  function toggleCollapsed(id) {
+    if (collapsedSessions[id]) {
+      delete collapsedSessions[id];
+    } else {
+      collapsedSessions[id] = true;
+    }
+    persistCollapsed();
+    renderedSessionSignature = null;
+    renderSessions();
+  }
+
   /** Build one session row. */
   function renderSessionRow(session) {
+    const active = session.id === state.activeSessionId;
+    const depth = typeof session.depth === 'number' ? session.depth : 0;
     const row = document.createElement('div');
-    row.className = 'session-row' + (session.id === state.activeSessionId ? ' active' : '');
-    row.setAttribute('role', 'option');
-    row.setAttribute('aria-selected', session.id === state.activeSessionId ? 'true' : 'false');
-    row.tabIndex = session.id === state.activeSessionId ? 0 : -1;
+    row.className =
+      'session-row depth-' + depth + (session.parentId ? ' child' : '') + (active ? ' active' : '');
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.setAttribute('aria-selected', active ? 'true' : 'false');
+    row.tabIndex = active ? 0 : -1;
     row.dataset.sessionId = session.id;
+    row.dataset.depth = String(depth);
+    if (session.parentId) {
+      row.dataset.parentId = session.parentId;
+    }
+
+    if (hasChildren(session.id)) {
+      const collapsed = Boolean(collapsedSessions[session.id]);
+      row.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      const chevron = document.createElement('button');
+      chevron.type = 'button';
+      chevron.className = 'session-chevron';
+      chevron.textContent = collapsed ? '▸' : '▾';
+      chevron.setAttribute('aria-label', collapsed ? 'Expand sub-agent chats' : 'Collapse sub-agent chats');
+      chevron.addEventListener('click', function (e) {
+        e.stopPropagation();
+        toggleCollapsed(session.id);
+      });
+      row.appendChild(chevron);
+    } else {
+      const spacer = document.createElement('span');
+      spacer.className = 'session-chevron-spacer';
+      row.appendChild(spacer);
+    }
 
     const title = document.createElement('span');
     title.className = 'session-title';
@@ -1095,21 +1207,25 @@
     time.textContent = relativeTime(session.updatedAt);
     row.appendChild(time);
 
-    const del = document.createElement('button');
-    del.className = 'session-delete';
-    del.type = 'button';
-    del.textContent = '\u2715';
-    del.setAttribute('aria-label', 'Delete session');
-    del.title = 'Delete this session';
-    del.disabled = state.busy;
-    del.addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (state.busy) {
-        return;
-      }
-      vscode.postMessage({ type: 'deleteSession', sessionId: session.id });
-    });
-    row.appendChild(del);
+    // Sub-agent chats are deleted with their parent; a read-only active row
+    // never offers delete either.
+    if (!session.parentId && !(state.readOnly === true && active)) {
+      const del = document.createElement('button');
+      del.className = 'session-delete';
+      del.type = 'button';
+      del.textContent = '✕';
+      del.setAttribute('aria-label', 'Delete session');
+      del.title = 'Delete this session';
+      del.disabled = state.busy;
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (state.busy) {
+          return;
+        }
+        vscode.postMessage({ type: 'deleteSession', sessionId: session.id });
+      });
+      row.appendChild(del);
+    }
 
     row.addEventListener('click', function () {
       if (session.id === state.activeSessionId) {
@@ -1123,9 +1239,18 @@
   function renderSessions() {
     const signature = state.sessions
       .map(function (s) {
-        return [s.id, s.title, s.updatedAt, s.id === state.activeSessionId, state.busy].join(
-          '\u0001',
-        );
+        return [
+          s.id,
+          s.title,
+          s.updatedAt,
+          s.id === state.activeSessionId,
+          state.busy,
+          state.readOnly === true,
+          s.parentId || '',
+          s.depth,
+          collapsedSessions[s.id] ? 1 : 0,
+          hasChildren(s.id),
+        ].join('\u0001');
       })
       .join('\u0000');
     if (signature === renderedSessionSignature) {
@@ -1140,8 +1265,11 @@
       sessionListEl.appendChild(empty);
       return;
     }
+    const byId = sessionsById();
     state.sessions.forEach(function (session) {
-      sessionListEl.appendChild(renderSessionRow(session));
+      if (!isSessionHidden(session, byId)) {
+        sessionListEl.appendChild(renderSessionRow(session));
+      }
     });
   }
 
@@ -1239,7 +1367,7 @@
       // to Spec (not DEFAULT_MODE) rather than showing a blank control.
       modeSelect.value = 'spec';
     }
-    modeSelect.disabled = state.busy || state.runActive === true || pinned;
+    modeSelect.disabled = state.busy || state.runActive === true || pinned || state.readOnly === true;
     modeSelect.title = pinned
       ? 'A spec conversation always runs the Spec pipeline.'
       : state.runActive === true
@@ -1272,7 +1400,7 @@
     }
     const ctx = state.context;
     if (compactBtn) {
-      compactBtn.disabled = state.busy || state.records.length === 0;
+      compactBtn.disabled = state.busy || state.readOnly === true || state.records.length === 0;
     }
     if (!ctx) {
       contextMeter.textContent = '';
@@ -1298,12 +1426,30 @@
     // ChatController enforces the authoritative guard.
     const text = inputEl.value;
     const hasContent = text.trim().length > 0 && text.length <= MAX_INPUT_CHARS;
-    sendBtn.disabled = state.busy || !hasContent;
-    stopBtn.disabled = !state.busy;
-    inputEl.disabled = state.busy;
+    sendBtn.disabled = state.busy || state.readOnly === true || !hasContent;
+    stopBtn.disabled = !state.busy || state.readOnly === true;
+    inputEl.disabled = state.busy || state.readOnly === true;
     // New Chat (and each row's delete) is offered only while idle; the host
     // confirms before deleting a session.
     newChatBtn.disabled = state.busy;
+  }
+
+  function renderReadOnly() {
+    const ro = state.readOnly === true;
+    if (composerEl) {
+      if (ro) {
+        composerEl.setAttribute('hidden', '');
+      } else {
+        composerEl.removeAttribute('hidden');
+      }
+    }
+    if (readOnlyNote) {
+      if (ro) {
+        readOnlyNote.removeAttribute('hidden');
+      } else {
+        readOnlyNote.setAttribute('hidden', '');
+      }
+    }
   }
 
   function render() {
@@ -1313,6 +1459,7 @@
     renderError();
     renderEmptyState();
     renderTranscript();
+    renderReadOnly();
     renderAutoMode();
     renderMode();
     renderContext();
@@ -1323,7 +1470,7 @@
 
   function send() {
     const text = inputEl.value;
-    if (state.busy) {
+    if (state.busy || state.readOnly) {
       return;
     }
     if (text.trim().length === 0 || text.length > MAX_INPUT_CHARS) {
@@ -1341,6 +1488,9 @@
    * the answer is sent to the host which validates it with checkAnswer.
    */
   function answerIntervention(id, answer) {
+    if (state.readOnly) {
+      return;
+    }
     if (answeredInterventions[id]) {
       return;
     }
@@ -1392,9 +1542,29 @@
       vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
       return;
     }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const chevron = row.querySelector('.session-chevron');
+      const collapsed = Boolean(collapsedSessions[sessionId]);
+      if (chevron && ((e.key === 'ArrowRight' && collapsed) || (e.key === 'ArrowLeft' && !collapsed))) {
+        e.preventDefault();
+        toggleCollapsed(sessionId);
+        return;
+      }
+      if (e.key === 'ArrowLeft' && row.dataset.parentId) {
+        e.preventDefault();
+        const parentRow = rows.find(function (r) {
+          return r.dataset.sessionId === row.dataset.parentId;
+        });
+        if (parentRow) {
+          parentRow.tabIndex = 0;
+          parentRow.focus();
+        }
+      }
+      return;
+    }
     if (e.key === 'Delete') {
       e.preventDefault();
-      if (state.busy) {
+      if (state.busy || row.dataset.parentId || (state.readOnly === true && sessionId === state.activeSessionId)) {
         return;
       }
       vscode.postMessage({ type: 'deleteSession', sessionId: sessionId });
@@ -1428,7 +1598,7 @@
     compactBtn.addEventListener('click', function () {
       // Host-authoritative: no local state change; the host's setBusy /
       // appendMessage / setContextUsage repaint the view.
-      if (state.busy) {
+      if (state.busy || state.readOnly) {
         return;
       }
       vscode.postMessage({ type: 'compactContext' });
@@ -1436,6 +1606,9 @@
   }
 
   stopBtn.addEventListener('click', function () {
+    if (state.readOnly) {
+      return;
+    }
     vscode.postMessage({ type: 'stop' });
   });
 

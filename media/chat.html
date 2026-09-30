@@ -33,6 +33,9 @@
   the chosen provider's models, plus a stale badge when that provider's catalog
   snapshot is no longer known current (and a Set API key affordance); the empty
   state shows the active provider + model rather than an endpoint URL.
+  The session list renders sub-agent chats as collapsible rows beneath their
+  parent, and a selected sub-agent chat renders read-only (composer hidden,
+  card controls, Stop and delete absent).
   All colors come from VS Code theme CSS variables so the view follows the
   active theme and reflects theme changes without a reload (Req 16.6, 16.7).
 -->
@@ -239,6 +242,55 @@
       .session-delete:disabled {
         opacity: 0;
         cursor: default;
+      }
+
+      .session-chevron {
+        flex: 0 0 auto;
+        width: 1.2em;
+        background: none;
+        border: none;
+        padding: 0;
+        color: inherit;
+        cursor: pointer;
+        line-height: 1;
+      }
+
+      .session-chevron:hover:not(:disabled) {
+        background: none;
+      }
+
+      .session-chevron-spacer {
+        flex: 0 0 auto;
+        width: 1.2em;
+      }
+
+      .session-row.depth-1 {
+        padding-left: calc(var(--baiton-gap) + 14px);
+      }
+
+      .session-row.depth-2 {
+        padding-left: calc(var(--baiton-gap) + 28px);
+      }
+
+      .session-row.child .session-title {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .session-row.child.active .session-title {
+        color: inherit;
+      }
+
+      .composer[hidden],
+      .readonly-note[hidden] {
+        display: none;
+      }
+
+      .readonly-note {
+        flex: 0 0 auto;
+        padding: 4px var(--baiton-gap);
+        font-size: 0.9em;
+        color: var(--vscode-descriptionForeground);
+        border-top: 1px solid var(--vscode-panel-border);
       }
 
       .session-empty {
@@ -774,7 +826,7 @@
         <select id="conversation-select"></select>
         <button id="new-chat" class="secondary" type="button" title="Start a new chat">New Chat</button>
       </div>
-      <div id="session-list" role="listbox" aria-label="Chat sessions" tabindex="0"></div>
+      <div id="session-list" role="tree" aria-label="Chat sessions" tabindex="0"></div>
     </div>
 
     <div id="chat-pane">
@@ -796,7 +848,9 @@
         <button id="empty-set-key" class="secondary" type="button">Set Provider API Key</button>
       </div>
 
-      <div class="composer">
+      <div id="readonly-note" class="readonly-note" hidden>Sub-agent chat — read only. It is driven by its parent chat.</div>
+
+      <div class="composer" id="composer">
         <div class="model-bar">
           <label for="provider-select">Provider</label>
           <select id="provider-select" aria-label="Provider"></select>

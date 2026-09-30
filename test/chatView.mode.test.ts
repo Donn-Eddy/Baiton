@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
-import { HostToWebview } from '../src/orchestrator/webviewProtocol';
+import { HostToWebview, SessionItem } from '../src/orchestrator/webviewProtocol';
 
 /**
  * Fake-DOM unit tests for the composer's host-authoritative Mode select added
@@ -306,6 +306,8 @@ const ELEMENT_IDS: Array<[string, string]> = [
   ['context-bar', 'div'],
   ['context-meter', 'span'],
   ['compact-context', 'button'],
+  ['composer', 'div'],
+  ['readonly-note', 'div'],
 ];
 
 interface ChatView {
@@ -595,5 +597,160 @@ describe('chat view context meter (context-budget T07)', () => {
     const view = loadChatView();
     view.send({ type: 'renderConversation', records: [] });
     assert.strictEqual(view.ids['compact-context'].disabled, true);
+  });
+});
+
+describe('chat view sub-agent chats (sub-agent-chats T08)', () => {
+  const tree = (): SessionItem[] => [
+    { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 },
+    { id: 'p1/c1', parentId: 'p1', title: 'Child task', updatedAt: 2, scopeId: 'workspace', depth: 1 },
+    { id: 'p1/c1/g1', parentId: 'p1/c1', title: 'Grandchild', updatedAt: 1, scopeId: 'workspace', depth: 2 },
+    { id: 'p2', title: 'Other', updatedAt: 0, scopeId: 'workspace', depth: 0 },
+  ];
+  const rowsOf = (view: ChatView): FakeEl[] => view.ids['session-list'].querySelectorAll('.session-row');
+  const rowIds = (view: ChatView): string[] => rowsOf(view).map((r) => r.dataset.sessionId);
+  const rowFor = (view: ChatView, id: string): FakeEl => {
+    const row = rowsOf(view).find((r) => r.dataset.sessionId === id);
+    assert.ok(row, 'row ' + id);
+    return row;
+  };
+  const stop = { stopPropagation(): void {} };
+  const loaded = (): ChatView => {
+    const view = loadChatView();
+    view.send({ type: 'setSessions', items: tree() });
+    return view;
+  };
+
+  it('renders children beneath their parent with depth and a chevron', () => {
+    const view = loaded();
+    assert.deepStrictEqual(rowIds(view), ['p1', 'p1/c1', 'p1/c1/g1', 'p2']);
+    assert.ok(rowFor(view, 'p1/c1').classList.contains('depth-1'));
+    assert.ok(rowFor(view, 'p1/c1/g1').classList.contains('depth-2'));
+    assert.strictEqual(rowFor(view, 'p1').querySelectorAll('.session-chevron').length, 1);
+    assert.strictEqual(rowFor(view, 'p1/c1').querySelectorAll('.session-chevron').length, 1);
+    assert.strictEqual(rowFor(view, 'p2').querySelectorAll('.session-chevron').length, 0);
+    assert.strictEqual(rowFor(view, 'p1/c1/g1').querySelectorAll('.session-chevron').length, 0);
+    assert.deepStrictEqual(
+      rowsOf(view).map((r) => r.getAttribute('aria-level')),
+      ['1', '2', '3', '1'],
+    );
+  });
+
+  it('collapsing a parent hides its descendants and expanding restores them', () => {
+    const view = loaded();
+    rowFor(view, 'p1').querySelector('.session-chevron')?.fire('click', stop);
+    assert.deepStrictEqual(rowIds(view), ['p1', 'p2']);
+    assert.strictEqual(view.posted.length, 0);
+    rowFor(view, 'p1').querySelector('.session-chevron')?.fire('click', stop);
+    assert.deepStrictEqual(rowIds(view), ['p1', 'p1/c1', 'p1/c1/g1', 'p2']);
+    assert.strictEqual(view.posted.length, 0);
+  });
+
+  it('collapse survives a setSessions re-post', () => {
+    const view = loaded();
+    rowFor(view, 'p1').querySelector('.session-chevron')?.fire('click', stop);
+    view.send({ type: 'setSessions', items: tree() });
+    assert.deepStrictEqual(rowIds(view), ['p1', 'p2']);
+  });
+
+  it('the active child stays visible under a collapsed parent', () => {
+    const view = loaded();
+    view.send({ type: 'setActiveSession', sessionId: 'p1/c1' });
+    rowFor(view, 'p1').querySelector('.session-chevron')?.fire('click', stop);
+    assert.ok(rowIds(view).includes('p1/c1'));
+  });
+
+  it('child rows offer no delete; top-level rows do', () => {
+    const view = loaded();
+    const counts = rowsOf(view).map((r) => r.querySelectorAll('.session-delete').length);
+    assert.deepStrictEqual(counts, [1, 0, 0, 1]);
+  });
+
+  it('clicking a child posts selectSession with its id', () => {
+    const view = loaded();
+    rowFor(view, 'p1/c1').fire('click', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [{ type: 'selectSession', sessionId: 'p1/c1' }]);
+  });
+
+  it('read-only hides the composer and shows the note', () => {
+    const view = loadChatView();
+    view.send({ type: 'renderConversation', records: [{ role: 'user', content: 'hi' }] });
+    view.send({ type: 'setReadOnly', readOnly: true });
+    assert.notStrictEqual(view.ids.composer.getAttribute('hidden'), null);
+    assert.strictEqual(view.ids['readonly-note'].getAttribute('hidden'), null);
+    for (const id of ['send', 'stop', 'input', 'compact-context']) {
+      assert.strictEqual(view.ids[id].disabled, true, id);
+    }
+    view.send({ type: 'setReadOnly', readOnly: false });
+    assert.strictEqual(view.ids.composer.getAttribute('hidden'), null);
+    assert.notStrictEqual(view.ids['readonly-note'].getAttribute('hidden'), null);
+  });
+
+  it('read-only: Stop, Send, Compact post nothing even while busy', () => {
+    const view = loadChatView();
+    view.send({ type: 'renderConversation', records: [{ role: 'user', content: 'hi' }] });
+    view.send({ type: 'setBusy', busy: true });
+    view.send({ type: 'setReadOnly', readOnly: true });
+    view.ids.input.value = 'hello';
+    view.ids.stop.fire('click', {});
+    view.ids.send.fire('click', {});
+    view.ids['compact-context'].fire('click', {});
+    assert.strictEqual(view.posted.length, 0);
+  });
+
+  const cards = (): HostToWebview[] => [
+    {
+      type: 'showIntervention',
+      intervention: { id: 'a1', kind: 'confirm', prompt: 'ok?', status: 'pending' },
+    },
+    {
+      type: 'showIntervention',
+      intervention: {
+        id: 'a2',
+        kind: 'question',
+        prompt: 'which?',
+        status: 'pending',
+        options: [{ id: 'x', label: 'X' }],
+      },
+    },
+  ];
+
+  it('read-only pending cards render no answer controls', () => {
+    const view = loadChatView();
+    view.send({ type: 'setReadOnly', readOnly: true });
+    for (const m of cards()) {
+      view.send(m);
+    }
+    const transcript = view.ids.transcript;
+    // FakeEl selectors match attributes only; card controls carry dataset fields.
+    const controls = (): FakeEl[] =>
+      ['BUTTON', 'INPUT', 'TEXTAREA'].flatMap((t) =>
+        transcript.querySelectorAll(t).filter((el) => el.dataset.interventionField !== undefined),
+      );
+    assert.strictEqual(controls().length, 0);
+    const decisions = transcript.querySelectorAll('.intervention-decision');
+    assert.ok(decisions.length > 0);
+    assert.ok(decisions.every((d) => d.textContent === 'Waiting for an answer in the parent chat'));
+    view.send({ type: 'setReadOnly', readOnly: false });
+    assert.ok(controls().length > 0);
+  });
+
+  it('read-only resolved cards still show the decision', () => {
+    const view = loadChatView();
+    view.send({ type: 'setReadOnly', readOnly: true });
+    view.send({
+      type: 'showIntervention',
+      intervention: { id: 'a1', kind: 'confirm', prompt: 'ok?', status: 'resolved', answer: { kind: 'approved' } },
+    });
+    const decisions = view.ids.transcript.querySelectorAll('.intervention-decision');
+    assert.strictEqual(decisions.length, 1);
+    assert.strictEqual(decisions[0].textContent, 'Approved');
+  });
+
+  it('Delete key on a child row posts nothing', () => {
+    const view = loaded();
+    view.send({ type: 'setActiveSession', sessionId: 'p1/c1' });
+    view.ids['session-list'].fire('keydown', { key: 'Delete', preventDefault(): void {} });
+    assert.strictEqual(view.posted.length, 0);
   });
 });

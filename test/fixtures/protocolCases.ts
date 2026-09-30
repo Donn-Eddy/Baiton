@@ -33,6 +33,7 @@ export function seed(over: Partial<WebviewState> = {}): WebviewState {
     activeId: '',
     sessions: [],
     activeSessionId: '',
+    readOnly: false,
     records: [],
     busy: false,
     autoMode: false,
@@ -360,7 +361,7 @@ cases.push({
   messages: [
     {
       type: 'setSessions',
-      items: [{ id: 's1', title: 'Session', updatedAt: 1234, scopeId: 'workspace' }],
+      items: [{ id: 's1', title: 'Session', updatedAt: 1234, scopeId: 'workspace', depth: 0 }],
     },
     { type: 'setActiveSession', sessionId: 's1' },
   ],
@@ -764,6 +765,59 @@ cases.push({
     { type: 'setContextUsage', loaded: 10, window: 100, source: 'estimate' },
     { type: 'renderConversation', records: [] },
     { type: 'setBusy', busy: false },
+  ],
+});
+
+const p1Item = { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 };
+const treeItems = [
+  p1Item,
+  { id: 'p1/c1', parentId: 'p1', title: 'Child task', updatedAt: 2, scopeId: 'workspace', depth: 1 },
+  {
+    id: 'p1/c1/g1',
+    parentId: 'p1/c1',
+    title: 'Grandchild',
+    updatedAt: 1,
+    scopeId: 'workspace',
+    depth: 2,
+  },
+  { id: 'p2', title: 'Other', updatedAt: 0, scopeId: 'workspace', depth: 0 },
+];
+
+cases.push({
+  name: 'setReadOnly turns read-only on',
+  messages: [{ type: 'setReadOnly', readOnly: true }],
+});
+
+cases.push({
+  name: 'setReadOnly turns read-only off',
+  state: seed({ readOnly: true }),
+  messages: [{ type: 'setReadOnly', readOnly: false }],
+});
+
+cases.push({
+  name: 'setSessions carries a sub-chat tree',
+  messages: [{ type: 'setSessions', items: treeItems }],
+});
+
+cases.push({
+  name: 'setReadOnly leaves sessions, records, busy alone',
+  state: seed({
+    sessions: [p1Item],
+    activeSessionId: 'p1',
+    records: [{ role: 'user', content: 'hi' }],
+    busy: true,
+  }),
+  messages: [{ type: 'setReadOnly', readOnly: true }],
+});
+
+cases.push({
+  name: 'select a child then back to the parent',
+  messages: [
+    { type: 'setActiveSession', sessionId: 'p1/c1' },
+    { type: 'setReadOnly', readOnly: true },
+    { type: 'renderConversation', records: [{ role: 'assistant', content: 'child reply' }] },
+    { type: 'setActiveSession', sessionId: 'p1' },
+    { type: 'setReadOnly', readOnly: false },
   ],
 });
 

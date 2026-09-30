@@ -83,8 +83,8 @@ describe('webview protocol reducer', () => {
 
   it('setSessions sets the session list', () => {
     const items: SessionItem[] = [
-      { id: '20260913-120000-a1b2', title: 'Add the login flow', updatedAt: '2026-09-13T12:00:00.000Z', scopeId: 'workspace' },
-      { id: '20260912-090000-c3d4', title: 'New chat', updatedAt: '2026-09-12T09:00:00.000Z', scopeId: 'workspace' },
+      { id: '20260913-120000-a1b2', title: 'Add the login flow', updatedAt: '2026-09-13T12:00:00.000Z', scopeId: 'workspace', depth: 0 },
+      { id: '20260912-090000-c3d4', title: 'New chat', updatedAt: '2026-09-12T09:00:00.000Z', scopeId: 'workspace', depth: 0 },
     ];
     const next = reduce(initialWebviewState(), { type: 'setSessions', items });
 
@@ -224,13 +224,14 @@ describe('webview protocol reducer', () => {
     reduce(seed, { type: 'setBusy', busy: true });
     reduce(seed, { type: 'appendMessage', record: rec('user', 'x') });
     reduce(seed, { type: 'setActive', conversationId: 'y' });
-    reduce(seed, { type: 'setSessions', items: [{ id: 's', title: 't', updatedAt: 1, scopeId: 'workspace' }] });
+    reduce(seed, { type: 'setSessions', items: [{ id: 's', title: 't', updatedAt: 1, scopeId: 'workspace', depth: 0 }] });
     reduce(seed, { type: 'setActiveSession', sessionId: 's' });
     reduce(seed, { type: 'showIntervention', intervention: { id: 'a1', kind: 'confirm', prompt: 'p', status: 'pending' } });
     reduce(seed, { type: 'resolveIntervention', id: 'a1', answer: { kind: 'approved' } });
     reduce(seed, { type: 'setAutoMode', enabled: true });
     reduce(seed, { type: 'setMode', mode: 'bug' });
     reduce(seed, { type: 'setRunActive', active: true });
+    reduce(seed, { type: 'setReadOnly', readOnly: true });
     assert.strictEqual(JSON.stringify(seed), snapshot);
   });
 });
@@ -915,7 +916,7 @@ describe('conversation mode and run activity', () => {
       ...initialWebviewState(),
       conversations: [{ id: 'workspace', label: 'Workspace' }],
       activeId: 'workspace',
-      sessions: [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace' }],
+      sessions: [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace', depth: 0 }],
       activeSessionId: 's1',
       records: [rec('user', 'hi')],
       busy: true,
@@ -929,7 +930,7 @@ describe('conversation mode and run activity', () => {
     assert.strictEqual(next.mode, 'refactor');
     assert.deepStrictEqual(next.conversations, [{ id: 'workspace', label: 'Workspace' }]);
     assert.strictEqual(next.activeId, 'workspace');
-    assert.deepStrictEqual(next.sessions, [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace' }]);
+    assert.deepStrictEqual(next.sessions, [{ id: 's1', title: 't', updatedAt: 1, scopeId: 'workspace', depth: 0 }]);
     assert.strictEqual(next.activeSessionId, 's1');
     assert.deepStrictEqual(next.records, [rec('user', 'hi')]);
     assert.strictEqual(next.busy, true);
@@ -1037,5 +1038,50 @@ describe('context usage', () => {
   it('a webview compactContext message carries only its type', () => {
     const msg: WebviewToHost = { type: 'compactContext' };
     assert.deepStrictEqual(msg, { type: 'compactContext' });
+  });
+});
+
+describe('sub-agent chats (read-only view and session tree)', () => {
+  const tree: SessionItem[] = [
+    { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 },
+    { id: 'p1/c1', parentId: 'p1', title: 'Child', updatedAt: 2, scopeId: 'workspace', depth: 1 },
+    { id: 'p1/c1/g1', parentId: 'p1/c1', title: 'Grand', updatedAt: 1, scopeId: 'workspace', depth: 2 },
+    { id: 'p2', title: 'Other', updatedAt: 0, scopeId: 'workspace', depth: 0 },
+  ];
+
+  it('starts not read-only', () => {
+    assert.strictEqual(initialWebviewState().readOnly, false);
+  });
+
+  it('setReadOnly sets the flag and nothing else', () => {
+    const base: WebviewState = { ...initialWebviewState(), busy: true, activeSessionId: 'p1', sessions: tree };
+    const on = reduce(base, { type: 'setReadOnly', readOnly: true });
+    assert.strictEqual(on.readOnly, true);
+    assert.deepStrictEqual({ ...on, readOnly: false }, base);
+    const off = reduce(on, { type: 'setReadOnly', readOnly: false });
+    assert.strictEqual(off.readOnly, false);
+    assert.deepStrictEqual(off, base);
+  });
+
+  it('setReadOnly returns a new object and does not mutate the input', () => {
+    const base = initialWebviewState();
+    const snapshot = JSON.stringify(base);
+    const next = reduce(base, { type: 'setReadOnly', readOnly: true });
+    assert.notStrictEqual(next, base);
+    assert.strictEqual(JSON.stringify(base), snapshot);
+  });
+
+  it('setSessions preserves parentId, depth and order and copies the array', () => {
+    const next = reduce(initialWebviewState(), { type: 'setSessions', items: tree });
+    assert.deepStrictEqual(next.sessions, tree);
+    assert.notStrictEqual(next.sessions, tree);
+  });
+
+  it('setSessions and setActiveSession do not change readOnly', () => {
+    const ro = reduce(initialWebviewState(), { type: 'setReadOnly', readOnly: true });
+    const a = reduce(ro, { type: 'setSessions', items: tree });
+    const b = reduce(a, { type: 'setActiveSession', sessionId: 'p1/c1' });
+    assert.strictEqual(a.readOnly, true);
+    assert.strictEqual(b.readOnly, true);
   });
 });

@@ -19,6 +19,7 @@
       activeId: '',
       sessions: [],
       activeSessionId: '',
+      readOnly: false,
       records: [],
       busy: false,
       autoMode: false,
@@ -156,6 +157,8 @@
         return Object.assign({}, state, { sessions: msg.items.slice() });
       case 'setActiveSession':
         return Object.assign({}, state, { activeSessionId: msg.sessionId });
+      case 'setReadOnly':
+        return Object.assign({}, state, { readOnly: msg.readOnly });
       case 'showError':
         return Object.assign({}, state, { error: { message: msg.message, action: msg.action, provider: msg.provider } });
       case 'setBusy':

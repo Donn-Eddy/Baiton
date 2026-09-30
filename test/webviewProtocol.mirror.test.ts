@@ -116,6 +116,29 @@ describe('webview protocol browser mirror (chat-interventions-auto-mode T04)', (
     assert.strictEqual(hardClone(mirror.initialWebviewState()).context, undefined);
   });
 
+  it('mirrors setReadOnly and a session tree', () => {
+    const msgs: HostToWebview[] = [
+      {
+        type: 'setSessions',
+        items: [
+          { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 },
+          { id: 'p1/c1', parentId: 'p1', title: 'Child', updatedAt: 2, scopeId: 'workspace', depth: 1 },
+        ],
+      },
+      { type: 'setReadOnly', readOnly: true },
+      { type: 'setReadOnly', readOnly: false },
+    ];
+    let ts = initialWebviewState();
+    let js: WebviewState = mirror.initialWebviewState();
+    for (const m of msgs) {
+      ts = reduce(ts, m);
+      js = mirror.reduce(js, m);
+    }
+    assert.deepStrictEqual(hardClone(js), ts);
+    assert.strictEqual(ts.readOnly, false);
+    assert.strictEqual(hardClone(mirror.initialWebviewState()).readOnly, false);
+  });
+
   it('neither reducer mutates the state it is given (purity check)', () => {
     const multi = PROTOCOL_CASES.find((c) => c.messages.length > 1);
     assert.ok(multi, 'Multi-message fixture case must exist');

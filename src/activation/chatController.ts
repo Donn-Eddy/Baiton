@@ -1854,6 +1854,8 @@ function toSessionItems(scope: SessionScope, metas: readonly SessionMeta[]): Ses
     title: meta.title,
     updatedAt: meta.updatedAt,
     scopeId: scopeId(scope),
+    depth: meta.depth,
+    ...(meta.parentId !== undefined ? { parentId: meta.parentId } : {}),
   }));
 }
 
