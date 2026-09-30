@@ -215,6 +215,13 @@ export interface SpecStore {
    */
   latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined>;
   /**
+   * Persist a validated stage artifact (absolute path under the spec folder) through the
+   * spec-branch writer, so it is serialized with state writes for the same spec. It is not
+   * committed on its own: the next state write (or the Execute commit) records it. Absent
+   * → the queue writes the file directly, as before.
+   */
+  persistArtifact?(slug: string, artifactPath: string, contents: string): Promise<void>;
+  /**
    * Whether the spec is approved: its `approved_rev` byte-equals the current
    * Approval_Hash and is non-empty (Req 5.3, 5.4).
    */
@@ -230,7 +237,10 @@ export interface SpecStore {
   inputRev(slug: string, todoId: string): Promise<string>;
   /**
    * Apply a lifecycle state write through the serializer, committing the change
-   * on the spec branch before the next stage (Req 17.1). Resolves `false` when
+   * on the spec branch before the next stage (Req 17.1). The write is applied
+   * through the per-slug spec-branch writer on freshly re-read content and
+   * committed path-scoped (`spec(<slug>): <id> <what>`, only
+   * `.baiton/specs/<slug>`). Resolves `false` when
    * the serializer aborted (the target could not be located) so the caller can
    * surface a `spec-write-failed` error and leave state unchanged (Req 6.5).
    */
@@ -753,6 +763,8 @@ class SerialRunQueue implements RunQueue {
     }
 
     let outcome: RunOutcome;
+    let captured: { path: string; contents: string } | undefined;
+    const persistArtifact = this.deps.specStore.persistArtifact?.bind(this.deps.specStore);
     try {
       outcome = await awaitStageResult(
         {
@@ -767,11 +779,33 @@ class SerialRunQueue implements RunQueue {
         {
           reportInvalid: (detail) =>
             this.report({ kind: 'outcome', outcome: { kind: 'invalid_output', detail }, message: detail }),
+          ...(persistArtifact !== undefined
+            ? {
+                writeArtifact: (p: string, c: string) => {
+                  captured = { path: p, contents: c };
+                },
+              }
+            : {}),
         },
       );
     } finally {
       askWatcher?.dispose();
       this.running = undefined;
+    }
+
+    // Persist the captured artifact through the spec-branch writer, before the
+    // Execute commit and the terminal state write pick it up.
+    if (captured !== undefined && persistArtifact !== undefined) {
+      const { path: artifactPath, contents } = captured;
+      try {
+        await persistArtifact(req.slug, artifactPath, contents);
+      } catch {
+        appendCompletion(this.deps.journalPath, { runId, result: 'completed' });
+        return this.refuse({
+          kind: 'spec-write-failed',
+          message: `could not persist the ${stage} artifact for "${req.todoId}"`,
+        });
+      }
     }
 
     // A Stop during the run turns any resolved outcome into `cancelled`.

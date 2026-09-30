@@ -8,7 +8,8 @@
  * the run worktree lifecycle (`.baiton/worktrees/<run-id>/` create, merge and
  * remove), the per-todo worktree lifecycle (`.baiton/worktrees/<slug>/<todo-id>/` on
  * `baiton-todo/<slug>/<todo-id>`: create/reuse, land into the spec branch, remove,
- * unlanded listing), and the spec-less run pipeline itself (plan -> execute -> review in
+ * unlanded listing), the per-slug serialized spec-branch writer (state, artifact and
+ * journal writes to `.baiton/specs/<slug>/` in the main checkout, committed path-scoped), and the spec-less run pipeline itself (plan -> execute -> review in
  * the run's own worktree, plus the read-only investigate dispatch).
  */
 export * from './roleInstructions';
@@ -23,6 +24,7 @@ export * from './transitions';
 export * from './stageContext';
 export * from './runContext';
 export * from './runQueue';
+export * from './specBranchWriter';
 export * from './recovery';
 export * from './specDraft';
 export * from './runStore';

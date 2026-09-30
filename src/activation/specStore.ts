@@ -12,7 +12,9 @@
  *     cores so no cached copy is trusted (Req 6.3).
  *   - `writeState` applies the minimal state-box edit via {@link writeTodoState}
  *     to freshly re-read content, writes it back, and commits the change on the
- *     spec branch as `spec(<slug>): <id> <what>` before the next stage
+ *     spec branch as `spec(<slug>): <id> <what>`, all under the per-slug
+ *     spec-branch writer and committing only `.baiton/specs/<slug>` via
+ *     `commitPaths`, before the next stage
  *     (Req 6.1, 6.3, 17.1). It resolves `false` when the serializer aborts (the
  *     target could not be located) so the queue surfaces a `spec-write-failed`
  *     refusal and leaves state unchanged (Req 6.5).
@@ -32,8 +34,8 @@ import { writeTodoState } from '../model/writer';
 import { isErr } from '../model/result';
 import type { TodoState } from '../model/todoState';
 import type { Stage } from '../model/stage';
-import type { GitService } from '../git';
-import type { SpecStore } from '../engine';
+import type { GitWorktreeService } from '../git';
+import { createSpecBranchWriter, type SpecBranchWriter, type SpecStore } from '../engine';
 import { persistencePathForStage, stageArtifactIsNumbered } from '../schema';
 import { parseJournal } from '../journal';
 
@@ -43,10 +45,12 @@ import { parseJournal } from '../journal';
  *
  * @param specsDir absolute `.baiton/specs/` directory.
  * @param git      the git seam used to commit each state write (Req 17.1).
+ * @param writer   the per-slug spec-branch writer; defaults to one over `git`.
  */
 export function createSpecStore(
   specsDir: string,
-  git: GitService,
+  git: GitWorktreeService,
+  writer: SpecBranchWriter = createSpecBranchWriter({ specsDir, git }),
 ): SpecStore {
   const specPath = (slug: string): string =>
     path.join(specsDir, slug, 'spec.md');
@@ -144,28 +148,38 @@ export function createSpecStore(
     },
 
     async writeState(slug, todoId, state, note): Promise<boolean> {
-      let current: string;
-      try {
-        current = await fsp.readFile(specPath(slug), 'utf8');
-      } catch {
-        return false;
-      }
-      const written = writeTodoState(current, todoId, state);
-      if (isErr(written)) {
-        return false;
-      }
-      if (written.value === current) {
-        // The serializer left the file unchanged (e.g. a `done`-line edit path
-        // or an already-current state): nothing to commit (Req 4.11, 6.5).
-        return false;
-      }
-      try {
-        await fsp.writeFile(specPath(slug), written.value, 'utf8');
-        await git.commit(`spec(${slug}): ${todoId} ${what(state, note)}`);
-        return true;
-      } catch {
-        return false;
-      }
+      return writer.apply(slug, async (scope) => {
+        let current: string;
+        try {
+          current = await fsp.readFile(specPath(slug), 'utf8');
+        } catch {
+          return false;
+        }
+        const written = writeTodoState(current, todoId, state);
+        if (isErr(written)) {
+          return false;
+        }
+        if (written.value === current) {
+          // The serializer left the file unchanged (e.g. a `done`-line edit path
+          // or an already-current state): nothing to commit (Req 4.11, 6.5).
+          return false;
+        }
+        try {
+          await fsp.writeFile(specPath(slug), written.value, 'utf8');
+          await scope.commit(`spec(${slug}): ${todoId} ${what(state, note)}`);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    },
+
+    async persistArtifact(slug, artifactPath, contents): Promise<void> {
+      // Not committed here: the following state write commits the spec folder.
+      await writer.apply(slug, async () => {
+        await fsp.mkdir(path.dirname(artifactPath), { recursive: true });
+        await fsp.writeFile(artifactPath, contents, 'utf8');
+      });
     },
   };
 }
