@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fc from 'fast-check';
 import {
   createRunQueue,
+  type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
   type SpecStore,
@@ -18,6 +19,7 @@ import type { TodoState } from '../src/model/todoState';
 import type { Role } from '../src/model/role';
 import { approvalHash } from '../src/model/hash';
 import { parseSpec, ParsedSpec } from '../src/model/parser';
+import { ok } from '../src/model/result';
 
 /**
  * Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
@@ -329,6 +331,135 @@ describe('run queue unknown-agent refusal', () => {
       0,
       'no running state is written for an unknown agent',
     );
+  });
+});
+
+// --- Worktree mode: tree guards and deps-unlanded ---------------------------
+
+describe('run queue worktree mode guards', () => {
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = makeWorkspace();
+  });
+
+  afterEach(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  function seam(
+    wtGit: GitService,
+    unlanded: readonly string[],
+  ): QueueWorktreeSeam & { ensured: number } {
+    const s = {
+      ensured: 0,
+      ensure: async () => {
+        s.ensured += 1;
+        return ok({ dir: path.join(workspace, '.baiton', 'worktrees', 's', 'T01'), git: wtGit });
+      },
+      unlanded: async () => unlanded,
+    };
+    return s;
+  }
+
+  it('checks the clean-tree guard against the worktree git, not the main checkout', async () => {
+    for (const [mainClean, wtClean] of [
+      [true, false],
+      [false, true],
+    ] as const) {
+      const specStore = makeSpecStore({ state: 'planned', approved: true });
+      const terminalHost = makeTerminalHost();
+      const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+      const wtGit: GitService = { ...makeGit(), isCleanExceptSpecFolder: async () => wtClean };
+      const queue = createRunQueue({
+        ...deps,
+        git: { ...makeGit(), isCleanExceptSpecFolder: async () => mainClean },
+        slug: 's',
+        todoId: 'T01',
+        worktrees: seam(wtGit, []),
+      });
+      const result = await queue.dispatch(executeRequest());
+      if (wtClean) {
+        assert.strictEqual(result.ok, true, 'a dirty main checkout must not block a clean worktree');
+      } else {
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual(!result.ok && result.error.kind, 'dirty-tree');
+        assert.strictEqual(terminalHost.created.length, 0);
+      }
+    }
+  });
+
+  /** A spec whose T06 depends on `after` (a subset of T01..T05). */
+  function specWithAfter(after: readonly string[]): ParsedSpec {
+    const lines = ['---', 'title: sample', '---', '# OVERVIEW', 'o', '# TODOS'];
+    for (const id of ['T01', 'T02', 'T03', 'T04', 'T05']) {
+      lines.push(`- [done] ${id} dep`);
+    }
+    lines.push(`- [pending] T06 target${after.length > 0 ? ` (after ${after.join(',')})` : ''}`);
+    return parseSpec(lines.join('\n'));
+  }
+
+  const idsArb = fc.subarray(['T01', 'T02', 'T03', 'T04', 'T05']);
+
+  it('refuses Plan with deps-unlanded iff an after dependency is unlanded, before creating a worktree', async () => {
+    await fc.assert(
+      fc.asyncProperty(idsArb, idsArb, async (after, unlanded) => {
+        const base = makeSpecStore({ state: 'pending', approved: true });
+        const specStore = { ...base, readSpec: async () => specWithAfter(after) };
+        const terminalHost = makeTerminalHost();
+        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const wt = seam(makeGit(), unlanded);
+        const queue = createRunQueue({ ...deps, slug: 's', todoId: 'T06', worktrees: wt });
+        const req: RunRequest = {
+          slug: 's',
+          todoId: 'T06',
+          action: 'plan',
+          role: 'planner',
+          attempt: 1,
+          resume: false,
+        };
+
+        const dispatched = queue.dispatch(req);
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        const expectRefused = after.some((id) => unlanded.includes(id));
+        if (expectRefused) {
+          const result = await dispatched;
+          assert.strictEqual(!result.ok && result.error.kind, 'deps-unlanded');
+          assert.strictEqual(wt.ensured, 0, 'no worktree is created for a refused Plan');
+          assert.strictEqual(terminalHost.created.length, 0);
+          assert.deepStrictEqual(base.writes, []);
+        } else {
+          assert.strictEqual(wt.ensured, 1);
+          assert.strictEqual(terminalHost.created.length, 1, 'Plan launches');
+          // The stage never settles (the fake terminal has no close path); leave it.
+          queue.stop();
+        }
+      }),
+      { numRuns: 60 },
+    );
+  });
+
+  it('never fires the deps-unlanded guard without a worktree seam', async () => {
+    const base = makeSpecStore({ state: 'pending', approved: true });
+    const specStore = { ...base, readSpec: async () => specWithAfter(['T01']) };
+    const terminalHost = makeTerminalHost();
+    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const queue = createRunQueue(deps);
+    const dispatched = queue.dispatch({
+      slug: 's',
+      todoId: 'T06',
+      action: 'plan',
+      role: 'planner',
+      attempt: 1,
+      resume: false,
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(terminalHost.created.length, 1);
+    // Launched instead of refused; the stage never settles, so leave it pending.
+    void dispatched;
+    queue.stop();
   });
 });
 

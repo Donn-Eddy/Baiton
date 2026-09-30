@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   createRunQueue,
+  type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
@@ -25,7 +26,8 @@ import type { Role } from '../src/model/role';
  * Feature: baiton-first-pass, Property 17: At most one running stage and
  * single-trigger dispatch
  *
- * For any interleaving of dispatches the per-repo queue SHALL run at most one
+ * For any interleaving of dispatches a single queue (one per todo when wired per
+ * (slug, todo); queues of different todos run concurrently) SHALL run at most one
  * stage at a time: `isRunning()` is true while a stage is in flight and never
  * more than one stage is instrumented as concurrently in flight (Req 10.3,
  * 10.4, 20.1). A dispatch issued while a stage runs is appended to the FIFO and
@@ -461,5 +463,75 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
       ),
       { numRuns: 120 },
     );
+  });
+
+  /** A fake per-todo worktree seam whose git is the rig's stub git. */
+  function fakeSeam(rig: Rig): QueueWorktreeSeam {
+    return {
+      ensure: async (slug, todoId) =>
+        ok({
+          dir: path.join(tmpDir, '.baiton', 'worktrees', slug, todoId),
+          git: rig.deps.git,
+        }),
+      unlanded: async () => [],
+    };
+  }
+
+  it('runs the stages of distinct todos concurrently, one queue per todo, completing in any order', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 2, max: 4 }).chain((n) =>
+          fc.tuple(
+            fc.constant(n),
+            fc.shuffledSubarray(
+              Array.from({ length: n }, (_, i) => i),
+              { minLength: n, maxLength: n },
+            ),
+          ),
+        ),
+        async ([n, order]) => {
+          const rig = makeRig(path.join(tmpDir, 'runs.jsonl'));
+          const seam = fakeSeam(rig);
+          const queues = Array.from({ length: n }, (_, i) =>
+            createRunQueue({ ...rig.deps, slug: 'demo', todoId: `todo-${i}`, worktrees: seam }),
+          );
+          const results = queues.map((q, i) => q.dispatch(executeRequest(i)));
+          await flush();
+          await flush();
+
+          assert.strictEqual(rig.stages.length, n, 'every todo launches without waiting');
+          assert.strictEqual(rig.peakInFlight(), n, 'stages run concurrently');
+          for (const q of queues) {
+            assert.strictEqual(q.isRunning(), true);
+          }
+
+          for (const i of order) {
+            // The stage launched by queue i is the i-th launch (dispatch order).
+            rig.stages[i].complete();
+            await flush();
+            await flush();
+            assert.strictEqual(queues[i].isRunning(), false, 'completion is independent');
+          }
+          for (const r of await Promise.all(results)) {
+            assert.strictEqual(r.ok, true);
+          }
+        },
+      ),
+      { numRuns: 30 },
+    );
+  });
+
+  it('refuses a request for another todo as illegal-transition without launching', async () => {
+    const rig = makeRig(path.join(tmpDir, 'runs.jsonl'));
+    const queue = createRunQueue({
+      ...rig.deps,
+      slug: 'demo',
+      todoId: 'T01',
+      worktrees: fakeSeam(rig),
+    });
+    const r = await queue.dispatch({ ...executeRequest(0), todoId: 'T02' });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(!r.ok && r.error.kind, 'illegal-transition');
+    assert.strictEqual(rig.stages.length, 0);
   });
 });

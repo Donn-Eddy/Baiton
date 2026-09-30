@@ -7,6 +7,8 @@ import {
   createRunQueue,
   MISSING_RESULT_HINT,
   PRESERVED_CHANGES_HINT,
+  type QueueWorktreeSeam,
+  type RunQueue,
   type RunQueueDeps,
   type RunRequest,
   type SpecStore,
@@ -597,5 +599,123 @@ describe('run queue execute closed-without-result with a dirty tree', () => {
     const { message } = await runClosedExecute('');
     assert.ok(message.endsWith(MISSING_RESULT_HINT), `expected the permission hint: ${message}`);
     assert.ok(!message.includes(PRESERVED_CHANGES_HINT));
+  });
+});
+
+/**
+ * Worktree mode: the stage runs in the todo's worktree, so the reset, the
+ * preserved-changes evidence and the revert bookkeeping all use the worktree's
+ * git, and no stage outcome ever removes the worktree (the seam has no removal).
+ */
+describe('run queue revert in worktree mode', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-runqueue-revert-wt-'));
+    fs.mkdirSync(path.join(tmpDir, '.baiton', 'specs', SLUG), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Dispatch `scenario` in worktree mode; `finish` drives its outcome. */
+  async function run(
+    scenario: Scenario,
+    finish: (rig: Rig, queue: RunQueue, drive: Drive) => void,
+    wtOverrides: Partial<GitService> = {},
+  ): Promise<{
+    result: { ok: boolean; error?: { message: string; kind: string } };
+    rig: Rig;
+    wtResets: number;
+    mainResets: number;
+    ensured: number;
+    wtDir: string;
+  }> {
+    let wtResets = 0;
+    let ensured = 0;
+    const wtDir = path.join(tmpDir, '.baiton', 'worktrees', SLUG, TODO_ID);
+    const rig = makeRig(path.join(tmpDir, 'runs.jsonl'), scenario, {
+      // The main checkout must never be consulted for the working-tree evidence.
+      diffAgainstWorkingTree: async () => 'diff --git a/main b/main\n+main\n',
+    });
+    const base = rig.deps.git;
+    const wtGit: GitService = {
+      ...base,
+      diffAgainstWorkingTree: async () => '',
+      resetWorkingTree: async () => {
+        wtResets += 1;
+        return ok(undefined);
+      },
+      ...wtOverrides,
+    };
+    const worktrees: QueueWorktreeSeam = {
+      ensure: async () => {
+        ensured += 1;
+        fs.mkdirSync(wtDir, { recursive: true });
+        return ok({ dir: wtDir, git: wtGit });
+      },
+      unlanded: async () => [],
+    };
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, todoId: TODO_ID, worktrees });
+    const pending = queue.dispatch({
+      slug: SLUG,
+      todoId: TODO_ID,
+      action: scenario.action,
+      role: scenario.role,
+      attempt: 1,
+      resume: false,
+    });
+    await flush();
+    const drive = rig.drive();
+    assert.ok(drive !== undefined, 'the stage should have launched');
+    finish(rig, queue, drive!);
+    await flush();
+    await flush();
+    await flush();
+    const result = (await pending) as {
+      ok: boolean;
+      error?: { message: string; kind: string };
+    };
+    return { result, rig, wtResets, mainResets: rig.resetCount(), ensured, wtDir };
+  }
+
+  it('reverts a closed or cancelled stage exactly as before and leaves the worktree in place', async () => {
+    for (const scenario of SCENARIOS) {
+      for (const how of ['closed', 'cancelled'] as const) {
+        const out = await run(scenario, (_rig, queue, drive) => {
+          if (how === 'closed') {
+            drive.closeWithExit(1);
+          } else {
+            queue.stop();
+          }
+        });
+        assert.strictEqual(out.result.ok, false);
+        assert.strictEqual(out.ensured, 1);
+        const last = out.rig.writes[out.rig.writes.length - 1];
+        assert.strictEqual(last.state, scenario.from, `${how} reverts to ${scenario.from}`);
+        assert.ok(fs.existsSync(out.wtDir), 'the worktree dir is untouched');
+        assert.strictEqual(out.mainResets, 0);
+        assert.strictEqual(out.wtResets, 0);
+      }
+    }
+  });
+
+  it('decides PRESERVED_CHANGES_HINT from the worktree git diff, not the main checkout', async () => {
+    const execute = SCENARIOS.find((s) => s.action === 'execute') as Scenario;
+    const clean = await run(execute, (_r, _q, d) => d.closeWithExit(0));
+    assert.ok(clean.result.error?.message.endsWith(MISSING_RESULT_HINT), 'worktree clean → permission hint');
+    const dirty = await run(execute, (_r, _q, d) => d.closeWithExit(0), {
+      diffAgainstWorkingTree: async () => 'diff --git a/x b/x\n+work\n',
+    });
+    assert.ok(dirty.result.error?.message.endsWith(PRESERVED_CHANGES_HINT), 'worktree dirty → preserved hint');
+  });
+
+  it('resets the worktree, not the main checkout, after a completed non-execute stage', async () => {
+    const plan = SCENARIOS.find((s) => s.action === 'plan') as Scenario;
+    const out = await run(plan, (_r, _q, d) => d.complete(plan.resultJson));
+    assert.strictEqual(out.result.ok, true);
+    assert.strictEqual(out.wtResets, 1);
+    assert.strictEqual(out.mainResets, 0);
   });
 });

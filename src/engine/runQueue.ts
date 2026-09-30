@@ -4,9 +4,12 @@
  * 21.1, 21.2, 5.3, 5.4; design "Stage engine", `RunQueue`).
  *
  * This module owns the run lifecycle independent of which agent runs. A single
- * in-memory FIFO per repository guarantees at most one running stage: a request
- * dispatched while one runs is appended and started only when the running stage
- * reaches a terminal outcome (Req 20.1–20.3). In first-pass manual mode the
+ * in-memory FIFO per queue guarantees at most one running stage per queue: a
+ * request dispatched while one runs is appended and started only when the running
+ * stage reaches a terminal outcome (Req 20.1–20.3). When wired per (slug, todo)
+ * (`RunQueueDeps.slug`/`todoId`/`worktrees`) there is one queue per todo, FIFO and
+ * `busy` are per todo, every stage runs in that todo's worktree, and there is no
+ * repo-wide serialization between todo queues. In first-pass manual mode the
  * queue never auto-chains — each user trigger runs exactly one stage and, on
  * completion, the queue is left for the next trigger (Req 19.1, 19.2). `stop()`
  * disposes the running terminal, records the outcome `cancelled`, sets the todo
@@ -47,6 +50,10 @@ import type { Stage } from '../model/stage';
 import type { ParsedSpec } from '../model/parser';
 import type { TodoState } from '../model/todoState';
 import type { GitService } from '../git';
+import { createGitService } from '../git/gitService';
+import { err, ok, type Result } from '../model/result';
+import { createTodoWorktree, unlandedTodos, type TodoWorktreeDeps } from './todoWorktree';
+import type { SpecBranchWriter } from './specBranchWriter';
 import type { Adapter } from '../adapter';
 import type { HostTerminal } from './terminalHost';
 import type { TerminalHost } from './terminalHost';
@@ -112,6 +119,8 @@ export interface RunRequest {
  *                          10.5, 18.2).
  * - `not-approved`       — the approval-hash gate failed (Req 5.3, 5.4).
  * - `blocked`            — the todo's derived blocked status is true (Req 18.2).
+ * - `deps-unlanded`      — a Plan whose `after` dependencies are done but not yet
+ *                          landed — their todo branches still exist.
  * - `dirty-tree`         — the working tree is not clean for Execute (Req 17.3,
  *                          18.8).
  * - `input-rev-mismatch` — the plan's Input_Rev no longer matches; the todo was
@@ -136,6 +145,7 @@ export type DispatchError =
   | { kind: 'illegal-transition'; message: string }
   | { kind: 'not-approved'; message: string }
   | { kind: 'blocked'; message: string }
+  | { kind: 'deps-unlanded'; message: string }
   | { kind: 'dirty-tree'; message: string }
   | { kind: 'input-rev-mismatch'; message: string }
   | { kind: 'unknown-agent'; message: string }
@@ -168,6 +178,8 @@ export interface LiveRun {
   /** The Claude `--session-id` UUID generated for this run (Req 3.1). */
   sessionId: string;
   terminal: HostTerminal;
+  /** The todo worktree the run executes in; absent when it runs in the main checkout. */
+  worktreeDir?: string;
 }
 
 /**
@@ -347,8 +359,69 @@ export interface RunQueueDeps {
    * todo-scoped, so they have no `todoId` and resolve no lifecycle transition.
    * The queue refuses a dispatch as `busy` while this answers true, which keeps
    * the one-stage-per-repository guarantee across all three paths (Req 20.1).
+   * Optional: the wiring decides whether spec-draft/run-pipeline still block; the
+   * per-todo wiring does not pass it.
    */
   isExternallyBusy?: () => boolean;
+  /** The spec slug this queue serves; a request for another slug is refused. */
+  slug?: string;
+  /** The todo this queue serves; a request for another todo is refused. */
+  todoId?: string;
+  /** When set, every todo-level stage runs in the todo's worktree; absent → main checkout. */
+  worktrees?: QueueWorktreeSeam;
+  /**
+   * The per-slug spec-branch writer; when set, journal appends run under
+   * `specWriter.apply(slug, ...)` so they serialize with state/artifact commits.
+   */
+  specWriter?: Pick<SpecBranchWriter, 'apply'>;
+}
+
+/** Where one todo's stages run: its worktree dir and a git service bound to it. */
+export interface TodoStageWorkspace {
+  dir: string;
+  git: GitService;
+}
+
+/** The per-todo worktree seam the queue dispatches through. */
+export interface QueueWorktreeSeam {
+  /** Create (first dispatch) or reuse the todo's worktree. Never resets an existing one. */
+  ensure(slug: string, todoId: string): Promise<Result<TodoStageWorkspace, string>>;
+  /** Todo ids of `slug` whose todo branch still exists (not landed). */
+  unlanded(slug: string): Promise<readonly string[]>;
+}
+
+/** The real {@link QueueWorktreeSeam} over the todo-worktree lifecycle. */
+export function createQueueWorktreeSeam(
+  deps: TodoWorktreeDeps & { writer?: Pick<SpecBranchWriter, 'apply'> },
+): QueueWorktreeSeam {
+  return {
+    async ensure(slug, todoId) {
+      try {
+        const run = async (): Promise<Result<TodoStageWorkspace, string>> => {
+          const r = await createTodoWorktree(deps, { slug, todoId });
+          if (!r.ok) {
+            return err(r.error.message);
+          }
+          const factory = deps.createService ?? createGitService;
+          return ok({ dir: r.value.worktreeDir, git: factory(r.value.worktreeDir) });
+        };
+        return deps.writer ? await deps.writer.apply(slug, run) : await run();
+      } catch (e) {
+        return err(describe(e));
+      }
+    },
+    unlanded: (slug) => unlandedTodos(deps, slug),
+  };
+}
+
+/** Where a stage runs: the git service to use and the launch cwd (undefined = main checkout). */
+interface StageWorkspace {
+  git: GitService;
+  cwd?: string;
+}
+
+function describe(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** Create a {@link RunQueue} bound to the injected dependencies. */
@@ -369,6 +442,7 @@ interface RunningState {
   todoId: string;
   sessionId: string;
   terminal: HostTerminal;
+  worktreeDir?: string;
   /** Marks the run cancelled so its outcome is recorded as `cancelled`. */
   cancel(): void;
 }
@@ -403,8 +477,15 @@ class SerialRunQueue implements RunQueue {
     if (this.running === undefined) {
       return undefined;
     }
-    const { runId, slug, todoId, sessionId, terminal } = this.running;
-    return { runId, slug, todoId, sessionId, terminal };
+    const { runId, slug, todoId, sessionId, terminal, worktreeDir } = this.running;
+    return {
+      runId,
+      slug,
+      todoId,
+      sessionId,
+      terminal,
+      ...(worktreeDir !== undefined ? { worktreeDir } : {}),
+    };
   }
 
   /**
@@ -488,6 +569,16 @@ class SerialRunQueue implements RunQueue {
       });
     }
 
+    if (
+      (this.deps.slug !== undefined && this.deps.slug !== req.slug) ||
+      (this.deps.todoId !== undefined && this.deps.todoId !== req.todoId)
+    ) {
+      return this.refuse({
+        kind: 'illegal-transition',
+        message: `this run queue serves ${this.deps.slug ?? req.slug}/${this.deps.todoId ?? req.todoId}, not ${req.slug}/${req.todoId}`,
+      });
+    }
+
     const state = await this.deps.specStore.currentState(req.slug, req.todoId);
     if (state === undefined) {
       return this.refuse({
@@ -526,9 +617,21 @@ class SerialRunQueue implements RunQueue {
     }
 
     // Evaluate guards against live git/spec state before launching.
-    const guarded = await this.checkGuards(req, transition);
+    const guarded = await this.checkSpecGuards(req, transition);
     if (!guarded.ok) {
       return this.refuse(guarded.error);
+    }
+
+    // Create or reuse the todo's worktree (never before the spec guards pass),
+    // then check the tree guards against the worktree's own git.
+    const workspace = await this.stageWorkspace(req);
+    if (!workspace.ok) {
+      return this.refuse(workspace.error);
+    }
+    const ws = workspace.ws;
+    const treeGuarded = await this.checkTreeGuards(req, transition, ws.git);
+    if (!treeGuarded.ok) {
+      return this.refuse(treeGuarded.error);
     }
 
     // Resolve the role's configured adapter before probing (Req 14.1). An
@@ -552,7 +655,7 @@ class SerialRunQueue implements RunQueue {
       });
     }
 
-    return this.launchAndComplete(req, transition, stage, adapter);
+    return this.launchAndComplete(req, transition, stage, adapter, ws);
   }
 
   /**
@@ -581,12 +684,33 @@ class SerialRunQueue implements RunQueue {
   }
 
   /**
-   * Evaluate a transition's guards against live state. Plan requires approval +
-   * unblocked (Req 18.1, 18.2). Execute requires the approval-hash gate (Req
-   * 5.3, 5.4), a clean tree (Req 17.2, 17.3, 18.8), and a matching Input_Rev; a
-   * mismatch reverts the todo to `pending` and refuses (Req 18.9).
+   * Resolve where the stage runs: the todo's worktree when the seam is wired
+   * (created on first dispatch, reused after), else the main checkout.
    */
-  private async checkGuards(
+  private async stageWorkspace(
+    req: RunRequest,
+  ): Promise<{ ok: true; ws: StageWorkspace } | { ok: false; error: DispatchError }> {
+    if (this.deps.worktrees === undefined) {
+      return { ok: true, ws: { git: this.deps.git } };
+    }
+    const r = await this.deps.worktrees.ensure(req.slug, req.todoId);
+    return r.ok
+      ? { ok: true, ws: { git: r.value.git, cwd: r.value.dir } }
+      : {
+          ok: false,
+          error: {
+            kind: 'launch-failed',
+            message: `could not prepare the worktree for "${req.todoId}": ${r.error}`,
+          },
+        };
+  }
+
+  /**
+   * Evaluate the spec-level guards. Plan requires approval + unblocked (Req
+   * 18.1, 18.2) and, with a worktree seam, that its `after` dependencies are
+   * landed. Execute requires the approval-hash gate (Req 5.3, 5.4).
+   */
+  private async checkSpecGuards(
     req: RunRequest,
     transition: Transition,
   ): Promise<{ ok: true } | { ok: false; error: DispatchError }> {
@@ -603,6 +727,35 @@ class SerialRunQueue implements RunQueue {
           error: { kind: 'blocked', message: `todo "${req.todoId}" is blocked by unmet dependencies` },
         };
       }
+      if (this.deps.worktrees !== undefined) {
+        const spec = await this.deps.specStore.readSpec(req.slug);
+        const after = spec?.todos.find((t) => t.id === req.todoId)?.after ?? [];
+        if (after.length > 0) {
+          let unlanded: readonly string[];
+          try {
+            unlanded = await this.deps.worktrees.unlanded(req.slug);
+          } catch (e) {
+            return {
+              ok: false,
+              error: {
+                kind: 'launch-failed',
+                message: `could not list unlanded todos of "${req.slug}": ${describe(e)}`,
+              },
+            };
+          }
+          const pending = after.filter((id) => unlanded.includes(id));
+          if (pending.length > 0) {
+            const many = pending.length !== 1;
+            return {
+              ok: false,
+              error: {
+                kind: 'deps-unlanded',
+                message: `todo "${req.todoId}" depends on ${pending.join(', ')}, which ${many ? 'are' : 'is'} done but not landed; land ${many ? 'them' : 'it'} (land_todo) before planning`,
+              },
+            };
+          }
+        }
+      }
     }
 
     if (transition.guards.cleanTreeAndInputRev) {
@@ -613,9 +766,26 @@ class SerialRunQueue implements RunQueue {
           error: { kind: 'not-approved', message: 'spec approval is stale; re-approve before executing' },
         };
       }
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Evaluate the tree guards against the stage's git (the worktree's when one
+   * is in use). Execute requires a clean tree (Req 17.2, 17.3, 18.8) and a
+   * matching Input_Rev; a mismatch reverts the todo to `pending` and refuses
+   * (Req 18.9).
+   */
+  private async checkTreeGuards(
+    req: RunRequest,
+    transition: Transition,
+    git: GitService,
+  ): Promise<{ ok: true } | { ok: false; error: DispatchError }> {
+    if (transition.guards.cleanTreeAndInputRev) {
       // Clean tree required except changes confined to the spec folder (Req
       // 16.1, 17.2, 17.3).
-      if (!(await this.deps.git.isCleanExceptSpecFolder(req.slug))) {
+      if (!(await git.isCleanExceptSpecFolder(req.slug))) {
         return {
           ok: false,
           error: { kind: 'dirty-tree', message: 'a clean working tree is required to execute' },
@@ -655,6 +825,7 @@ class SerialRunQueue implements RunQueue {
     transition: Transition,
     stage: Stage,
     adapter: Adapter,
+    ws: StageWorkspace,
   ): Promise<DispatchResult> {
     const runId = this.newRunId(req);
     const sessionId = this.newSessionId();
@@ -689,8 +860,8 @@ class SerialRunQueue implements RunQueue {
     //    17.2, 21.1) and the launch time, which bounds the adapter's search for
     //    the session the CLI mints for itself (Req 3.2).
     const launchedAt = this.clock();
-    const startHead = await this.safeHead();
-    const startBranch = await this.safeBranch();
+    const startHead = await this.safeHead(ws.git);
+    const startBranch = await this.safeBranch(ws.git);
     const inputRev = await this.deps.specStore.inputRev(req.slug, req.todoId);
 
     // 3. Launch the stage (Req 11). A launch failure halts and leaves state.
@@ -701,10 +872,11 @@ class SerialRunQueue implements RunQueue {
     const resumeSessionId = await resolveResumeSessionId(
       adapter,
       req,
-      this.deps.workspaceRoot,
+      ws.cwd ?? this.deps.workspaceRoot,
     );
     const launchInput: LaunchStageInput = {
       workspaceRoot: this.deps.workspaceRoot,
+      ...(ws.cwd !== undefined ? { cwd: ws.cwd } : {}),
       runId,
       stage,
       role: req.role,
@@ -732,17 +904,19 @@ class SerialRunQueue implements RunQueue {
 
     // 4. Journal the start (Req 21.1). The pid is best-effort.
     const terminalPid = await resolvePid(terminal);
-    appendStart(this.journalFor(req.todoId), {
-      runId,
-      todoId: req.todoId,
-      stage,
-      attempt: req.attempt,
-      startHead,
-      inputRev,
-      ...(terminalPid !== undefined ? { terminalPid } : {}),
-      fromState: transition.from,
-      sessionId,
-    });
+    await this.journal(req.slug, () =>
+      appendStart(this.journalFor(req.todoId), {
+        runId,
+        todoId: req.todoId,
+        stage,
+        attempt: req.attempt,
+        startHead,
+        inputRev,
+        ...(terminalPid !== undefined ? { terminalPid } : {}),
+        fromState: transition.from,
+        sessionId,
+      }),
+    );
 
     // 5. Watch for the result and await the terminal outcome (Req 12). `stop()`
     //    flips `cancelled` so a disposed terminal records cancellation.
@@ -759,6 +933,7 @@ class SerialRunQueue implements RunQueue {
       todoId: req.todoId,
       sessionId,
       terminal,
+      ...(ws.cwd !== undefined ? { worktreeDir: ws.cwd } : {}),
       cancel: () => {
         cancelled = true;
       },
@@ -817,7 +992,9 @@ class SerialRunQueue implements RunQueue {
       try {
         await persistArtifact(req.slug, artifactPath, contents);
       } catch {
-        appendCompletion(this.journalFor(req.todoId), { runId, result: 'completed' });
+        await this.journal(req.slug, () =>
+          appendCompletion(this.journalFor(req.todoId), { runId, result: 'completed' }),
+        );
         return this.refuse({
           kind: 'spec-write-failed',
           message: `could not persist the ${stage} artifact for "${req.todoId}"`,
@@ -834,7 +1011,12 @@ class SerialRunQueue implements RunQueue {
     // the one Baiton pre-assigned (Req 3.2). This runs for every outcome kind,
     // not just `completed`: a run that closed without a result is exactly the
     // one a user wants to resume, and its session exists all the same.
-    const discoveredSessionId = await this.discoverSessionId(adapter, runId, launchedAt);
+    const discoveredSessionId = await this.discoverSessionId(
+      adapter,
+      runId,
+      launchedAt,
+      ws.cwd ?? this.deps.workspaceRoot,
+    );
 
     return this.applyOutcome(
       req,
@@ -845,6 +1027,7 @@ class SerialRunQueue implements RunQueue {
       startBranch,
       outcome,
       resultPath,
+      ws,
       discoveredSessionId,
     );
   }
@@ -997,18 +1180,20 @@ class SerialRunQueue implements RunQueue {
     startBranch: string,
     outcome: RunOutcome,
     resultPath: string,
+    ws: StageWorkspace,
     discoveredSessionId?: string,
   ): Promise<DispatchResult> {
     // Every completion record for this run carries the discovered session id,
     // whatever the outcome kind.
-    const journalDone = (result: RunResultKind, commit?: string): void => {
-      appendCompletion(this.journalFor(req.todoId), {
-        runId,
-        result,
-        ...(commit !== undefined ? { commit } : {}),
-        ...(discoveredSessionId !== undefined ? { discoveredSessionId } : {}),
-      });
-    };
+    const journalDone = (result: RunResultKind, commit?: string): Promise<void> =>
+      this.journal(req.slug, () =>
+        appendCompletion(this.journalFor(req.todoId), {
+          runId,
+          result,
+          ...(commit !== undefined ? { commit } : {}),
+          ...(discoveredSessionId !== undefined ? { discoveredSessionId } : {}),
+        }),
+      );
 
     if (outcome.kind !== 'completed') {
       // Halt and journal the non-completing kind (Req 12.6, 14.7). A `closed`
@@ -1016,7 +1201,7 @@ class SerialRunQueue implements RunQueue {
       // stage launched from (Req 1.1, 1.4); `invalid_output` leaves state
       // unchanged (unreachable today — the flow keeps waiting for a valid
       // result — but kept as the conservative default).
-      journalDone(outcome.kind as RunResultKind);
+      await journalDone(outcome.kind as RunResultKind);
 
       if (
         transition.running !== undefined &&
@@ -1055,7 +1240,7 @@ class SerialRunQueue implements RunQueue {
         // blaming permissions.
         const missingResult = outcome.kind === 'closed' && !resultFileExists(resultPath);
         const preservedChanges =
-          missingResult && stage === 'execute' && (await this.workingTreeChanged(startHead));
+          missingResult && stage === 'execute' && (await this.workingTreeChanged(ws.git, startHead));
         const hint = preservedChanges
           ? PRESERVED_CHANGES_HINT
           : missingResult
@@ -1080,16 +1265,16 @@ class SerialRunQueue implements RunQueue {
     // 17.6). A drift halts with `git_state_changed` and leaves state unchanged.
     let commit: string | undefined;
     if (stage === 'execute') {
-      const drifted = await this.headOrBranchDrifted(startHead, startBranch);
+      const drifted = await this.headOrBranchDrifted(ws.git, startHead, startBranch);
       if (drifted) {
-        journalDone('completed');
+        await journalDone('completed');
         return this.refuse({
           kind: 'git-state-changed',
           message: 'HEAD or branch changed during execute; stage halted (git_state_changed)',
         });
       }
       const message = `spec(${req.slug}): ${req.todoId} execute attempt ${req.attempt}`;
-      commit = await this.safeCommit(message, { 'Run-Id': runId });
+      commit = await this.safeCommit(ws.git, message, { 'Run-Id': runId });
     }
 
     // Apply the terminal lifecycle state (Req 18.1, 18.7, 18.12, 18.13). Review
@@ -1098,7 +1283,7 @@ class SerialRunQueue implements RunQueue {
     if (terminalState !== undefined) {
       const wrote = await this.deps.specStore.writeState(req.slug, req.todoId, terminalState);
       if (!wrote) {
-        journalDone('completed', commit);
+        await journalDone('completed', commit);
         return this.refuse({
           kind: 'spec-write-failed',
           message: `could not write "${terminalState}" for "${req.todoId}"`,
@@ -1110,9 +1295,9 @@ class SerialRunQueue implements RunQueue {
     // starting commit; a non-zero reset halts before the next stage (Req 15.5,
     // 15.6). The executor's changes are preserved by its own commit above.
     if (stage !== 'execute') {
-      const reset = await this.deps.git.resetWorkingTree();
+      const reset = await ws.git.resetWorkingTree();
       if (!reset.ok) {
-        journalDone('completed', commit);
+        await journalDone('completed', commit);
         return this.refuse({
           kind: 'reset-failed',
           message: `working tree was not restored: ${reset.error.command} exited ${String(reset.error.exitCode)}`,
@@ -1121,7 +1306,7 @@ class SerialRunQueue implements RunQueue {
     }
 
     // Journal the completion with the resulting commit (Req 21.2).
-    journalDone('completed', commit);
+    await journalDone('completed', commit);
 
     return { ok: true, outcome };
   }
@@ -1155,6 +1340,7 @@ class SerialRunQueue implements RunQueue {
     adapter: Adapter,
     runId: string,
     launchedAt: number,
+    cwd: string,
   ): Promise<string | undefined> {
     if (adapter.discoverSessionId === undefined) {
       return undefined;
@@ -1162,7 +1348,7 @@ class SerialRunQueue implements RunQueue {
     try {
       const id = await adapter.discoverSessionId({
         runId,
-        workspaceRoot: this.deps.workspaceRoot,
+        workspaceRoot: cwd,
         launchedAt,
       });
       return id !== undefined && id.length > 0 ? id : undefined;
@@ -1177,12 +1363,12 @@ class SerialRunQueue implements RunQueue {
    * git seam as the drift check; a git failure reads as "no changes", the
    * conservative answer (it only suppresses a hint).
    */
-  private async workingTreeChanged(startHead: string): Promise<boolean> {
+  private async workingTreeChanged(git: GitService, startHead: string): Promise<boolean> {
     if (startHead.length === 0) {
       return false;
     }
     try {
-      const diff = await this.deps.git.diffAgainstWorkingTree(startHead);
+      const diff = await git.diffAgainstWorkingTree(startHead);
       return diff.trim().length > 0;
     } catch {
       return false;
@@ -1190,15 +1376,28 @@ class SerialRunQueue implements RunQueue {
   }
 
   /** Whether HEAD or the current branch drifted from the recorded start (Req 17.6). */
-  private async headOrBranchDrifted(startHead: string, startBranch: string): Promise<boolean> {
-    const head = await this.safeHead();
-    const branch = await this.safeBranch();
+  private async headOrBranchDrifted(
+    git: GitService,
+    startHead: string,
+    startBranch: string,
+  ): Promise<boolean> {
+    const head = await this.safeHead(git);
+    const branch = await this.safeBranch(git);
     return head !== startHead || branch !== startBranch;
   }
 
   /** Refuse a dispatch: report the error and resolve with it. */
   private journalFor(todoId: string): string {
     return this.deps.journalPathFor?.(todoId) ?? this.deps.journalPath;
+  }
+
+  /** Run a journal append under the spec-branch writer when wired, else directly. */
+  private async journal(slug: string, write: () => void): Promise<void> {
+    if (this.deps.specWriter) {
+      await this.deps.specWriter.apply(slug, () => write());
+    } else {
+      write();
+    }
   }
 
   private readJournal(): JournalEntry[] {
@@ -1211,18 +1410,18 @@ class SerialRunQueue implements RunQueue {
   }
 
   /** Read HEAD, tolerating a git failure by returning an empty marker. */
-  private async safeHead(): Promise<string> {
+  private async safeHead(git: GitService): Promise<string> {
     try {
-      return await this.deps.git.head();
+      return await git.head();
     } catch {
       return '';
     }
   }
 
   /** Read the current branch, tolerating a git failure. */
-  private async safeBranch(): Promise<string> {
+  private async safeBranch(git: GitService): Promise<string> {
     try {
-      return await this.deps.git.currentBranch();
+      return await git.currentBranch();
     } catch {
       return '';
     }
@@ -1230,11 +1429,12 @@ class SerialRunQueue implements RunQueue {
 
   /** Commit, tolerating a git failure by returning `undefined`. */
   private async safeCommit(
+    git: GitService,
     message: string,
     trailers: Record<string, string>,
   ): Promise<string | undefined> {
     try {
-      return await this.deps.git.commit(message, trailers);
+      return await git.commit(message, trailers);
     } catch {
       return undefined;
     }
