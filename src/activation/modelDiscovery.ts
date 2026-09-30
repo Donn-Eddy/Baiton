@@ -51,7 +51,7 @@ import type {
 } from '../orchestrator/modelCatalog';
 import { noopApiLog } from '../orchestrator/apiLog';
 import type { ApiLog, ApiFailureKind } from '../orchestrator/apiLog';
-import { fetchModelsDev } from '../orchestrator/modelsDev';
+import { feedModelLimitFields, fetchModelsDev } from '../orchestrator/modelsDev';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
 import { ok, err } from '../model/result';
 import type { Result } from '../model/result';
@@ -448,7 +448,8 @@ export class ModelDiscoveryService {
  * per provider/model pair, in feed order, the BARE model id as `id` and the
  * provider half on `provider`. Duplicate ids across providers are therefore
  * expected and only a (provider, id) pair is de-duplicated. No `efforts`: the
- * feed discloses no reasoning levels. Pure.
+ * feed discloses no reasoning levels. Plus `contextWindow`/`maxOutput` from the
+ * feed's `limit` block when disclosed. Pure.
  */
 function feedCatalogFetch(feed: ModelsDevFeed): CatalogFetch {
   const models: ModelEntry[] = [];
@@ -464,6 +465,7 @@ function feedCatalogFetch(feed: ModelsDevFeed): CatalogFetch {
         id: model.id,
         provider: provider.id,
         ...(model.name !== model.id ? { label: model.name } : {}),
+        ...feedModelLimitFields(model),
       });
     }
   }

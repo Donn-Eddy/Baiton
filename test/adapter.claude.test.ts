@@ -654,6 +654,16 @@ describe('claudeModelsFromFeed (model-selector-refresh T04)', () => {
     }
   });
 
+  it('carries the fixture limits as contextWindow/maxOutput; synthetic models carry neither key', () => {
+    for (const entry of claudeModelsFromFeed(fixtureFeed)) {
+      assert.strictEqual(entry.contextWindow, 200000);
+      assert.strictEqual(entry.maxOutput, 64000);
+    }
+    const [bare] = claudeModelsFromFeed([providerOf('anthropic', [{ id: 'claude-sonnet-5' }])]);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(bare, 'contextWindow'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(bare, 'maxOutput'), false);
+  });
+
   it('an entry whose name equals its id carries NO label own key', () => {
     const entries = claudeModelsFromFeed([providerOf('anthropic', [{ id: 'claude-sonnet-5' }])]);
     assert.strictEqual(entries.length, 1);

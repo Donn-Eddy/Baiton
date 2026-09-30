@@ -380,6 +380,12 @@
           "minimum": 0,
           "description": "Maximum number of tokens the orchestrator asks the model to generate per completion, sent as max_tokens. 0 (the default) leaves max_tokens off the request so the endpoint's own default applies."
         },
+        "baiton.orchestrator.contextWindow": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "Context window, in tokens, of the orchestrator's selected model, used only when the model catalog (models.dev) does not disclose one. 0 (the default) leaves it unset, so the context window is unknown unless the catalog knows it."
+        },
         "baiton.orchestrator.roundBound": {
           "type": "integer",
           "default": 20,

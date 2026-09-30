@@ -14,7 +14,7 @@ import type {
   LaunchSpec,
   ProbeResult,
 } from './adapter';
-import { fetchModelsDev } from '../orchestrator/modelsDev';
+import { feedModelLimitFields, fetchModelsDev } from '../orchestrator/modelsDev';
 import type { ModelsDevFeed } from '../orchestrator/modelsDev';
 import type { ApiLog } from '../orchestrator/apiLog';
 import type { ModelEntry } from '../orchestrator/modelCatalog';
@@ -88,7 +88,7 @@ export const CLAUDE_REQUIRED_MODEL: string = CLAUDE_MODELS[0];
  * conditional-own-key way `normalizeModelEntry` uses in
  * src/orchestrator/modelCatalog.ts: always `{ id, provider }`, plus
  * `label` only when the feed's `name` is a non-empty string different from
- * the id. No per-model `efforts`/`defaultEffort` (claude's levels are
+ * the id, plus `contextWindow`/`maxOutput` when the feed discloses positive integer limits. No per-model `efforts`/`defaultEffort` (claude's levels are
  * capability-level) and no `custom` flag. Returns `[]` when the feed has no
  * usable anthropic provider or lists no `claude-*` id — the caller then keeps
  * the curated {@link CLAUDE_MODELS}.
@@ -109,12 +109,19 @@ export function claudeModelsFromFeed(feed: ModelsDevFeed): readonly ModelEntry[]
       continue;
     }
     seen.add(id);
-    const entry: { id: string; label?: string; provider: string } = {
+    const entry: { id: string; label?: string; provider: string; contextWindow?: number; maxOutput?: number } = {
       id,
       provider: ANTHROPIC_PROVIDER_ID,
     };
     if (typeof model.name === 'string' && model.name.length > 0 && model.name !== id) {
       entry.label = model.name;
+    }
+    const limits = feedModelLimitFields(model);
+    if (limits.contextWindow !== undefined) {
+      entry.contextWindow = limits.contextWindow;
+    }
+    if (limits.maxOutput !== undefined) {
+      entry.maxOutput = limits.maxOutput;
     }
     entries.push(entry);
   }

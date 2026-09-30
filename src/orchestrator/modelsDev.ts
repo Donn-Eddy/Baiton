@@ -316,6 +316,27 @@ export function parseModelsDevFeed(raw: unknown): Result<ModelsDevFeed, string> 
   return ok(providers);
 }
 
+// --- entry projection ---
+
+/**
+ * The context/output limits of a feed model as the optional `ModelEntry`
+ * fields `contextWindow` / `maxOutput`: each key present only when the feed
+ * disclosed a positive integer for it (conditional own keys, never an explicit
+ * `undefined`). `{}` when the model has no usable limits. Pure.
+ */
+export function feedModelLimitFields(model: FeedModel): { contextWindow?: number; maxOutput?: number } {
+  const fields: { contextWindow?: number; maxOutput?: number } = {};
+  const context = model.limits?.context;
+  if (context !== undefined && Number.isInteger(context) && context > 0) {
+    fields.contextWindow = context;
+  }
+  const output = model.limits?.output;
+  if (output !== undefined && Number.isInteger(output) && output > 0) {
+    fields.maxOutput = output;
+  }
+  return fields;
+}
+
 // --- fetch with injected transport ---------------------------------------------
 
 /** The structural subset of a fetch `Response` this module needs. */
