@@ -1,12 +1,12 @@
 ---
 version: 1
 name: context-budget
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 019892d3527adbc9ac035c3a0cd76fa208f21c88
+branch: baiton/context-budget
+approved_rev: 191d39c1029806b601d4d8dae580efbb014c9dfd4cfa14fde4a724a9e04ef07d
 ---
 
 # OVERVIEW
