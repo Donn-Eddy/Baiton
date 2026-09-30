@@ -852,6 +852,7 @@ export function registerCommands(
     specsDir,
     roundBound: () => readRoundBound(),
     contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
+    contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
     contextWindow: () =>
       resolveContextWindow(selectedCatalogEntry(router.getSelection()), orchCfg().get('orchestrator.contextWindow')),
     config: readOrchestratorConfig(),

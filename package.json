@@ -398,6 +398,13 @@
           "maximum": 1,
           "description": "Fraction of the model's context window at which the chat starts trimming what it sends: auto-approved intervention lines are dropped, then tool results from earlier turns and older rounds are replaced with short stubs. The transcript is never changed. Applies only when the context window is known (catalog or baiton.orchestrator.contextWindow)."
         },
+        "baiton.orchestrator.contextSummarizeAt": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of the model's context window at which the chat, after trimming, summarises every message older than the last two turns into one context summary (goals, decisions taken, files touched, open questions). The summary is appended to the transcript; the full conversation stays visible. Applies only when the context window is known."
+        },
         "baiton.orchestrator.roundBound": {
           "type": "integer",
           "default": 20,

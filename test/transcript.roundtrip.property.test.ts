@@ -16,6 +16,9 @@ import { Clock } from '../src/orchestrator/seams';
  *
  * Validates: Requirements 8.2, 8.3, 20.2
  *
+ * Compaction records (`system` records carrying a `compaction` marker) are
+ * generated too and must round trip like any other record.
+ *
  * The property generates arbitrary message sequences with varied roles, content
  * (including newlines and non-ASCII), and well-formed assistant/tool pairs, appends
  * each through {@link ChatTranscript} into a fresh temp `chat.jsonl`, and reads
@@ -78,9 +81,24 @@ const toolPairArb: fc.Arbitrary<Array<Omit<TranscriptRecord, 'ts'>>> = fc
     { role: 'tool' as const, content: replyContent, tool_call_id: id },
   ]);
 
+/** A compaction record: a `system` record carrying a well-formed marker. */
+const compactionArb: fc.Arbitrary<Omit<TranscriptRecord, 'ts'>> = fc
+  .record({
+    content: contentArb,
+    id: fc.string({ minLength: 1, maxLength: 20 }),
+    fromTs: fc.string({ maxLength: 30 }),
+    toTs: fc.string({ maxLength: 30 }),
+    messages: fc.nat({ max: 500 }),
+  })
+  .map(({ content, id, fromTs, toTs, messages }) => ({
+    role: 'system' as const,
+    content,
+    compaction: { id, fromTs, toTs, messages },
+  }));
+
 /** A sequence of messages to append in order (empty sequence allowed). */
 const messagesArb: fc.Arbitrary<Array<Omit<TranscriptRecord, 'ts'>>> = fc
-  .array(fc.oneof(messageArb.map((m) => [m]), toolPairArb), { maxLength: 8 })
+  .array(fc.oneof(messageArb.map((m) => [m]), toolPairArb, compactionArb.map((m) => [m])), { maxLength: 8 })
   .map((groups) => groups.flat());
 
 // --- Property --------------------------------------------------------------

@@ -60,7 +60,10 @@
  *  - mirror spec-less run activity to the view (`setRunActive`), record a
  *    finished run's outcome as a system note on the Workspace_Conversation, and
  *    offer an Investigate run's finding as a promote card whose Bug/Quick choice
- *    raises the ordinary run confirm card before anything is dispatched.
+ *    raises the ordinary run confirm card before anything is dispatched;
+ *  - after trimming, summarise the messages older than the last two turns at
+ *    `contextSummarizeAt` into a compaction record; the view keeps rendering
+ *    the full transcript.
  */
 import * as path from 'path';
 import { mkdir, readFile } from 'fs/promises';
@@ -71,6 +74,8 @@ import {
   askCommandText,
   askFromPermission,
   buildSystemPrompt,
+  compactionCut,
+  compactionTranscriptRecord,
   defaultSummary,
   escalatedInterventionView,
   interventionTranscriptRecord,
@@ -128,8 +133,10 @@ import type {
   WebviewToHost,
 } from '../orchestrator';
 import { ChatTranscript, scopeId } from '../orchestrator';
-import { ContextTracker, estimateMessages } from '../orchestrator/contextBudget';
+import { ContextTracker, estimateMessages, estimateTokens } from '../orchestrator/contextBudget';
 import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from '../orchestrator/contextTrim';
+import { CONTEXT_SUMMARY_PREFIX } from '../orchestrator/transcriptReader';
+import type { CompactionMarker } from '../orchestrator/chatTranscript';
 import type { ContextBudget } from '../orchestrator/toolLoop';
 import { listSpecs } from './specLister';
 
@@ -138,6 +145,68 @@ export const WORKSPACE_CONVERSATION_ID = 'workspace';
 
 /** The maximum input length a send is allowed to carry (Req 14.4, 14.5). */
 export const MAX_INPUT_CHARS = 100_000;
+
+/** Default fraction of the context window at which the chat summarises older turns. */
+export const DEFAULT_CONTEXT_SUMMARIZE_AT = 0.8;
+
+/** How many trailing user turns stay verbatim when summarising. */
+export const SUMMARY_KEEP_TURNS = 2;
+
+/** Byte caps applied to a tool result / any other message in the summary request. */
+export const SUMMARY_TOOL_RESULT_BYTES = 2048;
+export const SUMMARY_MESSAGE_BYTES = 8192;
+
+/** A finite `contextSummarizeAt` in (0, 1], else the default. */
+export function resolveContextSummarizeAt(configured: unknown): number {
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 && configured <= 1
+    ? configured
+    : DEFAULT_CONTEXT_SUMMARIZE_AT;
+}
+
+/** The system prompt of the text-only summarising completion. */
+export const SUMMARY_SYSTEM_PROMPT =
+  'You compact a coding-assistant conversation so it can continue with less context. Summarise the conversation you are given under exactly these headings: Goals, Decisions taken, Files touched, Open questions. Keep file paths, identifiers, commands and decisions verbatim; be concise; omit pleasantries. Reply with the summary only.';
+
+/** Clip `text` to `max` bytes on a UTF-8 boundary, marking the cut. */
+function clipBytes(text: string, max: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= max) {
+    return text;
+  }
+  const clipped = buf.subarray(0, max).toString('utf8').replace(/\uFFFD$/, '');
+  return `${clipped} …[clipped]`;
+}
+
+/**
+ * Flatten `older` into one user message for the summarising completion: no
+ * tool_calls / tool roles, so strict endpoints never see unpaired tool
+ * messages. Oldest blocks are dropped when the estimate exceeds `maxTokens`.
+ */
+export function summaryRequestMessages(older: readonly ChatMessage[], maxTokens: number): ChatMessage[] {
+  const blocks: string[] = [];
+  for (const m of older) {
+    if (m.role === 'tool') {
+      blocks.push(`tool result (${m.tool_call_id ?? ''}):\n${clipBytes(m.content, SUMMARY_TOOL_RESULT_BYTES)}`);
+      continue;
+    }
+    blocks.push(`${m.role}:\n${clipBytes(m.content, SUMMARY_MESSAGE_BYTES)}`);
+    for (const call of m.tool_calls ?? []) {
+      blocks.push(`assistant called ${call.name}(${clipBytes(call.arguments, 512)})`);
+    }
+  }
+  let joined = blocks.join('\n\n');
+  if (estimateTokens(joined) > maxTokens) {
+    let start = 0;
+    while (start < blocks.length - 1 && estimateTokens(`[earlier messages omitted]\n\n${blocks.slice(start).join('\n\n')}`) > maxTokens) {
+      start++;
+    }
+    joined = `[earlier messages omitted]\n\n${blocks.slice(start).join('\n\n')}`;
+  }
+  return [
+    { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+    { role: 'user', content: `Conversation to summarise:\n\n${joined}` },
+  ];
+}
 
 /** The reason every still-pending ask is declined with when the user stops a run. */
 export const STOP_DECLINE_REASON = 'the run was stopped';
@@ -242,6 +311,8 @@ export interface ChatControllerDeps {
   contextWindow?(): number | undefined;
   /** The raw `baiton.orchestrator.contextTrimAt` value, resolved through `resolveContextTrimAt`. Absent → 0.5. */
   contextTrimAt?(): unknown;
+  /** The raw `baiton.orchestrator.contextSummarizeAt` value, resolved through `resolveContextSummarizeAt`. Absent → 0.8. */
+  contextSummarizeAt?(): unknown;
   /** Reads the configured endpoint/model for the empty state (Req 13.5). */
   config: OrchestratorConfig;
   /** Invoked on an inline-error fix action (Req 13.4). */
@@ -1048,7 +1119,7 @@ export class ChatController {
     await this.setActiveSession(scope, sessionId);
     const transcript = this.transcriptFor(scope, sessionId);
     const records = await readTranscript(transcript.path);
-    const history = toHistory(records);
+    let history = toHistory(records);
     const autoApprovedLines = autoApprovedInterventionLines(records);
 
     // Append and render the user's message before the loop runs (Req 14.4).
@@ -1067,6 +1138,12 @@ export class ChatController {
     const tools = this.deps.toolsFor(phase);
     this.abort = new AbortController();
     try {
+      if (this.shouldSummarize(history, tools, await this.buildPrompt(slug, mode), autoApprovedLines)) {
+        const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
+        if (compacted !== undefined) {
+          history = compacted;
+        }
+      }
       await runToolLoop(history, {
         client: this.deps.client,
         tools,
@@ -1360,6 +1437,85 @@ export class ChatController {
         tracker.record(sent, completion);
       },
     };
+  }
+
+  /** Whether the history, after trimming, still passes `contextSummarizeAt` of a known window. */
+  private shouldSummarize(
+    history: readonly ChatMessage[],
+    tools: ToolSpec[],
+    systemPrompt: string,
+    autoApprovedLines: ReadonlySet<string>,
+  ): boolean {
+    const window = this.deps.contextWindow?.();
+    if (window === undefined || !Number.isInteger(window) || window <= 0) {
+      return false;
+    }
+    const estimate = (h: readonly ChatMessage[]): number =>
+      estimateMessages([{ role: 'system', content: systemPrompt }]) + estimateMessages(h, tools);
+    const trimAt = resolveContextTrimAt(this.deps.contextTrimAt?.());
+    const sendable =
+      estimate(history) / window > trimAt
+        ? trimHistory(history, { targetTokens: Math.floor(window * trimAt), estimate, autoApprovedLines })
+        : history;
+    return estimate(sendable) / window > resolveContextSummarizeAt(this.deps.contextSummarizeAt?.());
+  }
+
+  /**
+   * Summarise every message older than the last {@link SUMMARY_KEEP_TURNS}
+   * turns with one text-only completion and append the compaction record.
+   * Returns the new history, or `undefined` when nothing was compacted (a
+   * failure is posted inline and never thrown).
+   */
+  private async compact(
+    transcript: ChatTranscript,
+    key: string,
+    signal: AbortSignal,
+    sessionId: string,
+  ): Promise<ChatMessage[] | undefined> {
+    const records = await readTranscript(transcript.path);
+    const cut = compactionCut(records, SUMMARY_KEEP_TURNS);
+    if (cut === undefined) {
+      return undefined;
+    }
+    const older = toHistory(records.slice(0, cut));
+    if (older.length === 0 || (older.length === 1 && older[0].content.startsWith(CONTEXT_SUMMARY_PREFIX))) {
+      return undefined;
+    }
+    const window = this.deps.contextWindow?.();
+    const budget = window !== undefined ? Math.floor(window / 2) : 32_000;
+    const messages = summaryRequestMessages(older, budget);
+    let summary: string;
+    try {
+      const result = await this.deps.client.complete({ messages, signal, sessionId });
+      summary = (result.content ?? '').trim();
+      if (summary.length === 0) {
+        throw new Error('the model returned an empty summary');
+      }
+    } catch (err) {
+      if (signal.aborted) {
+        return undefined;
+      }
+      this.deps.log(`Baiton chat: context summary failed: ${describe(err)}`);
+      if (err instanceof UnreachableEndpointError) {
+        this.deps.log(err.message);
+      }
+      this.deps.webview.post({
+        type: 'showError',
+        message: `Compacting the conversation failed: ${describe(err)}. The conversation was left as it was.`,
+      });
+      return undefined;
+    }
+    const marker: CompactionMarker = {
+      id: `compaction-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      fromTs: records[0].ts,
+      toTs: records[cut - 1].ts,
+      messages: older.length,
+    };
+    const rec = compactionTranscriptRecord(summary, marker);
+    await this.append(transcript, rec);
+    this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(rec) });
+    this.trackerFor(key).reset();
+    return toHistory(await readTranscript(transcript.path));
   }
 
   /** Append one message to the transcript, containing any write failure (Req 8.7). */

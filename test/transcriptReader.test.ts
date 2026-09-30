@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as fc from 'fast-check';
-import { readTranscript, toHistory } from '../src/orchestrator/transcriptReader';
+import { compactionCut, readTranscript, toHistory } from '../src/orchestrator/transcriptReader';
 import type { ChatMessage } from '../src/orchestrator/modelClient';
 import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 import { toRenderRecords, type InterventionView } from '../src/orchestrator/webviewProtocol';
@@ -680,6 +680,178 @@ describe('toHistory replay', () => {
         );
       }),
       { numRuns: 200 },
+    );
+  });
+});
+
+describe('compaction records', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length > 0) {
+      fs.rmSync(dirs.pop() as string, { recursive: true, force: true });
+    }
+  });
+
+  const T = (n: number): string => `2026-01-01T00:00:${String(n).padStart(2, '0')}.000Z`;
+  const rec = (
+    role: TranscriptRecord['role'],
+    content: string,
+    n: number,
+    extra: Partial<TranscriptRecord> = {},
+  ): TranscriptRecord => ({ ts: T(n), role, content, ...extra });
+  const comp = (content: string, n: number, fromN: number, toN: number, id = 'c1'): TranscriptRecord =>
+    rec('system', content, n, { compaction: { id, fromTs: T(fromN), toTs: T(toN), messages: 2 } });
+  const call = (id: string) => [{ id, name: 'read', arguments: '{}' }];
+
+  async function roundTrip(lines: unknown[]): Promise<TranscriptRecord[]> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-compaction-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'chat.jsonl');
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    return readTranscript(file);
+  }
+
+  it('round trips a compaction record', async () => {
+    const records = [rec('user', 'u1', 1), rec('assistant', 'a1', 2), comp('S', 3, 1, 2)];
+    assert.deepStrictEqual(await roundTrip(records), records);
+  });
+
+  it('skips malformed compaction records and keeps neighbours', async () => {
+    const good = rec('user', 'u', 1);
+    const bad = [
+      { ...comp('x', 2, 1, 1), compaction: { id: 'c', fromTs: T(1), toTs: T(1), messages: '2' } },
+      { ...comp('x', 3, 1, 1), compaction: { id: '', fromTs: T(1), toTs: T(1), messages: 2 } },
+      { ...comp('x', 4, 1, 1), compaction: { id: 'c', fromTs: T(1), messages: 2 } },
+      { ...comp('x', 5, 1, 1), role: 'assistant' },
+    ];
+    const end = rec('assistant', 'end', 6);
+    assert.deepStrictEqual(await roundTrip([good, ...bad, end]), [good, end]);
+  });
+
+  it('replays the summary once in place of the covered records', () => {
+    const records = [
+      rec('user', 'u1', 1),
+      rec('assistant', 'a1', 2, { tool_calls: call('c1') }),
+      rec('tool', 't1', 3, { tool_call_id: 'c1' }),
+      rec('user', 'u2', 4),
+      rec('assistant', 'a2', 5),
+      rec('user', 'u3', 6),
+      comp('S', 7, 1, 3),
+    ];
+    assert.deepStrictEqual(toHistory(records), [
+      { role: 'assistant', content: '[context summary] S' },
+      { role: 'user', content: 'u2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'u3' },
+    ]);
+  });
+
+  it('keeps tool directly after its call across an intervention card in the kept region', () => {
+    const card: InterventionView = { id: 'i1', kind: 'confirm', prompt: 'ok?', status: 'resolved' };
+    const records = [
+      rec('user', 'u1', 1),
+      rec('assistant', 'a1', 2),
+      rec('user', 'u2', 3),
+      rec('assistant', 'a2', 4, { tool_calls: call('c2') }),
+      rec('system', 'ok?', 5, { intervention: card }),
+      rec('tool', 't2', 6, { tool_call_id: 'c2' }),
+      comp('S', 7, 1, 2),
+    ];
+    const out = toHistory(records);
+    const i = out.findIndex((m) => m.role === 'tool');
+    assert.strictEqual(out[i - 1].role, 'assistant');
+    assert.ok(out[i - 1].tool_calls?.some((c) => c.id === 'c2'));
+    assert.strictEqual(out.filter((m) => m.content.startsWith('[context summary] ')).length, 1);
+  });
+
+  it('lets a later enclosing compaction supersede an earlier one', () => {
+    const records = [
+      rec('user', 'u1', 1),
+      rec('assistant', 'a1', 2),
+      rec('user', 'u2', 3),
+      comp('S1', 4, 1, 2, 'c1'),
+      rec('assistant', 'a2', 5),
+      rec('user', 'u3', 6),
+      comp('S2', 7, 1, 5, 'c2'),
+    ];
+    const out = toHistory(records);
+    assert.deepStrictEqual(out[0], { role: 'assistant', content: '[context summary] S2' });
+    assert.strictEqual(out.filter((m) => m.content.startsWith('[context summary] ')).length, 1);
+    assert.ok(!out.some((m) => m.content.includes('S1')));
+    assert.deepStrictEqual(out.slice(1).map((m) => m.content), ['u3']);
+  });
+
+  it('emits the summary at its own position when it covers nothing', () => {
+    const records = [rec('user', 'u1', 5), comp('S', 6, 1, 2)];
+    assert.deepStrictEqual(toHistory(records), [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: '[context summary] S' },
+    ]);
+  });
+
+  it('does not hide a later record sharing the range end timestamp', () => {
+    const records = [rec('user', 'u1', 1), comp('S', 2, 1, 2), rec('user', 'late', 2)];
+    assert.deepStrictEqual(toHistory(records).map((m) => m.content), ['[context summary] S', 'late']);
+  });
+
+  it('compactionCut finds the keepTurns-th user from the end, or refuses', () => {
+    const base = [rec('user', 'u1', 1), rec('assistant', 'a1', 2), rec('user', 'u2', 3), rec('assistant', 'a2', 4), rec('user', 'u3', 5)];
+    assert.strictEqual(compactionCut(base, 2), 2);
+    assert.strictEqual(compactionCut([rec('user', 'u', 1)], 2), undefined);
+    assert.strictEqual(compactionCut(base.slice(2), 2), undefined, 'cut at index 0');
+    const collide = [rec('user', 'u1', 1), rec('assistant', 'a1', 2), rec('user', 'u2', 2), rec('user', 'u3', 3)];
+    assert.strictEqual(compactionCut(collide, 2), undefined);
+  });
+
+  it('property: tool messages stay adjacent and exactly one summary is emitted', () => {
+    const turnArb = fc.record({
+      calls: fc.integer({ min: 0, max: 2 }),
+      card: fc.boolean(),
+    });
+    fc.assert(
+      fc.property(fc.array(turnArb, { minLength: 2, maxLength: 6 }), fc.nat(), (turns, pick) => {
+        const records: TranscriptRecord[] = [];
+        let n = 0;
+        const userIdx: number[] = [];
+        turns.forEach((t, ti) => {
+          userIdx.push(records.length);
+          records.push(rec('user', `u${ti}`, n++));
+          if (t.calls > 0) {
+            const ids = Array.from({ length: t.calls }, (_, k) => `c${ti}-${k}`);
+            records.push(rec('assistant', `a${ti}`, n++, { tool_calls: ids.map((id) => ({ id, name: 'r', arguments: '{}' })) }));
+            ids.forEach((id, k) => {
+              if (t.card && k === 0) {
+                records.push(rec('system', 'ask', n++, { intervention: { id: `i${ti}`, kind: 'confirm', prompt: 'ask', status: 'resolved' } }));
+              }
+              records.push(rec('tool', 'r', n++, { tool_call_id: id }));
+            });
+          }
+          records.push(rec('assistant', `f${ti}`, n++));
+        });
+        // Compaction appended after user `k` (k >= 1), covering everything before it.
+        const k = 1 + (pick % (turns.length - 1));
+        const at = userIdx[k];
+        const c: TranscriptRecord = {
+          ts: T(n++),
+          role: 'system',
+          content: 'S',
+          compaction: { id: 'c', fromTs: records[0].ts, toTs: records[at - 1].ts, messages: at },
+        };
+        records.splice(at + 1, 0, c);
+        const out = toHistory(records);
+        out.forEach((m, i) => {
+          if (m.role !== 'tool') {
+            return;
+          }
+          let j = i - 1;
+          while (j >= 0 && out[j].role === 'tool') {
+            j--;
+          }
+          assert.ok(j >= 0 && out[j].role === 'assistant' && out[j].tool_calls?.some((x) => x.id === m.tool_call_id));
+        });
+        assert.strictEqual(out.filter((m) => m.content.startsWith('[context summary] ')).length, 1);
+      }),
+      { numRuns: 100 },
     );
   });
 });
