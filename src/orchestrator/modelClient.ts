@@ -54,6 +54,34 @@ export interface ToolCall {
 export interface CompletionResult {
   content?: string;
   tool_calls: ToolCall[];
+  /** Present only when the endpoint reported usage; absent (key not set) otherwise. */
+  usage?: CompletionUsage;
+}
+
+/** Token accounting the endpoint reported for one completion. */
+export interface CompletionUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/**
+ * Parse an OpenAI `usage` object. Undefined unless `raw` is an object whose
+ * `prompt_tokens` is a finite integer >= 0; `completion_tokens` defaults to 0.
+ * Never throws.
+ */
+export function parseUsage(raw: unknown): CompletionUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const { prompt_tokens: prompt, completion_tokens: completion } = raw as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+  };
+  const valid = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+  if (!valid(prompt)) {
+    return undefined;
+  }
+  return { promptTokens: prompt, completionTokens: valid(completion) ? completion : 0 };
 }
 
 /**
@@ -159,6 +187,8 @@ export interface ModelClientConfig {
   getApiKey: ApiKeyProvider;
   /** Whether the endpoint supports streaming; defaults to `false` (non-streaming). */
   isStreaming?: StreamingCapabilityProvider;
+  /** Whether to ask a streaming endpoint for usage via `stream_options.include_usage`; defaults to true. Ignored on the non-streaming path. */
+  isUsageInStream?: () => boolean | Promise<boolean>;
   /** The configured completion token cap; omitted from the request unless positive. */
   getMaxTokens?: MaxTokensProvider;
   /** The wire shaping applied to messages; defaults to {@link openAiDialect}. */
@@ -577,6 +607,8 @@ export class OpenAiModelClient implements ModelClient {
     }
 
     const streaming = this.config.isStreaming ? await this.config.isStreaming() : false;
+    const includeUsage =
+      streaming && (this.config.isUsageInStream ? (await this.config.isUsageInStream()) !== false : true);
     const maxTokens = resolveMaxTokens(
       this.config.getMaxTokens ? await this.config.getMaxTokens() : undefined,
     );
@@ -587,6 +619,7 @@ export class OpenAiModelClient implements ModelClient {
       messages: dialect.shapeMessages(req.messages),
       tools: toWireTools(req.tools ?? []),
       stream: streaming,
+      ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
     });
     const extra = this.config.extraHeaders?.(req) ?? {};
@@ -762,9 +795,11 @@ export class OpenAiModelClient implements ModelClient {
     const choices = (parsed as { choices?: unknown }).choices;
     const first = Array.isArray(choices) ? choices[0] : undefined;
     const message = (first as { message?: unknown } | undefined)?.message;
+    const usage = parseUsage((parsed as { usage?: unknown } | null)?.usage);
     return {
       content: parseNonStreamingContent(message),
       tool_calls: parseNonStreamingToolCalls(message),
+      ...(usage !== undefined ? { usage } : {}),
     };
   }
 
@@ -784,6 +819,7 @@ export class SseCompletionParser {
   private content = '';
   private sawContent = false;
   private pending = '';
+  private usage: CompletionUsage | undefined;
 
   constructor(onDelta?: DeltaListener) {
     this.onDelta = onDelta;
@@ -811,6 +847,7 @@ export class SseCompletionParser {
     return {
       content: this.sawContent ? this.content : undefined,
       tool_calls: finalizeToolCalls(this.toolCalls),
+      ...(this.usage !== undefined ? { usage: this.usage } : {}),
     };
   }
 
@@ -829,7 +866,13 @@ export class SseCompletionParser {
     } catch {
       return; // Skip malformed keep-alive or partial frames.
     }
-    const choices = (event as { choices?: unknown }).choices;
+    // Read usage before the delta early return: with include_usage the final
+    // chunk carries `usage` and `choices: []`.
+    const u = parseUsage((event as { usage?: unknown } | null)?.usage);
+    if (u !== undefined) {
+      this.usage = u;
+    }
+    const choices = (event as { choices?: unknown } | null)?.choices;
     const first = Array.isArray(choices) ? choices[0] : undefined;
     const delta = (first as { delta?: unknown } | undefined)?.delta;
     if (typeof delta !== 'object' || delta === null) {

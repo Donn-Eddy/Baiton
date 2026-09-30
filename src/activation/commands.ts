@@ -609,6 +609,7 @@ export function registerCommands(
     getModel: () => orchCfg().get<string>('orchestrator.model') || undefined,
     isStreaming: () => orchCfg().get<boolean>('orchestrator.streaming') ?? true,
     getMaxTokens: () => orchCfg().get('orchestrator.maxTokens'),
+    isUsageInStream: () => orchCfg().get<boolean>('orchestrator.usageInStream') ?? true,
   };
   const router = new ProviderRouter({
     secrets: context.secrets,

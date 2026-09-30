@@ -374,6 +374,11 @@
           "default": true,
           "description": "Stream assistant text into the chat as it is generated. Disable if the orchestrator endpoint does not support streaming (server-sent events) responses. Applies to the HTTP providers; GitHub Copilot always streams through vscode.lm."
         },
+        "baiton.orchestrator.usageInStream": {
+          "type": "boolean",
+          "default": true,
+          "description": "When streaming, ask the endpoint to report token usage (stream_options.include_usage) so the chat can show how much of the context window is loaded. Disable for endpoints that reject the stream_options field; the chat then falls back to a local estimate. Applies to the HTTP providers only."
+        },
         "baiton.orchestrator.maxTokens": {
           "type": "integer",
           "default": 0,

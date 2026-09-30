@@ -125,6 +125,8 @@ export interface ProviderSettings {
   isStreaming: () => boolean;
   /** `baiton.orchestrator.maxTokens` — passed through; `resolveMaxTokens` already normalises. */
   getMaxTokens: () => unknown;
+  /** `baiton.orchestrator.usageInStream` — ask streaming endpoints for usage; absent means true. */
+  isUsageInStream?: () => boolean;
 }
 
 /**
@@ -232,7 +234,7 @@ export function resolveProviderEndpoint(
  *   the header style (`opencode` gets the OpenCode User-Agent / session
  *   headers, built ONCE per client so the `x-opencode-session` uuid stays
  *   stable per conversation);
- * - streaming and `max_tokens` pass through unchanged;
+ * - streaming, `max_tokens` and `usageInStream` pass through unchanged;
  * - failed calls are reported to `deps.apiLog` with the provider id as `surfaceId`.
  *
  * Calling it with `id === 'copilot'` is a programmer error: Copilot is built
@@ -259,6 +261,7 @@ export function providerClientConfig(id: ProviderId, deps: ClientConfigDeps): Mo
     },
     isStreaming: () => deps.settings.isStreaming(),
     getMaxTokens: () => deps.settings.getMaxTokens(),
+    isUsageInStream: () => deps.settings.isUsageInStream?.() ?? true,
     dialect: dialectFor(info.dialect),
     surfaceId: id,
   };
