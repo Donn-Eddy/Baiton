@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createGitService } from '../src/git/gitService';
+import { unlandedTodos } from '../src/engine/todoWorktree';
 import { submitPr, PR_DIFF_FILE_NAME, PR_TODO_ID } from '../src/engine/submitPr';
 import type { SubmitPrDeps } from '../src/engine/submitPr';
 import type { CreatePrInput, PrTool, PullRequest } from '../src/engine/prTool';
@@ -260,6 +261,55 @@ describe('submitPr (design section 8 "PR")', () => {
     }
     assert.strictEqual(h.terminals.created.length, 0);
     assert.strictEqual(h.pr.created.length, 0);
+  });
+
+  it('refuses while a todo branch is unlanded, naming the todos', async () => {
+    const h = harness(makeRepo(['done', 'done']), { unlandedTodos: async () => ['T01', 'T02'] });
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /T01, T02/);
+      assert.match(result.error.message, /land_todo/);
+    }
+    assert.strictEqual(h.terminals.created.length, 0);
+    assert.strictEqual(h.pr.created.length, 0);
+  });
+
+  it('reads unlanded todos from real todo branches', async () => {
+    const repo = makeRepo(['done']);
+    git(repo.root, 'branch', 'baiton-todo/greeting/T01');
+    const lookup = (s: string) => unlandedTodos({ git: createGitService(repo.root) }, s);
+    const h = harness(repo, { unlandedTodos: lookup });
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /T01/);
+    }
+    assert.strictEqual(h.terminals.created.length, 0);
+
+    git(repo.root, 'branch', '-D', 'baiton-todo/greeting/T01');
+    const h2 = harness(repo, { unlandedTodos: lookup });
+    const pending = submitPr(SLUG, h2.deps);
+    (await awaitWatcher(h2)).emitClose(1);
+    const second = await pending;
+    assert.ok(second.ok || second.error.kind !== 'not-ready');
+  });
+
+  it('reports a failing unlanded lookup as not-ready', async () => {
+    const h = harness(makeRepo(['done']), {
+      unlandedTodos: async () => {
+        throw new Error('boom');
+      },
+    });
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /boom/);
+    }
+    assert.strictEqual(h.terminals.created.length, 0);
   });
 
   it('refuses when the spec branch is not checked out', async () => {

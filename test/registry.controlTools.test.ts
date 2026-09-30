@@ -16,6 +16,8 @@ import { Result, ok } from '../src/model/result';
 import {
   DraftSpecOutcome,
   DraftSpecRequest,
+  LandTodoOutcome,
+  LandTodoRequest,
   RunDispatchOutcome,
   RunDispatchRequest,
   StartRunOutcome,
@@ -74,6 +76,7 @@ const EXPECTED_TOOLS = [
   'investigate',
   'approve_spec',
   'run',
+  'land_todo',
   'submit_pr',
 ];
 
@@ -267,6 +270,41 @@ function draftSpec(): string {
     '# TODOS',
     '',
     '- [pending] T01 Do the first thing',
+    '',
+  ].join('\n');
+}
+
+/** A land seam that records the requests it received and answers a fixed outcome. */
+function recordingLand(outcome: LandTodoOutcome): {
+  calls: LandTodoRequest[];
+  land: (req: LandTodoRequest) => Promise<LandTodoOutcome>;
+} {
+  const calls: LandTodoRequest[] = [];
+  return {
+    calls,
+    land: async (req: LandTodoRequest): Promise<LandTodoOutcome> => {
+      calls.push(req);
+      return outcome;
+    },
+  };
+}
+
+/** An approved spec with one todo in `state`. */
+function approvedSpec(state: string): string {
+  return [
+    '---',
+    'version: 1',
+    'name: sample',
+    'status: approved',
+    '---',
+    '',
+    '# OVERVIEW',
+    '',
+    'A sample spec used by the registry unit tests.',
+    '',
+    '# TODOS',
+    '',
+    `- [${state}] T01 Do the first thing`,
     '',
   ].join('\n');
 }
@@ -625,6 +663,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'ask_user',
         'approve_spec',
         'run',
+        'land_todo',
         'submit_pr',
       ],
       run: [
@@ -819,6 +858,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const calls: [string, unknown][] = [
         ['run', { slug, todo: 'T01', stage: 'plan' }],
         ['draft_spec', { slug: 'other', requirements: 'Goal: something.' }],
+        ['land_todo', { slug, todo: 'T01' }],
         ['submit_pr', { slug }],
         ['approve_spec', { slug }],
         ['add_todo', { slug, text: 'T02 Another thing' }],
@@ -1659,6 +1699,120 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const refused = seam.dispatch(req);
       q.pending[0]({ ok: false, error: { kind: 'deps-unlanded', message: 'm' } } as unknown as DispatchResult);
       assert.deepStrictEqual(await refused, { kind: 'illegal', reason: 'm' });
+    });
+  });
+  describe('land_todo', () => {
+    const slug = 'sample';
+    const COMMIT = 'c'.repeat(40);
+
+    function setup(state: string, outcome: LandTodoOutcome, wired = true) {
+      const repo = newRepo();
+      writeSpec(repo, slug, approvedSpec(state));
+      const seam = recordingLand(outcome);
+      const confirm = recordingConfirm(true);
+      const base = makeServices(repo, benignGit(), confirm);
+      const registry = createToolRegistry(wired ? { ...base, landTodo: seam } : base);
+      return { repo, seam, confirm, registry };
+    }
+    const LANDED: LandTodoOutcome = { kind: 'landed', commit: 'c'.repeat(40), noop: false, cleanup: [] };
+
+    it('lands a done todo without a confirm card', async () => {
+      const { repo, seam, confirm, registry } = setup('done', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-a', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.deepStrictEqual(result.data, { slug, todo: 'T01', landed: true, commit: COMMIT });
+      }
+      assert.deepStrictEqual(seam.calls, [{ slug, todoId: 'T01' }]);
+      assert.strictEqual(confirm.calls.length, 0);
+    });
+
+    it('reports an already-landed todo', async () => {
+      const { repo, registry } = setup('done', { kind: 'already-landed' });
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-b', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        const data = result.data as { landed: boolean; message: string };
+        assert.strictEqual(data.landed, false);
+        assert.strictEqual(data.message, 'already landed');
+      }
+    });
+
+    it('refuses a todo that is not done', async () => {
+      const { repo, seam, registry } = setup('executed', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-c', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /executed/);
+        assert.match(result.error, /done/);
+      }
+      assert.strictEqual(seam.calls.length, 0);
+    });
+
+    it('refuses an unknown todo id', async () => {
+      const { repo, seam, registry } = setup('done', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T09' }, 'call-land-d', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /T09/);
+        assert.match(result.error, /not found/);
+      }
+      assert.strictEqual(seam.calls.length, 0);
+    });
+
+    it('relays a seam refusal', async () => {
+      const { repo, registry } = setup('done', { kind: 'refused', reason: 'the merge conflicts' });
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-e', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.ok(result.error.includes('the merge conflicts'));
+        assert.ok(result.error.includes('T01'));
+      }
+    });
+
+    it('reports itself unavailable when no land seam is wired', async () => {
+      const { repo, registry } = setup('done', LANDED, false);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-f', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /not available/);
+      }
+    });
+
+    it('is idempotent by call id', async () => {
+      const { repo, seam, registry } = setup('done', LANDED);
+      const first = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
+      const second = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
+      assert.strictEqual(seam.calls.length, 1);
+      assert.deepStrictEqual(second, first);
+    });
+
+    it('requires a call id', async () => {
+      const { repo, seam, registry } = setup('done', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, undefined, makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /idempotency key/);
+      }
+      assert.strictEqual(seam.calls.length, 0);
+    });
+
+    it('is disabled under Restricted Mode', async () => {
+      const { repo, seam, registry } = setup('done', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-r', makeRestrictedGuard(repo), 'drive');
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(seam.calls.length, 0);
+    });
+
+    it('is refused while gathering', async () => {
+      const { repo, seam, registry } = setup('done', LANDED);
+      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-g', makeGuard(repo), 'gather');
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /land_todo/);
+        assert.match(result.error, /gather/);
+      }
+      assert.strictEqual(seam.calls.length, 0);
     });
   });
 });

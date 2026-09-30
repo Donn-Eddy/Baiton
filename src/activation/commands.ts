@@ -81,11 +81,14 @@ import {
   createSpecDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
+  landTodoWorktree,
   resolveProviderExecutable,
   runsRootDir,
   selectProvider,
   submitPr,
+  todoBranchFor,
   todoWorktreeDirFor,
+  unlandedTodos,
 } from '../engine';
 import type {
   DispatchResult,
@@ -125,6 +128,7 @@ import type {
   EvaluationTaskContext,
   Intervention,
   InterventionSeam,
+  LandTodoSeam,
   OrchestratorPhase,
   PresentIntervention,
   RunPipelineSeam,
@@ -498,7 +502,8 @@ export function registerCommands(
 
   // Submit PR (design section 8): the per-spec flow over the same seams as the
   // queue. One in-flight submission per spec; it also refuses while that
-  // spec's queue is running a stage (one run at a time per repository).
+  // spec's queue is running a stage, and while any todo of the spec is
+  // unlanded (checked inside submitPr).
   const prInFlight = new Set<string>();
   const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
     if (prInFlight.has(slug) || todoQueues.isRunning(slug)) {
@@ -538,6 +543,7 @@ export function registerCommands(
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
+        unlandedTodos: (s) => unlandedTodos({ git }, s),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -547,6 +553,38 @@ export function registerCommands(
     } finally {
       prInFlight.delete(slug);
     }
+  };
+
+  // land_todo (per-todo worktrees): merge a done todo's branch into the spec
+  // branch in the main checkout. It goes through the spec-branch writer so a
+  // land never interleaves with a state commit for another todo of the spec.
+  const landTodoSeam: LandTodoSeam = {
+    land: async ({ slug, todoId }) => {
+      if (prInFlight.has(slug)) {
+        return { kind: 'refused', reason: `a pull request is being submitted for spec "${slug}"` };
+      }
+      if (queueFor(slug, todoId).isRunning()) {
+        return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
+      }
+      try {
+        return await specWriter.apply(slug, async () => {
+          if ((await git.branchHead(todoBranchFor(slug, todoId))) === undefined) {
+            return { kind: 'already-landed' as const };
+          }
+          const landed = await landTodoWorktree({ workspaceRoot: repoRoot, git }, { slug, todoId });
+          if (landed.ok) {
+            return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
+          }
+          if (landed.error.reason === 'missing-branch') {
+            return { kind: 'already-landed' as const };
+          }
+          const detail = landed.error.reason === 'dirty-tree' ? ` (${landed.error.changes.join(', ')})` : '';
+          return { kind: 'refused' as const, reason: `${landed.error.message}${detail}` };
+        });
+      } catch (e) {
+        return { kind: 'refused', reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
   };
 
   // The spec-draft runner (design "the harness writes the spec"): the
@@ -573,6 +611,7 @@ export function registerCommands(
     confirm,
     interventionSeam,
     runPipelineSeam,
+    landTodoSeam,
   );
   const specDraftRunner = createSpecDraftRunner({
     workspaceRoot: repoRoot,
@@ -591,7 +630,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -1855,8 +1894,8 @@ async function promptForSlug(
  * tools (`start_run` / `investigate`) start a run through, the injected
  * confirmation seam, and the shared intervention seam itself — the seam the
  * inline-card `confirm` adapter wraps, and which `ask_user` asks through
- * directly. Both seams are supplied by the caller so both tool-services bundles
- * share one of each.
+ * directly. Both seams, and the land seam `land_todo` merges through, are
+ * supplied by the caller so both tool-services bundles share one of each.
  */
 function buildToolServices(
   repoRoot: string,
@@ -1869,6 +1908,7 @@ function buildToolServices(
   confirm: ConfirmSeam,
   intervention: InterventionSeam,
   runPipeline: RunPipelineSeam,
+  landTodo: LandTodoSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -1878,6 +1918,7 @@ function buildToolServices(
     intervention,
     runQueue: createRunQueueSeam(queueFor, specsDir, adapterForRole),
     runPipeline,
+    landTodo,
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),

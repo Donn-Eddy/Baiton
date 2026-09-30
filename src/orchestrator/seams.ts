@@ -18,6 +18,8 @@
  *   todo's stages run in its own worktree, and different todos run
  *   concurrently. The stage engine owns the real queues; the tool only asks
  *   for one stage and reports what it answers.
+ * - {@link LandTodoSeam} — the seam `land_todo` merges a done todo's branch into
+ *   its spec branch through; the engine serializes it with state commits.
  * - {@link RunPipelineSeam} — the spec-less run pipeline the `start_run` and
  *   `investigate` dispatch tools start a run through. The stage engine owns the
  *   real pipeline; the tools only ask it to start a run and report what it
@@ -84,6 +86,25 @@ export interface RunQueueSeam {
    * state.
    */
   dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome>;
+}
+
+/** One request to land a done todo's branch into its spec branch. */
+export interface LandTodoRequest {
+  slug: string;
+  todoId: string;
+}
+
+/**
+ * What the land seam answers `land_todo`. `landed` carries the spec branch's head after the merge (`noop` when the branch was already contained, `cleanup` any non-fatal worktree/branch removal warnings); `already-landed` means no todo branch exists; `refused` carries the named reason (wrong branch checked out, dirty tree, conflict, a stage still running, a git failure).
+ */
+export type LandTodoOutcome =
+  | { kind: 'landed'; commit: string; noop: boolean; cleanup: readonly string[] }
+  | { kind: 'already-landed' }
+  | { kind: 'refused'; reason: string };
+
+/** The seam `land_todo` lands through; the engine serializes it with state commits via the spec-branch writer. */
+export interface LandTodoSeam {
+  land(req: LandTodoRequest): Promise<LandTodoOutcome>;
 }
 
 /** One request to draft a spec from an agreed requirements document. */

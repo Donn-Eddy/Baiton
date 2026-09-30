@@ -15,6 +15,7 @@ import {
   ConfirmSeam,
   DraftSpecSeam,
   IdGenerator,
+  LandTodoSeam,
   RunPipelineSeam,
   RunQueueSeam,
 } from './seams';
@@ -45,6 +46,7 @@ export interface ToolGitSettings {
  * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
  * - `runPipeline` — the spec-less run pipeline seam `start_run` and
  *                 `investigate` dispatch into.
+ * - `landTodo`  — the seam `land_todo` merges a done todo's branch through.
  * - `clock`     — wall clock for transcript timestamps.
  * - `ids`       — identifier source (reserved for tool-generated ids).
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
@@ -77,6 +79,10 @@ export interface ToolServices {
    * nothing.
    */
   runPipeline?: RunPipelineSeam;
+  /**
+   * The seam `land_todo` merges a done todo's branch into the spec branch through. Optional so a host that has not wired per-todo worktrees still builds a registry; `land_todo` then reports itself unavailable.
+   */
+  landTodo?: LandTodoSeam;
   clock: Clock;
   ids: IdGenerator;
   gitSettings: ToolGitSettings;

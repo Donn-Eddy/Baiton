@@ -16,8 +16,9 @@
  *
  * - **gather** — a Workspace conversation, or a spec still in `draft`: the
  *   ask-then-agree-then-`draft_spec` flow (Req 11.2).
- * - **drive** — a spec whose `status` has moved past `draft`: the next-legal-
- *   stage table, one todo at a time, and `submit_pr` when every todo is done.
+ * - **drive** — a spec whose `status` has moved past `draft`: the
+ *   next-legal-step table (plan, execute, review, land_todo), one todo at a time,
+ *   and `submit_pr` when every todo is done and landed.
  * - **run** — a non-Spec Workspace conversation (Default/Bug/Quick/Refactor/
  *   Investigate): inspect with the read tools, state the work and the guessed
  *   files, then dispatch one spec-less run with `start_run` or `investigate`.
@@ -143,7 +144,7 @@ export const PROHIBITION_LINES: readonly string[] = [
 export const SCOPE_TEXT = [
   'You have exactly two jobs.',
   '1. Help the user create a spec. Ask clarifying questions until you and the user agree on what the work is, then hand the agreed requirements to the spec writer with `draft_spec`.',
-  '2. Drive an approved spec to completion. Dispatch each stage with `run` until every todo is done, then finish with `submit_pr`.',
+  '2. Drive an approved spec to completion. Dispatch each stage with `run`, land each done todo with `land_todo`, and when every todo is done and landed finish with `submit_pr`.',
   'That is the whole job. Everything else belongs to someone else:',
   ...PROHIBITION_LINES,
 ].join('\n');
@@ -179,7 +180,8 @@ export const ASK_USER_TEXT = [
 /**
  * The drive-phase text: the next legal stage for each todo state, that `run`
  * blocks until its stage finishes, that only one todo is driven at a time, and
- * what to offer once every todo is done (Req 11.1).
+ * that a done todo is landed with `land_todo`, and what to offer once every
+ * todo is done and landed (Req 11.1).
  */
 export const DRIVE_TEXT = [
   'This spec is approved. Your job here is to drive it to completion, one todo at a time.',
@@ -188,10 +190,12 @@ export const DRIVE_TEXT = [
   '- `planned` -> `run` the `execute` stage.',
   '- `executed` -> `run` the `review` stage.',
   '- A review that sends the todo back -> `run` the `execute` stage again.',
+  '- `done` (unlanded) -> `land_todo` it, which merges its branch into the spec branch.',
+  'A todo can be planned only once every todo it comes `after` is done and landed.',
   '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the spec file already reflects it.',
-  'Drive one todo at a time. Take the next todo only when the one before it is `done`.',
+  'Drive one todo at a time. Take the next todo only when the one before it is `done`; land a done todo whenever you choose, but before any todo that comes `after` it is planned.',
   'You do not read the plan, the diff, or any source file to check the work. The plan reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
-  'When every todo is `done`, tell the user and offer to `submit_pr`.',
+  'When every todo is `done` and landed, tell the user and offer to `submit_pr`. `submit_pr` refuses while any todo is unlanded.',
 ].join('\n');
 
 /** The section-7 role text: what the orchestrator is and is not allowed to do (Req 11.1). */

@@ -37,11 +37,14 @@
  *   running (Req 10.4) or the transition is illegal (Req 10.5). `plan-review`
  *   is not a standalone trigger — it runs inside the Plan action's review
  *   rounds — so the tool does not offer it and rejects it outright.
+ * - `land_todo(slug, todo)` (mutating, no confirm) — refuses unless the todo is
+ *   `done`, merges its branch into the spec branch through the land seam, and
+ *   reports the merge commit or `already landed`.
  * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every todo
- *   is done.
+ *   is done and landed.
  *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
- * `draft_spec` only while gathering requirements, `run` and `submit_pr` only
+ * `draft_spec` only while gathering requirements, `run`, `land_todo` and `submit_pr` only
  * while driving an approved spec, `approve_spec` in both, and `ask_user` in all
  * three — a run-mode conversation agrees the work through it too.
  * `start_run` and `investigate` belong only to the `run` phase, so they are
@@ -74,6 +77,7 @@ export function createControlTools(services: ToolServices): Tool[] {
     investigateTool(services),
     approveSpecTool(services),
     runTool(services),
+    landTodoTool(services),
     submitPrTool(services),
   ];
 }
@@ -768,6 +772,83 @@ function runTool(services: ToolServices): Tool {
  * returned content is byte-identical when the value was already current.
  */
 /**
+ * `land_todo(slug, todo)` — merge a done todo's branch into the spec branch and
+ * remove its worktree. Refuses any todo that is not `done` before the seam.
+ */
+function landTodoTool(services: ToolServices): Tool {
+  return {
+    name: 'land_todo',
+    description:
+      'Land a done todo: merge its branch into the spec branch and remove its worktree. Returns the merge commit, or reports that the todo is already landed.',
+    mutating: true,
+    phases: ['drive'],
+    schema: {
+      type: 'object',
+      properties: { slug: { type: 'string' }, todo: { type: 'string' } },
+      required: ['slug', 'todo'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const slug = readString(args, 'slug');
+      const todo = readString(args, 'todo');
+      if (slug === undefined || todo === undefined) {
+        return { ok: false, error: 'land_todo requires a string "slug" and "todo"' };
+      }
+      if (!isSlug(slug)) {
+        return { ok: false, error: `invalid slug: ${slug}` };
+      }
+      if (!isSlug(todo)) {
+        return { ok: false, error: `invalid todo id: ${todo}` };
+      }
+      const resolved = await tc.ctx.resolveMutatingPath(specPath(services, slug));
+      if (!resolved.ok) {
+        return { ok: false, error: resolved.error.message };
+      }
+      let content: string;
+      try {
+        content = await fs.readFile(resolved.resolved, 'utf8');
+      } catch {
+        return { ok: false, error: `spec "${slug}" was not found` };
+      }
+      const entry = parseSpec(content).todos.find((t) => t.id === todo);
+      if (entry === undefined) {
+        return { ok: false, error: `todo "${todo}" was not found in spec "${slug}"` };
+      }
+      if (entry.state !== 'done') {
+        return {
+          ok: false,
+          error: `todo "${todo}" is ${entry.state}; only a done todo can be landed. Run its remaining stages first.`,
+        };
+      }
+      if (services.landTodo === undefined) {
+        return { ok: false, error: 'land_todo is not available in this host' };
+      }
+      const outcome = await services.landTodo.land({ slug, todoId: todo });
+      switch (outcome.kind) {
+        case 'landed':
+          return {
+            ok: true,
+            data: {
+              slug,
+              todo,
+              landed: true,
+              commit: outcome.commit,
+              ...(outcome.noop ? { noop: true } : {}),
+              ...(outcome.cleanup.length > 0 ? { cleanup: [...outcome.cleanup] } : {}),
+            },
+          };
+        case 'already-landed':
+          return { ok: true, data: { slug, todo, landed: false, message: 'already landed' } };
+        case 'refused':
+          return { ok: false, error: `landing todo "${todo}" of spec "${slug}" was refused: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'land_todo returned an unknown outcome' };
+      }
+    },
+  };
+}
+
+/**
  * `submit_pr(slug)` — run Verify then the PR stage (design section 8). Like
  * approval it confirms in the UI first: the flow pushes a branch and opens a
  * pull request, which are outward-facing.
@@ -776,7 +857,7 @@ function submitPrTool(services: ToolServices): Tool {
   return {
     name: 'submit_pr',
     description:
-      'Submit the pull request for a spec whose todos are all done: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
+      'Submit the pull request for a spec whose todos are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
     mutating: true,
     phases: ['drive'],
     schema: {
