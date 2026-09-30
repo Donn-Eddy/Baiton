@@ -51,8 +51,9 @@
  * "dispatch modes"), supplies the resulting `RunPipelineSeam` to the tool
  * registry (`start_run` / `investigate`) and to the chat's Investigate promote
  * flow, remembers the composer's Mode select in `workspaceState` under
- * {@link CHAT_MODE_KEY}, and holds the one-stage-per-repository lock jointly
- * across the todo-scoped queues, the spec draft and the run pipeline.
+ * {@link CHAT_MODE_KEY}. It caches one run queue per (slug, todo), each running
+ * its stages in the todo's worktree, so different todos run concurrently; only
+ * the spec draft and the spec-less run pipeline still exclude each other.
  *
  * Probe-failure, invalid-result, git, and recovery errors are surfaced through
  * the shared {@link Surface}: chat/tool errors as tool results, command
@@ -75,8 +76,8 @@ import { createGitService } from '../git';
 import {
   createPrTool,
   createRunPipeline,
-  createRunQueue,
   createRunStore,
+  createSpecBranchWriter,
   createSpecDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
@@ -84,6 +85,7 @@ import {
   runsRootDir,
   selectProvider,
   submitPr,
+  todoWorktreeDirFor,
 } from '../engine';
 import type {
   DispatchResult,
@@ -97,8 +99,6 @@ import {
   latestStart,
   readSpecJournal,
   resumableSessionId,
-  specJournalPathFor,
-  todoJournalPathFor,
   type JournalEntry,
 } from '../journal';
 import {
@@ -146,10 +146,13 @@ import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
 import {
   createRunPipelineSeam,
   createRunQueueSeam,
+  createStageLock,
+  createTodoQueues,
   dispatchTrigger,
   STAGE_ROLE,
   type AdapterForRole,
   type EngineTrigger,
+  type TodoQueues,
 } from './engineFacade';
 import { ChatController } from './chatController';
 import type { AutoModeGate, OrchestratorConfig } from './chatController';
@@ -351,7 +354,7 @@ export interface CommandActivation {
 export interface CommandSurface {
   /** All registrations, pushed onto `context.subscriptions`. */
   disposables: vscode.Disposable[];
-  /** Slugs with a stage currently in flight, for the in-flight note. */
+  /** Slug/todo pairs (and the spec draft / spec-less run) with a stage in flight. */
   runningSlugs(): readonly string[];
 }
 
@@ -416,7 +419,11 @@ export function registerCommands(
     log: (message) => surface.log(message),
   });
   const git = createGitService(repoRoot);
-  const specStore = createSpecStore(specsDir, git);
+  // One writer shared by the store, the queues and the worktree seam so state
+  // commits, artifact writes, journal appends and worktree creation serialize
+  // per slug.
+  const specWriter = createSpecBranchWriter({ specsDir, git });
+  const specStore = createSpecStore(specsDir, git, specWriter);
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
   const adapters = createAdapterRegistry();
@@ -427,11 +434,42 @@ export function registerCommands(
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
+  // Spec-scoped stages keep the spec-level journal
+  // (`.baiton/specs/<slug>/runs.jsonl`, Req 21); todo stages journal to
+  // `todos/<id>/runs.jsonl`, and the queue reads the merged spec journal. One
+  // serialized queue is built per slug+todo and cached, each running its stages
+  // in the todo's worktree. Manual mode runs one stage per trigger per todo and
+  // the queue refuses a second while one is running (Req 19.1, 20.1). Every
+  // refusal/halt is surfaced through the shared Surface (Req 5.3, 10.3, 14.5,
+  // 19.1). Todo queues sit outside the
+  // repository lock.
+  const todoQueues: TodoQueues = createTodoQueues({
+    workspaceRoot: repoRoot,
+    specsDir,
+    git,
+    specWriter,
+    terminalHost,
+    watcherFactory,
+    askWatcherFactory,
+    specStore,
+    modelForRole: (role) => modelForRole(cfg(), role),
+    adapterForRole: adapterFor,
+    report: (error) => surface.reportDispatchError(error),
+  });
+  const queueFor = (slug: string, todoId: string): RunQueue => todoQueues.queueFor(slug, todoId);
+
+  // The repository lock after per-todo worktrees: the spec draft and spec-less
+  // runs exclude each other. Per-todo stages run concurrently in their own
+  // worktrees and neither block nor are blocked by them.
+  const stageLock = createStageLock({
+    specDraftRunning: () => specDraftRunner.isRunning(),
+    runRunning: () => runPipeline.isRunning(),
+  });
+
   // The spec-less run pipeline (design "dispatch modes"): Bug/Quick/Refactor
   // drive plan -> execute -> review in a per-run worktree, Investigate answers a
   // question read-only. It is run-scoped, so it sits beside the todo-scoped
-  // queues rather than inside one, and the two exclude each other so only one
-  // stage runs per repository. Manifests, journals and rendered artifacts live
+  // queues rather than inside one; it excludes only the spec draft. Manifests, journals and rendered artifacts live
   // under `.baiton/runs/<run-id>/`; nothing is written under `.baiton/specs/`.
   const runStore = createRunStore({ workspaceRoot: repoRoot });
   const runPipeline: RunPipeline = createRunPipeline({
@@ -446,11 +484,9 @@ export function registerCommands(
     // Read per run off the live config, like every other config read here.
     execAttempts: () => cfg().limits.exec_attempts,
     verify: () => cfg().git.verify,
-    // The other half of the one-stage-per-repository lock: a run refuses while
-    // any spec queue or the spec draft has a stage in flight, and
-    // `RunQueueDeps.isExternallyBusy` / `SpecDraftDeps.isQueueRunning` refuse
-    // while a run does.
-    isSpecBusy: () => [...queues.values()].some((q) => q.isRunning()) || specDraftRunner.isRunning(),
+    // A spec-less run refuses only while the spec draft runs; per-todo stages
+    // run in their own worktrees and do not block it.
+    isSpecBusy: () => stageLock.runPipelineBusy(),
     onComplete: (outcome) => surface.log(`Baiton: run ${outcome.runId} ${outcome.state}: ${outcome.message}`),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -460,46 +496,12 @@ export function registerCommands(
     (detail) => surface.warn(`Baiton: ${detail}`),
   );
 
-  // Spec-scoped stages keep the spec-level journal
-  // (`.baiton/specs/<slug>/runs.jsonl`, Req 21); todo stages journal to
-  // `todos/<id>/runs.jsonl`, and the queue reads the merged spec journal. One
-  // serialized queue is built per slug and cached. Manual mode runs one stage per trigger and the queue itself
-  // refuses a second while one is running (Req 19.1, 20.1). Every refusal/halt
-  // is surfaced through the shared Surface (Req 5.3, 10.3, 14.5, 19.1).
-  const queues = new Map<string, RunQueue>();
-  const queueForSlug = (slug: string): RunQueue => {
-    const existing = queues.get(slug);
-    if (existing !== undefined) {
-      return existing;
-    }
-    const journalPath = specJournalPathFor(specsDir, slug);
-    const queue = createRunQueue({
-      workspaceRoot: repoRoot,
-      git,
-      terminalHost,
-      watcherFactory,
-      askWatcherFactory,
-      specStore,
-      journalPath,
-      journalPathFor: (todoId) => todoJournalPathFor(specsDir, slug, todoId),
-      readJournal: () => readSpecJournal(specsDir, slug),
-      modelForRole: (role) => modelForRole(cfg(), role),
-      adapterForRole: adapterFor,
-      report: (error) => surface.reportDispatchError(error),
-      // A spec draft and a spec-less run hold the same one-stage-per-repository
-      // lock (Req 20.1); the run pipeline's `isSpecBusy` is the mirror of this.
-      isExternallyBusy: () => specDraftRunner.isRunning() || runPipeline.isRunning(),
-    });
-    queues.set(slug, queue);
-    return queue;
-  };
-
   // Submit PR (design section 8): the per-spec flow over the same seams as the
   // queue. One in-flight submission per spec; it also refuses while that
   // spec's queue is running a stage (one run at a time per repository).
   const prInFlight = new Set<string>();
   const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
-    if (prInFlight.has(slug) || queueForSlug(slug).isRunning()) {
+    if (prInFlight.has(slug) || todoQueues.isRunning(slug)) {
       return { ok: false, error: `spec "${slug}" already has a run in progress` };
     }
     const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
@@ -550,8 +552,7 @@ export function registerCommands(
   // The spec-draft runner (design "the harness writes the spec"): the
   // orchestrator gathers requirements and calls `draft_spec`, which dispatches
   // here. It is spec-scoped, so it runs beside the todo-scoped queues rather
-  // than through one, and the two exclude each other so only one stage runs per
-  // repository. Its completion sink is bound after the ChatController exists.
+  // than through one; it excludes only a spec-less run. Its completion sink is bound after the ChatController exists.
   let reportDraftOutcome: (outcome: SpecDraftOutcome) => void = () => {};
   // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
   // goes through one registry and one seam. `present` is bound late: until the
@@ -565,7 +566,7 @@ export function registerCommands(
     repoRoot,
     baitonDir,
     git,
-    queueForSlug,
+    queueFor,
     specsDir,
     adapterFor,
     submitPrForSlug,
@@ -581,9 +582,8 @@ export function registerCommands(
     services: draftServices,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
-    // The run pipeline is the third holder of the one-stage-per-repository lock.
-    isQueueRunning: () =>
-      [...queues.values()].some((q) => q.isRunning()) || runPipeline.isRunning(),
+    // Refuses only while a spec-less run is in flight; todo queues don't count.
+    isQueueRunning: () => stageLock.specDraftBusy(),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -591,7 +591,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueForSlug, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -757,16 +757,16 @@ export function registerCommands(
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueForSlug, adapterFor, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueForSlug, adapterFor, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueForSlug, adapterFor, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueForSlug, adapterFor, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueForSlug, adapterFor, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueFor, adapterFor, surface),
     registerViewCommand(
       activation,
       specsDir,
       repoRoot,
-      queueForSlug,
+      (slug, todoId) => todoQueues.find(slug, todoId),
       adapterFor,
       terminalHost,
       surface,
@@ -1060,9 +1060,7 @@ export function registerCommands(
   return {
     disposables,
     runningSlugs: () => {
-      const running = [...queues.entries()]
-        .filter(([, q]) => q.isRunning())
-        .map(([slug]) => slug);
+      const running = todoQueues.running().map((r) => `${r.slug}/${r.todoId}`);
       if (specDraftRunner.isRunning()) {
         running.push('(spec draft)');
       }
@@ -1198,7 +1196,9 @@ function directoryExists(p: string): boolean {
 // --- stage / action triggers ----------------------------------------------
 
 /** A per-slug run-queue accessor: builds (and caches) the queue for a spec. */
-type QueueForSlug = (slug: string) => RunQueue;
+type QueueFor = (slug: string, todoId: string) => RunQueue;
+/** Looks up a todo's queue without creating one. */
+type FindQueue = (slug: string, todoId: string) => RunQueue | undefined;
 
 /** Register a stage-trigger command (plan/execute/review). */
 function registerStageCommand(
@@ -1206,7 +1206,7 @@ function registerStageCommand(
   stage: Stage,
   activation: CommandActivation,
   specsDir: string,
-  queueForSlug: QueueForSlug,
+  queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
@@ -1214,7 +1214,7 @@ function registerStageCommand(
     commandId,
     (a?: TreeNode | string, b?: string) => {
       const { slug, todoId } = todoArgs(a, b);
-      return runStage(activation, specsDir, queueForSlug, adapterForRole, surface, stage, slug, todoId);
+      return runStage(activation, specsDir, queueFor, adapterForRole, surface, stage, slug, todoId);
     },
   );
 }
@@ -1225,7 +1225,7 @@ function registerActionCommand(
   action: 'replan' | 'stop',
   activation: CommandActivation,
   specsDir: string,
-  queueForSlug: QueueForSlug,
+  queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
@@ -1244,15 +1244,15 @@ function registerActionCommand(
       if (target === undefined) {
         return;
       }
-      // Stop cancels the running stage and clears the queue rather than
+      // Stop cancels the todo's running stage and clears its queue rather than
       // enqueuing behind it — dispatching a `stop` action would wait for the
-      // busy stage to finish, defeating the cancellation — but only when the
-      // todo IS the Live_Run; otherwise there is nothing running to cancel and
-      // the transition table's revert path applies instead (Req 2.1, 2.2, 2.3,
+      // busy stage to finish, defeating the cancellation. The queue serves only
+      // this todo, so other todos' stages are never cancelled; when nothing is
+      // running the transition table's revert path applies instead (Req 2.1, 2.2, 2.3,
       // 20.4–20.6).
       if (action === 'stop') {
-        const queue = queueForSlug(target.slug);
-        if (queue.currentRun()?.todoId === target.todoId) {
+        const queue = queueFor(target.slug, target.todoId);
+        if (queue.currentRun() !== undefined) {
           queue.stop();
           surface.log(`Baiton: stop ${target.slug}/${target.todoId}`);
           return;
@@ -1277,7 +1277,7 @@ function registerActionCommand(
         todoId: target.todoId,
         action,
       };
-      await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
+      await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
     },
   );
 }
@@ -1292,7 +1292,7 @@ function registerViewCommand(
   activation: CommandActivation,
   specsDir: string,
   repoRoot: string,
-  queueForSlug: QueueForSlug,
+  findQueue: FindQueue,
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
@@ -1305,7 +1305,7 @@ function registerViewCommand(
       if (target === undefined) {
         return;
       }
-      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, queueForSlug, adapterForRole, terminalHost, surface);
+      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -1314,7 +1314,8 @@ function registerViewCommand(
  * View a todo's sub-agent session (Req 3.3, 3.4, 3.5, 3.6): reveal the
  * Live_Run's terminal when the todo is currently running; otherwise attach to
  * the Session_Id the journal's most recent start recorded for it, launching a
- * new terminal at the workspace root; otherwise warn that no session is
+ * new terminal in the todo's worktree (the directory the session was created
+ * in) when it exists, else at the workspace root; otherwise warn that no session is
  * recorded. The role passed to `attach` comes from the stage recorded on that
  * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6). The
  * executable check runs here, once that role is known, gating on the *same*
@@ -1330,13 +1331,13 @@ async function runView(
   todoId: string,
   specsDir: string,
   repoRoot: string,
-  queueForSlug: QueueForSlug,
+  findQueue: FindQueue,
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): Promise<void> {
-  const live = queueForSlug(slug).currentRun();
-  if (live?.todoId === todoId) {
+  const live = findQueue(slug, todoId)?.currentRun();
+  if (live !== undefined) {
     live.terminal.show();
     return;
   }
@@ -1361,6 +1362,9 @@ async function runView(
   // Baiton pre-assigned, opencode tagged its own session with it (resolved
   // below), while codex/antigravity minted their own — for those only an id
   // discovered after the run can be reopened (Req 3.2).
+  // Attach in the directory the session was created in.
+  const worktreeDir = todoWorktreeDirFor(repoRoot, slug, todoId);
+  const cwd = fs.existsSync(worktreeDir) ? worktreeDir : repoRoot;
   let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
   if (sessionId === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
@@ -1370,7 +1374,7 @@ async function runView(
   // Session_Id to theirs first; when nothing carries that id the adapter
   // reopens its most recent session instead, and the user is told so.
   if (adapter.resolveSessionId !== undefined) {
-    const resolved = await adapter.resolveSessionId(sessionId, repoRoot);
+    const resolved = await adapter.resolveSessionId(sessionId, cwd);
     if (resolved === undefined) {
       surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${todoId}; opening its most recent session instead`);
     } else {
@@ -1387,7 +1391,7 @@ async function runView(
     name: `Baiton view ${slug}/${todoId}`,
     shellPath: spec.shellPath,
     shellArgs: spec.shellArgs,
-    cwd: repoRoot,
+    cwd,
     ...(spec.env !== undefined ? { env: spec.env } : {}),
   });
   terminal.show();
@@ -1397,7 +1401,7 @@ async function runView(
 async function runStage(
   activation: CommandActivation,
   specsDir: string,
-  queueForSlug: QueueForSlug,
+  queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
   stage: Stage,
@@ -1417,7 +1421,7 @@ async function runStage(
     todoId: target.todoId,
     stage,
   };
-  await dispatchAndReport(queueForSlug(target.slug), specsDir, trigger, adapterForRole, surface);
+  await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
 }
 
 /**
@@ -1858,7 +1862,7 @@ function buildToolServices(
   repoRoot: string,
   baitonDir: string,
   git: ReturnType<typeof createGitService>,
-  queueForSlug: QueueForSlug,
+  queueFor: QueueFor,
   specsDir: string,
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
@@ -1872,7 +1876,7 @@ function buildToolServices(
     git,
     confirm,
     intervention,
-    runQueue: createRunQueueSeam(queueForSlug, specsDir, adapterForRole),
+    runQueue: createRunQueueSeam(queueFor, specsDir, adapterForRole),
     runPipeline,
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },

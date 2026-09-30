@@ -661,7 +661,7 @@ async function reapprove(
  * but a dispatch, so the guard disables it under Restricted Mode (Req 22.2).
  * Before dispatching any stage it validates the spec and refuses every stage
  * while the spec is invalid, surfacing the current validation errors until the
- * spec parses without error (Req 4.9). Refuses when a stage is already running
+ * spec parses without error (Req 4.9). Refuses when a stage is already running for that todo
  * (Req 10.4) or the transition is illegal (Req 10.5).
  *
  * The stage enum is exactly `plan | execute | review` (Req 11.1). `plan-review`
@@ -748,7 +748,10 @@ function runTool(services: ToolServices): Tool {
         case 'dispatched':
           return { ok: true, data: { slug, todo, stage, runId: outcome.runId } };
         case 'busy':
-          return { ok: false, error: 'a stage is already running for this repository; try again after it finishes' };
+          return {
+            ok: false,
+            error: `a stage is already running for todo "${todo}" of spec "${slug}"; wait for it to finish before dispatching another stage for this todo (other todos can run meanwhile)`,
+          };
         case 'illegal':
           return { ok: false, error: `stage "${stage}" is not allowed for todo "${todo}": ${outcome.reason}` };
         default:

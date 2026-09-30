@@ -9,6 +9,8 @@ import {
   OrchestratorPhase,
 } from '../src/orchestrator/guard';
 import { ToolServices } from '../src/orchestrator/toolServices';
+import { createRunQueueSeam } from '../src/activation/engineFacade';
+import type { DispatchResult, RunQueue, RunRequest } from '../src/engine';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import {
@@ -1565,6 +1567,98 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         assert.deepStrictEqual(result.data, { answer: 'text', text: 'yes' });
       }
       assert.deepStrictEqual(ask.calls, [{ kind: 'question', prompt: question }]);
+    });
+  });
+
+  describe('run over per-todo queues', () => {
+    interface FakeQueue extends RunQueue {
+      requests: RunRequest[];
+      running: boolean;
+      pending: Array<(r: DispatchResult) => void>;
+    }
+    function fakeQueue(): FakeQueue {
+      const q: FakeQueue = {
+        requests: [],
+        running: false,
+        pending: [],
+        dispatch: (req) => {
+          q.requests.push(req);
+          return new Promise<DispatchResult>((resolve) => q.pending.push(resolve));
+        },
+        stop: () => {},
+        isRunning: () => q.running,
+        currentRun: () => undefined,
+      };
+      return q;
+    }
+    const dispatched: DispatchResult = { ok: true, outcome: { kind: 'planned' } } as unknown as DispatchResult;
+
+    it('names the todo when the seam answers busy', async () => {
+      const repo = newRepo();
+      const slug = 'sample';
+      writeSpec(repo, slug, draftSpec());
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true), undefined, {
+          dispatch: async () => ({ kind: 'busy' }),
+        }),
+      );
+      const result = await registry.call(
+        'run',
+        { slug, todo: 'T01', stage: 'plan' },
+        undefined,
+        makeGuard(repo),
+        'drive',
+      );
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /todo "T01"/);
+        assert.match(result.error, /other todos can run/);
+      }
+    });
+
+    it('answers busy per todo, dispatches other todos, and clears in-flight state', async () => {
+      const specsDir = path.join(newRepo(), '.baiton', 'specs');
+      const queues = new Map<string, FakeQueue>([
+        ['demo/T01', fakeQueue()],
+        ['demo/T02', fakeQueue()],
+      ]);
+      const seam = createRunQueueSeam((slug, todoId) => queues.get(`${slug}/${todoId}`)!, specsDir, () => undefined);
+      const t01 = queues.get('demo/T01')!;
+      const t02 = queues.get('demo/T02')!;
+      const req = (todoId: string) => ({ slug: 'demo', todoId, stage: 'plan' as const });
+
+      const first = seam.dispatch(req('T01'));
+      assert.deepStrictEqual(await seam.dispatch(req('T01')), { kind: 'busy' });
+      assert.strictEqual(t01.requests.length, 1, 'the second dispatch never reached the queue');
+
+      const other = seam.dispatch(req('T02'));
+      assert.strictEqual(t02.requests.length, 1, 'T02 reached its own queue');
+      t02.pending[0](dispatched);
+      assert.strictEqual((await other).kind, 'dispatched');
+
+      t01.pending[0](dispatched);
+      assert.strictEqual((await first).kind, 'dispatched');
+
+      const again = seam.dispatch(req('T01'));
+      assert.strictEqual(t01.requests.length, 2, 'in-flight state was cleared');
+      t01.pending[1](dispatched);
+      await again;
+    });
+
+    it('answers busy while the queue itself is running and maps refusals to illegal', async () => {
+      const specsDir = path.join(newRepo(), '.baiton', 'specs');
+      const q = fakeQueue();
+      const seam = createRunQueueSeam(() => q, specsDir, () => undefined);
+      const req = { slug: 'demo', todoId: 'T01', stage: 'plan' as const };
+
+      q.running = true;
+      assert.deepStrictEqual(await seam.dispatch(req), { kind: 'busy' });
+      assert.strictEqual(q.requests.length, 0);
+
+      q.running = false;
+      const refused = seam.dispatch(req);
+      q.pending[0]({ ok: false, error: { kind: 'deps-unlanded', message: 'm' } } as unknown as DispatchResult);
+      assert.deepStrictEqual(await refused, { kind: 'illegal', reason: 'm' });
     });
   });
 });
