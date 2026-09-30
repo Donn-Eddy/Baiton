@@ -25,6 +25,9 @@ import { isErr, isOk } from '../src/model/result';
  * - `branchHead` resolving a ref or reporting undefined for a missing one
  * - `merge` as a real merge commit, and its aborted conflict/unknown-branch paths
  * - whole-tree `isClean`, distinct from the spec-scoped clean check
+ * - `commitPaths` committing only the named paths (with trailers) and leaving
+ *   other staged/unstaged changes alone
+ * - `listBranches` filtering local branches by an arbitrary prefix
  *
  * Temp repos are removed after each test.
  */
@@ -539,6 +542,78 @@ describe('git service against a temp repo (Task 8.2)', () => {
         assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
         assert.strictEqual(await git$.isClean(), false);
       });
+    });
+  });
+
+  describe('commitPaths', () => {
+    it('commits only the named paths, appends trailers and leaves other changes alone', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      writeFile(repo, '.baiton/specs/s/old.md', 'old\n');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-q', '-m', 'add old');
+
+      writeFile(repo, 'README.md', 'changed\n');
+      writeFile(repo, '.baiton/specs/s/spec.md', 'spec\n');
+      fs.rmSync(path.join(repo, '.baiton/specs/s/old.md'));
+
+      const sha = await git$.commitPaths(['.baiton/specs/s'], 'spec(s): T01 state', { 'Run-Id': 'r1' });
+
+      assert.strictEqual(sha, git(repo, 'rev-parse', 'HEAD').trim());
+      const shown = git(repo, 'show', '--name-status', '--format=', 'HEAD')
+        .trim()
+        .split('\n')
+        .map((l) => l.split(/\s+/).join(' '))
+        .sort();
+      assert.deepStrictEqual(shown, ['A .baiton/specs/s/spec.md', 'D .baiton/specs/s/old.md']);
+      const status = await git$.status();
+      assert.deepStrictEqual(
+        status.changes.map((c) => c.path),
+        ['README.md'],
+      );
+      assert.ok(git(repo, 'log', '-1', '--format=%B').trim().endsWith('Run-Id: r1'));
+    });
+
+    it('leaves an unrelated already-staged file staged and out of the commit', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      writeFile(repo, 'other.txt', 'other\n');
+      git(repo, 'add', 'other.txt');
+      writeFile(repo, '.baiton/specs/s/spec.md', 'spec\n');
+
+      await git$.commitPaths(['.baiton/specs/s'], 'spec(s): state');
+
+      assert.strictEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').trim(), '.baiton/specs/s/spec.md');
+      assert.strictEqual(git(repo, 'diff', '--cached', '--name-only').trim(), 'other.txt');
+    });
+
+    it('rejects when there is nothing to commit under the paths', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      await assert.rejects(git$.commitPaths(['README.md'], 'nothing'));
+    });
+
+    it('rejects an empty path list', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      await assert.rejects(git$.commitPaths([], 'x'));
+    });
+  });
+
+  describe('listBranches', () => {
+    it('lists local branches by prefix, sorted, and nothing for an unknown prefix', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      git(repo, 'branch', 'baiton-todo/s/T02');
+      git(repo, 'branch', 'baiton-todo/s/T01');
+      git(repo, 'branch', 'baiton-todo/s-other/T01');
+      git(repo, 'branch', 'baiton/s');
+
+      assert.deepStrictEqual(await git$.listBranches('baiton-todo/s/'), [
+        'baiton-todo/s/T01',
+        'baiton-todo/s/T02',
+      ]);
+      assert.deepStrictEqual(await git$.listBranches('nope/'), []);
     });
   });
 });
