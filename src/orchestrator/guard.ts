@@ -153,6 +153,55 @@ export interface BoundedText {
   truncated: boolean;
 }
 
+/**
+ * The fixed cap, in UTF-8 bytes, on the content of every `tool` message the chat
+ * tool loop appends to history and persists, whatever tool produced it, so one
+ * unbounded result cannot blow the model's context or grow the transcript
+ * without limit.
+ */
+export const TOOL_RESULT_CAP_BYTES = 64 * 1024;
+
+/**
+ * Cuts `text` to at most `maxBytes` UTF-8 bytes on a valid character boundary.
+ * Reports the bytes kept and the original total so callers can note the cut.
+ */
+function cutUtf8(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean; keptBytes: number; totalBytes: number } {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength <= maxBytes) {
+    return { text, truncated: false, keptBytes: bytes.byteLength, totalBytes: bytes.byteLength };
+  }
+  // Slice on a byte boundary, then decode dropping any partial trailing
+  // multibyte sequence so the result is always valid UTF-8.
+  const decoded = new TextDecoder('utf-8', { fatal: false })
+    .decode(bytes.subarray(0, maxBytes))
+    .replace(/\uFFFD+$/u, '');
+  return {
+    text: decoded,
+    truncated: true,
+    keptBytes: Buffer.byteLength(decoded, 'utf8'),
+    totalBytes: bytes.byteLength,
+  };
+}
+
+/**
+ * Bounds one tool result's content to {@link TOOL_RESULT_CAP_BYTES}. Input at or
+ * under the cap is returned verbatim (the same string). Over the cap, the body is
+ * cut on a valid UTF-8 character boundary to at most the cap, followed by a
+ * newline and exactly one note line `[truncated: <n> of <m> bytes]`, where n is
+ * the UTF-8 bytes kept and m the UTF-8 bytes of the original. The note is
+ * appended after the body, so the whole string may exceed the cap by the note.
+ */
+export function boundToolResult(text: string): string {
+  const cut = cutUtf8(text, TOOL_RESULT_CAP_BYTES);
+  if (!cut.truncated) {
+    return text;
+  }
+  return `${cut.text}\n[truncated: ${cut.keptBytes} of ${cut.totalBytes} bytes]`;
+}
+
 /** Why a guarded path resolution was rejected. */
 export type PathError =
   /** A mutating target resolved outside `.baiton/specs/` (Req 8.2). */
@@ -314,16 +363,8 @@ export class GuardContext {
    * character boundary.
    */
   public boundRead(text: string): BoundedText {
-    const bytes = Buffer.from(text, 'utf8');
-    if (bytes.byteLength <= READ_RESULT_CAP_BYTES) {
-      return { text, truncated: false };
-    }
-    // Slice on a byte boundary, then decode dropping any partial trailing
-    // multibyte sequence so the result is always valid UTF-8.
-    const slice = bytes.subarray(0, READ_RESULT_CAP_BYTES);
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    const decoded = decoder.decode(slice).replace(/\uFFFD+$/u, '');
-    return { text: decoded, truncated: true };
+    const cut = cutUtf8(text, READ_RESULT_CAP_BYTES);
+    return { text: cut.text, truncated: cut.truncated };
   }
 
   /** Resolves a requested path against the repo root when it is relative. */

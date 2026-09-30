@@ -20,7 +20,7 @@
  * transcript `append`), so it is directly unit- and property-testable (Req 9.9).
  */
 import { ChatMessage, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
-import { ToolResult } from './guard';
+import { ToolResult, boundToolResult } from './guard';
 import { TranscriptRecord } from './chatTranscript';
 
 /** The default round bound used when configuration is unset or invalid (Req 9.6). */
@@ -59,12 +59,18 @@ export interface ToolLoopDeps {
   sessionId?: string;
 }
 
-/** Serializes a tool result into the `content` of its answering `tool` message. */
+/**
+ * Serializes a tool result into the `content` of its answering `tool` message,
+ * bounded to TOOL_RESULT_CAP_BYTES with a truncation note. The error string is
+ * bounded after its `Error: ` prefix is added so the prefix is always kept.
+ */
 function toolResultContent(result: ToolResult): string {
   if (result.ok) {
-    return typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+    const raw: string = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+    // JSON.stringify(undefined) is undefined at runtime; pass it through as before.
+    return typeof raw === 'string' ? boundToolResult(raw) : raw;
   }
-  return `Error: ${result.error}`;
+  return boundToolResult(`Error: ${result.error}`);
 }
 
 /**

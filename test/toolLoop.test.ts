@@ -6,7 +6,7 @@ import {
   DEFAULT_ROUND_BOUND,
 } from '../src/orchestrator/toolLoop';
 import { ChatMessage, CompletionRequest, CompletionResult, ModelClient } from '../src/orchestrator/modelClient';
-import { ToolResult } from '../src/orchestrator/guard';
+import { ToolResult, TOOL_RESULT_CAP_BYTES } from '../src/orchestrator/guard';
 import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 
 /**
@@ -355,6 +355,76 @@ describe('runToolLoop', () => {
 
     const req = (client as ScriptedClient).requests[0];
     assert.strictEqual('sessionId' in req, false);
+  });
+
+  /** Runs one tool call returning `call`'s outcome; yields the tool record and the client. */
+  async function runOne(
+    call: () => Promise<ToolResult>,
+  ): Promise<{ content: string; client: ScriptedClient }> {
+    const client = new ScriptedClient([
+      toolCallCompletion('call_big', 'big', '{}'),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({ client, call });
+    await runToolLoop([{ role: 'user', content: 'go' }], deps);
+    const toolMsg = appended.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, 'expected a tool message to be appended');
+    return { content: toolMsg!.content, client };
+  }
+
+  const NOTE_RE = /\n\[truncated: (\d+) of (\d+) bytes\]$/;
+
+  it('caps an oversized string success result in history and the transcript', async () => {
+    const data = 'x'.repeat(TOOL_RESULT_CAP_BYTES + 1000);
+    const { content, client } = await runOne(async () => ({ ok: true, data }));
+
+    const note = `\n[truncated: ${TOOL_RESULT_CAP_BYTES} of ${TOOL_RESULT_CAP_BYTES + 1000} bytes]`;
+    assert.strictEqual(content, 'x'.repeat(TOOL_RESULT_CAP_BYTES) + note);
+    assert.ok(Buffer.byteLength(content) - Buffer.byteLength(note) <= TOOL_RESULT_CAP_BYTES);
+
+    const sent = client.requests[1].messages.find((m) => m.role === 'tool');
+    assert.ok(sent, 'expected the second request to carry the tool message');
+    assert.strictEqual(sent!.content, content);
+  });
+
+  it('caps an oversized JSON (non-string) success payload', async () => {
+    const data = { blob: 'y'.repeat(200_000) };
+    const { content } = await runOne(async () => ({ ok: true, data }));
+
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength(JSON.stringify(data)));
+    assert.strictEqual(Number(m![1]), TOOL_RESULT_CAP_BYTES);
+  });
+
+  it('caps an oversized error result and keeps the Error: prefix', async () => {
+    const error = 'e'.repeat(TOOL_RESULT_CAP_BYTES * 2);
+    const { content } = await runOne(async () => ({ ok: false, error }));
+
+    assert.match(content, /^Error: /);
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength('Error: ' + error));
+  });
+
+  it('caps an oversized thrown error message and keeps the Error: prefix', async () => {
+    const message = 't'.repeat(TOOL_RESULT_CAP_BYTES * 2);
+    const { content } = await runOne(async () => {
+      throw new Error(message);
+    });
+
+    assert.match(content, /^Error: /);
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength('Error: ' + message));
+  });
+
+  it('leaves a result at exactly the cap untouched', async () => {
+    const data = 'z'.repeat(TOOL_RESULT_CAP_BYTES);
+    const { content } = await runOne(async () => ({ ok: true, data }));
+
+    assert.strictEqual(content, data);
+    assert.ok(!content.includes('[truncated:'));
   });
 
   it('keeps history and the persisted transcript in sync as it appends', async () => {

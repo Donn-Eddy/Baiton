@@ -3,6 +3,8 @@ import * as fc from 'fast-check';
 import {
   GuardContext,
   READ_RESULT_CAP_BYTES,
+  TOOL_RESULT_CAP_BYTES,
+  boundToolResult,
 } from '../src/orchestrator/guard';
 
 /**
@@ -130,6 +132,47 @@ describe('Guard bounded read-tool output (property harness)', () => {
           isValidUtf8(text),
           'truncated text must be valid UTF-8 with no partial trailing sequence',
         );
+      }),
+      { numRuns: 200 },
+    );
+  });
+});
+
+describe('Guard bounded tool results (property harness)', () => {
+  const overToolCapArb = fc
+    .constantFrom('a', 'é', '€', '中', '😀')
+    .chain((unit) => {
+      const minRepeats = Math.ceil((TOOL_RESULT_CAP_BYTES + 4096) / utf8Len(unit));
+      return fc
+        .integer({ min: minRepeats, max: minRepeats + 2000 })
+        .map((n) => unit.repeat(n));
+    });
+
+  it('exposes a 64 KiB tool result cap', () => {
+    assert.strictEqual(TOOL_RESULT_CAP_BYTES, 64 * 1024);
+  });
+
+  it('bounds any tool result, keeping a valid prefix and a truncation note', () => {
+    fc.assert(
+      fc.property(fc.oneof(asciiArb, unicodeArb, overToolCapArb), (input) => {
+        const out = boundToolResult(input);
+        const orig = utf8Len(input);
+
+        if (orig <= TOOL_RESULT_CAP_BYTES) {
+          assert.strictEqual(out, input);
+          assert.ok(!out.includes('[truncated:'));
+          return;
+        }
+
+        const m = /^([\s\S]*)\n\[truncated: (\d+) of (\d+) bytes\]$/.exec(out);
+        assert.ok(m, 'expected a truncation note after the body');
+        const body = m![1];
+        assert.ok(utf8Len(body) <= TOOL_RESULT_CAP_BYTES);
+        assert.strictEqual(Number(m![2]), utf8Len(body));
+        assert.strictEqual(Number(m![3]), orig);
+        assert.ok(input.startsWith(body), 'body must be a prefix of the input');
+        assert.ok(isValidUtf8(body), 'body must be valid UTF-8');
+        assert.ok(utf8Len(body) > TOOL_RESULT_CAP_BYTES - 4, 'cut loses at most one code point');
       }),
       { numRuns: 200 },
     );
