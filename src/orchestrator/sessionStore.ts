@@ -21,6 +21,17 @@
  * with the file's mtime standing in for either timestamp when the file is
  * empty, unreadable, or carries no parseable record.
  *
+ * A session may also spawn *child* sessions (sub-agent chats). A child lives in
+ * a folder beside its parent's transcript, named after the parent:
+ *
+ * - children at `<scope dir>/<parentId>.children/<leaf>.jsonl`
+ * - grandchildren at `<scope dir>/<root>.children/<child>.children/<leaf>.jsonl`
+ *
+ * There is still no index file. A child's id encodes its ancestry
+ * (`<parentId>/<leaf>`), so `pathFor`, `meta` and `delete` work at any depth,
+ * and a child's title derives from its first `user` record (the task the
+ * parent gave it).
+ *
  * Persistence still begins at the first message: {@link SessionStore.create}
  * only allocates an id, and the file appears when {@link ChatTranscript} first
  * appends to it.
@@ -28,7 +39,7 @@
  * This module is a pure filesystem seam — no `vscode` import — so it is unit
  * testable against temp directories.
  */
-import { mkdir, readdir, readFile, rename, stat, unlink } from 'fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, unlink } from 'fs/promises';
 import * as path from 'path';
 import type { ConversationKind } from './systemPrompt';
 import { Clock, systemClock } from './seams';
@@ -39,6 +50,47 @@ import { Clock, systemClock } from './seams';
  */
 export type SessionScope = ConversationKind;
 
+/** Separates the segments of a nested (child) session id. */
+export const CHILD_ID_SEPARATOR = '/';
+
+/** Suffix of the folder holding a session's direct children. */
+export const CHILDREN_SUFFIX = '.children';
+
+/**
+ * The path segments of a session id (`<root>/<child>/<grandchild>`). Throws when
+ * a segment is empty, `.`, `..`, or contains a backslash, which guards against
+ * path traversal.
+ */
+export function sessionIdSegments(id: string): string[] {
+  const segments = id.split(CHILD_ID_SEPARATOR);
+  for (const seg of segments) {
+    if (seg === '' || seg === '.' || seg === '..' || seg.includes('\\')) {
+      throw new Error('invalid session id: ' + id);
+    }
+  }
+  return segments;
+}
+
+/** The parent session's id, or `undefined` for a top-level session. */
+export function parentIdOf(id: string): string | undefined {
+  const segments = sessionIdSegments(id);
+  return segments.length > 1 ? segments.slice(0, -1).join(CHILD_ID_SEPARATOR) : undefined;
+}
+
+/** Nesting depth of a session id: 0 for top-level, 1 for a child, and so on. */
+export function sessionDepth(id: string): number {
+  return sessionIdSegments(id).length - 1;
+}
+
+/** Newest first: descending `updatedAt`, ties broken by descending id. */
+function compareNewestFirst(a: SessionMeta, b: SessionMeta): number {
+  return a.updatedAt === b.updatedAt
+    ? b.id.localeCompare(a.id)
+    : a.updatedAt < b.updatedAt
+      ? 1
+      : -1;
+}
+
 /** The longest a derived session title may be, in characters. */
 export const TITLE_MAX_CHARS = 60;
 
@@ -47,8 +99,12 @@ export const DEFAULT_TITLE = 'New chat';
 
 /** One session's derived metadata. */
 export interface SessionMeta {
-  /** The session id, which is also its file's basename. */
+  /** The session id; for a child it is `<parentId>/<leaf>`. */
   id: string;
+  /** The parent session's id for a sub-agent chat; absent for a top-level session. */
+  parentId?: string;
+  /** Nesting depth: 0 for a top-level session, 1 for a child, 2 for a grandchild. */
+  depth: number;
   /** The derived title (never empty, at most {@link TITLE_MAX_CHARS} chars). */
   title: string;
   /** ISO-8601 timestamp of the session's first record (or the file's mtime). */
@@ -100,7 +156,18 @@ export class SessionStore {
 
   /** The transcript file path of one session in a scope. */
   public pathFor(scope: SessionScope, id: string): string {
-    return path.join(this.dirFor(scope), `${id}.jsonl`);
+    const segs = sessionIdSegments(id);
+    let dir = this.dirFor(scope);
+    for (const seg of segs.slice(0, -1)) {
+      dir = path.join(dir, seg + CHILDREN_SUFFIX);
+    }
+    return path.join(dir, `${segs[segs.length - 1]}.jsonl`);
+  }
+
+  /** The folder holding a session's direct children. */
+  public childrenDirFor(scope: SessionScope, id: string): string {
+    const segs = sessionIdSegments(id);
+    return path.join(path.dirname(this.pathFor(scope, id)), segs[segs.length - 1] + CHILDREN_SUFFIX);
   }
 
   /** The pre-sessions transcript path this scope is migrated from. */
@@ -116,7 +183,32 @@ export class SessionStore {
    * no sessions.
    */
   public async list(scope: SessionScope): Promise<SessionMeta[]> {
-    const dir = this.dirFor(scope);
+    return this.listIn(this.dirFor(scope), undefined);
+  }
+
+  /** A session's direct children, newest first; a missing folder lists as none. */
+  public async listChildren(scope: SessionScope, parentId: string): Promise<SessionMeta[]> {
+    return this.listIn(this.childrenDirFor(scope, parentId), parentId);
+  }
+
+  /**
+   * Every session in a scope as a flat depth-first pre-order walk: top-level
+   * sessions newest first, each followed by its descendants (children newest
+   * first). Children folders without a parent transcript are not listed.
+   */
+  public async listTree(scope: SessionScope): Promise<SessionMeta[]> {
+    const out: SessionMeta[] = [];
+    const walk = async (metas: SessionMeta[]): Promise<void> => {
+      for (const meta of metas) {
+        out.push(meta);
+        await walk(await this.listChildren(scope, meta.id));
+      }
+    };
+    await walk(await this.list(scope));
+    return out;
+  }
+
+  private async listIn(dir: string, idPrefix: string | undefined): Promise<SessionMeta[]> {
     let names: string[];
     try {
       names = await readdir(dir);
@@ -131,19 +223,14 @@ export class SessionStore {
       if (!name.endsWith('.jsonl')) {
         continue;
       }
-      const id = name.slice(0, -'.jsonl'.length);
-      if (id.length === 0) {
+      const leaf = name.slice(0, -'.jsonl'.length);
+      if (leaf.length === 0) {
         continue;
       }
+      const id = idPrefix === undefined ? leaf : `${idPrefix}${CHILD_ID_SEPARATOR}${leaf}`;
       metas.push(await this.metaFor(path.join(dir, name), id));
     }
-    metas.sort((a, b) =>
-      a.updatedAt === b.updatedAt
-        ? b.id.localeCompare(a.id)
-        : a.updatedAt < b.updatedAt
-          ? 1
-          : -1,
-    );
+    metas.sort(compareNewestFirst);
     return metas;
   }
 
@@ -166,12 +253,32 @@ export class SessionStore {
     return `${stamp}-${suffix}`;
   }
 
-  /** Ensure a scope's session folder exists, so a first append can create the file. */
-  public async ensureDir(scope: SessionScope): Promise<void> {
-    await mkdir(this.dirFor(scope), { recursive: true });
+  /**
+   * Allocate a child session id under `parentId` and create its `.children`
+   * folder. Like {@link create} it writes no transcript: persistence begins at
+   * the child's first append. The store does not enforce a sub-agent depth cap
+   * (the runner does); any depth is supported.
+   */
+  public async createChild(scope: SessionScope, parentId: string): Promise<string> {
+    sessionIdSegments(parentId);
+    const id = parentId + CHILD_ID_SEPARATOR + this.create(scope);
+    await this.ensureDir(scope, id);
+    return id;
   }
 
-  /** Delete one session's transcript. A session with no file yet deletes cleanly. */
+  /**
+   * Ensure a scope's session folder exists, so a first append can create the
+   * file. With an `id`, ensures the folder that session's transcript lives in.
+   */
+  public async ensureDir(scope: SessionScope, id?: string): Promise<void> {
+    const dir = id === undefined ? this.dirFor(scope) : path.dirname(this.pathFor(scope, id));
+    await mkdir(dir, { recursive: true });
+  }
+
+  /**
+   * Delete one session's transcript and, recursively, all its descendants. A
+   * session with no file or children yet deletes cleanly.
+   */
   public async delete(scope: SessionScope, id: string): Promise<void> {
     try {
       await unlink(this.pathFor(scope, id));
@@ -180,6 +287,7 @@ export class SessionStore {
         throw err;
       }
     }
+    await rm(this.childrenDirFor(scope, id), { recursive: true, force: true });
   }
 
   /** Read one session's derived metadata, or `undefined` when it has no file. */
@@ -240,12 +348,18 @@ export class SessionStore {
     const fallback = mtime ?? this.clock.now();
     const first = records[0];
     const last = records[records.length - 1];
-    return {
+    const meta: SessionMeta = {
       id,
       title: deriveTitle(records),
       createdAt: first?.ts ?? fallback,
       updatedAt: last?.ts ?? fallback,
+      depth: sessionDepth(id),
     };
+    const parentId = parentIdOf(id);
+    if (parentId !== undefined) {
+      meta.parentId = parentId;
+    }
+    return meta;
   }
 }
 

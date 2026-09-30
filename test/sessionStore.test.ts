@@ -254,6 +254,117 @@ describe('SessionStore', () => {
     });
   });
 
+  describe('child sessions', () => {
+    const rec = (ts: string, content = 'task') => [{ ts, role: 'user', content }];
+
+    it('pathFor nests children and leaves top-level paths unchanged', () => {
+      const { store, baitonDir, specsDir } = newStore();
+      assert.strictEqual(
+        store.pathFor(workspace, 'p/c'),
+        path.join(baitonDir, 'chat', 'p.children', 'c.jsonl'),
+      );
+      assert.strictEqual(
+        store.pathFor(spec, 'p/c/g'),
+        path.join(specsDir, 'my-spec', 'chat', 'p.children', 'c.children', 'g.jsonl'),
+      );
+      assert.strictEqual(store.pathFor(workspace, 'p'), path.join(baitonDir, 'chat', 'p.jsonl'));
+    });
+
+    it('pathFor throws for malformed ids', () => {
+      const { store } = newStore();
+      for (const bad of ['p//c', '../x', 'p/..', '', 'p/.', 'a\\b']) {
+        assert.throws(() => store.pathFor(workspace, bad), /invalid session id/);
+      }
+    });
+
+    it('createChild allocates a nested id and the children folder, but no transcript', async () => {
+      const { store } = newStore();
+      const id = await store.createChild(workspace, 'p');
+      assert.match(id, /^p\/\d{8}-\d{6}-[0-9a-z]{4}$/);
+      assert.strictEqual(existsSync(store.childrenDirFor(workspace, 'p')), true);
+      assert.strictEqual(existsSync(store.pathFor(workspace, id)), false);
+
+      const grand = await store.createChild(workspace, id);
+      assert.match(grand, /^p\/[^/]+\/[^/]+$/);
+      assert.strictEqual((await store.meta(workspace, grand)), undefined);
+      await assert.rejects(store.createChild(workspace, '../x'), /invalid session id/);
+    });
+
+    it('meta of a child carries parentId and depth; top-level has depth 0 and no parentId', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'p', rec('2026-09-01T10:00:00.000Z', 'parent'));
+      writeSession(store, workspace, 'p/c', rec('2026-09-01T11:00:00.000Z', 'do the child task'));
+
+      const child = await store.meta(workspace, 'p/c');
+      assert.strictEqual(child?.title, 'do the child task');
+      assert.strictEqual(child?.parentId, 'p');
+      assert.strictEqual(child?.depth, 1);
+
+      const top = await store.meta(workspace, 'p');
+      assert.strictEqual(top?.depth, 0);
+      assert.ok(top && !('parentId' in top));
+    });
+
+    it('list returns only top-level sessions when children exist', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'p', rec('2026-09-01T10:00:00.000Z'));
+      writeSession(store, workspace, 'p/c', rec('2026-09-01T11:00:00.000Z'));
+      assert.deepStrictEqual((await store.list(workspace)).map((m) => m.id), ['p']);
+    });
+
+    it('listChildren returns direct children newest first, excluding grandchildren', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'p', rec('2026-09-01T10:00:00.000Z'));
+      writeSession(store, workspace, 'p/a', rec('2026-09-02T10:00:00.000Z'));
+      writeSession(store, workspace, 'p/b', rec('2026-09-03T10:00:00.000Z'));
+      writeSession(store, workspace, 'p/a/g', rec('2026-09-04T10:00:00.000Z'));
+
+      assert.deepStrictEqual((await store.listChildren(workspace, 'p')).map((m) => m.id), ['p/b', 'p/a']);
+      assert.deepStrictEqual(await store.listChildren(workspace, 'p/b'), []);
+    });
+
+    it('listTree is depth-first pre-order with siblings newest first', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'A', rec('2026-09-10T10:00:00.000Z'));
+      writeSession(store, workspace, 'B', rec('2026-09-01T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A1', rec('2026-09-05T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A2', rec('2026-09-06T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A1/A1x', rec('2026-09-07T10:00:00.000Z'));
+
+      const tree = await store.listTree(workspace);
+      assert.deepStrictEqual(
+        tree.map((m) => m.id),
+        ['A', 'A/A2', 'A/A1', 'A/A1/A1x', 'B'],
+      );
+      assert.deepStrictEqual(tree.map((m) => m.depth), [0, 1, 1, 2, 0]);
+      assert.deepStrictEqual(tree.map((m) => m.parentId), [undefined, 'A', 'A', 'A/A1', undefined]);
+    });
+
+    it('delete cascades to descendants and leaves relatives alone', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'A', rec('2026-09-10T10:00:00.000Z'));
+      writeSession(store, workspace, 'B', rec('2026-09-01T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A1', rec('2026-09-05T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A2', rec('2026-09-06T10:00:00.000Z'));
+      writeSession(store, workspace, 'A/A1/g', rec('2026-09-07T10:00:00.000Z'));
+
+      await store.delete(workspace, 'A/A1');
+      assert.deepStrictEqual((await store.listTree(workspace)).map((m) => m.id), ['A', 'A/A2', 'B']);
+      await store.delete(workspace, 'A/nope/deeper');
+
+      await store.delete(workspace, 'A');
+      assert.strictEqual(existsSync(store.pathFor(workspace, 'A')), false);
+      assert.strictEqual(existsSync(store.childrenDirFor(workspace, 'A')), false);
+      assert.deepStrictEqual((await store.listTree(workspace)).map((m) => m.id), ['B']);
+    });
+
+    it('does not list an orphan children folder', async () => {
+      const { store } = newStore();
+      writeSession(store, workspace, 'X/c', rec('2026-09-01T10:00:00.000Z'));
+      assert.deepStrictEqual(await store.listTree(workspace), []);
+    });
+  });
+
   it('scopeId names the workspace scope and each spec by slug', () => {
     assert.strictEqual(scopeId(workspace), 'workspace');
     assert.strictEqual(scopeId(spec), 'my-spec');
