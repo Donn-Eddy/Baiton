@@ -37,7 +37,8 @@ export function isCatalogSourceId(value: unknown): value is CatalogSourceId {
  * or the feed provider id. `efforts` / `defaultEffort` are the per-model
  * reasoning levels (codex `supportedReasoningEfforts`). `custom: true` marks
  * an entry appended by {@link mergePreservingExisting} rather than returned
- * by the source.
+ * by the source. `contextWindow` / `maxOutput` are carried only from the
+ * models.dev feed; other sources leave them undefined.
  */
 export interface ModelEntry {
   /** The model id itself, exactly as written into configuration. */
@@ -50,6 +51,10 @@ export interface ModelEntry {
   readonly efforts?: readonly string[];
   /** This model's default reasoning level, when the source discloses it. */
   readonly defaultEffort?: string;
+  /** The model's total context window in tokens, when the source discloses it (models.dev `limit.context`). */
+  readonly contextWindow?: number;
+  /** The model's maximum output tokens, when the source discloses it (models.dev `limit.output`). */
+  readonly maxOutput?: number;
   /** True when this entry was appended from user configuration, not from the source. */
   readonly custom?: boolean;
 }
@@ -164,7 +169,7 @@ export function normalizeModelEntry(value: unknown): ModelEntry | undefined {
   if (id.length === 0) {
     return undefined;
   }
-  const entry: { id: string; label?: string; provider?: string; efforts?: readonly string[]; defaultEffort?: string; custom?: boolean } = { id };
+  const entry: { id: string; label?: string; provider?: string; efforts?: readonly string[]; defaultEffort?: string; contextWindow?: number; maxOutput?: number; custom?: boolean } = { id };
   const label = optionalString(raw['label']);
   if (label !== undefined) {
     entry.label = label;
@@ -181,10 +186,23 @@ export function normalizeModelEntry(value: unknown): ModelEntry | undefined {
   if (defaultEffort !== undefined) {
     entry.defaultEffort = defaultEffort;
   }
+  const contextWindow = optionalTokenCount(raw['contextWindow']);
+  if (contextWindow !== undefined) {
+    entry.contextWindow = contextWindow;
+  }
+  const maxOutput = optionalTokenCount(raw['maxOutput']);
+  if (maxOutput !== undefined) {
+    entry.maxOutput = maxOutput;
+  }
   if (raw['custom'] === true) {
     entry.custom = true;
   }
   return entry;
+}
+
+/** An unknown value as a positive finite integer token count, or undefined. */
+function optionalTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 /**

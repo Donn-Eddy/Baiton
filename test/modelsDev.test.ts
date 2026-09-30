@@ -7,9 +7,10 @@ import {
   MODELS_DEV_URL,
   ModelsDevFeed,
   fetchModelsDev,
+  feedModelLimitFields,
   parseModelsDevFeed,
 } from '../src/orchestrator/modelsDev';
-import type { FeedResponse } from '../src/orchestrator/modelsDev';
+import type { FeedModel, FeedResponse } from '../src/orchestrator/modelsDev';
 import { createApiLog } from '../src/orchestrator/apiLog';
 import type { ApiLog } from '../src/orchestrator/apiLog';
 
@@ -226,6 +227,39 @@ describe('orchestrator/modelsDev', () => {
         limits: { output: 100 },
         cost: { cacheWrite: 0 },
       });
+    });
+  });
+
+  describe('feedModelLimitFields', () => {
+    const base: FeedModel = { id: 'm', name: 'm', reasoning: false, toolCall: false, attachment: false };
+    const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+    it('maps both limits to contextWindow/maxOutput', () => {
+      assert.deepStrictEqual(feedModelLimitFields({ ...base, limits: { context: 200000, output: 64000 } }), {
+        contextWindow: 200000,
+        maxOutput: 64000,
+      });
+    });
+
+    it('omits absent keys', () => {
+      const onlyOutput = feedModelLimitFields({ ...base, limits: { output: 4096 } });
+      assert.deepStrictEqual(onlyOutput, { maxOutput: 4096 });
+      assert.strictEqual(has(onlyOutput, 'contextWindow'), false);
+      assert.deepStrictEqual(feedModelLimitFields(base), {});
+    });
+
+    it('rejects zero and fractional values', () => {
+      for (const context of [0, 1.5]) {
+        assert.strictEqual(has(feedModelLimitFields({ ...base, limits: { context } }), 'contextWindow'), false);
+      }
+    });
+
+    it('yields the fixture claude-opus-5-5 limits', () => {
+      const result = parseModelsDevFeed(JSON.parse(fixtureText));
+      assert.ok(result.ok);
+      const model = result.value.find((p) => p.id === 'anthropic')?.models.find((m) => m.id === 'claude-opus-5-5');
+      assert.ok(model);
+      assert.deepStrictEqual(feedModelLimitFields(model), { contextWindow: 200000, maxOutput: 64000 });
     });
   });
 

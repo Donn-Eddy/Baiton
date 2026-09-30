@@ -6,7 +6,7 @@ import {
   DEFAULT_ROUND_BOUND,
 } from '../src/orchestrator/toolLoop';
 import { ChatMessage, CompletionRequest, CompletionResult, ModelClient } from '../src/orchestrator/modelClient';
-import { ToolResult } from '../src/orchestrator/guard';
+import { ToolResult, TOOL_RESULT_CAP_BYTES } from '../src/orchestrator/guard';
 import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 
 /**
@@ -92,6 +92,7 @@ function makeDeps(
     roundBound: overrides.roundBound ?? DEFAULT_ROUND_BOUND,
     signal: overrides.signal ?? new AbortController().signal,
     ...(overrides.sessionId !== undefined ? { sessionId: overrides.sessionId } : {}),
+    ...(overrides.budget !== undefined ? { budget: overrides.budget } : {}),
   };
   return { deps, appended, calls };
 }
@@ -357,6 +358,76 @@ describe('runToolLoop', () => {
     assert.strictEqual('sessionId' in req, false);
   });
 
+  /** Runs one tool call returning `call`'s outcome; yields the tool record and the client. */
+  async function runOne(
+    call: () => Promise<ToolResult>,
+  ): Promise<{ content: string; client: ScriptedClient }> {
+    const client = new ScriptedClient([
+      toolCallCompletion('call_big', 'big', '{}'),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({ client, call });
+    await runToolLoop([{ role: 'user', content: 'go' }], deps);
+    const toolMsg = appended.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, 'expected a tool message to be appended');
+    return { content: toolMsg!.content, client };
+  }
+
+  const NOTE_RE = /\n\[truncated: (\d+) of (\d+) bytes\]$/;
+
+  it('caps an oversized string success result in history and the transcript', async () => {
+    const data = 'x'.repeat(TOOL_RESULT_CAP_BYTES + 1000);
+    const { content, client } = await runOne(async () => ({ ok: true, data }));
+
+    const note = `\n[truncated: ${TOOL_RESULT_CAP_BYTES} of ${TOOL_RESULT_CAP_BYTES + 1000} bytes]`;
+    assert.strictEqual(content, 'x'.repeat(TOOL_RESULT_CAP_BYTES) + note);
+    assert.ok(Buffer.byteLength(content) - Buffer.byteLength(note) <= TOOL_RESULT_CAP_BYTES);
+
+    const sent = client.requests[1].messages.find((m) => m.role === 'tool');
+    assert.ok(sent, 'expected the second request to carry the tool message');
+    assert.strictEqual(sent!.content, content);
+  });
+
+  it('caps an oversized JSON (non-string) success payload', async () => {
+    const data = { blob: 'y'.repeat(200_000) };
+    const { content } = await runOne(async () => ({ ok: true, data }));
+
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength(JSON.stringify(data)));
+    assert.strictEqual(Number(m![1]), TOOL_RESULT_CAP_BYTES);
+  });
+
+  it('caps an oversized error result and keeps the Error: prefix', async () => {
+    const error = 'e'.repeat(TOOL_RESULT_CAP_BYTES * 2);
+    const { content } = await runOne(async () => ({ ok: false, error }));
+
+    assert.match(content, /^Error: /);
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength('Error: ' + error));
+  });
+
+  it('caps an oversized thrown error message and keeps the Error: prefix', async () => {
+    const message = 't'.repeat(TOOL_RESULT_CAP_BYTES * 2);
+    const { content } = await runOne(async () => {
+      throw new Error(message);
+    });
+
+    assert.match(content, /^Error: /);
+    const m = NOTE_RE.exec(content);
+    assert.ok(m, 'expected a truncation note');
+    assert.strictEqual(Number(m![2]), Buffer.byteLength('Error: ' + message));
+  });
+
+  it('leaves a result at exactly the cap untouched', async () => {
+    const data = 'z'.repeat(TOOL_RESULT_CAP_BYTES);
+    const { content } = await runOne(async () => ({ ok: true, data }));
+
+    assert.strictEqual(content, data);
+    assert.ok(!content.includes('[truncated:'));
+  });
+
   it('keeps history and the persisted transcript in sync as it appends', async () => {
     const client = new ScriptedClient([
       toolCallCompletion('call_h', 'read_file', '{}'),
@@ -419,5 +490,186 @@ describe('resolveRoundBound', () => {
     assert.strictEqual(resolveRoundBound(1), 1);
     assert.strictEqual(resolveRoundBound(7), 7);
     assert.strictEqual(resolveRoundBound(100), 100);
+  });
+});
+
+describe('budget seam', () => {
+  it('sends prepare()\'s result while history and transcript keep the full messages', async () => {
+    const client = new ScriptedClient([
+      toolCallCompletion('c1', 'read_file', '{}'),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({
+      client,
+      call: async (): Promise<ToolResult> => ({ ok: true, data: 'full result' }),
+      budget: {
+        prepare: () => [{ role: 'user', content: 'trimmed' }],
+        observe: () => undefined,
+      },
+    });
+    const history: ChatMessage[] = [{ role: 'user', content: 'orig' }];
+    await runToolLoop(history, deps);
+
+    assert.deepStrictEqual(client.requests[0].messages, [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'trimmed' },
+    ]);
+    assert.strictEqual(history[0].content, 'orig');
+    assert.ok(history.some((m) => m.role === 'tool' && m.content === 'full result'));
+    assert.ok(appended.some((m) => m.role === 'tool' && m.content === 'full result'));
+  });
+
+  it('calls prepare once per round with the live history', async () => {
+    const client = new ScriptedClient([
+      toolCallCompletion('c1', 'read_file', '{}'),
+      finalCompletion('done'),
+    ]);
+    const lengths: number[] = [];
+    const { deps } = makeDeps({
+      client,
+      budget: {
+        prepare: (h) => {
+          lengths.push(h.length);
+          return [...h];
+        },
+        observe: () => undefined,
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.deepStrictEqual(lengths, [1, 3]);
+  });
+
+  it('observes each completion with what was sent', async () => {
+    const completion: CompletionResult = {
+      content: 'done',
+      tool_calls: [],
+      usage: { promptTokens: 7, completionTokens: 1, totalTokens: 8 },
+    } as CompletionResult;
+    const client = new ScriptedClient([completion]);
+    const seen: Array<{ sent: { messages: readonly ChatMessage[]; tools: unknown }; completion: CompletionResult }> = [];
+    const tools = [{ name: 't', description: 'd', parameters: {} }];
+    const { deps } = makeDeps({
+      client,
+      tools,
+      budget: {
+        prepare: (h) => [...h],
+        observe: (sent, c) => {
+          seen.push({ sent, completion: c });
+        },
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(seen.length, 1);
+    assert.deepStrictEqual(seen[0].sent.messages, client.requests[0].messages);
+    assert.strictEqual(seen[0].sent.tools, deps.tools);
+    assert.strictEqual(seen[0].completion, completion);
+  });
+
+  it('does not observe when the completion rejects on abort', async () => {
+    const controller = new AbortController();
+    const client: ModelClient = {
+      complete: async (): Promise<CompletionResult> => {
+        controller.abort();
+        throw new Error('aborted');
+      },
+    };
+    let observed = 0;
+    const { deps, appended } = makeDeps({
+      client,
+      signal: controller.signal,
+      budget: { prepare: (h) => [...h], observe: () => { observed += 1; } },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(observed, 0);
+    assert.deepStrictEqual(appended, [{ role: 'assistant', content: STOPPED_NOTICE }]);
+  });
+
+  it('sends [system, ...history] when no budget is given', async () => {
+    const client = new ScriptedClient([finalCompletion('ok')]);
+    const { deps } = makeDeps({ client });
+    const history: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+    await runToolLoop(history, deps);
+    assert.deepStrictEqual(client.requests[0].messages, [{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }]);
+  });
+
+  const NOTICE = "The conversation exceeds the model's context window (~1234 of 1000 tokens); compact it or start a new chat.";
+
+  it('stops with the sized notice and never calls the endpoint on overflow', async () => {
+    const client = new ScriptedClient([]);
+    let observed = 0;
+    const { deps, appended } = makeDeps({
+      client,
+      budget: {
+        prepare: (h) => [...h],
+        observe: () => { observed += 1; },
+        preflight: async () => ({ kind: 'overflow', estimate: 1234, window: 1000 }),
+      },
+    });
+    const history: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+    await runToolLoop(history, deps);
+    assert.strictEqual(client.requests.length, 0);
+    assert.strictEqual(observed, 0);
+    assert.deepStrictEqual(appended, [{ role: 'assistant', content: NOTICE }]);
+    assert.deepStrictEqual(history[history.length - 1], { role: 'assistant', content: NOTICE });
+  });
+
+  it('sends preflight messages and adopts its history', async () => {
+    const client = new ScriptedClient([finalCompletion('done')]);
+    const summary: ChatMessage = { role: 'assistant', content: '[context summary] s' };
+    const sent: ChatMessage[] = [{ role: 'system', content: 'SYS' }, summary, { role: 'user', content: 'q' }];
+    const { deps } = makeDeps({
+      client,
+      budget: {
+        prepare: (h) => [...h],
+        observe: () => undefined,
+        preflight: async () => ({ kind: 'send', messages: sent, history: [summary, { role: 'user', content: 'q' }] }),
+      },
+    });
+    const history: ChatMessage[] = [{ role: 'user', content: 'old' }, { role: 'user', content: 'q' }];
+    await runToolLoop(history, deps);
+    assert.deepStrictEqual(client.requests[0].messages, sent);
+    assert.strictEqual(history[0].content, '[context summary] s');
+    assert.strictEqual(history[history.length - 1].content, 'done');
+  });
+
+  it('preflight sees the prepared request each round', async () => {
+    const client = new ScriptedClient([toolCallCompletion('c1', 'read_file', '{}'), finalCompletion('done')]);
+    const seen: ChatMessage[][] = [];
+    const { deps } = makeDeps({
+      client,
+      budget: {
+        prepare: (h) => h.slice(-1),
+        observe: () => undefined,
+        preflight: async (req) => {
+          seen.push([...req.messages]);
+          return { kind: 'send', messages: req.messages };
+        },
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'a' }, { role: 'user', content: 'b' }], deps);
+    assert.deepStrictEqual(seen[0], [{ role: 'system', content: 'SYS' }, { role: 'user', content: 'b' }]);
+    assert.strictEqual(seen.length, 2);
+    assert.strictEqual(seen[1][0].content, 'SYS');
+    assert.strictEqual(seen[1].length, 2);
+  });
+
+  it('abort during preflight appends the stopped notice', async () => {
+    const controller = new AbortController();
+    const client = new ScriptedClient([finalCompletion('never')]);
+    const { deps, appended } = makeDeps({
+      client,
+      signal: controller.signal,
+      budget: {
+        prepare: (h) => [...h],
+        observe: () => undefined,
+        preflight: async (req) => {
+          controller.abort();
+          return { kind: 'send', messages: req.messages };
+        },
+      },
+    });
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(client.requests.length, 0);
+    assert.deepStrictEqual(appended, [{ role: 'assistant', content: STOPPED_NOTICE }]);
   });
 });

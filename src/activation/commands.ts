@@ -24,6 +24,8 @@
  *     {@link ChatController} runs the real host-side tool loop against the model
  *     client and the guarded registry (Req 1.3, 9.1, 13). `baiton.chat` is kept
  *     as an alias of the new Open Chat command.
+ *   - `baiton.compactContext` — trim-then-summarise the chat conversation in
+ *     view; refused while busy.
  *   - `baiton.setProviderApiKey` — set or clear one provider's API key in
  *     SecretStorage (pre-selecting the provider named by its argument, or
  *     picking through a quick-pick); the Chat view's inline "Set API key…"
@@ -163,7 +165,9 @@ import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEnd
 import { ProviderRouter } from './providerRouter';
 import type { ProviderSettings } from './providerRouter';
 import { findProviderInfo, isProviderId, providerCatalog } from '../orchestrator/providers';
-import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
+import type { ModelSelection, ProviderId, ProviderInfo } from '../orchestrator/providers';
+import type { ModelEntry } from '../orchestrator/modelCatalog';
+import { resolveContextWindow } from '../orchestrator/contextBudget';
 import type { FixAction } from '../orchestrator/webviewProtocol';
 import { revealConfigPanel } from './openConfigPanelView';
 // The window's model catalog seams. This closes an `extension -> activation ->
@@ -208,6 +212,7 @@ export const COMMANDS = {
   setProviderEndpoint: 'baiton.setProviderEndpoint',
   openConfigPanel: 'baiton.openConfigPanel',
   refreshModels: 'baiton.refreshModels',
+  compactContext: 'baiton.compactContext',
   runsCancel: 'baiton.runs.cancel',
   runsViewDiff: 'baiton.runs.viewDiff',
   runsMerge: 'baiton.runs.merge',
@@ -609,6 +614,7 @@ export function registerCommands(
     getModel: () => orchCfg().get<string>('orchestrator.model') || undefined,
     isStreaming: () => orchCfg().get<boolean>('orchestrator.streaming') ?? true,
     getMaxTokens: () => orchCfg().get('orchestrator.maxTokens'),
+    isUsageInStream: () => orchCfg().get<boolean>('orchestrator.usageInStream') ?? true,
   };
   const router = new ProviderRouter({
     secrets: context.secrets,
@@ -848,6 +854,12 @@ export function registerCommands(
     baitonDir,
     specsDir,
     roundBound: () => readRoundBound(),
+    contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
+    contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
+    contextWindow: () =>
+      resolveContextWindow(selectedCatalogEntry(router.getSelection()), orchCfg().get('orchestrator.contextWindow')),
+    maxTokens: () => orchCfg().get('orchestrator.maxTokens'),
+    maxOutput: () => selectedCatalogEntry(router.getSelection())?.maxOutput,
     config: readOrchestratorConfig(),
     providers: router,
     triggerFix: (action, provider) =>
@@ -930,6 +942,7 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(COMMANDS.chat, () => openChat()),
     vscode.commands.registerCommand(COMMANDS.openChat, () => openChat()),
+    vscode.commands.registerCommand(COMMANDS.compactContext, () => chatController.compactContext()),
     // A catalog member (builtin or feed-derived) pre-selects the provider; an
     // arbitrary string must never become a SecretStorage slot, so membership —
     // not mere string-ness — is the gate, with builtin ids as the offline
@@ -2037,4 +2050,16 @@ function modelForRole(config: Config, role: Role): { model: string; effort?: str
  */
 function adapterForRole(config: Config, adapters: AdapterRegistry, role: Role): Adapter | undefined {
   return adapters.get(config.roles[role].agent);
+}
+
+/** The models.dev catalog entry for the active selection (provider preferred, else id only). */
+function selectedCatalogEntry(selection: ModelSelection | undefined): ModelEntry | undefined {
+  if (selection === undefined) {
+    return undefined;
+  }
+  const models = getModelCatalogStore()?.get('models.dev')?.models ?? [];
+  return (
+    models.find((m) => m.id === selection.model && m.provider === selection.provider) ??
+    models.find((m) => m.id === selection.model)
+  );
 }

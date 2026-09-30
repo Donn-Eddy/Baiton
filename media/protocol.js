@@ -144,6 +144,10 @@
         return Object.assign({}, state, { mode: msg.mode });
       case 'setRunActive':
         return Object.assign({}, state, { runActive: msg.active });
+      case 'setContextUsage':
+        return Object.assign({}, state, {
+          context: { loaded: msg.loaded, window: msg.window, source: msg.source },
+        });
       case 'setConversations':
         return Object.assign({}, state, { conversations: msg.items.slice() });
       case 'setActive':

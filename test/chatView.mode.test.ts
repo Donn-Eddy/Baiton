@@ -303,6 +303,9 @@ const ELEMENT_IDS: Array<[string, string]> = [
   ['model-select', 'select'],
   ['model-stale', 'span'],
   ['model-set-key', 'button'],
+  ['context-bar', 'div'],
+  ['context-meter', 'span'],
+  ['compact-context', 'button'],
 ];
 
 interface ChatView {
@@ -523,5 +526,74 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     view.send({ type: 'setMode', mode: 'not-a-mode' } as unknown as HostToWebview);
     assert.strictEqual(modes.value, 'spec');
     assert.strictEqual(modes.options.length, 6);
+  });
+});
+
+describe('chat view context meter (context-budget T07)', () => {
+  const usage = (loaded: number, window: number | null, source: 'usage' | 'estimate' = 'usage'): HostToWebview => ({
+    type: 'setContextUsage',
+    loaded,
+    window,
+    source,
+  });
+
+  it('seed paint hides the meter', () => {
+    const view = loadChatView();
+    assert.notStrictEqual(view.ids['context-bar'].getAttribute('hidden'), null);
+    assert.strictEqual(view.ids['context-meter'].textContent, '');
+  });
+
+  it('renders loaded / window · source', () => {
+    const view = loadChatView();
+    view.send(usage(256000, 1000000));
+    assert.strictEqual(view.ids['context-meter'].textContent, '~256K / 1M · usage');
+    assert.strictEqual(view.ids['context-bar'].getAttribute('hidden'), null);
+  });
+
+  it('renders window unknown', () => {
+    const view = loadChatView();
+    view.send(usage(256000, null, 'estimate'));
+    assert.strictEqual(view.ids['context-meter'].textContent, '~256K · window unknown');
+  });
+
+  it('formats small and fractional-million values', () => {
+    const view = loadChatView();
+    view.send(usage(900, 1500000, 'estimate'));
+    assert.strictEqual(view.ids['context-meter'].textContent, '~900 / 1.5M · estimate');
+  });
+
+  it('warns at 80% of the window', () => {
+    const view = loadChatView();
+    view.send(usage(850000, 1000000));
+    assert.strictEqual(view.ids['context-meter'].classList.contains('warn'), true);
+    view.send(usage(100000, 1000000));
+    assert.strictEqual(view.ids['context-meter'].classList.contains('warn'), false);
+  });
+
+  it('Compact posts compactContext exactly once when idle with records', () => {
+    const view = loadChatView();
+    view.send({ type: 'renderConversation', records: [{ role: 'user', content: 'hi' }] });
+    const btn = view.ids['compact-context'];
+    assert.strictEqual(btn.disabled, false);
+    btn.fire('click', {});
+    assert.deepStrictEqual(view.posted.map(plainClone), [{ type: 'compactContext' }]);
+  });
+
+  it('Compact is disabled and posts nothing while busy', () => {
+    const view = loadChatView();
+    view.send({ type: 'renderConversation', records: [{ role: 'user', content: 'hi' }] });
+    view.send({ type: 'setBusy', busy: true });
+    const btn = view.ids['compact-context'];
+    assert.strictEqual(btn.disabled, true);
+    btn.fire('click', {});
+    assert.strictEqual(view.posted.length, 0);
+    view.send({ type: 'setBusy', busy: false });
+    assert.strictEqual(btn.disabled, false);
+  });
+
+  it('Compact is disabled on an empty conversation', () => {
+    const view = loadChatView();
+    view.send({ type: 'renderConversation', records: [] });
+    assert.strictEqual(view.ids['compact-context'].disabled, true);
   });
 });

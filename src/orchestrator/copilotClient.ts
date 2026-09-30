@@ -337,6 +337,7 @@ export class CopilotModelClient implements ModelClient {
 
     // `req.sessionId` is unused here: Copilot is in-process, so there are no
     // headers for a provider to derive a session id from.
+    // vscode.lm reports no token usage, so `usage` is left unset and the tracker falls back to its estimate.
     return { content: sawText ? content : undefined, tool_calls: toolCalls };
   }
 }

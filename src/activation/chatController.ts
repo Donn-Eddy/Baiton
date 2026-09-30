@@ -60,7 +60,13 @@
  *  - mirror spec-less run activity to the view (`setRunActive`), record a
  *    finished run's outcome as a system note on the Workspace_Conversation, and
  *    offer an Investigate run's finding as a promote card whose Bug/Quick choice
- *    raises the ordinary run confirm card before anything is dispatched.
+ *    raises the ordinary run confirm card before anything is dispatched;
+ *  - after trimming, summarise the messages older than the last two turns at
+ *    `contextSummarizeAt` into a compaction record; the view keeps rendering
+ *    the full transcript;
+ *  - post the context meter (`setContextUsage`) after every completion,
+ *    compaction and render; compact on demand (`compactContext` /
+ *    `baiton.compactContext`), refused while busy.
  */
 import * as path from 'path';
 import { mkdir, readFile } from 'fs/promises';
@@ -71,6 +77,8 @@ import {
   askCommandText,
   askFromPermission,
   buildSystemPrompt,
+  compactionCut,
+  compactionTranscriptRecord,
   defaultSummary,
   escalatedInterventionView,
   interventionTranscriptRecord,
@@ -84,6 +92,7 @@ import {
   resolveRoundBound,
   runToolLoop,
   settledInterventionView,
+  toHistory,
   toRenderRecords,
   toolUpdate,
 } from '../orchestrator';
@@ -127,6 +136,11 @@ import type {
   WebviewToHost,
 } from '../orchestrator';
 import { ChatTranscript, scopeId } from '../orchestrator';
+import { ContextTracker, estimateMessages, estimateTokens, fitToWindow, resolveOutputReserve } from '../orchestrator/contextBudget';
+import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from '../orchestrator/contextTrim';
+import { CONTEXT_SUMMARY_PREFIX } from '../orchestrator/transcriptReader';
+import type { CompactionMarker } from '../orchestrator/chatTranscript';
+import type { ContextBudget } from '../orchestrator/toolLoop';
 import { listSpecs } from './specLister';
 
 /** The conversation-selector id of the Workspace_Conversation. */
@@ -134,6 +148,68 @@ export const WORKSPACE_CONVERSATION_ID = 'workspace';
 
 /** The maximum input length a send is allowed to carry (Req 14.4, 14.5). */
 export const MAX_INPUT_CHARS = 100_000;
+
+/** Default fraction of the context window at which the chat summarises older turns. */
+export const DEFAULT_CONTEXT_SUMMARIZE_AT = 0.8;
+
+/** How many trailing user turns stay verbatim when summarising. */
+export const SUMMARY_KEEP_TURNS = 2;
+
+/** Byte caps applied to a tool result / any other message in the summary request. */
+export const SUMMARY_TOOL_RESULT_BYTES = 2048;
+export const SUMMARY_MESSAGE_BYTES = 8192;
+
+/** A finite `contextSummarizeAt` in (0, 1], else the default. */
+export function resolveContextSummarizeAt(configured: unknown): number {
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 && configured <= 1
+    ? configured
+    : DEFAULT_CONTEXT_SUMMARIZE_AT;
+}
+
+/** The system prompt of the text-only summarising completion. */
+export const SUMMARY_SYSTEM_PROMPT =
+  'You compact a coding-assistant conversation so it can continue with less context. Summarise the conversation you are given under exactly these headings: Goals, Decisions taken, Files touched, Open questions. Keep file paths, identifiers, commands and decisions verbatim; be concise; omit pleasantries. Reply with the summary only.';
+
+/** Clip `text` to `max` bytes on a UTF-8 boundary, marking the cut. */
+function clipBytes(text: string, max: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= max) {
+    return text;
+  }
+  const clipped = buf.subarray(0, max).toString('utf8').replace(/\uFFFD$/, '');
+  return `${clipped} …[clipped]`;
+}
+
+/**
+ * Flatten `older` into one user message for the summarising completion: no
+ * tool_calls / tool roles, so strict endpoints never see unpaired tool
+ * messages. Oldest blocks are dropped when the estimate exceeds `maxTokens`.
+ */
+export function summaryRequestMessages(older: readonly ChatMessage[], maxTokens: number): ChatMessage[] {
+  const blocks: string[] = [];
+  for (const m of older) {
+    if (m.role === 'tool') {
+      blocks.push(`tool result (${m.tool_call_id ?? ''}):\n${clipBytes(m.content, SUMMARY_TOOL_RESULT_BYTES)}`);
+      continue;
+    }
+    blocks.push(`${m.role}:\n${clipBytes(m.content, SUMMARY_MESSAGE_BYTES)}`);
+    for (const call of m.tool_calls ?? []) {
+      blocks.push(`assistant called ${call.name}(${clipBytes(call.arguments, 512)})`);
+    }
+  }
+  let joined = blocks.join('\n\n');
+  if (estimateTokens(joined) > maxTokens) {
+    let start = 0;
+    while (start < blocks.length - 1 && estimateTokens(`[earlier messages omitted]\n\n${blocks.slice(start).join('\n\n')}`) > maxTokens) {
+      start++;
+    }
+    joined = `[earlier messages omitted]\n\n${blocks.slice(start).join('\n\n')}`;
+  }
+  return [
+    { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+    { role: 'user', content: `Conversation to summarise:\n\n${joined}` },
+  ];
+}
 
 /** The reason every still-pending ask is declined with when the user stops a run. */
 export const STOP_DECLINE_REASON = 'the run was stopped';
@@ -231,6 +307,19 @@ export interface ChatControllerDeps {
   specsDir: string;
   /** Reads the configured Round_Bound; resolved through {@link resolveRoundBound}. */
   roundBound(): unknown;
+  /**
+   * The selected model's context window in tokens (already resolved through
+   * `resolveContextWindow`), or undefined when unknown. Absent → unknown.
+   */
+  contextWindow?(): number | undefined;
+  /** The raw `baiton.orchestrator.maxTokens` value; with maxOutput it sizes the pre-flight output reserve. */
+  maxTokens?(): unknown;
+  /** The selected model's catalog `maxOutput`, or undefined. */
+  maxOutput?(): number | undefined;
+  /** The raw `baiton.orchestrator.contextTrimAt` value, resolved through `resolveContextTrimAt`. Absent → 0.5. */
+  contextTrimAt?(): unknown;
+  /** The raw `baiton.orchestrator.contextSummarizeAt` value, resolved through `resolveContextSummarizeAt`. Absent → 0.8. */
+  contextSummarizeAt?(): unknown;
   /** Reads the configured endpoint/model for the empty state (Req 13.5). */
   config: OrchestratorConfig;
   /** Invoked on an inline-error fix action (Req 13.4). */
@@ -387,6 +476,9 @@ export class ChatController {
 
   /** `<scopeKey>/<sessionId>` of the session a run is in flight on, if any. */
   private runningKey: string | undefined;
+
+  /** One context tracker per conversation, keyed `<scopeKey>/<sessionId>`. */
+  private readonly trackers = new Map<string, ContextTracker>();
 
   /** The pending-ask registry every inline card settles through. */
   private readonly asks: PendingAskRegistry;
@@ -637,6 +729,9 @@ export class ChatController {
         return;
       case 'setMode':
         await this.onSetMode(msg.mode);
+        return;
+      case 'compactContext':
+        await this.compactContext();
         return;
     }
   }
@@ -1033,7 +1128,9 @@ export class ChatController {
       this.activeSessions.get(scopeId(scope)) ?? this.newSessionId(scope);
     await this.setActiveSession(scope, sessionId);
     const transcript = this.transcriptFor(scope, sessionId);
-    const history = await this.loadHistory(transcript.path);
+    const records = await readTranscript(transcript.path);
+    let history = toHistory(records);
+    const autoApprovedLines = autoApprovedInterventionLines(records);
 
     // Append and render the user's message before the loop runs (Req 14.4).
     const userRecord: Omit<TranscriptRecord, 'ts'> = { role: 'user', content: text };
@@ -1046,12 +1143,22 @@ export class ChatController {
     // live; the whole conversation is re-rendered from the persisted transcript
     // once the loop ends so the view matches what was recorded (Req 8.6).
     this.setBusy(true);
-    this.runningKey = `${scopeId(scope)}/${sessionId}`;
+    const key = `${scopeId(scope)}/${sessionId}`;
+    this.runningKey = key;
+    const tools = this.deps.toolsFor(phase);
     this.abort = new AbortController();
     try {
+      if (this.shouldSummarize(history, tools, await this.buildPrompt(slug, mode), autoApprovedLines)) {
+        const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
+        if (compacted !== undefined) {
+          history = compacted;
+          await this.seedContextEstimate(key, slug, history);
+          this.postContextUsage(key);
+        }
+      }
       await runToolLoop(history, {
         client: this.deps.client,
-        tools: this.deps.toolsFor(phase),
+        tools,
         call: (name, args, callId, signal) =>
           this.callTool(name, args, callId, signal, phase),
         systemPrompt: () => this.buildPrompt(slug, mode),
@@ -1063,6 +1170,7 @@ export class ChatController {
         signal: this.abort.signal,
         onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
         sessionId,
+        budget: this.contextBudget(key, tools, autoApprovedLines, transcript, sessionId),
       });
       await this.renderConversation(transcript.path);
     } catch (err) {
@@ -1157,10 +1265,28 @@ export class ChatController {
     if (active === undefined) {
       // A fresh chat with no transcript yet: show the empty state.
       await this.renderConversation(undefined);
+      const window = this.deps.contextWindow?.();
+      this.deps.webview.post({
+        type: 'setContextUsage',
+        loaded: 0,
+        window: window !== undefined && Number.isInteger(window) && window > 0 ? window : null,
+        source: 'estimate',
+      });
       this.repostPendingCards(scopeId(scope));
       return;
     }
     await this.renderConversation(this.sessions.pathFor(scope, active));
+    const viewKey = `${scopeId(scope)}/${active}`;
+    if (!this.trackers.has(viewKey)) {
+      // Not measured in this window yet (e.g. after a reload): estimate it.
+      try {
+        const history = toHistory(await readTranscript(this.sessions.pathFor(scope, active)));
+        await this.seedContextEstimate(viewKey, this.activeSpec, history);
+      } catch (err) {
+        this.deps.log(`Baiton chat: could not estimate context: ${describe(err)}`);
+      }
+    }
+    this.postContextUsage(viewKey);
     this.repostPendingCards(scopeId(scope));
   }
 
@@ -1304,10 +1430,227 @@ export class ChatController {
     this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(message) });
   }
 
-  /** Read a conversation's persisted history as tool-loop {@link ChatMessage}s. */
-  private async loadHistory(file: string): Promise<ChatMessage[]> {
-    const records = await readTranscript(file);
-    return records.map(toChatMessage);
+  /** The key of the session in view, or undefined when none is active. */
+  private viewKey(): string | undefined {
+    const scope = this.activeScope();
+    const id = this.activeSessions.get(scopeId(scope));
+    return id === undefined ? undefined : `${scopeId(scope)}/${id}`;
+  }
+
+  /** Post the tracker's reading, only when `key` is the conversation in view. */
+  private postContextUsage(key: string): void {
+    if (key !== this.viewKey()) {
+      return;
+    }
+    const s = this.trackerFor(key).status();
+    this.deps.webview.post({
+      type: 'setContextUsage',
+      loaded: s.loaded,
+      window: s.window ?? null,
+      source: s.source,
+    });
+  }
+
+  /** Record a local estimate of what the next request would carry on the tracker. */
+  private async seedContextEstimate(
+    key: string,
+    slug: string | undefined,
+    history: readonly ChatMessage[],
+  ): Promise<void> {
+    const tools = this.deps.toolsFor(await this.phaseForConversation(slug));
+    const prompt = await this.buildPrompt(slug, this.effectiveMode());
+    this.trackerFor(key).record({ messages: [{ role: 'system', content: prompt }, ...history], tools }, {});
+  }
+
+  /**
+   * Trim-then-summarise the conversation in view on demand (the Compact button
+   * and `baiton.compactContext`). Refused while busy; the transcript keeps
+   * every record. Trim is round-local (it only shapes one request's payload and
+   * is re-applied by the loop's budget seam on every round), and the summary
+   * replaces every turn older than the last two — exactly the turns trim would
+   * stub — so the 'trim' here is realised by the next send's budget over the
+   * compacted history. Runs whether or not the window is known.
+   */
+  public async compactContext(): Promise<void> {
+    if (this.busy) {
+      this.deps.webview.post({ type: 'showError', message: 'Wait for the current run to finish before compacting.' });
+      return;
+    }
+    const slug = this.activeSpec;
+    const scope = this.activeScope();
+    const sessionId = this.activeSessions.get(scopeId(scope));
+    if (sessionId === undefined || (await this.sessions.meta(scope, sessionId)) === undefined) {
+      this.deps.webview.post({ type: 'showError', message: 'There is nothing to compact in this conversation yet.' });
+      return;
+    }
+    const transcript = this.transcriptFor(scope, sessionId);
+    const records = await readTranscript(transcript.path);
+    if (compactionCut(records, SUMMARY_KEEP_TURNS) === undefined) {
+      this.deps.webview.post({
+        type: 'showError',
+        message: `Nothing to compact: only the last ${SUMMARY_KEEP_TURNS} turns are in the conversation.`,
+      });
+      return;
+    }
+    const key = `${scopeId(scope)}/${sessionId}`;
+    this.setBusy(true);
+    this.runningKey = key;
+    this.abort = new AbortController();
+    try {
+      const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
+      const history = compacted ?? toHistory(await readTranscript(transcript.path));
+      await this.seedContextEstimate(key, slug, history);
+      this.postContextUsage(key);
+    } catch (err) {
+      this.surfaceError(err);
+    } finally {
+      this.abort = undefined;
+      this.runningKey = undefined;
+      this.setBusy(false);
+    }
+  }
+
+  /** The conversation's context tracker, created on first use. */
+  private trackerFor(key: string): ContextTracker {
+    let tracker = this.trackers.get(key);
+    if (tracker === undefined) {
+      tracker = new ContextTracker(() => this.deps.contextWindow?.());
+      this.trackers.set(key, tracker);
+    }
+    return tracker;
+  }
+
+  /**
+   * The per-send context budget: trims the round's payload once the local
+   * estimate passes `contextTrimAt` of a known window, and records each
+   * completion on the conversation's tracker. Unknown window → sends everything.
+   * Its pre-flight then re-checks the payload against window minus the output
+   * reserve (trim, summarise, re-estimate) and stops with a sized notice on overflow.
+   */
+  private contextBudget(
+    key: string,
+    tools: ToolSpec[],
+    autoApprovedLines: ReadonlySet<string>,
+    transcript: ChatTranscript,
+    sessionId: string,
+  ): ContextBudget {
+    const tracker = this.trackerFor(key);
+    let systemTokens = 0; // last system prompt's estimate, learned in observe
+    const estimate = (h: readonly ChatMessage[]): number => systemTokens + estimateMessages(h, tools);
+    return {
+      prepare: (history) => {
+        const window = this.deps.contextWindow?.();
+        if (window === undefined || !Number.isInteger(window) || window <= 0) {
+          return [...history];
+        }
+        const trimAt = resolveContextTrimAt(this.deps.contextTrimAt?.());
+        if (estimate(history) / window <= trimAt) {
+          return [...history];
+        }
+        return trimHistory(history, { targetTokens: Math.floor(window * trimAt), estimate, autoApprovedLines });
+      },
+      observe: (sent, completion) => {
+        const system = sent.messages[0];
+        systemTokens = system?.role === 'system' ? estimateMessages([system]) : 0;
+        tracker.record(sent, completion);
+        this.postContextUsage(key);
+      },
+      preflight: (req) =>
+        fitToWindow({
+          messages: req.messages,
+          history: req.history,
+          tools: req.tools,
+          window: this.deps.contextWindow?.(),
+          reserve: resolveOutputReserve(this.deps.maxTokens?.(), this.deps.maxOutput?.()),
+          trim: (h, targetTokens, estimate) => trimHistory(h, { targetTokens, estimate, autoApprovedLines }),
+          summarise: async () => {
+            const compacted = await this.compact(transcript, key, req.signal, sessionId);
+            if (compacted !== undefined) {
+              this.postContextUsage(key);
+            }
+            return compacted;
+          },
+        }),
+    };
+  }
+
+  /** Whether the history, after trimming, still passes `contextSummarizeAt` of a known window. */
+  private shouldSummarize(
+    history: readonly ChatMessage[],
+    tools: ToolSpec[],
+    systemPrompt: string,
+    autoApprovedLines: ReadonlySet<string>,
+  ): boolean {
+    const window = this.deps.contextWindow?.();
+    if (window === undefined || !Number.isInteger(window) || window <= 0) {
+      return false;
+    }
+    const estimate = (h: readonly ChatMessage[]): number =>
+      estimateMessages([{ role: 'system', content: systemPrompt }]) + estimateMessages(h, tools);
+    const trimAt = resolveContextTrimAt(this.deps.contextTrimAt?.());
+    const sendable =
+      estimate(history) / window > trimAt
+        ? trimHistory(history, { targetTokens: Math.floor(window * trimAt), estimate, autoApprovedLines })
+        : history;
+    return estimate(sendable) / window > resolveContextSummarizeAt(this.deps.contextSummarizeAt?.());
+  }
+
+  /**
+   * Summarise every message older than the last {@link SUMMARY_KEEP_TURNS}
+   * turns with one text-only completion and append the compaction record.
+   * Returns the new history, or `undefined` when nothing was compacted (a
+   * failure is posted inline and never thrown).
+   */
+  private async compact(
+    transcript: ChatTranscript,
+    key: string,
+    signal: AbortSignal,
+    sessionId: string,
+  ): Promise<ChatMessage[] | undefined> {
+    const records = await readTranscript(transcript.path);
+    const cut = compactionCut(records, SUMMARY_KEEP_TURNS);
+    if (cut === undefined) {
+      return undefined;
+    }
+    const older = toHistory(records.slice(0, cut));
+    if (older.length === 0 || (older.length === 1 && older[0].content.startsWith(CONTEXT_SUMMARY_PREFIX))) {
+      return undefined;
+    }
+    const window = this.deps.contextWindow?.();
+    const budget = window !== undefined ? Math.floor(window / 2) : 32_000;
+    const messages = summaryRequestMessages(older, budget);
+    let summary: string;
+    try {
+      const result = await this.deps.client.complete({ messages, signal, sessionId });
+      summary = (result.content ?? '').trim();
+      if (summary.length === 0) {
+        throw new Error('the model returned an empty summary');
+      }
+    } catch (err) {
+      if (signal.aborted) {
+        return undefined;
+      }
+      this.deps.log(`Baiton chat: context summary failed: ${describe(err)}`);
+      if (err instanceof UnreachableEndpointError) {
+        this.deps.log(err.message);
+      }
+      this.deps.webview.post({
+        type: 'showError',
+        message: `Compacting the conversation failed: ${describe(err)}. The conversation was left as it was.`,
+      });
+      return undefined;
+    }
+    const marker: CompactionMarker = {
+      id: `compaction-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      fromTs: records[0].ts,
+      toTs: records[cut - 1].ts,
+      messages: older.length,
+    };
+    const rec = compactionTranscriptRecord(summary, marker);
+    await this.append(transcript, rec);
+    this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(rec) });
+    this.trackerFor(key).reset();
+    return toHistory(await readTranscript(transcript.path));
   }
 
   /** Append one message to the transcript, containing any write failure (Req 8.7). */
@@ -1519,48 +1862,6 @@ function toRenderRecord(
   record: Pick<TranscriptRecord, 'role' | 'content' | 'tool_call_id'>,
 ): RenderRecord {
   return { role: record.role, content: record.content };
-}
-
-/** Turn a persisted transcript record into a tool-loop chat message. */
-function toChatMessage(record: TranscriptRecord): ChatMessage {
-  if (record.intervention !== undefined) {
-    // A persisted card re-enters the model history as the ask and its outcome,
-    // never as a bare prompt that would read like a fresh question.
-    return { role: 'assistant', content: interventionHistoryText(record.intervention) };
-  }
-  // Transcript records use the same role set the completions path expects,
-  // except that a persisted `system` role is not part of the history the loop
-  // sends (the loop prepends a fresh system prompt each round). Preserve the
-  // role and any tool-call id so a resumed conversation keeps its tool turns.
-  const role: ChatMessage['role'] = record.role === 'system' ? 'assistant' : record.role;
-  return {
-    role,
-    content: record.content,
-    ...(record.tool_call_id !== undefined ? { tool_call_id: record.tool_call_id } : {}),
-    ...(record.tool_calls !== undefined ? { tool_calls: record.tool_calls } : {}),
-  };
-}
-
-/** How a persisted card reads in the model history: the ask and what was decided. */
-function interventionHistoryText(view: InterventionView): string {
-  return `[intervention] ${view.prompt}\nDecision: ${describeAnswer(view.answer)}`;
-}
-
-/** A one-line description of an intervention answer. */
-function describeAnswer(answer: InterventionAnswer | undefined): string {
-  if (answer === undefined) {
-    return 'no answer was recorded';
-  }
-  switch (answer.kind) {
-    case 'approved':
-      return 'approved';
-    case 'declined':
-      return answer.reason === undefined ? 'declined' : `declined (${answer.reason})`;
-    case 'option':
-      return `chose "${answer.label ?? answer.optionId}"`;
-    case 'text':
-      return `answered: ${answer.text}`;
-  }
 }
 
 /**

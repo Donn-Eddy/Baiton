@@ -11,6 +11,7 @@ import {
   ToolSpec,
   completionsUrl,
   resolveMaxTokens,
+  parseUsage,
   SseCompletionParser,
   shapeGeminiMessages,
   sanitizeToolArguments,
@@ -18,6 +19,7 @@ import {
   openCodeExtraHeaders,
 } from '../src/orchestrator/modelClient';
 import { createApiLog } from '../src/orchestrator/apiLog';
+import { estimateMessages } from '../src/orchestrator/contextBudget';
 import type { ApiLog } from '../src/orchestrator/apiLog';
 
 /**
@@ -238,6 +240,125 @@ describe('OpenAiModelClient', () => {
       assert.ok(!('max_tokens' in (mock.captured[0].body as object)));
     });
 
+  });
+
+  describe('usage', () => {
+    let mock: MockServer | undefined;
+    afterEach(async () => {
+      await mock?.close();
+      mock = undefined;
+    });
+
+    const sse = (...events: string[]): string => [...events, 'data: [DONE]', ''].join('\n\n');
+    const complete = (config: Partial<ModelClientConfig> = {}) =>
+      new OpenAiModelClient(makeConfig(mock!.url, config)).complete({
+        messages: SAMPLE_MESSAGES,
+        tools: SAMPLE_TOOLS,
+        signal: liveSignal(),
+      });
+
+    it('parses usage from a non-streaming response', async () => {
+      mock = await startMockServer(() => ({
+        body: JSON.stringify({
+          choices: [{ message: { content: 'ok' } }],
+          usage: { prompt_tokens: 120, completion_tokens: 7 },
+        }),
+      }));
+      const result = await complete();
+      assert.deepStrictEqual(result.usage, { promptTokens: 120, completionTokens: 7 });
+    });
+
+    it('leaves the usage key off when a non-streaming response has none', async () => {
+      mock = await startMockServer(() => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }));
+      const result = await complete();
+      assert.ok(!('usage' in result));
+    });
+
+    it('parses usage from the final choices-less SSE chunk', async () => {
+      mock = await startMockServer(() => ({
+        headers: { 'content-type': 'text/event-stream' },
+        body: sse(
+          'data: ' + JSON.stringify({ choices: [{ delta: { content: 'Hel' } }] }),
+          'data: ' + JSON.stringify({ choices: [{ delta: { content: 'lo' } }] }),
+          'data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":3}}',
+        ),
+      }));
+      const result = await complete({ isStreaming: () => true });
+      assert.strictEqual(result.content, 'Hello');
+      assert.deepStrictEqual(result.usage, { promptTokens: 50, completionTokens: 3 });
+    });
+
+    describe('stream_options on the request', () => {
+      const bodyFor = async (config: Partial<ModelClientConfig>): Promise<Record<string, unknown>> => {
+        mock = await startMockServer(() => ({
+          headers: { 'content-type': 'text/event-stream' },
+          body: sse('data: ' + JSON.stringify({ choices: [{ delta: { content: 'x' } }] })),
+        }));
+        await complete(config);
+        return mock.captured[0].body as Record<string, unknown>;
+      };
+
+      it('is sent by default when streaming', async () => {
+        const body = await bodyFor({ isStreaming: () => true });
+        assert.deepStrictEqual(body.stream_options, { include_usage: true });
+      });
+
+      it('is sent when isUsageInStream is true', async () => {
+        const body = await bodyFor({ isStreaming: () => true, isUsageInStream: () => true });
+        assert.deepStrictEqual(body.stream_options, { include_usage: true });
+      });
+
+      it('is omitted when isUsageInStream is false', async () => {
+        const body = await bodyFor({ isStreaming: () => true, isUsageInStream: () => false });
+        assert.ok(!('stream_options' in body));
+      });
+
+      it('is never sent when not streaming', async () => {
+        mock = await startMockServer(() => ({ body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }));
+        await complete({ isStreaming: () => false, isUsageInStream: () => true });
+        assert.ok(!('stream_options' in (mock.captured[0].body as object)));
+      });
+    });
+
+    describe('SseCompletionParser usage', () => {
+      const line = (o: unknown): string => 'data: ' + JSON.stringify(o) + '\n';
+
+      it('keeps an earlier usage when a later chunk has usage: null', () => {
+        const p = new SseCompletionParser();
+        p.feed(line({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } }));
+        p.feed(line({ choices: [{ delta: { content: 'a' } }], usage: null }));
+        assert.deepStrictEqual(p.finish().usage, { promptTokens: 10, completionTokens: 2 });
+      });
+
+      it('keeps the last of two usage events', () => {
+        const p = new SseCompletionParser();
+        p.feed(line({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } }));
+        p.feed(line({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 4 } }));
+        assert.deepStrictEqual(p.finish().usage, { promptTokens: 20, completionTokens: 4 });
+      });
+
+      it('returns no usage key when none was seen', () => {
+        const p = new SseCompletionParser();
+        p.feed(line({ choices: [{ delta: { content: 'a' } }] }));
+        assert.ok(!('usage' in p.finish()));
+      });
+    });
+
+    describe('parseUsage', () => {
+      it('rejects null, non-objects and bad prompt_tokens', () => {
+        for (const bad of [null, undefined, 5, 'x', true]) {
+          assert.strictEqual(parseUsage(bad), undefined);
+        }
+        for (const prompt of [undefined, -1, NaN, 1.5, '12']) {
+          assert.strictEqual(parseUsage({ prompt_tokens: prompt, completion_tokens: 1 }), undefined);
+        }
+        assert.strictEqual(parseUsage({}), undefined);
+      });
+
+      it('defaults a missing completion_tokens to 0', () => {
+        assert.deepStrictEqual(parseUsage({ prompt_tokens: 9 }), { promptTokens: 9, completionTokens: 0 });
+      });
+    });
   });
 
   describe('resolveMaxTokens', () => {
@@ -1154,6 +1275,54 @@ describe('OpenAiModelClient', () => {
           lines[0],
           /^\[2026-01-01T00:00:00\.000Z\] openai completion http-status HTTP 500 http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions — endpoint returned HTTP 500 \| body: boom line2$/,
         );
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('names the payload size on an empty-body HTTP 400', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: '' }));
+      try {
+        const { lines, apiLog } = recordingLog();
+        const messages = [{ role: 'user' as const, content: 'x'.repeat(400) }];
+        const n = estimateMessages(messages, []);
+        assert.strictEqual(n, 104);
+        await assert.rejects(
+          new OpenAiModelClient(makeConfig(mock.url, { apiLog })).complete({ messages, signal: liveSignal() }),
+          (err: unknown) => {
+            assert.ok(err instanceof UnreachableEndpointError);
+            assert.strictEqual(
+              err.message,
+              'Orchestrator endpoint was unreachable: endpoint returned HTTP 400 (empty body; payload ~104 tokens)',
+            );
+            return true;
+          },
+        );
+        await settle();
+        assert.strictEqual(lines.length, 1);
+        assert.ok(lines[0].includes('(empty body; payload ~'), lines[0]);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('treats a whitespace-only 4xx body as empty and counts tools', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: '  \n' }));
+      try {
+        const n = estimateMessages(SAMPLE_MESSAGES, SAMPLE_TOOLS);
+        await rejectsUnreachable(
+          new OpenAiModelClient(makeConfig(mock.url)).complete(req()),
+          new RegExp(`HTTP 400 \\(empty body; payload ~${n} tokens\\)$`),
+        );
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('keeps the body text on a non-empty 400', async () => {
+      const mock = await startMockServer(() => ({ status: 400, body: 'bad' }));
+      try {
+        await rejectsUnreachable(new OpenAiModelClient(makeConfig(mock.url)).complete(req()), /HTTP 400: bad$/);
       } finally {
         await mock.close();
       }

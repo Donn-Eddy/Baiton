@@ -23,9 +23,24 @@
  * Intervention records are passed through that pairing untouched: a card can
  * sit between an assistant turn and the tool record answering it (a tool that
  * asks for confirmation mid-call) and neither opens nor closes a call window.
+ *
+ * Replay: {@link toHistory} turns records into the model's chat history. Record
+ * to message replay lives here so it is host-free and testable. Tool messages
+ * always directly follow their assistant `tool_calls` entry: an intervention
+ * card met inside an open call window is deferred until the window closes,
+ * a pending/settled pair for one id collapses to the settled card, and a plain
+ * `system` record replays as `assistant`.
+ *
+ * A compaction record hides the records in its `[fromTs, toTs]` range that
+ * precede it and replays its summary once, as `[context summary] …`, at the
+ * first hidden record's position; a later compaction whose range contains an
+ * earlier one supersedes it.
  */
 import { readFile } from 'fs/promises';
 import { TranscriptRecord } from './chatTranscript';
+import type { ChatMessage } from './modelClient';
+import type { InterventionAnswer } from './interventions';
+import type { InterventionView } from './webviewProtocol';
 
 /**
  * Read a session transcript file and return its records in append order.
@@ -97,6 +112,179 @@ function dropOrphanToolRecords(records: TranscriptRecord[]): TranscriptRecord[] 
   return out;
 }
 
+/** How a persisted card reads in the model history: the ask and what was decided. */
+export function interventionHistoryText(view: InterventionView): string {
+  return `[intervention] ${view.prompt}\nDecision: ${describeAnswer(view.answer)}`;
+}
+
+/** A one-line description of an intervention answer. */
+function describeAnswer(answer: InterventionAnswer | undefined): string {
+  if (answer === undefined) {
+    return 'no answer was recorded';
+  }
+  switch (answer.kind) {
+    case 'approved':
+      return 'approved';
+    case 'declined':
+      return answer.reason === undefined ? 'declined' : `declined (${answer.reason})`;
+    case 'option':
+      return `chose "${answer.label ?? answer.optionId}"`;
+    case 'text':
+      return `answered: ${answer.text}`;
+  }
+}
+
+/** Prefix marking a replayed compaction summary in the model history. */
+export const CONTEXT_SUMMARY_PREFIX = '[context summary] ';
+
+/** How a compaction summary reads in the model history. */
+export function compactionHistoryText(summary: string): string {
+  return `${CONTEXT_SUMMARY_PREFIX}${summary}`;
+}
+
+/**
+ * Work out which records compactions hide. Compactions are applied last to
+ * first; one whose range lies within an applied one is superseded. Only records
+ * before the compaction record in file order are eligible, so later records
+ * sharing a timestamp are never hidden.
+ */
+function compactionPlan(records: readonly TranscriptRecord[]): {
+  covered: Set<number>;
+  summaryAt: Map<number, string>;
+} {
+  const covered = new Set<number>();
+  const summaryAt = new Map<number, string>();
+  const ranges: { fromTs: string; toTs: string }[] = [];
+  for (let c = records.length - 1; c >= 0; c--) {
+    const m = records[c].compaction;
+    if (m === undefined) {
+      continue;
+    }
+    if (covered.has(c) || ranges.some((r) => r.fromTs <= m.fromTs && m.toTs <= r.toTs)) {
+      covered.add(c);
+      continue;
+    }
+    let first: number | undefined;
+    for (let j = 0; j < c; j++) {
+      if (!covered.has(j) && m.fromTs <= records[j].ts && records[j].ts <= m.toTs) {
+        covered.add(j);
+        first ??= j;
+      }
+    }
+    covered.add(c);
+    summaryAt.set(first ?? c, compactionHistoryText(records[c].content));
+    ranges.push({ fromTs: m.fromTs, toTs: m.toTs });
+  }
+  return { covered, summaryAt };
+}
+
+/**
+ * The index of the first record to keep when compacting: the `keepTurns`-th
+ * `user` record from the end. `undefined` when there are fewer user records,
+ * the cut would be at 0, or its timestamp equals its predecessor's (a ts range
+ * could then hide a kept record).
+ */
+export function compactionCut(
+  records: readonly TranscriptRecord[],
+  keepTurns: number,
+): number | undefined {
+  let seen = 0;
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i].role === 'user' && ++seen === keepTurns) {
+      if (i === 0 || records[i].ts === records[i - 1].ts) {
+        return undefined;
+      }
+      return i;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Replay transcript records as the chat history the model receives. Tool
+ * messages stay adjacent to the assistant `tool_calls` entry they answer:
+ * intervention cards inside an open call window are held back and emitted when
+ * the window closes. A pending/settled pair for one id collapses to a single
+ * message carrying the settled decision, at the first occurrence's position.
+ */
+export function toHistory(records: readonly TranscriptRecord[]): ChatMessage[] {
+  const settledById = new Map<string, InterventionView>();
+  for (const record of records) {
+    const view = record.intervention;
+    if (view !== undefined && (!settledById.has(view.id) || view.status === 'resolved')) {
+      settledById.set(view.id, view);
+    }
+  }
+
+  const out: ChatMessage[] = [];
+  let openCallIds: Set<string> | undefined;
+  let deferred: ChatMessage[] = [];
+  const emittedIds = new Set<string>();
+  const flush = (): void => {
+    out.push(...deferred);
+    deferred = [];
+    openCallIds = undefined;
+  };
+
+  const plan = compactionPlan(records);
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (plan.covered.has(i)) {
+      const s = plan.summaryAt.get(i);
+      if (s !== undefined) {
+        flush();
+        out.push({ role: 'assistant', content: s });
+      }
+      continue;
+    }
+    if (record.intervention !== undefined) {
+      const id = record.intervention.id;
+      if (emittedIds.has(id)) {
+        continue;
+      }
+      emittedIds.add(id);
+      // A persisted card re-enters the model history as the ask and its outcome,
+      // never as a bare prompt that would read like a fresh question.
+      const message: ChatMessage = {
+        role: 'assistant',
+        content: interventionHistoryText(settledById.get(id) as InterventionView),
+      };
+      if (openCallIds !== undefined) {
+        deferred.push(message);
+      } else {
+        out.push(message);
+      }
+      continue;
+    }
+    if (record.role === 'tool') {
+      if (
+        openCallIds === undefined ||
+        record.tool_call_id === undefined ||
+        !openCallIds.has(record.tool_call_id)
+      ) {
+        continue;
+      }
+      out.push({ role: 'tool', content: record.content, tool_call_id: record.tool_call_id });
+      continue;
+    }
+    flush();
+    // A persisted `system` role is not part of the history the loop sends (the
+    // loop prepends a fresh system prompt each round), so it replays as assistant.
+    const role: ChatMessage['role'] = record.role === 'system' ? 'assistant' : record.role;
+    out.push({
+      role,
+      content: record.content,
+      ...(record.tool_call_id !== undefined ? { tool_call_id: record.tool_call_id } : {}),
+      ...(record.tool_calls !== undefined ? { tool_calls: record.tool_calls } : {}),
+    });
+    if (record.role === 'assistant' && record.tool_calls !== undefined && record.tool_calls.length > 0) {
+      openCallIds = new Set(record.tool_calls.map((c) => c.id));
+    }
+  }
+  flush();
+  return out;
+}
+
 /** Whether a caught filesystem error is a "file does not exist" error. */
 function isNotFound(err: unknown): boolean {
   return (
@@ -153,7 +341,26 @@ function isTranscriptRecord(value: unknown): value is TranscriptRecord {
   if (rec.intervention !== undefined && !isInterventionView(rec.intervention)) {
     return false;
   }
+  if (rec.compaction !== undefined && (rec.role !== 'system' || !isCompactionMarker(rec.compaction))) {
+    return false;
+  }
   return true;
+}
+
+/** Structural check for a persisted compaction marker; extra fields are tolerated. */
+function isCompactionMarker(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const m = value as Record<string, unknown>;
+  return (
+    typeof m.id === 'string' &&
+    m.id.length > 0 &&
+    typeof m.fromTs === 'string' &&
+    typeof m.toTs === 'string' &&
+    Number.isInteger(m.messages) &&
+    (m.messages as number) >= 0
+  );
 }
 
 /** Structural check for a persisted assistant `tool_calls` list. */

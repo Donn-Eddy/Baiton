@@ -241,6 +241,48 @@ describe('T07 ModelDiscoveryService.refresh', () => {
     service.dispose();
   });
 
+  it('carries models.dev limits onto every feed entry as contextWindow/maxOutput and persists them', async () => {
+    const feed = fakeFeed();
+    const memento = fakeMemento();
+    const service = new ModelDiscoveryService({
+      store: makeStore(memento),
+      registry: fakeRegistry({}),
+      fetchFeed: feedSpy(feed).fetchFeed,
+    });
+    const table = await service.refresh();
+    const models = table['models.dev']?.models ?? [];
+    const feedModels = feed.flatMap((provider) => provider.models);
+    assert.strictEqual(models.length, feedModels.length);
+    const positive = (n: number | undefined): n is number => n !== undefined && Number.isInteger(n) && n > 0;
+    let withLimits = 0;
+    feedModels.forEach((model, i) => {
+      const entry = models[i];
+      const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(entry, k);
+      const context = model.limits?.context;
+      const output = model.limits?.output;
+      assert.strictEqual(has('contextWindow'), positive(context));
+      assert.strictEqual(has('maxOutput'), positive(output));
+      if (positive(context)) {
+        assert.strictEqual(entry.contextWindow, context);
+        withLimits++;
+      }
+      if (positive(output)) {
+        assert.strictEqual(entry.maxOutput, output);
+      }
+    });
+    assert.ok(withLimits > 0, 'the fixture must exercise at least one limit');
+    service.dispose();
+
+    const second = new ModelDiscoveryService({
+      store: makeStore(memento),
+      registry: fakeRegistry({}),
+      fetchFeed: feedSpy(feed).fetchFeed,
+    });
+    assert.deepStrictEqual(second.table()['models.dev']?.models, models);
+    assert.strictEqual(second.table()['models.dev']?.source, 'cached');
+    second.dispose();
+  });
+
   it('stores bare feed model ids with the provider id on `provider`, in feed order', async () => {
     const feed = fakeFeed();
     const service = new ModelDiscoveryService({

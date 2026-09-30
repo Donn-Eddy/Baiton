@@ -104,6 +104,11 @@
         "category": "Baiton"
       },
       {
+        "command": "baiton.compactContext",
+        "title": "Compact Chat Context",
+        "category": "Baiton"
+      },
+      {
         "command": "baiton.approve",
         "title": "Approve Spec",
         "category": "Baiton"
@@ -217,6 +222,10 @@
         },
         {
           "command": "baiton.openChat",
+          "when": "baiton.activated"
+        },
+        {
+          "command": "baiton.compactContext",
           "when": "baiton.activated"
         },
         {
@@ -374,11 +383,36 @@
           "default": true,
           "description": "Stream assistant text into the chat as it is generated. Disable if the orchestrator endpoint does not support streaming (server-sent events) responses. Applies to the HTTP providers; GitHub Copilot always streams through vscode.lm."
         },
+        "baiton.orchestrator.usageInStream": {
+          "type": "boolean",
+          "default": true,
+          "description": "When streaming, ask the endpoint to report token usage (stream_options.include_usage) so the chat can show how much of the context window is loaded. Disable for endpoints that reject the stream_options field; the chat then falls back to a local estimate. Applies to the HTTP providers only."
+        },
         "baiton.orchestrator.maxTokens": {
           "type": "integer",
           "default": 0,
           "minimum": 0,
           "description": "Maximum number of tokens the orchestrator asks the model to generate per completion, sent as max_tokens. 0 (the default) leaves max_tokens off the request so the endpoint's own default applies."
+        },
+        "baiton.orchestrator.contextWindow": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "Context window, in tokens, of the orchestrator's selected model, used only when the model catalog (models.dev) does not disclose one. 0 (the default) leaves it unset, so the context window is unknown unless the catalog knows it."
+        },
+        "baiton.orchestrator.contextTrimAt": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of the model's context window at which the chat starts trimming what it sends: auto-approved intervention lines are dropped, then tool results from earlier turns and older rounds are replaced with short stubs. The transcript is never changed. Applies only when the context window is known (catalog or baiton.orchestrator.contextWindow)."
+        },
+        "baiton.orchestrator.contextSummarizeAt": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of the model's context window at which the chat, after trimming, summarises every message older than the last two turns into one context summary (goals, decisions taken, files touched, open questions). The summary is appended to the transcript; the full conversation stays visible. Applies only when the context window is known."
         },
         "baiton.orchestrator.roundBound": {
           "type": "integer",

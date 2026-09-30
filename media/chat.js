@@ -35,7 +35,10 @@
  * model list; picking a model posts `selectModel` and the view repaints when
  * the host echoes `setProviders` back — neither change handler ever writes
  * `state.selection` itself. The empty state shows the active provider + model
- * rather than an endpoint URL.
+ * rather than an endpoint URL. Under the composer a context meter shows
+ * `state.context` (`~256K / 1M · usage`, warning at 80% of the window) beside a
+ * Compact link that posts `compactContext` (host-authoritative, disabled while
+ * busy or on an empty conversation).
  *
  * The input box characters survive hide/show because they are persisted to the
  * webview state via acquireVsCodeApi().setState (Req 16.5) — retained across
@@ -69,6 +72,10 @@
   const stopBtn = /** @type {HTMLButtonElement} */ (document.getElementById('stop'));
   const autoBtn = /** @type {HTMLButtonElement} */ (document.getElementById('auto-mode'));
   const modeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('mode-select'));
+  // Null-tolerant: fake DOMs in some tests do not define the context meter.
+  const contextBar = document.getElementById('context-bar');
+  const contextMeter = document.getElementById('context-meter');
+  const compactBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('compact-context'));
   const newChatBtn = /** @type {HTMLButtonElement} */ (document.getElementById('new-chat'));
   const sessionListEl = /** @type {HTMLElement} */ (document.getElementById('session-list'));
 
@@ -1240,6 +1247,51 @@
         : 'Conversation mode: the pipeline a dispatch from this chat runs.';
   }
 
+  /** @param {number} n */
+  function formatTokens(n) {
+    if (n >= 1000000) {
+      return Math.round(n / 100000) / 10 + 'M';
+    }
+    if (n >= 1000) {
+      return Math.round(n / 1000) + 'K';
+    }
+    return String(Math.max(0, Math.round(n)));
+  }
+
+  /** @param {{loaded: number, window: number | null, source: string}} ctx */
+  function contextMeterText(ctx) {
+    if (typeof ctx.window === 'number' && ctx.window > 0) {
+      return '~' + formatTokens(ctx.loaded) + ' / ' + formatTokens(ctx.window) + ' · ' + ctx.source;
+    }
+    return '~' + formatTokens(ctx.loaded) + ' · window unknown';
+  }
+
+  function renderContext() {
+    if (!contextMeter) {
+      return;
+    }
+    const ctx = state.context;
+    if (compactBtn) {
+      compactBtn.disabled = state.busy || state.records.length === 0;
+    }
+    if (!ctx) {
+      contextMeter.textContent = '';
+      if (contextBar) {
+        contextBar.setAttribute('hidden', '');
+      }
+      return;
+    }
+    if (contextBar) {
+      contextBar.removeAttribute('hidden');
+    }
+    const known = typeof ctx.window === 'number' && ctx.window > 0;
+    contextMeter.textContent = contextMeterText(ctx);
+    contextMeter.title =
+      'Tokens sent with the last request (' + ctx.source + ')' +
+      (known ? " of the model's " + ctx.window + '-token window' : '');
+    contextMeter.classList.toggle('warn', known && ctx.loaded / /** @type {number} */ (ctx.window) >= 0.8);
+  }
+
   function updateEnablement() {
     // Send/stop enablement follows the busy flag; send additionally requires a
     // non-whitespace, in-limit input (Req 14.2, 14.3, 14.4, 14.5). The host
@@ -1263,6 +1315,7 @@
     renderTranscript();
     renderAutoMode();
     renderMode();
+    renderContext();
     updateEnablement();
   }
 
@@ -1370,6 +1423,17 @@
     // the host and `selectModel` leaves `state.selection` to it.
     renderMode();
   });
+
+  if (compactBtn) {
+    compactBtn.addEventListener('click', function () {
+      // Host-authoritative: no local state change; the host's setBusy /
+      // appendMessage / setContextUsage repaint the view.
+      if (state.busy) {
+        return;
+      }
+      vscode.postMessage({ type: 'compactContext' });
+    });
+  }
 
   stopBtn.addEventListener('click', function () {
     vscode.postMessage({ type: 'stop' });

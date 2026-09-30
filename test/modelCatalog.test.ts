@@ -126,6 +126,19 @@ describe('orchestrator/modelCatalog', () => {
   });
 
   describe('normalizeModelEntry', () => {
+    it('keeps contextWindow/maxOutput only when positive integers', () => {
+      assert.deepStrictEqual(normalizeModelEntry({ id: 'm', contextWindow: 200000, maxOutput: 64000 }), {
+        id: 'm',
+        contextWindow: 200000,
+        maxOutput: 64000,
+      });
+      for (const field of ['contextWindow', 'maxOutput']) {
+        for (const bad of [0, -1, 1.5, NaN, Infinity, '200000', null]) {
+          assert.deepStrictEqual(normalizeModelEntry({ id: 'm', [field]: bad }), { id: 'm' });
+        }
+      }
+    });
+
     it('accepts a plain string as { id: trimmed }', () => {
       assert.deepStrictEqual(normalizeModelEntry('grok-code'), { id: 'grok-code' });
       assert.deepStrictEqual(normalizeModelEntry('  grok-code  '), { id: 'grok-code' });
@@ -409,6 +422,29 @@ describe('orchestrator/modelCatalog', () => {
       assert.strictEqual(second.get('claude')?.staleReason, 'feed down');
       assert.strictEqual(second.get('claude')?.fetchedAt, '2026-01-01T00:00:00.001Z');
       assert.deepStrictEqual(modelIds(second.get('claude')), ['claude-sonnet-4-5']);
+    });
+
+    it('round-trips contextWindow/maxOutput through the memento; old blobs still hydrate', () => {
+      const memento = makeFakeMemento();
+      const models = [
+        { id: 'a', provider: 'p', contextWindow: 1048576, maxOutput: 65536 },
+        { id: 'b', provider: 'p' },
+      ];
+      const first = new CatalogStore({ memento, now: clock() });
+      first.applyResult('models.dev', ok<CatalogFetch, string>({ models }));
+      const second = new CatalogStore({ memento, now: clock() });
+      assert.deepStrictEqual(second.get('models.dev')?.models, models);
+      assert.strictEqual(second.get('models.dev')?.source, 'cached');
+
+      const oldMemento = makeFakeMemento();
+      oldMemento.store.set(MODEL_CATALOG_MEMENTO_KEY, {
+        version: 1,
+        snapshots: {
+          'models.dev': { models: [{ id: 'a', provider: 'p' }], fetchedAt: '2026-01-01T00:00:00.000Z' },
+        },
+      });
+      const old = new CatalogStore({ memento: oldMemento, now: clock() });
+      assert.deepStrictEqual(old.get('models.dev')?.models, [{ id: 'a', provider: 'p' }]);
     });
 
     it('a wrong-version or non-object blob is discarded without throwing', () => {

@@ -20,6 +20,7 @@ import { StringDecoder } from 'string_decoder';
 import { randomUUID } from 'crypto';
 import type { DialectId } from './providers';
 import { noopApiLog } from './apiLog';
+import { estimateMessages } from './contextBudget';
 import type { ApiLog, ApiFailureEntry } from './apiLog';
 
 /** A single chat message on the OpenAI chat-completions path. */
@@ -54,6 +55,34 @@ export interface ToolCall {
 export interface CompletionResult {
   content?: string;
   tool_calls: ToolCall[];
+  /** Present only when the endpoint reported usage; absent (key not set) otherwise. */
+  usage?: CompletionUsage;
+}
+
+/** Token accounting the endpoint reported for one completion. */
+export interface CompletionUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/**
+ * Parse an OpenAI `usage` object. Undefined unless `raw` is an object whose
+ * `prompt_tokens` is a finite integer >= 0; `completion_tokens` defaults to 0.
+ * Never throws.
+ */
+export function parseUsage(raw: unknown): CompletionUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const { prompt_tokens: prompt, completion_tokens: completion } = raw as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+  };
+  const valid = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+  if (!valid(prompt)) {
+    return undefined;
+  }
+  return { promptTokens: prompt, completionTokens: valid(completion) ? completion : 0 };
 }
 
 /**
@@ -159,6 +188,8 @@ export interface ModelClientConfig {
   getApiKey: ApiKeyProvider;
   /** Whether the endpoint supports streaming; defaults to `false` (non-streaming). */
   isStreaming?: StreamingCapabilityProvider;
+  /** Whether to ask a streaming endpoint for usage via `stream_options.include_usage`; defaults to true. Ignored on the non-streaming path. */
+  isUsageInStream?: () => boolean | Promise<boolean>;
   /** The configured completion token cap; omitted from the request unless positive. */
   getMaxTokens?: MaxTokensProvider;
   /** The wire shaping applied to messages; defaults to {@link openAiDialect}. */
@@ -577,6 +608,8 @@ export class OpenAiModelClient implements ModelClient {
     }
 
     const streaming = this.config.isStreaming ? await this.config.isStreaming() : false;
+    const includeUsage =
+      streaming && (this.config.isUsageInStream ? (await this.config.isUsageInStream()) !== false : true);
     const maxTokens = resolveMaxTokens(
       this.config.getMaxTokens ? await this.config.getMaxTokens() : undefined,
     );
@@ -587,19 +620,21 @@ export class OpenAiModelClient implements ModelClient {
       messages: dialect.shapeMessages(req.messages),
       tools: toWireTools(req.tools ?? []),
       stream: streaming,
+      ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
     });
     const extra = this.config.extraHeaders?.(req) ?? {};
+    const payloadTokens = estimateMessages(req.messages, req.tools ?? []);
 
     if (!streaming) {
-      const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra);
+      const raw = await this.postCompletion(url, apiKey, body, req.signal, undefined, extra, payloadTokens);
       return this.parseNonStreaming(raw, url);
     }
 
     // Streaming: feed each response chunk to the SSE parser as it arrives so
     // assistant text reaches `onDelta` incrementally rather than at end of body.
     const parser = new SseCompletionParser(req.onDelta);
-    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk), extra);
+    await this.postCompletion(url, apiKey, body, req.signal, (chunk) => parser.feed(chunk), extra, payloadTokens);
     return parser.finish();
   }
 
@@ -631,6 +666,7 @@ export class OpenAiModelClient implements ModelClient {
     signal: AbortSignal,
     onChunk?: (text: string) => void,
     extra: Record<string, string> = {},
+    payloadTokens?: number,
   ): Promise<string> {
     const connectTimeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const transport = url.protocol === 'https:' ? https : http;
@@ -704,10 +740,17 @@ export class OpenAiModelClient implements ModelClient {
             }
             const text = Buffer.concat(chunks).toString('utf8');
             if (status < 200 || status >= 300) {
-              finishReject(
-                new UnreachableEndpointError(`endpoint returned HTTP ${status}: ${text.slice(0, 500)}`),
-                { kind: 'http-status', status, message: `endpoint returned HTTP ${status}`, bodyExcerpt: text },
-              );
+              const emptyClientError =
+                status >= 400 && status < 500 && text.trim().length === 0 && payloadTokens !== undefined;
+              const detail = emptyClientError
+                ? `endpoint returned HTTP ${status} (empty body; payload ~${payloadTokens} tokens)`
+                : `endpoint returned HTTP ${status}: ${text.slice(0, 500)}`;
+              finishReject(new UnreachableEndpointError(detail), {
+                kind: 'http-status',
+                status,
+                message: emptyClientError ? detail : `endpoint returned HTTP ${status}`,
+                bodyExcerpt: text,
+              });
               return;
             }
             finishResolve(text);
@@ -762,9 +805,11 @@ export class OpenAiModelClient implements ModelClient {
     const choices = (parsed as { choices?: unknown }).choices;
     const first = Array.isArray(choices) ? choices[0] : undefined;
     const message = (first as { message?: unknown } | undefined)?.message;
+    const usage = parseUsage((parsed as { usage?: unknown } | null)?.usage);
     return {
       content: parseNonStreamingContent(message),
       tool_calls: parseNonStreamingToolCalls(message),
+      ...(usage !== undefined ? { usage } : {}),
     };
   }
 
@@ -784,6 +829,7 @@ export class SseCompletionParser {
   private content = '';
   private sawContent = false;
   private pending = '';
+  private usage: CompletionUsage | undefined;
 
   constructor(onDelta?: DeltaListener) {
     this.onDelta = onDelta;
@@ -811,6 +857,7 @@ export class SseCompletionParser {
     return {
       content: this.sawContent ? this.content : undefined,
       tool_calls: finalizeToolCalls(this.toolCalls),
+      ...(this.usage !== undefined ? { usage: this.usage } : {}),
     };
   }
 
@@ -829,7 +876,13 @@ export class SseCompletionParser {
     } catch {
       return; // Skip malformed keep-alive or partial frames.
     }
-    const choices = (event as { choices?: unknown }).choices;
+    // Read usage before the delta early return: with include_usage the final
+    // chunk carries `usage` and `choices: []`.
+    const u = parseUsage((event as { usage?: unknown } | null)?.usage);
+    if (u !== undefined) {
+      this.usage = u;
+    }
+    const choices = (event as { choices?: unknown } | null)?.choices;
     const first = Array.isArray(choices) ? choices[0] : undefined;
     const delta = (first as { delta?: unknown } | undefined)?.delta;
     if (typeof delta !== 'object' || delta === null) {

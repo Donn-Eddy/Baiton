@@ -19,12 +19,33 @@
  * seams (`ModelClient`, the `call` function, the system-prompt builder, and the
  * transcript `append`), so it is directly unit- and property-testable (Req 9.9).
  */
-import { ChatMessage, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
-import { ToolResult } from './guard';
+import { ChatMessage, CompletionResult, DeltaListener, ModelClient, ToolCall, ToolSpec } from './modelClient';
+import { ToolResult, boundToolResult } from './guard';
 import { TranscriptRecord } from './chatTranscript';
+import { contextOverflowNotice } from './contextBudget';
+import type { FitVerdict } from './contextBudget';
 
 /** The default round bound used when configuration is unset or invalid (Req 9.6). */
 export const DEFAULT_ROUND_BOUND = 20;
+
+/**
+ * Optional per-round context budget. `prepare` returns the history to send this
+ * round (it must not mutate `history`; the loop keeps appending to the real
+ * history and the transcript); `observe` sees what was sent and the completion.
+ * `observe` must not throw: an error propagates like any other loop error.
+ * The optional `preflight` runs after `prepare` and before each completion.
+ */
+export interface ContextBudget {
+  prepare(history: readonly ChatMessage[]): ChatMessage[];
+  observe(sent: { messages: readonly ChatMessage[]; tools: readonly ToolSpec[] }, completion: CompletionResult): void;
+  /**
+   * Optional pre-flight run after prepare and before each completion. Resolves the
+   * request to send (possibly reduced), optionally a replacement history (after a
+   * summary), or an overflow verdict: the loop then appends the sized notice and
+   * stops without calling the endpoint.
+   */
+  preflight?(req: { messages: ChatMessage[]; history: readonly ChatMessage[]; tools: readonly ToolSpec[]; signal: AbortSignal }): Promise<FitVerdict>;
+}
 
 /**
  * The seams the tool loop depends on, all injected so the loop stays a pure,
@@ -57,14 +78,22 @@ export interface ToolLoopDeps {
   onDelta?: DeltaListener;
   /** The chat session id, forwarded to every completion so provider headers stay stable for a conversation. */
   sessionId?: string;
+  /** Optional context budget; absent, the loop sends the full history every round. */
+  budget?: ContextBudget;
 }
 
-/** Serializes a tool result into the `content` of its answering `tool` message. */
+/**
+ * Serializes a tool result into the `content` of its answering `tool` message,
+ * bounded to TOOL_RESULT_CAP_BYTES with a truncation note. The error string is
+ * bounded after its `Error: ` prefix is added so the prefix is always kept.
+ */
 function toolResultContent(result: ToolResult): string {
   if (result.ok) {
-    return typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+    const raw: string = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+    // JSON.stringify(undefined) is undefined at runtime; pass it through as before.
+    return typeof raw === 'string' ? boundToolResult(raw) : raw;
   }
-  return `Error: ${result.error}`;
+  return boundToolResult(`Error: ${result.error}`);
 }
 
 /**
@@ -85,7 +114,23 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
 
   for (let round = 0; round < deps.roundBound; round += 1) {
     const system = await deps.systemPrompt();
-    const messages: ChatMessage[] = [{ role: 'system', content: system }, ...history];
+    const sendable = deps.budget !== undefined ? deps.budget.prepare(history) : history;
+    let messages: ChatMessage[] = [{ role: 'system', content: system }, ...sendable];
+    if (deps.budget?.preflight !== undefined) {
+      const verdict = await deps.budget.preflight({ messages, history, tools: deps.tools, signal: deps.signal });
+      if (deps.signal.aborted) {
+        await appendMessage(history, deps, { role: 'assistant', content: STOPPED_NOTICE });
+        return;
+      }
+      if (verdict.kind === 'overflow') {
+        await appendMessage(history, deps, { role: 'assistant', content: contextOverflowNotice(verdict.estimate, verdict.window) });
+        return;
+      }
+      if (verdict.history !== undefined) {
+        history.splice(0, history.length, ...verdict.history);
+      }
+      messages = verdict.messages;
+    }
 
     let completion;
     try {
@@ -104,6 +149,8 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
       }
       throw err;
     }
+
+    deps.budget?.observe({ messages, tools: deps.tools }, completion);
 
     // The completion itself may have raced an abort (Req 14.7).
     if (deps.signal.aborted) {

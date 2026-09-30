@@ -100,6 +100,22 @@ describe('webview protocol browser mirror (chat-interventions-auto-mode T04)', (
     }
   });
 
+  it('mirrors setContextUsage, including a null window', () => {
+    const msgs: HostToWebview[] = [
+      { type: 'setContextUsage', loaded: 1, window: null, source: 'estimate' },
+      { type: 'setContextUsage', loaded: 2, window: 8, source: 'usage' },
+    ];
+    let ts = initialWebviewState();
+    let js: WebviewState = mirror.initialWebviewState();
+    for (const m of msgs) {
+      ts = reduce(ts, m);
+      js = mirror.reduce(js, m);
+    }
+    assert.deepStrictEqual(hardClone(js), ts);
+    assert.deepStrictEqual(ts.context, { loaded: 2, window: 8, source: 'usage' });
+    assert.strictEqual(hardClone(mirror.initialWebviewState()).context, undefined);
+  });
+
   it('neither reducer mutates the state it is given (purity check)', () => {
     const multi = PROTOCOL_CASES.find((c) => c.messages.length > 1);
     assert.ok(multi, 'Multi-message fixture case must exist');

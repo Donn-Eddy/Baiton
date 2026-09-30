@@ -16,12 +16,28 @@
  * Intervention cards are persisted as `system` records carrying `intervention`,
  * appended when the ask settles, so they are part of the append-only history
  * like any other message.
+ *
+ * Compaction records are `system` records carrying `compaction`: the summary of
+ * an earlier range of records, appended at a turn boundary. Older readers
+ * replay them as a plain system note, which is backward compatible.
  */
 import { appendFile, writeFile } from 'fs/promises';
 import type { ToolCall } from './modelClient';
 import type { InterventionAnswer } from './interventions';
 import type { InterventionView } from './webviewProtocol';
 import { Clock, systemClock } from './seams';
+
+/** Marks a record as the summary that replaces an earlier range of records. */
+export interface CompactionMarker {
+  /** Unique per compaction. */
+  id: string;
+  /** Inclusive start (ISO-8601) of the range of records the summary replaces in the model history. */
+  fromTs: string;
+  /** Inclusive end (ISO-8601) of that range. */
+  toTs: string;
+  /** The number of history messages that were summarised. */
+  messages: number;
+}
 
 /** One persisted transcript record. */
 export interface TranscriptRecord {
@@ -37,6 +53,11 @@ export interface TranscriptRecord {
   tool_calls?: ToolCall[];
   /** For an intervention record: the card and its settled state. */
   intervention?: InterventionView;
+  /**
+   * For a compaction record: the range of earlier records the summary in
+   * `content` replaces when replaying history. The view still renders every record.
+   */
+  compaction?: CompactionMarker;
 }
 
 /**
@@ -101,4 +122,15 @@ export function settledInterventionView(
     ...(opts.rationale !== undefined ? { rationale: opts.rationale } : {}),
     ...(opts.auto !== undefined ? { auto: opts.auto } : {}),
   };
+}
+
+/**
+ * The transcript record that persists one context summary. `content` is the
+ * summary; `marker` names the range of earlier records it replaces in history.
+ */
+export function compactionTranscriptRecord(
+  summary: string,
+  marker: CompactionMarker,
+): Omit<TranscriptRecord, 'ts'> {
+  return { role: 'system', content: summary, compaction: { ...marker } };
 }

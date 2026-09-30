@@ -973,3 +973,69 @@ describe('conversation mode and run activity', () => {
     assert.strictEqual(msg.mode, 'investigate');
   });
 });
+
+describe('context usage', () => {
+  it('a fresh state carries no context reading', () => {
+    assert.strictEqual(initialWebviewState().context, undefined);
+  });
+
+  it('setContextUsage sets loaded, window and source', () => {
+    const next = reduce(initialWebviewState(), {
+      type: 'setContextUsage',
+      loaded: 256000,
+      window: 1000000,
+      source: 'usage',
+    });
+    assert.deepStrictEqual(next.context, { loaded: 256000, window: 1000000, source: 'usage' });
+  });
+
+  it('an unknown window is carried as null', () => {
+    const next = reduce(initialWebviewState(), {
+      type: 'setContextUsage',
+      loaded: 1200,
+      window: null,
+      source: 'estimate',
+    });
+    assert.deepStrictEqual(next.context, { loaded: 1200, window: null, source: 'estimate' });
+  });
+
+  it('a later reading replaces the earlier one', () => {
+    let state = reduce(initialWebviewState(), { type: 'setContextUsage', loaded: 5, window: 10, source: 'usage' });
+    state = reduce(state, { type: 'setContextUsage', loaded: 7, window: null, source: 'estimate' });
+    assert.deepStrictEqual(state.context, { loaded: 7, window: null, source: 'estimate' });
+  });
+
+  it('setContextUsage leaves the rest of the state alone', () => {
+    const start: WebviewState = {
+      ...initialWebviewState(),
+      busy: true,
+      mode: 'bug',
+      records: [{ role: 'user', content: 'hi' }],
+      activeId: 'x',
+    };
+    const next = reduce(start, { type: 'setContextUsage', loaded: 1, window: 2, source: 'usage' });
+    assert.deepStrictEqual({ ...next, context: undefined }, { ...start, context: undefined });
+  });
+
+  it('renderConversation and setBusy keep the reading', () => {
+    let state = reduce(initialWebviewState(), { type: 'setContextUsage', loaded: 1, window: 2, source: 'usage' });
+    state = reduce(state, { type: 'renderConversation', records: [] });
+    state = reduce(state, { type: 'setBusy', busy: true });
+    assert.deepStrictEqual(state.context, { loaded: 1, window: 2, source: 'usage' });
+  });
+
+  it('does not mutate its input and does not alias the message', () => {
+    const seed = initialWebviewState();
+    const snapshot = JSON.stringify(seed);
+    const msg = { type: 'setContextUsage' as const, loaded: 3, window: 9 as number | null, source: 'usage' as const };
+    const next = reduce(seed, msg);
+    assert.strictEqual(JSON.stringify(seed), snapshot);
+    msg.loaded = 99;
+    assert.strictEqual(next.context?.loaded, 3);
+  });
+
+  it('a webview compactContext message carries only its type', () => {
+    const msg: WebviewToHost = { type: 'compactContext' };
+    assert.deepStrictEqual(msg, { type: 'compactContext' });
+  });
+});
