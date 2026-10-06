@@ -18,5 +18,6 @@ export * from './readTools';
 export * from './specWriteTools';
 export * from './controlTools';
 export * from './registry';
+export * from './subAgent';
 export * from './webviewProtocol';
 export * from './apiLog';

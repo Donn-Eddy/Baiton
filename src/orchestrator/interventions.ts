@@ -9,6 +9,8 @@
  * - {@link checkAnswer} — pure validator of an answer against its request kind.
  * - {@link PendingAskRegistry} — in-memory tracker for active asks and their settlement promises.
  * - {@link InterventionSeam} — the seam through which tools and orchestrator ask for user intervention.
+ * - {@link InterventionOrigin} — optional attribution of an ask a sub-agent raised, carried on the
+ *   {@link Intervention} so the parent chat can show where a forwarded card came from.
  * - {@link confirmSeamFrom} — backwards-compatible adapter mapping an {@link InterventionSeam}
  *   to the legacy {@link ConfirmSeam}.
  */
@@ -65,6 +67,18 @@ export interface PermissionRequest {
 
 export type InterventionRequest = QuestionRequest | ConfirmRequest | PermissionRequest;
 
+/** Where a forwarded sub-agent ask came from: the card is shown on `rootKey`'s chat; `chatId`/`chatKey` name the sub-agent chat that asked. */
+export interface InterventionOrigin {
+  /** Session key of the top-level chat (`<scopeId>/<rootSessionId>`). */
+  rootKey: string;
+  /** The sub-agent's session id (`<root>/<leaf>[/<leaf>]`). */
+  chatId: string;
+  /** The sub-agent's session key (`<scopeId>/<chatId>`). */
+  chatKey: string;
+  /** The sub-agent's depth (1 or 2). */
+  depth: number;
+}
+
 /** A created, pending or settled ask: a request plus its identity. */
 export type Intervention = InterventionRequest & {
   /** Registry-assigned id; the key every resolve/reject names. */
@@ -73,6 +87,8 @@ export type Intervention = InterventionRequest & {
   createdAt: string;
   /** Conversation scope the card belongs to ('workspace' or a spec slug). */
   scopeId?: string;
+  /** Present only for an ask a sub-agent raised. */
+  origin?: InterventionOrigin;
 };
 
 /** The user's answer to one intervention. */
@@ -161,13 +177,17 @@ export class PendingAskRegistry {
   }
 
   /** Register a new ask; returns the stamped Intervention and the promise that settles with the user's answer. */
-  create(request: InterventionRequest): { intervention: Intervention; answer: Promise<InterventionAnswer> } {
+  create(
+    request: InterventionRequest,
+    origin?: InterventionOrigin,
+  ): { intervention: Intervention; answer: Promise<InterventionAnswer> } {
     const id = this.ids.next();
     const createdAt = this.clock.now();
     const intervention: Intervention = {
       ...request,
       id,
       createdAt,
+      ...(origin !== undefined ? { origin } : {}),
     };
     let settle!: (a: InterventionAnswer) => void;
     const answer = new Promise<InterventionAnswer>((resolve) => {
@@ -227,7 +247,7 @@ export class PendingAskRegistry {
 
 /** The seam every human-in-the-loop ask goes through. Resolves with the user's answer. */
 export interface InterventionSeam {
-  ask(request: InterventionRequest): Promise<InterventionAnswer>;
+  ask(request: InterventionRequest, origin?: InterventionOrigin): Promise<InterventionAnswer>;
 }
 
 /** Shows a pending card to the user; the host implements it (chat post / webview message). */
@@ -238,8 +258,8 @@ export function createInterventionSeam(
   present: PresentIntervention,
 ): InterventionSeam {
   return {
-    async ask(request: InterventionRequest): Promise<InterventionAnswer> {
-      const { intervention, answer } = registry.create(request);
+    async ask(request: InterventionRequest, origin?: InterventionOrigin): Promise<InterventionAnswer> {
+      const { intervention, answer } = registry.create(request, origin);
       try {
         await present(intervention);
       } catch (err) {
