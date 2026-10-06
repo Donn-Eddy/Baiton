@@ -132,6 +132,7 @@ import type {
   OrchestratorPhase,
   PresentIntervention,
   RunPipelineSeam,
+  SubAgentSeam,
   SubmitPrOutcome,
   ToolRegistry,
   ToolServices,
@@ -598,7 +599,21 @@ export function registerCommands(
   // triggered from the tree is never silently declined.
   const modalConfirm = buildConfirmSeam();
   presentAsk = (ask) => presentThroughModal(askRegistry, modalConfirm, ask);
-  const interventionSeam = createInterventionSeam(askRegistry, (ask) => presentAsk(ask));
+  const baseInterventionSeam = createInterventionSeam(askRegistry, (ask) => presentAsk(ask));
+  // The chat controller owns the sub-agent runner, so the registry reaches it
+  // (and the origin-stamping intervention seam) through late-bound forwarders
+  // that are pointed at it once the controller exists.
+  let originSeam: InterventionSeam = baseInterventionSeam;
+  const interventionSeam: InterventionSeam = { ask: (req, origin) => originSeam.ask(req, origin) };
+  const subAgentsUnavailable = async () => ({
+    kind: 'refused' as const,
+    reason: 'sub-agents are not available until the Chat view has started',
+  });
+  let subAgentTarget: SubAgentSeam = { spawn: subAgentsUnavailable, send: subAgentsUnavailable };
+  const subAgents: SubAgentSeam = {
+    spawn: (r) => subAgentTarget.spawn(r),
+    send: (r) => subAgentTarget.send(r),
+  };
   const confirm = confirmSeamFrom(interventionSeam);
   const draftServices = buildToolServices(
     repoRoot,
@@ -630,7 +645,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -964,6 +979,8 @@ export function registerCommands(
   // Once the Chat_View has resolved, asks are presented as inline cards on the
   // conversation in view; before that the modal fallback stands in.
   presentAsk = (ask) => chatController.presentIntervention(ask);
+  subAgentTarget = chatController.subAgents;
+  originSeam = chatController.subAgentInterventionSeam(baseInterventionSeam);
   presentRelayAsk = (ask, context) => chatController.presentIntervention(ask, context);
   declineAsk = (id, reason) => void chatController.declineAsk(id, reason);
   chatWebview.onResolve(() => chatController.start());
@@ -1909,6 +1926,7 @@ function buildToolServices(
   intervention: InterventionSeam,
   runPipeline: RunPipelineSeam,
   landTodo: LandTodoSeam,
+  subAgents?: SubAgentSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -1923,6 +1941,7 @@ function buildToolServices(
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),
     submitPr: submitPrForSlug,
+    ...(subAgents !== undefined ? { subAgents } : {}),
   };
 }
 
