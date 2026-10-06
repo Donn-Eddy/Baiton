@@ -13,7 +13,9 @@
  * completion resolves as a whole message; when the client streams, assistant
  * text fragments are forwarded to the optional `onDelta` listener along the way
  * (Req 9.8). On abort through the injected `AbortSignal` the loop appends a
- * stopped notice and ends (Req 14.7).
+ * stopped notice and ends (Req 14.7). Within one completion, maximal runs of
+ * consecutive concurrent-flagged calls run in parallel, every other call runs
+ * alone, and results are appended in the model's call order.
  *
  * This is a pure core: it carries no `vscode` import and depends only on injected
  * seams (`ModelClient`, the `call` function, the system-prompt builder, and the
@@ -56,6 +58,7 @@ export interface ContextBudget {
  * - `call`        — runs one tool call through the guarded registry; `callId` is
  *                   the model's tool-call id, used as the idempotency key (Req 9.2),
  *                   and `signal` lets an in-flight tool observe an abort.
+ * - `isConcurrent`— whether a tool may run in parallel with its concurrent neighbours.
  * - `systemPrompt`— builds the system prompt; called each round so a spec
  *                   conversation re-reads its `spec.md` per round (Req 11.6).
  * - `append`      — persists one message to the conversation transcript.
@@ -66,6 +69,11 @@ export interface ToolLoopDeps {
   client: ModelClient;
   tools: ToolSpec[];
   call(name: string, args: string, callId: string, signal: AbortSignal): Promise<ToolResult>;
+  /**
+   * Whether a tool call may run in parallel with its concurrent neighbours (the
+   * tool's `concurrent` flag). Absent, every call runs one after another as before.
+   */
+  isConcurrent?(name: string): boolean;
   systemPrompt(): Promise<string>;
   append(msg: Omit<TranscriptRecord, 'ts'>): Promise<void>;
   roundBound: number;
@@ -94,6 +102,34 @@ function toolResultContent(result: ToolResult): string {
     return typeof raw === 'string' ? boundToolResult(raw) : raw;
   }
   return boundToolResult(`Error: ${result.error}`);
+}
+
+/** Runs one tool call; a thrown failure becomes an error result (Req 9.4), so it never rejects. */
+async function runOneCall(toolCall: ToolCall, deps: ToolLoopDeps): Promise<ToolResult> {
+  try {
+    return await deps.call(toolCall.name, toolCall.arguments, toolCall.id, deps.signal);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Splits calls, preserving order, into segments: a maximal run of consecutive
+ * concurrent calls forms one segment, every other call is a segment of its own.
+ */
+function segmentCalls(calls: readonly ToolCall[], isConcurrent: (name: string) => boolean): ToolCall[][] {
+  const segments: ToolCall[][] = [];
+  let previousConcurrent = false;
+  for (const call of calls) {
+    const concurrent = isConcurrent(call.name);
+    if (concurrent && previousConcurrent) {
+      segments[segments.length - 1].push(call);
+    } else {
+      segments.push([call]);
+    }
+    previousConcurrent = concurrent;
+  }
+  return segments;
 }
 
 /**
@@ -177,23 +213,22 @@ export async function runToolLoop(history: ChatMessage[], deps: ToolLoopDeps): P
     });
 
     // Run each tool call and append its result as a `tool` message (Req 9.2–9.4).
-    for (const toolCall of completion.tool_calls) {
+    const isConcurrent = deps.isConcurrent?.bind(deps) ?? (() => false);
+    for (const segment of segmentCalls(completion.tool_calls, isConcurrent)) {
       if (deps.signal.aborted) {
         await appendMessage(history, deps, { role: 'assistant', content: STOPPED_NOTICE });
         return;
       }
-      let result: ToolResult;
-      try {
-        result = await deps.call(toolCall.name, toolCall.arguments, toolCall.id, deps.signal);
-      } catch (err) {
-        // A thrown tool failure becomes an error `tool` message (Req 9.4).
-        result = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      // Start every call of the segment before awaiting any (a one-call segment is just sequential).
+      const results = await Promise.all(segment.map((toolCall) => runOneCall(toolCall, deps)));
+      // Append in the model's call order so transcript/history shape is unchanged.
+      for (let i = 0; i < segment.length; i += 1) {
+        await appendMessage(history, deps, {
+          role: 'tool',
+          content: toolResultContent(results[i]),
+          tool_call_id: segment[i].id,
+        });
       }
-      await appendMessage(history, deps, {
-        role: 'tool',
-        content: toolResultContent(result),
-        tool_call_id: toolCall.id,
-      });
     }
 
     // A tool may have observed the abort while running; stop before the next round.

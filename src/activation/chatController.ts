@@ -1161,6 +1161,7 @@ export class ChatController {
         tools,
         call: (name, args, callId, signal) =>
           this.callTool(name, args, callId, signal, phase),
+        isConcurrent: (name) => (this.deps.registry.definitions?.() ?? []).some((t) => t.name === name && t.concurrent === true),
         systemPrompt: () => this.buildPrompt(slug, mode),
         append: async (m) => {
           await this.append(transcript, m);

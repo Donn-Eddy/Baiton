@@ -682,6 +682,7 @@ function runTool(services: ToolServices): Tool {
     mutating: false,
     phases: ['drive'],
     dispatch: true,
+    concurrent: true,
     schema: {
       type: 'object',
       properties: {

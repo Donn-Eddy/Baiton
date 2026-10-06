@@ -110,6 +110,8 @@ export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'dri
  *                `investigate`). Dispatch is disabled under Restricted Mode
  *                (Req 22.2) even though the dispatch tool writes no spec file
  *                itself.
+ * - `concurrent` — whether the tool loop may run this call in parallel with
+ *                adjacent concurrent-flagged calls of the same completion.
  * - `phases`   — the orchestrator phases this tool is part of (Req 11.1). A
  *                tool is neither advertised nor runnable outside them.
  * - `schema`   — JSON Schema for the tool's arguments (validated elsewhere in
@@ -127,6 +129,13 @@ export interface Tool {
   description: string;
   mutating: boolean;
   dispatch?: boolean;
+  /**
+   * Whether the tool loop may run this call in parallel with the adjacent
+   * concurrent-flagged calls of the same completion. Only side-effect-free or
+   * self-serializing tools set it (the read tools, `run`); a tool that writes
+   * spec files, raises a card or finishes a spec leaves it unset so it runs alone.
+   */
+  concurrent?: boolean;
   /**
    * The orchestrator phases in which this tool is advertised and may run
    * (Req 11.1). The registry refuses a call whose phase is not listed here

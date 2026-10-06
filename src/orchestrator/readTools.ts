@@ -49,6 +49,7 @@ function listSpecsTool(services: ToolServices): Tool {
     name: 'list_specs',
     description: 'List the slugs of every spec under .baiton/specs/ that contains a spec.md.',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'drive', 'run'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
@@ -85,6 +86,7 @@ function readSpecTool(services: ToolServices): Tool {
     name: 'read_spec',
     description: "Read the raw spec.md text for a given spec slug, bounded to the read cap.",
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
@@ -128,6 +130,7 @@ function listFilesTool(services: ToolServices): Tool {
     name: 'list_files',
     description: 'List repository-relative file paths matching the given glob pattern.',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'run'],
     schema: {
       type: 'object',
@@ -159,6 +162,7 @@ function readFileTool(_services: ToolServices): Tool {
     name: 'read_file',
     description: "Read a file's text, or an optional 1-based inclusive line range of it.",
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'run'],
     schema: {
       type: 'object',
@@ -219,6 +223,7 @@ function searchTool(services: ToolServices): Tool {
     name: 'search',
     description: 'Search repository file contents for lines matching a regular expression.',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'run'],
     schema: {
       type: 'object',
@@ -286,6 +291,7 @@ function gitStatusTool(services: ToolServices): Tool {
     name: 'git_status',
     description: 'Report the working-tree status: whether it is clean and any pending changes.',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'drive', 'run'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
@@ -312,6 +318,7 @@ function gitDiffTool(services: ToolServices): Tool {
     name: 'git_diff',
     description: 'Show the diff between the working tree and an optional ref (defaults to HEAD).',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'run'],
     schema: {
       type: 'object',
@@ -342,6 +349,7 @@ function gitLogTool(services: ToolServices): Tool {
     name: 'git_log',
     description: 'List the most recent commits as "<sha> <subject>" lines, bounded to the read cap.',
     mutating: false,
+    concurrent: true,
     phases: ['gather', 'run'],
     schema: {
       type: 'object',

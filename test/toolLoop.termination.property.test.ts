@@ -33,6 +33,12 @@ import { ToolResult } from '../src/orchestrator/guard';
  * the completions the loop performs and asserts the count never exceeds the
  * resolved Round_Bound, and that the round-bound notice is the final appended
  * message exactly when the bound was reached.
+ *
+ * A second property drives multi-call completions with mixed concurrent flags
+ * and checks ordering and pairing: every assistant `tool_calls` entry is answered
+ * by tool records in call order, every call runs exactly once, a non-concurrent
+ * call never overlaps another call, and a call never starts before every call of
+ * an earlier segment has finished.
  */
 
 /** The round-bound notice text the loop appends when it stops on the bound. */
@@ -181,6 +187,158 @@ describe('Tool loop termination (property harness)', () => {
               'the round-bound notice must be the final appended message on the bound',
             );
           }
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  // Ordering and pairing over multi-call completions with mixed concurrent flags.
+  it('pairs every tool call with its result in call order and keeps non-concurrent calls alone', async () => {
+    type CallSpec = { concurrent: boolean; delay: number; fail: boolean };
+    type MultiReply = { kind: 'text'; content: string } | { kind: 'tools'; calls: CallSpec[] };
+    const multiReplyArb: fc.Arbitrary<MultiReply> = fc.oneof(
+      fc.record({ kind: fc.constant<'text'>('text'), content: fc.string({ maxLength: 10 }) }),
+      fc.record({
+        kind: fc.constant<'tools'>('tools'),
+        calls: fc.array(
+          fc.record({
+            concurrent: fc.boolean(),
+            delay: fc.integer({ min: 0, max: 3 }),
+            fail: fc.boolean(),
+          }),
+          { minLength: 1, maxLength: 4 },
+        ),
+      }),
+    );
+    const nameOf = (c: CallSpec): string =>
+      `${c.concurrent ? 'c' : 's'}-${c.delay}-${c.fail ? 'f' : 'k'}`;
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(multiReplyArb, { maxLength: 12 }),
+        fc.integer({ min: 1, max: 8 }),
+        async (replies, roundBound) => {
+          // Segment index of each emitted call id, per completion.
+          const segmentOf = new Map<string, { completion: number; segment: number }>();
+          let completions = 0;
+          const client: ModelClient = {
+            async complete(_req: CompletionRequest): Promise<CompletionResult> {
+              const n = completions;
+              completions += 1;
+              const reply: MultiReply = replies[n] ?? {
+                kind: 'tools',
+                calls: [{ concurrent: false, delay: 0, fail: false }],
+              };
+              if (reply.kind === 'text') {
+                return { content: reply.content, tool_calls: [] };
+              }
+              let segment = -1;
+              let prevConcurrent = false;
+              const toolCalls: ToolCall[] = reply.calls.map((c, i) => {
+                if (!(c.concurrent && prevConcurrent)) {
+                  segment += 1;
+                }
+                prevConcurrent = c.concurrent;
+                const id = `call-${n}-${i}`;
+                segmentOf.set(id, { completion: n, segment });
+                return { id, name: nameOf(c), arguments: '{}' };
+              });
+              return { content: undefined, tool_calls: toolCalls };
+            },
+          };
+
+          let inFlight = 0;
+          let violation = false;
+          const started: string[] = [];
+          const finished = new Set<string>();
+          let orderViolation = false;
+          const call = async (name: string, _args: string, callId: string): Promise<ToolResult> => {
+            const concurrent = name.startsWith('c-');
+            const delay = Number(name.split('-')[1]);
+            const fail = name.endsWith('-f');
+            const mine = segmentOf.get(callId)!;
+            for (const [id, pos] of segmentOf) {
+              if (pos.completion === mine.completion && pos.segment < mine.segment && !finished.has(id)) {
+                orderViolation = true;
+              }
+            }
+            started.push(callId);
+            inFlight += 1;
+            if (!concurrent && inFlight !== 1) {
+              violation = true;
+            }
+            for (let k = 0; k < delay; k += 1) {
+              await Promise.resolve();
+              if (!concurrent && inFlight !== 1) {
+                violation = true;
+              }
+            }
+            inFlight -= 1;
+            finished.add(callId);
+            return fail ? { ok: false, error: 'boom' } : { ok: true, data: callId };
+          };
+
+          const appended: ChatMessage[] = [];
+          const deps: ToolLoopDeps = {
+            client,
+            tools: [],
+            call,
+            isConcurrent: (name) => name.startsWith('c-'),
+            systemPrompt: async () => 'system',
+            append: async (msg) => {
+              appended.push({
+                role: msg.role,
+                content: msg.content,
+                ...(msg.tool_call_id !== undefined ? { tool_call_id: msg.tool_call_id } : {}),
+                ...(msg.tool_calls !== undefined ? { tool_calls: msg.tool_calls } : {}),
+              });
+            },
+            roundBound,
+            signal: new AbortController().signal,
+          };
+
+          await runToolLoop([{ role: 'user', content: 'hello' }], deps);
+
+          // (1) bound and notice.
+          assert.ok(completions <= roundBound);
+          const endedEarly = replies.slice(0, roundBound).some((r) => r.kind === 'text');
+          const last = appended[appended.length - 1];
+          assert.strictEqual(last.content === ROUND_BOUND_NOTICE, !endedEarly);
+
+          // (2)/(3) pairing.
+          const answered = new Set<string>();
+          for (let i = 0; i < appended.length; i += 1) {
+            const rec = appended[i];
+            if (rec.role === 'assistant' && rec.tool_calls !== undefined) {
+              const ids = rec.tool_calls.map((c) => c.id);
+              const following = appended.slice(i + 1, i + 1 + ids.length);
+              assert.deepStrictEqual(
+                following.map((m) => (m.role === 'tool' ? m.tool_call_id : undefined)),
+                ids,
+              );
+              following.forEach((m, k) => {
+                assert.ok(!answered.has(ids[k]), 'call id answered twice');
+                answered.add(ids[k]);
+                const spec = ids[k];
+                if (m.content.startsWith('Error: ')) {
+                  assert.strictEqual(m.content, 'Error: boom');
+                } else {
+                  assert.strictEqual(m.content, spec);
+                }
+              });
+            } else if (rec.role === 'tool') {
+              assert.ok(answered.has(rec.tool_call_id ?? ''), 'tool record without a preceding tool_calls');
+            }
+          }
+
+          // (4) every emitted call ran exactly once.
+          assert.deepStrictEqual([...started].sort(), [...segmentOf.keys()].sort());
+          assert.strictEqual(new Set(started).size, started.length);
+
+          // (5)/(6) isolation and segment order.
+          assert.strictEqual(violation, false, 'a non-concurrent call overlapped another call');
+          assert.strictEqual(orderViolation, false, 'a call started before an earlier segment finished');
         },
       ),
       { numRuns: 200 },
