@@ -267,6 +267,39 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       }
     });
 
+    it('assembles the sub-agent surface of each phase as a subset of the top surface', () => {
+      const registry = createToolRegistry(makeServices(newRepo()));
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const top = registry.assembleFor(phase);
+        const sub = registry.assembleFor(phase, 'subagent');
+        assert.ok(top.ok && sub.ok, `the ${phase} phase must assemble on both surfaces`);
+        if (!top.ok || !sub.ok) {
+          continue;
+        }
+        const topNames = top.value.map((s) => s.name);
+        const defs = registry.definitionsFor(phase, 'subagent');
+        assert.deepStrictEqual(sub.value.map((s) => s.name), defs.map((d) => d.name));
+        for (const spec of sub.value) {
+          assert.ok(topNames.includes(spec.name));
+          assert.strictEqual(spec.description, defs.find((d) => d.name === spec.name)!.description);
+        }
+        assert.ok(sub.value.length < top.value.length, `${phase} sub-agent surface is strictly smaller`);
+      }
+    });
+
+    it('advertises the spawn tools on both surfaces of every phase and run only in drive for sub-agents', () => {
+      const registry = createToolRegistry(makeServices(newRepo()));
+      for (const phase of ORCHESTRATOR_PHASES) {
+        for (const surface of ['top', 'subagent'] as const) {
+          const names = registry.definitionsFor(phase, surface).map((d) => d.name);
+          assert.ok(names.includes('spawn_subagent'), `${phase}/${surface} has spawn_subagent`);
+          assert.ok(names.includes('send_to_subagent'), `${phase}/${surface} has send_to_subagent`);
+        }
+        const subNames = registry.definitionsFor(phase, 'subagent').map((d) => d.name);
+        assert.strictEqual(subNames.includes('run'), phase === 'drive', `run on the ${phase} sub-agent surface`);
+      }
+    });
+
     it('the run phase assembles the read tools, ask_user and the two dispatch tools', () => {
       const repo = newRepo();
       const registry = createToolRegistry(makeServices(repo));

@@ -43,6 +43,14 @@
  * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every todo
  *   is done and landed.
  *
+ * - `spawn_subagent(task)` and `send_to_subagent(chat_id, message)` (neither
+ *   mutating nor dispatch) — start a sub-agent chat and wait for its first
+ *   reply, or send it a follow-up. They go through the sub-agent seam, need a
+ *   calling chat, and `spawn_subagent` is refused at depth
+ *   {@link MAX_SUBAGENT_DEPTH}. They are on every phase and on both tool
+ *   surfaces; `ask_user`, `run` and the read tools are the only other
+ *   sub-agent tools.
+ *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
  * `draft_spec` only while gathering requirements, `run`, `land_todo` and `submit_pr` only
  * while driving an approved spec, `approve_spec` in both, and `ask_user` in all
@@ -66,6 +74,7 @@ import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
 import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
+import { MAX_SUBAGENT_DEPTH } from './seams';
 import { ToolServices } from './toolServices';
 
 /** Build every control tool for the registry. */
@@ -79,6 +88,8 @@ export function createControlTools(services: ToolServices): Tool[] {
     runTool(services),
     landTodoTool(services),
     submitPrTool(services),
+    spawnSubAgentTool(services),
+    sendToSubAgentTool(services),
   ];
 }
 
@@ -97,6 +108,7 @@ function askUserTool(services: ToolServices): Tool {
       'Ask the user a question and wait for their answer: offer a short list of options, accept a typed reply, or both. Use this instead of ending your turn with a question.',
     mutating: false,
     phases: ['gather', 'drive', 'run'],
+    subagent: true,
     schema: {
       type: 'object',
       properties: {
@@ -681,6 +693,7 @@ function runTool(services: ToolServices): Tool {
       'Dispatch one stage for one todo (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
     mutating: false,
     phases: ['drive'],
+    subagent: true,
     dispatch: true,
     concurrent: true,
     schema: {
@@ -911,6 +924,99 @@ const RUNNABLE_STAGES: readonly Stage[] = ['plan', 'execute', 'review'] as const
 /** Whether `value` is a stage the `run` tool may dispatch. */
 function isRunnableStage(value: string): value is Stage {
   return isStage(value) && RUNNABLE_STAGES.includes(value);
+}
+
+/** The refusal a spawn from a chat already at the nesting cap gets; shared with the sub-agent runner. */
+export function subAgentDepthRefusal(depth: number): string {
+  return `spawn_subagent refused: sub-agents may nest at most ${MAX_SUBAGENT_DEPTH} levels deep (MAX_SUBAGENT_DEPTH = ${MAX_SUBAGENT_DEPTH}) and this chat is already at depth ${depth}. Do the task yourself or report back to your parent.`;
+}
+
+function spawnSubAgentTool(services: ToolServices): Tool {
+  return {
+    name: 'spawn_subagent',
+    description:
+      'Start a sub-agent chat to do one task and wait for its first reply. The sub-agent has its own tool loop and transcript; returns its chat id (for send_to_subagent) and its reply.',
+    mutating: false,
+    concurrent: true,
+    subagent: true,
+    phases: ['gather', 'drive', 'run'],
+    schema: {
+      type: 'object',
+      properties: { task: { type: 'string' } },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const task = readString(args, 'task');
+      if (task === undefined || task.trim() === '') {
+        return { ok: false, error: 'spawn_subagent requires a non-empty string "task"' };
+      }
+      const caller = tc.caller;
+      if (caller === undefined) {
+        return { ok: false, error: 'spawn_subagent needs a calling chat; it is not available here' };
+      }
+      if (caller.depth >= MAX_SUBAGENT_DEPTH) {
+        return { ok: false, error: subAgentDepthRefusal(caller.depth) };
+      }
+      if (services.subAgents === undefined) {
+        return { ok: false, error: 'spawn_subagent is not available in this host' };
+      }
+      const outcome = await services.subAgents.spawn({ task: task.trim(), caller });
+      switch (outcome.kind) {
+        case 'replied':
+          return { ok: true, data: { chatId: outcome.chatId, reply: outcome.reply } };
+        case 'refused':
+          return { ok: false, error: `the sub-agent did not start: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'spawn_subagent returned an unknown outcome' };
+      }
+    },
+  };
+}
+
+function sendToSubAgentTool(services: ToolServices): Tool {
+  return {
+    name: 'send_to_subagent',
+    description:
+      'Send a follow-up message to a sub-agent chat you started with spawn_subagent and wait for its reply.',
+    mutating: false,
+    concurrent: true,
+    subagent: true,
+    phases: ['gather', 'drive', 'run'],
+    schema: {
+      type: 'object',
+      properties: { chat_id: { type: 'string' }, message: { type: 'string' } },
+      required: ['chat_id', 'message'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const chatId = readString(args, 'chat_id');
+      const message = readString(args, 'message');
+      if (chatId === undefined || chatId.trim() === '' || message === undefined || message.trim() === '') {
+        return { ok: false, error: 'send_to_subagent requires a non-empty string "chat_id" and "message"' };
+      }
+      const caller = tc.caller;
+      if (caller === undefined) {
+        return { ok: false, error: 'send_to_subagent needs a calling chat; it is not available here' };
+      }
+      if (services.subAgents === undefined) {
+        return { ok: false, error: 'send_to_subagent is not available in this host' };
+      }
+      const outcome = await services.subAgents.send({
+        chatId: chatId.trim(),
+        message: message.trim(),
+        caller,
+      });
+      switch (outcome.kind) {
+        case 'replied':
+          return { ok: true, data: { reply: outcome.reply } };
+        case 'refused':
+          return { ok: false, error: `sub-agent "${chatId}" did not answer: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'send_to_subagent returned an unknown outcome' };
+      }
+    },
+  };
 }
 
 /** A slug/todo id is a simple directory-safe name (no separators/traversal). */

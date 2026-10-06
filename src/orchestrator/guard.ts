@@ -29,6 +29,7 @@
 import * as fs from 'fs/promises';
 import { realpathSync } from 'fs';
 import * as path from 'path';
+import type { ConversationKind } from './systemPrompt';
 
 /**
  * The result of any tool invocation (design "Orchestrator: tool registry and
@@ -67,10 +68,14 @@ export interface GuardWorkspace {
  *              rejects that for mutating calls (Req 8.4).
  * - `ctx`    — the workspace context, exposing the guard's path-containment
  *              helpers so a tool resolves its argument paths through the guard.
+ * - `caller` — the chat making the call, so a tool such as `spawn_subagent`
+ *              knows who is asking. Absent when the host does not say (e.g.
+ *              existing direct calls such as commands.ts approve_spec).
  */
 export interface ToolContext {
   callId: string | undefined;
   ctx: GuardContext;
+  caller?: ToolCaller;
 }
 
 /**
@@ -100,6 +105,19 @@ export type OrchestratorPhase = 'gather' | 'drive' | 'run';
 
 /** All three orchestrator phases, for iteration in assembly and tests. */
 export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive', 'run'] as const;
+
+/** Who is asking for the tool surface: a top-level chat, or a sub-agent chat a parent spawned. A sub-agent sees only the read tools, ask_user, run (drive phase) and the two spawn tools; only a top-level chat finishes a spec. */
+export type ToolSurface = 'top' | 'subagent';
+export const TOOL_SURFACES: readonly ToolSurface[] = ['top', 'subagent'] as const;
+
+/** The chat making a tool call, so a tool (spawn_subagent, send_to_subagent) knows who is calling. depth is 0 for a top-level chat, 1 for its sub-agent, 2 for a sub-agent's sub-agent. */
+export interface ToolCaller {
+  sessionKey: string;
+  depth: number;
+  phase: OrchestratorPhase;
+  kind: ConversationKind;
+  signal: AbortSignal;
+}
 
 /**
  * A single orchestrator tool (design "Orchestrator: tool registry and guard").
@@ -142,6 +160,10 @@ export interface Tool {
    * before the tool's `run` is reached.
    */
   phases: readonly OrchestratorPhase[];
+  /**
+   * Whether a sub-agent chat may see and call this tool (in the phases it lists). Unset means top-level only, so a new tool never leaks onto the sub-agent surface by default. Read tools are sub-agent tools by origin (the registry marks them), so they do not set it.
+   */
+  subagent?: boolean;
   schema: object;
   run(args: unknown, tc: ToolContext): Promise<ToolResult>;
 }

@@ -40,6 +40,11 @@
  * absent mode or `'spec'` reproduces today's phase and today's prompt text byte
  * for byte, so every existing Spec-mode test keeps passing unmodified.
  *
+ * {@link buildSubAgentPrompt} builds the prompt for a sub-agent chat instead:
+ * its role (do one task, report back, never finish a spec), the shared
+ * prohibitions, refusal and `ask_user` text, the run table only in `drive`,
+ * and whether it may spawn its own sub-agents at its depth.
+ *
  * For a spec conversation the prompt appends the current `spec.md` content when
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
@@ -47,6 +52,7 @@
 import { isSpecless, RunMode } from '../model/mode';
 import { parseSpec } from '../model/parser';
 import { OrchestratorPhase } from './guard';
+import { MAX_SUBAGENT_DEPTH } from './seams';
 
 /** Which conversation the prompt is being built for. */
 export type ConversationKind =
@@ -401,5 +407,54 @@ export function buildSystemPrompt(
     sections.push(['Current spec file content:', '', specContent].join('\n'));
   }
 
+  return sections.join('\n\n');
+}
+
+/** The sub-agent's role: one task, a concise report back, and no spec finishing. */
+export const SUBAGENT_ROLE_TEXT = [
+  'You are a Baiton sub-agent: a chat another Baiton chat started to do one task for it.',
+  'Do the task you were given, then report back concisely: lead with the result, then only the detail your parent needs to act on it.',
+  'You never finish a spec. You do not draft, approve, land or submit; only the top-level chat does that, and those tools are not yours.',
+  'You never edit source code and you write nothing yourself. You inspect the repository only through the read tools you have been given.',
+].join('\n');
+
+/** The run table a sub-agent sees only while its parent is driving an approved spec. */
+export const SUBAGENT_DRIVE_TEXT = [
+  'Your parent is driving an approved spec. When your task is to move a todo forward, dispatch the next legal stage with `run`:',
+  '- `pending` -> `run` the `plan` stage.',
+  '- `planned` -> `run` the `execute` stage.',
+  '- `executed` -> `run` the `review` stage.',
+  '- A review that sends the todo back -> `run` the `execute` stage again.',
+  "- `done` -> stop and report; landing it with `land_todo` is your parent's job.",
+  '`run` blocks until the stage finishes and returns its outcome; there is nothing to poll afterwards.',
+].join('\n');
+
+/** Whether a sub-agent at `depth` may start its own sub-agents. */
+export function subAgentSpawnText(depth: number): string {
+  if (depth < MAX_SUBAGENT_DEPTH) {
+    return `You may start your own sub-agents with \`spawn_subagent\` and follow up with \`send_to_subagent\`. You are at depth ${depth}; sub-agents nest at most ${MAX_SUBAGENT_DEPTH} deep.`;
+  }
+  return `You may not start sub-agents: you are at depth ${depth}, the most sub-agents may nest (${MAX_SUBAGENT_DEPTH}). \`spawn_subagent\` will refuse; do the work yourself.`;
+}
+
+/**
+ * The system prompt for a sub-agent chat. `phase` is the parent's phase (passed
+ * in, not derived) so a sub-agent of a run-phase conversation never sees the
+ * drive table.
+ */
+export function buildSubAgentPrompt(
+  kind: ConversationKind,
+  phase: OrchestratorPhase,
+  depth: number,
+  specContent?: string,
+): string {
+  const sections = [SUBAGENT_ROLE_TEXT, PROHIBITION_LINES.join('\n'), REFUSAL_TEXT, ASK_USER_TEXT];
+  if (phase === 'drive') {
+    sections.push(SUBAGENT_DRIVE_TEXT);
+  }
+  sections.push(subAgentSpawnText(depth), STYLE_TEXT);
+  if (kind.kind === 'spec' && specContent !== undefined) {
+    sections.push(['Current spec file content:', '', specContent].join('\n'));
+  }
   return sections.join('\n\n');
 }

@@ -23,14 +23,22 @@
  * refuses an out-of-phase tool — a dispatch included — before the guard and
  * before the tool's `run` is reached, so a tool the model should not have
  * cannot act even if it is named anyway.
+ *
+ * A second axis, the {@link ToolSurface}, separates a top-level chat from a
+ * sub-agent chat. A sub-agent surface is the read tools, `ask_user`, `run`
+ * (drive only) and `spawn_subagent`/`send_to_subagent` within the current
+ * phase; never `draft_spec`, `approve_spec`, `submit_pr`, `land_todo`,
+ * `start_run`, `investigate` or the spec-write tools.
  */
 import {
   GuardContext,
   IdempotencyStore,
   OrchestratorPhase,
   Tool,
+  ToolCaller,
   ToolContext,
   ToolResult,
+  ToolSurface,
   guardTool,
 } from './guard';
 import { createControlTools } from './controlTools';
@@ -60,6 +68,8 @@ export interface ToolDescriptionError {
 interface RegisteredTool {
   tool: Tool;
   guardedRun: (args: unknown, tc: ToolContext) => Promise<ToolResult>;
+  /** Whether a sub-agent chat may see and call this tool. */
+  subagent: boolean;
 }
 
 /**
@@ -73,17 +83,26 @@ export class ToolRegistry {
   private readonly store = new IdempotencyStore();
 
   constructor(services: ToolServices) {
-    const tools = [
-      ...createReadTools(services),
-      ...createSpecWriteTools(services),
-      ...createControlTools(services),
-    ];
-    for (const tool of tools) {
+    const reads = createReadTools(services);
+    const others = [...createSpecWriteTools(services), ...createControlTools(services)];
+    const register = (tool: Tool, subagent: boolean): void => {
       this.registered.set(tool.name, {
         tool,
         guardedRun: guardTool(tool, this.store),
+        subagent,
       });
+    };
+    // Read tools are sub-agent tools by origin; everything else opts in.
+    for (const tool of reads) {
+      register(tool, true);
     }
+    for (const tool of others) {
+      register(tool, tool.subagent === true);
+    }
+  }
+
+  private onSurface(entry: RegisteredTool, surface: ToolSurface): boolean {
+    return surface === 'top' || entry.subagent;
   }
 
   /** Whether a tool with `name` is registered. */
@@ -109,10 +128,14 @@ export class ToolRegistry {
 
   /**
    * The raw {@link Tool} definitions advertised in `phase` (Req 11.1): the
-   * subset of {@link definitions} whose `phases` include it.
+   * subset of {@link definitions} whose `phases` include it. On the
+   * `'subagent'` surface only the sub-agent tools (read tools, `ask_user`,
+   * `run`, the spawn tools) of that phase are returned.
    */
-  public definitionsFor(phase: OrchestratorPhase): Tool[] {
-    return this.definitions().filter((t) => t.phases.includes(phase));
+  public definitionsFor(phase: OrchestratorPhase, surface: ToolSurface = 'top'): Tool[] {
+    return [...this.registered.values()]
+      .filter((entry) => entry.tool.phases.includes(phase) && this.onSurface(entry, surface))
+      .map((entry) => entry.tool);
   }
 
   /**
@@ -128,8 +151,11 @@ export class ToolRegistry {
    * The validated {@link ToolSpec}s to advertise while in `phase` (Req 11.1),
    * validating only that phase's descriptions (Req 10.3–10.5).
    */
-  public assembleFor(phase: OrchestratorPhase): Result<ToolSpec[], ToolDescriptionError> {
-    return assembleToolSpecs(this.definitionsFor(phase));
+  public assembleFor(
+    phase: OrchestratorPhase,
+    surface: ToolSurface = 'top',
+  ): Result<ToolSpec[], ToolDescriptionError> {
+    return assembleToolSpecs(this.definitionsFor(phase, surface));
   }
 
   /**
@@ -140,7 +166,9 @@ export class ToolRegistry {
    * `phase` is the orchestrator phase the conversation is in (Req 11.1). A tool
    * that does not belong to that phase is refused here, before the guard and
    * before the tool's own `run`, so an out-of-phase call reads nothing and
-   * writes nothing.
+   * writes nothing. Likewise a tool not on the `surface` (a sub-agent calling a
+   * top-only tool) is refused before the guard. `caller` is passed through to
+   * the tool's context.
    */
   public async call(
     name: string,
@@ -148,6 +176,8 @@ export class ToolRegistry {
     callId: string | undefined,
     ctx: GuardContext,
     phase: OrchestratorPhase,
+    surface: ToolSurface = 'top',
+    caller?: ToolCaller,
   ): Promise<ToolResult> {
     const entry = this.registered.get(name);
     if (entry === undefined) {
@@ -159,7 +189,13 @@ export class ToolRegistry {
         error: `tool "${name}" is not available while ${phase}`,
       };
     }
-    return entry.guardedRun(args, { callId, ctx });
+    if (!this.onSurface(entry, surface)) {
+      return {
+        ok: false,
+        error: `tool "${name}" is not available to a sub-agent; only the top-level chat may use it`,
+      };
+    }
+    return entry.guardedRun(args, { callId, ctx, ...(caller !== undefined ? { caller } : {}) });
   }
 }
 

@@ -7,7 +7,9 @@ import {
   GuardContext,
   ORCHESTRATOR_PHASES,
   OrchestratorPhase,
+  ToolCaller,
 } from '../src/orchestrator/guard';
+import { subAgentDepthRefusal } from '../src/orchestrator/controlTools';
 import { ToolServices } from '../src/orchestrator/toolServices';
 import { createRunQueueSeam } from '../src/activation/engineFacade';
 import type { DispatchResult, RunQueue, RunRequest } from '../src/engine';
@@ -19,7 +21,13 @@ import {
   LandTodoOutcome,
   LandTodoRequest,
   RunDispatchOutcome,
+  MAX_SUBAGENT_DEPTH,
   RunDispatchRequest,
+  SendToSubAgentOutcome,
+  SendToSubAgentRequest,
+  SpawnSubAgentOutcome,
+  SpawnSubAgentRequest,
+  SubAgentSeam,
   StartRunOutcome,
   StartRunRequest,
 } from '../src/orchestrator/seams';
@@ -78,6 +86,8 @@ const EXPECTED_TOOLS = [
   'run',
   'land_todo',
   'submit_pr',
+  'spawn_subagent',
+  'send_to_subagent',
 ];
 
 /** A git stub whose every method throws, proving a code path touched no git. */
@@ -194,6 +204,40 @@ function spyingPipeline(
   };
 }
 
+/** A sub-agent seam that records its requests and answers fixed outcomes. */
+function recordingSubAgents(
+  spawnOutcome: SpawnSubAgentOutcome,
+  sendOutcome: SendToSubAgentOutcome,
+): { seam: SubAgentSeam; spawnCalls: SpawnSubAgentRequest[]; sendCalls: SendToSubAgentRequest[] } {
+  const spawnCalls: SpawnSubAgentRequest[] = [];
+  const sendCalls: SendToSubAgentRequest[] = [];
+  return {
+    spawnCalls,
+    sendCalls,
+    seam: {
+      spawn: async (req) => {
+        spawnCalls.push(req);
+        return spawnOutcome;
+      },
+      send: async (req) => {
+        sendCalls.push(req);
+        return sendOutcome;
+      },
+    },
+  };
+}
+
+/** A caller at `depth` in `phase`. */
+function makeCaller(depth: number, phase: OrchestratorPhase = 'gather'): ToolCaller {
+  return {
+    sessionKey: 'chat-1',
+    depth,
+    phase,
+    kind: { kind: 'workspace' },
+    signal: new AbortController().signal,
+  };
+}
+
 /** Build {@link ToolServices} rooted at `repoRoot` with the given git/confirm. */
 function makeServices(
   repoRoot: string,
@@ -203,6 +247,7 @@ function makeServices(
   runQueue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> } = noRunQueue,
   intervention?: InterventionSeam,
   runPipeline?: { start: (req: StartRunRequest) => Promise<StartRunOutcome> },
+  subAgents?: SubAgentSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -216,6 +261,7 @@ function makeServices(
     ...(draftSpec !== undefined ? { draftSpec } : {}),
     ...(intervention !== undefined ? { intervention } : {}),
     ...(runPipeline !== undefined ? { runPipeline } : {}),
+    ...(subAgents !== undefined ? { subAgents } : {}),
     clock: { now: () => '2024-01-01T00:00:00.000Z' },
     ids: { next: () => 'id-1' },
     gitSettings: { remote: 'origin', base: 'main' },
@@ -651,6 +697,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'ask_user',
         'draft_spec',
         'approve_spec',
+        'spawn_subagent',
+        'send_to_subagent',
       ],
       drive: [
         'list_specs',
@@ -665,6 +713,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'run',
         'land_todo',
         'submit_pr',
+        'spawn_subagent',
+        'send_to_subagent',
       ],
       run: [
         'list_specs',
@@ -678,6 +728,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'ask_user',
         'start_run',
         'investigate',
+        'spawn_subagent',
+        'send_to_subagent',
       ],
     };
 
@@ -1813,6 +1865,211 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         assert.match(result.error, /gather/);
       }
       assert.strictEqual(seam.calls.length, 0);
+    });
+  });
+
+  describe('sub-agent surface', () => {
+    const READS = ['list_specs', 'read_spec', 'list_files', 'read_file', 'search', 'git_status', 'git_diff', 'git_log'];
+    const EXPECTED_SUBAGENT_TOOLS: Record<OrchestratorPhase, string[]> = {
+      gather: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
+      drive: ['list_specs', 'read_spec', 'git_status', 'ask_user', 'run', 'spawn_subagent', 'send_to_subagent'],
+      run: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
+    };
+    const TOP_ONLY = [
+      'draft_spec', 'approve_spec', 'submit_pr', 'land_todo', 'start_run', 'investigate',
+      'update_overview', 'add_todo', 'edit_todo', 'remove_todo',
+    ];
+
+    function registryFor(repo: string, extra?: { confirm?: ReturnType<typeof recordingConfirm>; draft?: ReturnType<typeof recordingDraft>; pipeline?: ReturnType<typeof spyingPipeline> }) {
+      return createToolRegistry(
+        makeServices(repo, throwingGit(), extra?.confirm ?? recordingConfirm(true), extra?.draft, undefined, undefined, extra?.pipeline),
+      );
+    }
+
+    it('advertises exactly the sub-agent tools of each phase', () => {
+      const registry = registryFor(newRepo());
+      for (const phase of ORCHESTRATOR_PHASES) {
+        assert.deepStrictEqual(
+          registry.definitionsFor(phase, 'subagent').map((d) => d.name).sort(),
+          [...EXPECTED_SUBAGENT_TOOLS[phase]].sort(),
+          `the ${phase} sub-agent surface`,
+        );
+        assert.deepStrictEqual(
+          registry.definitionsFor(phase).map((d) => d.name),
+          registry.definitionsFor(phase, 'top').map((d) => d.name),
+        );
+      }
+    });
+
+    it('never advertises a top-only tool to a sub-agent', () => {
+      const registry = registryFor(newRepo());
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const names = registry.definitionsFor(phase, 'subagent').map((d) => d.name);
+        for (const name of TOP_ONLY) {
+          assert.ok(!names.includes(name), `${name} must not be on the ${phase} sub-agent surface`);
+        }
+      }
+    });
+
+    it('assembles the sub-agent surface in definition order', () => {
+      const registry = registryFor(newRepo());
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const result = registry.assembleFor(phase, 'subagent');
+        assert.strictEqual(result.ok, true);
+        if (result.ok) {
+          assert.deepStrictEqual(
+            result.value.map((s) => s.name),
+            registry.definitionsFor(phase, 'subagent').map((d) => d.name),
+          );
+        }
+      }
+    });
+
+    it('refuses top-only tools on the sub-agent surface before anything runs', async () => {
+      const repo = newRepo();
+      const specFile = writeSpec(repo, 'sample', draftSpec());
+      const before = fs.readFileSync(specFile);
+      const confirm = recordingConfirm(true);
+      const draft = recordingDraft();
+      const pipeline = spyingPipeline();
+      const registry = registryFor(repo, { confirm, draft, pipeline });
+      const guard = makeGuard(repo);
+      const cases: Array<[string, unknown, OrchestratorPhase]> = [
+        ['submit_pr', { slug: 'sample' }, 'drive'],
+        ['land_todo', { slug: 'sample', todo: 'T01' }, 'drive'],
+        ['draft_spec', { slug: 'sample', requirements: 'x' }, 'gather'],
+        ['start_run', { mode: 'bug', statement: 's', files: [] }, 'run'],
+      ];
+      for (const [name, args, phase] of cases) {
+        const result = await registry.call(name, args, 'id', guard, phase, 'subagent');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+          assert.match(result.error, new RegExp(name));
+          assert.match(result.error, /sub-agent/);
+        }
+      }
+      assert.strictEqual(confirm.calls.length, 0);
+      assert.strictEqual(draft.calls.length, 0);
+      assert.strictEqual(pipeline.calls.length, 0);
+      assert.deepStrictEqual(fs.readFileSync(specFile), before);
+    });
+
+    it('lets a sub-agent call read_spec in every phase', async () => {
+      const repo = newRepo();
+      writeSpec(repo, 'sample', draftSpec());
+      const registry = registryFor(repo);
+      for (const phase of ORCHESTRATOR_PHASES) {
+        const result = await registry.call('read_spec', { slug: 'sample' }, undefined, makeGuard(repo), phase, 'subagent');
+        assert.strictEqual(result.ok, true, `read_spec in ${phase}`);
+      }
+    });
+  });
+
+  describe('spawn_subagent and send_to_subagent', () => {
+    const replied: SpawnSubAgentOutcome = { kind: 'replied', chatId: 'child-1', reply: 'done' };
+    const sent: SendToSubAgentOutcome = { kind: 'replied', reply: 'ok then' };
+
+    function setup(seam?: SubAgentSeam) {
+      const repo = newRepo();
+      const registry = createToolRegistry(
+        makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, undefined, undefined, seam),
+      );
+      return { registry, guard: makeGuard(repo) };
+    }
+
+    it('spawns through the seam with the trimmed task and returns chatId and reply', async () => {
+      const rec = recordingSubAgents(replied, sent);
+      const { registry, guard } = setup(rec.seam);
+      const caller = makeCaller(0);
+      const result = await registry.call('spawn_subagent', { task: '  trimmed task  ' }, 'c', guard, 'gather', 'top', caller);
+      assert.deepStrictEqual(result, { ok: true, data: { chatId: 'child-1', reply: 'done' } });
+      assert.deepStrictEqual(rec.spawnCalls, [{ task: 'trimmed task', caller }]);
+    });
+
+    it('refuses a spawn from the depth cap before the seam, but allows depth 1', async () => {
+      const rec = recordingSubAgents(replied, sent);
+      const { registry, guard } = setup(rec.seam);
+      const refused = await registry.call('spawn_subagent', { task: 't' }, 'c', guard, 'gather', 'subagent', makeCaller(MAX_SUBAGENT_DEPTH));
+      assert.strictEqual(refused.ok, false);
+      if (!refused.ok) {
+        assert.match(refused.error, /2/);
+        assert.match(refused.error, /depth/);
+        assert.strictEqual(refused.error, subAgentDepthRefusal(2));
+      }
+      assert.strictEqual(rec.spawnCalls.length, 0);
+      const allowed = await registry.call('spawn_subagent', { task: 't' }, 'c', guard, 'gather', 'subagent', makeCaller(1));
+      assert.strictEqual(allowed.ok, true);
+      assert.strictEqual(rec.spawnCalls.length, 1);
+    });
+
+    it('refuses a blank task, a missing caller and a missing seam', async () => {
+      const rec = recordingSubAgents(replied, sent);
+      const { registry, guard } = setup(rec.seam);
+      const blank = await registry.call('spawn_subagent', { task: '   ' }, 'c', guard, 'gather', 'top', makeCaller(0));
+      assert.strictEqual(blank.ok, false);
+      const noCaller = await registry.call('spawn_subagent', { task: 't' }, 'c', guard, 'gather');
+      assert.strictEqual(noCaller.ok, false);
+      assert.strictEqual(rec.spawnCalls.length, 0);
+
+      const bare = setup();
+      const noSeam = await bare.registry.call('spawn_subagent', { task: 't' }, 'c', bare.guard, 'gather', 'top', makeCaller(0));
+      assert.strictEqual(noSeam.ok, false);
+      if (!noSeam.ok) {
+        assert.match(noSeam.error, /not available/);
+      }
+    });
+
+    it('maps a refused spawn to an error carrying the reason', async () => {
+      const rec = recordingSubAgents({ kind: 'refused', reason: 'too busy' }, sent);
+      const { registry, guard } = setup(rec.seam);
+      const result = await registry.call('spawn_subagent', { task: 't' }, 'c', guard, 'gather', 'top', makeCaller(0));
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) {
+        assert.match(result.error, /too busy/);
+      }
+    });
+
+    it('sends a follow-up through the seam and returns the reply', async () => {
+      const rec = recordingSubAgents(replied, sent);
+      const { registry, guard } = setup(rec.seam);
+      const caller = makeCaller(0);
+      const result = await registry.call('send_to_subagent', { chat_id: ' child-1 ', message: ' hi ' }, 'c', guard, 'gather', 'top', caller);
+      assert.deepStrictEqual(result, { ok: true, data: { reply: 'ok then' } });
+      assert.deepStrictEqual(rec.sendCalls, [{ chatId: 'child-1', message: 'hi', caller }]);
+    });
+
+    it('refuses a send with missing arguments before the seam and maps a refusal naming the chat', async () => {
+      const rec = recordingSubAgents(replied, { kind: 'refused', reason: 'gone' });
+      const { registry, guard } = setup(rec.seam);
+      const caller = makeCaller(0);
+      for (const args of [{ message: 'm' }, { chat_id: 'child-1' }]) {
+        const result = await registry.call('send_to_subagent', args, 'c', guard, 'gather', 'top', caller);
+        assert.strictEqual(result.ok, false);
+      }
+      assert.strictEqual(rec.sendCalls.length, 0);
+      const refused = await registry.call('send_to_subagent', { chat_id: 'child-1', message: 'm' }, 'c', guard, 'gather', 'top', caller);
+      assert.strictEqual(refused.ok, false);
+      if (!refused.ok) {
+        assert.match(refused.error, /child-1/);
+        assert.match(refused.error, /gone/);
+      }
+    });
+
+    it('flags both tools concurrent and not mutating', () => {
+      const { registry } = setup();
+      for (const name of ['spawn_subagent', 'send_to_subagent']) {
+        const tool = registry.definitions().find((d) => d.name === name)!;
+        assert.strictEqual(tool.concurrent, true);
+        assert.strictEqual(tool.mutating, false);
+      }
+    });
+
+    it('runs on the sub-agent surface too', async () => {
+      const rec = recordingSubAgents(replied, sent);
+      const { registry, guard } = setup(rec.seam);
+      const result = await registry.call('spawn_subagent', { task: 't' }, 'c', guard, 'drive', 'subagent', makeCaller(1, 'drive'));
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(rec.spawnCalls.length, 1);
     });
   });
 });

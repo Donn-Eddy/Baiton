@@ -18,6 +18,7 @@ import {
   LandTodoSeam,
   RunPipelineSeam,
   RunQueueSeam,
+  SubAgentSeam,
 } from './seams';
 
 /** The git settings the approval flow needs (remote to fetch, base branch). */
@@ -47,6 +48,8 @@ export interface ToolGitSettings {
  * - `runPipeline` — the spec-less run pipeline seam `start_run` and
  *                 `investigate` dispatch into.
  * - `landTodo`  — the seam `land_todo` merges a done todo's branch through.
+ * - `subAgents` — the seam `spawn_subagent` and `send_to_subagent` go through
+ *                 (optional; both tools report unavailable without it).
  * - `clock`     — wall clock for transcript timestamps.
  * - `ids`       — identifier source (reserved for tool-generated ids).
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
@@ -83,6 +86,10 @@ export interface ToolServices {
    * The seam `land_todo` merges a done todo's branch into the spec branch through. Optional so a host that has not wired per-todo worktrees still builds a registry; `land_todo` then reports itself unavailable.
    */
   landTodo?: LandTodoSeam;
+  /**
+   * The seam spawn_subagent and send_to_subagent go through. Optional so a host that has not wired sub-agents still builds a registry; both tools then report themselves unavailable.
+   */
+  subAgents?: SubAgentSeam;
   clock: Clock;
   ids: IdGenerator;
   gitSettings: ToolGitSettings;
