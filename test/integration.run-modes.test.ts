@@ -23,7 +23,7 @@ import {
   mergeRunWorktree,
   type RunWorktreeDeps,
 } from '../src/engine/runWorktree';
-import { createRunPipelineSeam } from '../src/activation/engineFacade';
+import { createRunPipelineSeam, createStageLock } from '../src/activation/engineFacade';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
 import type { ToolServices } from '../src/orchestrator/toolServices';
@@ -53,7 +53,8 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/ada
  * executes with a `Run-Id:` commit and reviews, and touches nothing under
  * `.baiton/specs/`; a declined confirm creates nothing; a merge removes the
  * worktree and branch and refuses on a moved base or a dirty tree, while a
- * cancel keeps them; an Investigate run commits nothing and yields a finding.
+ * cancel keeps them; an Investigate run commits nothing and yields a finding;
+ * and only the spec draft (never a per-todo queue) blocks a spec-less run.
  */
 
 // ---------------------------------------------------------------------------
@@ -269,7 +270,7 @@ interface Harness {
  */
 function makeHarness(
   repo: string,
-  options: { runId?: string; execAttempts?: number } = {},
+  options: { runId?: string; execAttempts?: number; isSpecBusy?: () => boolean } = {},
 ): Harness {
   const service = createGitService(repo);
   const store = createRunStore({ workspaceRoot: repo });
@@ -291,6 +292,7 @@ function makeHarness(
     adapterForRole: () => adapter,
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
+    ...(options.isSpecBusy !== undefined ? { isSpecBusy: options.isSpecBusy } : {}),
     newRunId: () => options.runId ?? RUN_ID,
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
     onComplete: (o) => outcomes.push(o),
@@ -837,6 +839,50 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
       assert.notStrictEqual(await h.service.branchHead(`baiton/bug/${RUN_ID}`), undefined);
       assert.strictEqual(h.pipeline.isRunning(), false);
       assert.strictEqual((await h.service.status()).clean, true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 6: the repository lock
+  // -------------------------------------------------------------------------
+
+  describe('the repository lock', () => {
+    it('is held against a spec-less run only by the spec draft, and the run holds it against the draft', async () => {
+      const repo = newRepo();
+      let drafting = true;
+      // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
+      let h!: Harness;
+      const lock = createStageLock({
+        specDraftRunning: () => drafting,
+        runRunning: () => h.pipeline.isRunning(),
+      });
+      h = makeHarness(repo, { isSpecBusy: () => lock.runPipelineBusy() });
+
+      // While the spec draft runs, a spec-less run is refused and creates nothing.
+      const refused = await h.pipeline.start(bugRequest());
+      assert.strictEqual(refused.ok, false);
+      if (!refused.ok) {
+        assert.strictEqual(refused.error.kind, 'busy');
+      }
+      assert.strictEqual(fs.existsSync(h.worktreeDir()), false, 'no worktree was created');
+      assert.strictEqual(await h.service.branchHead(`baiton/bug/${RUN_ID}`), undefined, 'no branch was created');
+
+      // With the draft finished the run starts, and while it runs the draft is locked out.
+      drafting = false;
+      assert.strictEqual(lock.specDraftBusy(), false);
+      const started = await h.pipeline.start(bugRequest());
+      assert.ok(started.ok, 'the run starts once the draft is done');
+      if (!started.ok) {
+        return;
+      }
+      assert.strictEqual(lock.specDraftBusy(), true, 'a running spec-less run blocks the spec draft');
+
+      await h.waitFor(0);
+      assert.strictEqual(h.pipeline.cancel(), true);
+      await h.close(0, undefined);
+      await started.completed;
+      await waitUntil(() => !h.pipeline.isRunning(), 'the run settling after cancel');
+      assert.strictEqual(lock.specDraftBusy(), false, 'the lock is released when the run ends');
     });
   });
 
