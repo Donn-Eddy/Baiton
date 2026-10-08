@@ -1,12 +1,15 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
   appendStart,
   appendCompletion,
   parseJournal,
+  readSpecJournal,
+  specJournalPathFor,
+  todoJournalPathFor,
   StartInput,
   CompletionInput,
   JournalEntry,
@@ -293,5 +296,111 @@ describe('run journal round trip (property)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('readSpecJournal', () => {
+  const start = (runId: string, todoId: string): StartInput => ({
+    runId,
+    todoId,
+    stage: 'execute',
+    attempt: 1,
+    startHead: 'h',
+    inputRev: 'r',
+  });
+
+  function withDir(fn: (specsDir: string) => void): void {
+    const specsDir = mkdtempSync(join(tmpdir(), 'baiton-specjournal-'));
+    try {
+      fn(specsDir);
+    } finally {
+      rmSync(specsDir, { recursive: true, force: true });
+    }
+  }
+
+  it('returns the union of spec-level and per-todo entries, preserving per-todo order', () => {
+    const todoIds = ['T01', 'T02', 'T03'];
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            todo: fc.constantFrom(...todoIds),
+            legacy: fc.boolean(),
+            done: fc.boolean(),
+          }),
+          { maxLength: 15 },
+        ),
+        (runs) => {
+          withDir((specsDir) => {
+            runs.forEach((r, i) => {
+              const runId = `run-${i}`;
+              const file = r.legacy
+                ? specJournalPathFor(specsDir, 'demo')
+                : todoJournalPathFor(specsDir, 'demo', r.todo);
+              appendStart(file, start(runId, r.todo));
+              if (r.done) {
+                appendCompletion(file, { runId, result: 'completed' });
+              }
+            });
+            const merged = readSpecJournal(specsDir, 'demo');
+            assert.strictEqual(merged.length, runs.length);
+            const byId = new Map(merged.map((e) => [e.runId, e]));
+            runs.forEach((r, i) => {
+              const e = byId.get(`run-${i}`);
+              assert.ok(e);
+              assert.strictEqual(e.todoId, r.todo);
+              assert.strictEqual(e.result, r.done ? 'completed' : undefined);
+            });
+            for (const id of todoIds) {
+              const expected = [
+                ...runs.map((r, i) => ({ r, i })).filter((x) => x.r.todo === id && x.r.legacy),
+                ...runs.map((r, i) => ({ r, i })).filter((x) => x.r.todo === id && !x.r.legacy),
+              ].map((x) => `run-${x.i}`);
+              const actual = merged.filter((e) => e.todoId === id).map((e) => e.runId);
+              assert.deepStrictEqual(actual, expected);
+            }
+          });
+        },
+      ),
+      { numRuns: 50 },
+    );
+  });
+
+  it('attaches a per-todo completion to a spec-level start', () => {
+    withDir((specsDir) => {
+      appendStart(specJournalPathFor(specsDir, 'demo'), start('r1', 'T01'));
+      appendCompletion(todoJournalPathFor(specsDir, 'demo', 'T01'), {
+        runId: 'r1',
+        result: 'completed',
+        commit: 'sha',
+      });
+      const merged = readSpecJournal(specsDir, 'demo');
+      assert.strictEqual(merged.length, 1);
+      assert.strictEqual(merged[0].result, 'completed');
+      assert.strictEqual(merged[0].commit, 'sha');
+    });
+  });
+
+  it('tolerates missing files and folders without a journal', () => {
+    withDir((specsDir) => {
+      assert.deepStrictEqual(readSpecJournal(specsDir, 'demo'), []);
+      mkdirSync(join(specsDir, 'demo', 'todos', 'T05'), { recursive: true });
+      writeFileSync(join(specsDir, 'demo', 'todos', 'T05', 'plan.md'), '# plan\n');
+      assert.deepStrictEqual(readSpecJournal(specsDir, 'demo'), []);
+      appendStart(todoJournalPathFor(specsDir, 'demo', 'T01'), start('r1', 'T01'));
+      assert.deepStrictEqual(
+        readSpecJournal(specsDir, 'demo').map((e) => e.runId),
+        ['r1'],
+      );
+    });
+  });
+
+  it('appendStart creates a missing todos/<id>/ directory', () => {
+    withDir((specsDir) => {
+      const file = todoJournalPathFor(specsDir, 'demo', 'T09');
+      assert.ok(!existsSync(join(specsDir, 'demo', 'todos', 'T09')));
+      appendStart(file, start('r1', 'T09'));
+      assert.ok(existsSync(file));
+    });
   });
 });

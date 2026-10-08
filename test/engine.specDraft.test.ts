@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { createStageLock } from '../src/activation/engineFacade';
 import { createSpecDraftRunner } from '../src/engine/specDraft';
 import type { SpecDraftOutcome } from '../src/engine/specDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
@@ -159,7 +160,9 @@ function recordingGit(commits: string[], fail = false): GitService {
 }
 
 /** A harness bundling the stubs and the runner under test. */
-function makeHarness(options: { probeOk?: boolean; commitFails?: boolean; unknownAgent?: boolean } = {}) {
+function makeHarness(
+  options: { probeOk?: boolean; commitFails?: boolean; unknownAgent?: boolean; isQueueRunning?: () => boolean } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-draft-'));
   const specsDir = path.join(root, '.baiton', 'specs');
   fs.mkdirSync(specsDir, { recursive: true });
@@ -191,7 +194,7 @@ function makeHarness(options: { probeOk?: boolean; commitFails?: boolean; unknow
     services,
     modelForRole: () => ({ model: 'writer-model', effort: 'high' }),
     adapterForRole: () => (options.unknownAgent ? undefined : adapter),
-    isQueueRunning: () => queueRunning,
+    isQueueRunning: () => options.isQueueRunning?.() ?? queueRunning,
     newRunId: () => 'draft-run-1',
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
     onComplete: (o) => outcomes.push(o),
@@ -401,7 +404,7 @@ describe('spec-draft runner (unit)', () => {
     assert.strictEqual(h.terminalHost.created.length, 0);
   });
 
-  it('refuses while the todo-scoped queue is running, and vice versa', async () => {
+  it('refuses while a spec-less run is in flight, and reports itself busy to it', async () => {
     const h = track(makeHarness());
     h.setQueueRunning(true);
 
@@ -412,8 +415,8 @@ describe('spec-draft runner (unit)', () => {
     }
     assert.strictEqual(h.terminalHost.created.length, 0);
 
-    // With the queue idle the draft starts and then itself reports busy, which
-    // is what the queue's `isExternallyBusy` hook reads.
+    // With the run idle the draft starts and then itself reports busy, which
+    // is what the run pipeline's `isSpecBusy` hook reads.
     h.setQueueRunning(false);
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
     assert.ok(started.ok);
@@ -429,6 +432,45 @@ describe('spec-draft runner (unit)', () => {
 
     h.watcherFactory.watchers[0].emitResult(DRAFT_RESULT);
     await started.completed;
+  });
+
+  it('is not blocked by per-todo stages: only a spec-less run holds the lock', async () => {
+    let runRunning = false;
+    const todoStageRunning = true; // deliberately not consulted by the lock
+    // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
+    let h!: ReturnType<typeof makeHarness>;
+    const lock = createStageLock({
+      specDraftRunning: () => h.runner.isRunning(),
+      runRunning: () => runRunning,
+    });
+    h = track(makeHarness({ isQueueRunning: () => lock.specDraftBusy() }));
+    assert.strictEqual(todoStageRunning, true);
+
+    const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
+    assert.ok(started.ok, 'a running todo stage does not block the draft');
+    if (!started.ok) {
+      return;
+    }
+    assert.strictEqual(lock.runPipelineBusy(), true, 'the running draft blocks a spec-less run');
+    h.watcherFactory.watchers[0].emitResult(DRAFT_RESULT);
+    await started.completed;
+    assert.strictEqual(lock.runPipelineBusy(), false);
+
+    // A spec-less run in flight does block it, before any terminal is created.
+    // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
+    let blockedHarness!: ReturnType<typeof makeHarness>;
+    const blockedLock = createStageLock({
+      specDraftRunning: () => blockedHarness.runner.isRunning(),
+      runRunning: () => runRunning,
+    });
+    blockedHarness = track(makeHarness({ isQueueRunning: () => blockedLock.specDraftBusy() }));
+    runRunning = true;
+    const blocked = await blockedHarness.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
+    assert.strictEqual(blocked.ok, false);
+    if (!blocked.ok) {
+      assert.strictEqual(blocked.error.kind, 'busy');
+    }
+    assert.strictEqual(blockedHarness.terminalHost.created.length, 0);
   });
 
   it('refuses when the adapter probe fails, before launching', async () => {

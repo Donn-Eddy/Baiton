@@ -415,6 +415,39 @@ describe('ChatController interventions', () => {
     await awaitRunEnd();
   });
 
+  it('persists a forwarded ask to its root session and shows it while that session is in view', async () => {
+    startSend();
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the first card');
+    const first = webview.last('showIntervention')!.intervention;
+    const file = transcriptFile();
+    const rootKey = `workspace/${path.basename(file, '.jsonl')}`;
+
+    const origin = { rootKey, chatId: `${path.basename(file, '.jsonl')}/kid`, chatKey: `workspace/${path.basename(file, '.jsonl')}/kid`, depth: 1 };
+    const { intervention, answer } = askRegistry.create({ kind: 'question', prompt: 'which one?', allowFreeText: true }, origin);
+    await controller.presentIntervention(intervention);
+    const shown = webview.all('showIntervention').filter((m) => m.intervention.id === intervention.id);
+    assert.strictEqual(shown.length, 1);
+    assert.ok(shown[0].intervention.prompt.startsWith('Sub-agent `kid` asks:'));
+
+    await webview.send({ type: 'answerIntervention', id: intervention.id, answer: { kind: 'text', text: 'this' } });
+    assert.deepStrictEqual(await answer, { kind: 'text', text: 'this' });
+    await waitFor(() => webview.all('resolveIntervention').some((m) => m.id === intervention.id), 'the card to settle');
+    let records: TranscriptRecord[] = [];
+    await waitFor(() => {
+      records = fs
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+        .map((l) => JSON.parse(l) as TranscriptRecord)
+        .filter((r) => r.intervention?.id === intervention.id);
+      return records.length === 1;
+    }, 'the settled record');
+    assert.strictEqual(records[0].intervention!.status, 'resolved');
+
+    await webview.send({ type: 'answerIntervention', id: first.id, answer: { kind: 'approved' } });
+    await awaitRunEnd();
+  });
+
   it('declines every pending ask on stop and completes the run', async () => {
     startSend();
     await waitFor(() => webview.all('showIntervention').length === 1, 'the pending card');

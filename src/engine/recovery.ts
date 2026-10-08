@@ -8,7 +8,7 @@
  * extension must reconcile every such result-less entry rather than leave the
  * todo wedged in a running state (`planning`/`executing`/`reviewing`) forever.
  *
- * {@link recoverJournal} reads `runs.jsonl` via {@link parseJournal}, selects
+ * {@link recoverJournal} reads the journal (the merged spec journal via {@link readSpecJournal}, or a single file via {@link parseJournal}), selects
  * the entries with no `result` (Req 21.3), and for each one, in order:
  *
  *   1. If the entry recorded a `terminalPid` and a process with that id is
@@ -32,7 +32,7 @@
  */
 import type { GitService } from '../git';
 import type { JournalEntry } from '../journal';
-import { parseJournal } from '../journal';
+import { parseJournal, readSpecJournal } from '../journal';
 import type { SpecStore } from './runQueue';
 import type { TodoState } from '../model/todoState';
 import type { Stage } from '../model/stage';
@@ -94,11 +94,27 @@ export interface RecoveryOutcome {
 }
 
 /** Everything {@link recoverJournal} needs, all injectable for testing. */
-export interface RecoveryDeps {
+export type RecoveryDeps = RecoveryBaseDeps &
+  (
+    | {
+        /**
+         * Absolute `.baiton/specs/` dir; recovery reads the merged spec journal —
+         * spec-level plus every `todos/<id>/runs.jsonl` — via readSpecJournal.
+         */
+        specsDir: string;
+        journalPath?: never;
+      }
+    | {
+        /** A single journal file to reconcile instead; used when specsDir is absent. */
+        journalPath: string;
+        specsDir?: never;
+      }
+  );
+
+/** The journal-source-independent part of {@link RecoveryDeps}. */
+export interface RecoveryBaseDeps {
   /** The spec slug whose journal is being reconciled. */
   slug: string;
-  /** Absolute path of the run journal `runs.jsonl` (Req 21.3). */
-  journalPath: string;
   /** The git seam; only {@link GitService.findCommitByRunId} is used (Req 21.5). */
   git: Pick<GitService, 'findCommitByRunId'>;
   /** The process-control seam for the still-live-pid kill (Req 21.4). */
@@ -120,7 +136,11 @@ export const HOST_EXITED_NOTE = 'host exited';
  * still reconciled.
  */
 export async function recoverJournal(deps: RecoveryDeps): Promise<RecoveryOutcome[]> {
-  const entries = parseJournal(deps.journalPath).filter(isResultLess);
+  const all =
+    deps.specsDir !== undefined
+      ? readSpecJournal(deps.specsDir, deps.slug)
+      : parseJournal(deps.journalPath);
+  const entries = all.filter(isResultLess);
   const outcomes: RecoveryOutcome[] = [];
   for (const entry of entries) {
     outcomes.push(await reconcileEntry(deps, entry));

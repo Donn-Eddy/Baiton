@@ -193,4 +193,17 @@ export interface GitWorktreeService extends GitService {
    * {@link GitService.isCleanExceptSpecFolder}.
    */
   isClean(): Promise<boolean>;
+  /**
+   * Stage ONLY `paths` (additions, modifications and deletions beneath them) and
+   * commit exactly those paths, appending each trailer as a `Key: value` line like
+   * {@link GitService.commit}. Changes elsewhere in the tree — unstaged or already
+   * staged — are left out of the commit and stay as they were. Rejects with a
+   * {@link GitError} when `paths` is empty-handed or there is nothing to commit.
+   */
+  commitPaths(paths: readonly string[], message: string, trailers?: Record<string, string>): Promise<string>;
+  /**
+   * Every local branch whose short name starts with `prefix` (e.g.
+   * `baiton-todo/<slug>/`), as short names (no `refs/heads/`), sorted.
+   */
+  listBranches(prefix: string): Promise<readonly string[]>;
 }

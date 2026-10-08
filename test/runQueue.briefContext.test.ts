@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   createRunQueue,
   type DispatchResult,
+  type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
@@ -76,6 +77,8 @@ interface Rig {
   briefPath: () => string | undefined;
   /** Whether any terminal was created at all. */
   terminalCount: () => number;
+  /** The cwd every terminal was created with. */
+  cwds: Array<string | undefined>;
 }
 
 /**
@@ -93,6 +96,7 @@ function makeRig(
   const writes: TodoState[] = [];
   let briefPath: string | undefined;
   let terminalCount = 0;
+  const cwds: Array<string | undefined> = [];
 
   class FakeTerminal implements HostTerminal {
     disposed = false;
@@ -111,7 +115,8 @@ function makeRig(
   }
 
   const terminalHost: TerminalHost = {
-    createTerminal(): HostTerminal {
+    createTerminal(options): HostTerminal {
+      cwds.push(options.cwd);
       terminalCount += 1;
       return new FakeTerminal();
     },
@@ -206,6 +211,7 @@ function makeRig(
     writes,
     briefPath: () => briefPath,
     terminalCount: () => terminalCount,
+    cwds,
   };
 }
 
@@ -312,5 +318,34 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
       fs.readFileSync(artifact, 'utf8').startsWith(`# Execute ${TODO_ID}`),
       'the artifact is the rendered markdown, not a JSON dump',
     );
+  });
+
+  it('in worktree mode launches in the worktree, writes the brief there and reads context from the spec store', async () => {
+    const mainRig = makeRig(workspaceRoot, { plan: `# Plan T02\n\n${PLAN_MARK}\n` }, EXECUTE_RESULT);
+    await createRunQueue(mainRig.deps).dispatch(request('execute', 'executor'));
+    const mainBrief = fs.readFileSync(mainRig.briefPath() as string, 'utf8');
+
+    const rig = makeRig(workspaceRoot, { plan: `# Plan T02\n\n${PLAN_MARK}\n` }, EXECUTE_RESULT);
+    const wtDir = path.join(workspaceRoot, '.baiton', 'worktrees', SLUG, TODO_ID);
+    fs.mkdirSync(wtDir, { recursive: true });
+    const worktrees: QueueWorktreeSeam = {
+      ensure: async () => ok({ dir: wtDir, git: rig.deps.git }),
+      unlanded: async () => [],
+    };
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, todoId: TODO_ID, worktrees });
+
+    const result = await queue.dispatch(request('execute', 'executor'));
+    assert.ok(result.ok, 'the execute dispatch ran');
+
+    assert.deepStrictEqual(rig.cwds, [wtDir]);
+    const briefPath = rig.briefPath() as string;
+    assert.strictEqual(
+      briefPath,
+      path.join(wtDir, '.baiton', 'runs', `run-${TODO_ID}-execute`, 'brief.md'),
+    );
+    const brief = fs.readFileSync(briefPath, 'utf8');
+    const contextOf = (b: string): string => b.slice(b.indexOf('# Context'));
+    assert.ok(brief.includes(PLAN_MARK));
+    assert.strictEqual(contextOf(brief).split('\n# ')[0], contextOf(mainBrief).split('\n# ')[0]);
   });
 });

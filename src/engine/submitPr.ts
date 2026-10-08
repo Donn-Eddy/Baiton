@@ -4,7 +4,7 @@
  * {@link submitPr} is the per-spec counterpart of the per-todo run queue. In
  * order it:
  *
- *   1. Reads the spec and refuses unless every todo is `done`, the approval
+ *   1. Reads the spec and refuses unless every todo is `done` and landed (no todo branch remains), the approval
  *      hash is current, the spec carries `branch`/`base_commit`, that branch
  *      is checked out, and the tree is clean.
  *   2. Runs `git.verify` when configured; a failure halts with its output.
@@ -27,7 +27,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { Adapter } from '../adapter';
 import type { GitService } from '../git';
-import { appendCompletion, appendStart, parseJournal } from '../journal';
+import { appendCompletion, appendStart, readSpecJournal } from '../journal';
 import type { PrCompletion, RunResultKind } from '../journal';
 import { approvalHash } from '../model/hash';
 import { parseSpec } from '../model/parser';
@@ -73,6 +73,10 @@ export interface SubmitPrDeps {
   adapterForRole(role: Role): Adapter | undefined;
   /** Surfaces an invalid-result detail while the terminal stays open. */
   reportInvalid?: (detail: string) => void;
+  /**
+   * The todo ids of `slug` whose todo branch still exists (not yet landed); the readiness check refuses while any remain. Optional so callers without per-todo worktrees keep today's behaviour. Real host: `(s) => unlandedTodos({ git }, s)`.
+   */
+  unlandedTodos?: (slug: string) => Promise<readonly string[]>;
   clock?: () => number;
   newSessionId?: () => string;
 }
@@ -142,7 +146,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
 
   // 4. Launch the pr-writer with the cumulative diff and spec folder as context.
   const clock = deps.clock ?? Date.now;
-  const attempt = countPrStarts(journalPath) + 1;
+  const attempt = countPrStarts(deps.specsDir, slug) + 1;
   const runId = `${slug}-pr-${attempt}-${clock()}`;
   const sessionId = (deps.newSessionId ?? randomUUID)();
   const runDir = path.join(deps.workspaceRoot, '.baiton', 'runs', runId);
@@ -300,6 +304,21 @@ async function checkReady(
     });
   }
 
+  if (deps.unlandedTodos !== undefined) {
+    let unlanded: readonly string[];
+    try {
+      unlanded = await deps.unlandedTodos(slug);
+    } catch (e) {
+      return fail({ kind: 'not-ready', message: `could not list the unlanded todos of spec "${slug}": ${errorMessage(e)}` });
+    }
+    if (unlanded.length > 0) {
+      return fail({
+        kind: 'not-ready',
+        message: `every todo must be landed before submitting a PR; still unlanded: ${unlanded.join(', ')}. Land each with land_todo first.`,
+      });
+    }
+  }
+
   const branch = (spec.frontmatter.get('branch') ?? '').trim();
   const baseCommit = (spec.frontmatter.get('base_commit') ?? '').trim();
   const base = (spec.frontmatter.get('base') ?? '').trim();
@@ -340,9 +359,9 @@ export function prContext(input: {
   ].join('\n\n');
 }
 
-function countPrStarts(journalPath: string): number {
+function countPrStarts(specsDir: string, slug: string): number {
   let count = 0;
-  for (const entry of parseJournal(journalPath)) {
+  for (const entry of readSpecJournal(specsDir, slug)) {
     if (entry.stage === 'pr') {
       count += 1;
     }

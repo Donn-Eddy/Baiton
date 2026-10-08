@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   createRunQueue,
+  type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
@@ -67,10 +68,16 @@ interface Rig {
   commitCount: () => number;
   /** How many `executing`→`executed` writeState advances were observed. */
   advanceCount: () => number;
+  /** Commits recorded on the main checkout's git (never expected in worktree mode). */
+  mainCommits: () => number;
+  /** Commits recorded on the worktree git: message + trailers. */
+  worktreeCommits: Array<{ message: string; trailers?: Record<string, string> }>;
 }
 
 /** Build a fully-stubbed rig around a temp journal path. */
-function makeRig(journalPath: string): Rig {
+function makeRig(journalPath: string, worktreeMode = false): Rig {
+  let mainCommits = 0;
+  const worktreeCommits: Rig['worktreeCommits'] = [];
   const stages: LiveStage[] = [];
   let commitCount = 0;
   let advanceCount = 0;
@@ -195,8 +202,14 @@ function makeRig(journalPath: string): Rig {
     resolveBaseCommit: async () => 'base',
     createSpecBranch: async () => {},
     checkout: async () => {},
-    commit: async () => {
-      commitCount += 1;
+    commit: async (message: string, trailers?: Record<string, string>) => {
+      if (worktreeMode) {
+        mainCommits += 1;
+      } else {
+        commitCount += 1;
+      }
+      void message;
+      void trailers;
       return 'commitsha';
     },
     head: async () => 'HEAD0',
@@ -213,6 +226,20 @@ function makeRig(journalPath: string): Rig {
   // A spec store that keeps every execute transition legal. Each dispatch's
   // todo is `planned` (legal for execute). Observing an `executing`→`executed`
   // write is the lifecycle-advance observable that only a completed run drives.
+  const wtGit = {
+    ...git,
+    commit: async (message: string, trailers?: Record<string, string>) => {
+      commitCount += 1;
+      worktreeCommits.push({ message, ...(trailers !== undefined ? { trailers } : {}) });
+      return 'wtcommitsha';
+    },
+  } satisfies GitService;
+  const worktrees: QueueWorktreeSeam = {
+    ensure: async (slug, todoId) =>
+      ok({ dir: path.join(path.dirname(journalPath), '.baiton', 'worktrees', slug, todoId), git: wtGit }),
+    unlanded: async () => [],
+  };
+
   const specStore: SpecStore = {
     currentState: async () => 'planned',
     readSpec: async () => undefined,
@@ -242,6 +269,7 @@ function makeRig(journalPath: string): Rig {
     specStore,
     journalPath,
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
+    ...(worktreeMode ? { worktrees } : {}),
     report: () => {},
     clock: (() => {
       let t = 0;
@@ -255,6 +283,8 @@ function makeRig(journalPath: string): Rig {
     stages,
     commitCount: () => commitCount,
     advanceCount: () => advanceCount,
+    mainCommits: () => mainCommits,
+    worktreeCommits,
   };
 }
 
@@ -290,7 +320,8 @@ describe('run queue attempt counting (property harness)', () => {
   });
 
   // Feature: baiton-first-pass, Property 16: Only completed executes count as attempts
-  it('counts only completed execute outcomes as attempts; invalid_output/closed/cancelled do not', async () => {
+  for (const worktreeMode of [false, true]) {
+  it(`counts only completed execute outcomes as attempts; invalid_output/closed/cancelled do not${worktreeMode ? ' (worktree mode)' : ''}`, async () => {
     await fc.assert(
       fc.asyncProperty(
         // A random non-empty sequence of execute outcomes.
@@ -305,7 +336,7 @@ describe('run queue attempt counting (property harness)', () => {
         ),
         async (outcomes) => {
           const journalPath = path.join(tmpDir, 'runs.jsonl');
-          const rig = makeRig(journalPath);
+          const rig = makeRig(journalPath, worktreeMode);
           const queue = createRunQueue(rig.deps);
 
           const results: Array<Promise<{ ok: boolean }>> = [];
@@ -372,6 +403,15 @@ describe('run queue attempt counting (property harness)', () => {
               `expected ${expectedAttempts}, got ${rig.advanceCount()} for [${outcomes.join(', ')}]`,
           );
 
+          if (worktreeMode) {
+            assert.strictEqual(rig.mainCommits(), 0, 'the main checkout is never committed to');
+            assert.strictEqual(rig.worktreeCommits.length, expectedAttempts);
+            for (const c of rig.worktreeCommits) {
+              assert.match(c.message, /^spec\(demo\): todo-\d+ execute attempt \d+$/);
+              assert.ok(c.trailers?.['Run-Id']?.startsWith('demo-todo-'), 'Run-Id trailer');
+            }
+          }
+
           assert.strictEqual(
             queue.isRunning(),
             false,
@@ -382,4 +422,5 @@ describe('run queue attempt counting (property harness)', () => {
       { numRuns: 200 },
     );
   });
+  }
 });

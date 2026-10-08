@@ -23,7 +23,7 @@
  */
 import { appendFile, writeFile } from 'fs/promises';
 import type { ToolCall } from './modelClient';
-import type { InterventionAnswer } from './interventions';
+import type { Intervention, InterventionAnswer } from './interventions';
 import type { InterventionView } from './webviewProtocol';
 import { Clock, systemClock } from './seams';
 
@@ -53,6 +53,8 @@ export interface TranscriptRecord {
   tool_calls?: ToolCall[];
   /** For an intervention record: the card and its settled state. */
   intervention?: InterventionView;
+  /** For an intervention record on a sub-agent transcript: the ask was forwarded to, and answered on, the parent chat. */
+  forwarded?: boolean;
   /**
    * For a compaction record: the range of earlier records the summary in
    * `content` replaces when replaying history. The view still renders every record.
@@ -133,4 +135,47 @@ export function compactionTranscriptRecord(
   marker: CompactionMarker,
 ): Omit<TranscriptRecord, 'ts'> {
   return { role: 'system', content: summary, compaction: { ...marker } };
+}
+
+/** Project a registry `Intervention` into the pending card the view renders. */
+export function interventionViewOf(ask: Intervention): InterventionView {
+  const base = { id: ask.id, kind: ask.kind, prompt: ask.prompt, status: 'pending' as const };
+  switch (ask.kind) {
+    case 'question':
+      return {
+        ...base,
+        ...(ask.options !== undefined ? { options: ask.options.map((o) => ({ ...o })) } : {}),
+        ...(ask.allowFreeText !== undefined ? { allowFreeText: ask.allowFreeText } : {}),
+        ...(ask.placeholder !== undefined ? { placeholder: ask.placeholder } : {}),
+      };
+    case 'confirm':
+      return { ...base, ...(ask.detail !== undefined ? { detail: ask.detail } : {}) };
+    case 'permission':
+      return {
+        ...base,
+        agent: ask.agent,
+        tool: ask.tool,
+        ...(ask.args !== undefined ? { args: ask.args } : {}),
+        ...(ask.detail !== undefined ? { detail: ask.detail } : {}),
+      };
+  }
+}
+
+/**
+ * The note a sub-agent transcript records for an ask forwarded to its parent
+ * chat: the settled card, flagged `forwarded`. It is an intervention record
+ * (role 'system') so `toHistory` defers it while the ask_user tool call is
+ * still open and replays it as the ask and its decision. A plain `system`
+ * record appended between an assistant `tool_calls` record and its `tool`
+ * result would make `toHistory` flush and drop the tool result.
+ */
+export function forwardedAskNoteRecord(
+  view: InterventionView,
+  answer: InterventionAnswer,
+): Omit<TranscriptRecord, 'ts'> {
+  return {
+    ...interventionTranscriptRecord(settledInterventionView(view, answer)),
+    content: `Asked the user (on the parent chat): ${view.prompt}`,
+    forwarded: true,
+  };
 }

@@ -21,6 +21,7 @@ import type { Config } from './config';
 import { createGitService } from './git';
 import type { GitService } from './git';
 import { recoverJournal } from './engine';
+import { specJournalPaths } from './journal';
 import type { ProcessControl } from './engine';
 import { writeTodoState } from './model/writer';
 import type { TodoState } from './model/todoState';
@@ -477,8 +478,9 @@ const settingsOverride: OverrideGetter = (agent: string): string | undefined => 
 // --- crash recovery wiring (task 11.2 seam) -------------------------------
 
 /**
- * Run crash recovery over every spec's `runs.jsonl` on activation (Req 21.3–
- * 21.7). Each spec folder under `.baiton/specs/` owns its own journal, so we
+ * Run crash recovery over every spec's journals on activation (Req 21.3–
+ * 21.7). Each spec folder under `.baiton/specs/` owns a spec-level journal plus
+ * per-todo journals (merged by readSpecJournal), so we
  * reconcile them one spec at a time, wiring the git seam, a `process`-backed
  * {@link ProcessControl}, and a serializer-backed spec-write seam. A failure
  * for one spec is contained so the rest still reconcile.
@@ -502,14 +504,13 @@ async function runCrashRecovery(
   }
 
   for (const slug of slugs) {
-    const journalPath = path.join(specsDir, slug, 'runs.jsonl');
-    if (!fs.existsSync(journalPath)) {
+    if (!specJournalPaths(specsDir, slug).some((p) => fs.existsSync(p))) {
       continue;
     }
     try {
       await recoverJournal({
         slug,
-        journalPath,
+        specsDir,
         git,
         process: hostProcessControl,
         specStore: { writeState: makeRecoveryWriteState(repoRoot, slug, git) },

@@ -80,7 +80,12 @@ export type ValidationReporter = (detail: string) => void;
 
 /** Everything {@link awaitStageResult} needs to run one stage's completion flow. */
 export interface AwaitStageResultInput {
-  /** Absolute path of the workspace root; resolves the spec artifact path. */
+  /**
+   * Absolute path of the workspace root; resolves the spec artifact path. The run
+   * queue passes the MAIN checkout root even when the stage ran in a todo
+   * worktree, so artifacts always land in the main checkout's spec folder; the
+   * watcher's result path may be inside a worktree.
+   */
   workspaceRoot: string;
   /** The spec slug whose folder receives the persisted artifact (Req 24.3). */
   slug: string;

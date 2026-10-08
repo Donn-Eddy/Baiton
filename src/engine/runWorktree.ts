@@ -138,7 +138,7 @@ function describe(e: unknown): string {
  * Narrow a thrown value to a {@link GitError} — the shape `runOrThrow` throws —
  * so a `kind: 'git'` failure can carry git's own command and stderr.
  */
-function asGitError(e: unknown): GitError | undefined {
+export function asGitError(e: unknown): GitError | undefined {
   if (typeof e !== 'object' || e === null) {
     return undefined;
   }
@@ -159,7 +159,7 @@ function asGitError(e: unknown): GitError | undefined {
  * string comparison against a constructed path fails wherever a parent is a
  * symlink (e.g. `/tmp` on macOS) — see {@link GitWorktree.dir}.
  */
-function safeRealpath(p: string): string {
+export function safeRealpath(p: string): string {
   try {
     return realpathSync(p);
   } catch {

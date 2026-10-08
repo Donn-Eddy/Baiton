@@ -250,6 +250,8 @@ class FakeGit implements GitWorktreeService {
   findCommitByRunId = boom('findCommitByRunId');
   push = boom('push');
   remoteUrl = boom('remoteUrl');
+  commitPaths = boom('commitPaths');
+  listBranches = boom('listBranches');
 }
 
 // ---------------------------------------------------------------------------

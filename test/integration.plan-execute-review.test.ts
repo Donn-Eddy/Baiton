@@ -7,21 +7,20 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createGitService } from '../src/git/gitService';
-import type { GitService } from '../src/git';
-import { createRunQueue } from '../src/engine/runQueue';
-import type {
-  RunQueue,
-  SpecStore,
-  ResultWatcherFactory,
-} from '../src/engine/runQueue';
+import type { GitWorktreeService } from '../src/git';
+import type { RunQueue, SpecStore, ResultWatcherFactory } from '../src/engine/runQueue';
+import { createSpecBranchWriter, type SpecBranchWriter } from '../src/engine/specBranchWriter';
+import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor } from '../src/engine/todoWorktree';
+import { createSpecStore } from '../src/activation/specStore';
+import { createTodoQueues, type TodoQueues } from '../src/activation/engineFacade';
+import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import type { HostTerminal, TerminalHost, CreateTerminalOptions } from '../src/engine/terminalHost';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 import { recoverJournal, type ProcessControl } from '../src/engine/recovery';
-import { parseJournal, appendStart } from '../src/journal';
+import { parseJournal, appendStart, specJournalPathFor } from '../src/journal';
 import { parseSpec } from '../src/model/parser';
-import { approvalHash, computeInputRev, isBlocked } from '../src/model/hash';
-import { writeTodoState } from '../src/model/writer';
+import { approvalHash } from '../src/model/hash';
 import { isOk } from '../src/model/result';
 import type { TodoState } from '../src/model/todoState';
 import type { Stage } from '../src/model/stage';
@@ -130,166 +129,12 @@ function makeRepo(): string {
   // Ignore the runs directory (sub-agent scratch) and a scratch gitignored file
   // whose survival across the post-run reset we assert (Req 15.5).
   writeRepoFile(repo, '.gitignore', ['.baiton/runs/', 'scratch.local', ''].join('\n'));
+  // Without this the `/worktrees/` directory would dirty the main checkout.
+  writeRepoFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
   writeRepoFile(repo, SPEC_REL, initialSpec());
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'initial commit');
   return repo;
-}
-
-// ---------------------------------------------------------------------------
-// Lightweight SpecStore backed by the real serializer + git service
-// ---------------------------------------------------------------------------
-
-/**
- * A vscode-free {@link SpecStore} that re-reads `spec.md` before each read/write
- * (Req 6.3), applies lifecycle state through the pure {@link writeTodoState}
- * serializer, and commits the change on the spec branch via the git service as
- * `spec(<slug>): <id> <state>` before the next stage (Req 17.1). Approval,
- * blocked, and input-rev facts are derived from the parsed spec through the same
- * pure cores the extension uses.
- */
-class FileSpecStore implements SpecStore {
-  private readonly repoRoot: string;
-  private readonly git: GitService;
-
-  constructor(repoRoot: string, git: GitService) {
-    this.repoRoot = repoRoot;
-    this.git = git;
-  }
-
-  private specAbsPath(slug: string): string {
-    return path.join(this.repoRoot, '.baiton', 'specs', slug, 'spec.md');
-  }
-
-  private read(slug: string): string {
-    return fs.readFileSync(this.specAbsPath(slug), 'utf8');
-  }
-
-  async currentState(slug: string, todoId: string): Promise<TodoState | undefined> {
-    const spec = parseSpec(this.read(slug));
-    return spec.todos.find((t) => t.id === todoId)?.state;
-  }
-
-  async readSpec(slug: string): Promise<ReturnType<typeof parseSpec> | undefined> {
-    try {
-      return parseSpec(this.read(slug));
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * The todo's artifact for a stage, read out of its own `todos/<id>/` folder;
-   * for the numbered stages the highest-numbered file wins (Req 24.3).
-   */
-  async readArtifact(
-    slug: string,
-    todoId: string,
-    stage: Stage,
-  ): Promise<string | undefined> {
-    const dir = path.join(this.repoRoot, '.baiton', 'specs', slug, 'todos', todoId);
-    let names: string[];
-    try {
-      names = fs.readdirSync(dir);
-    } catch {
-      return undefined;
-    }
-    const pattern = new RegExp(`^${stage}-(\\d+)\\.md$`);
-    const name =
-      stage === 'plan'
-        ? 'plan.md'
-        : names
-            .filter((n) => pattern.test(n))
-            .sort((a, b) => Number(pattern.exec(a)?.[1]) - Number(pattern.exec(b)?.[1]))
-            .pop();
-    if (name === undefined) {
-      return undefined;
-    }
-    try {
-      return fs.readFileSync(path.join(dir, name), 'utf8');
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** The commit the todo's most recent completed Execute landed in (Req 21.2). */
-  async latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined> {
-    const journal = path.join(this.repoRoot, '.baiton', 'specs', slug, 'runs.jsonl');
-    let commit: string | undefined;
-    for (const entry of parseJournal(journal)) {
-      if (
-        entry.stage === 'execute' &&
-        entry.todoId === todoId &&
-        entry.result === 'completed' &&
-        entry.commit !== undefined
-      ) {
-        commit = entry.commit;
-      }
-    }
-    return commit;
-  }
-
-  async isApproved(slug: string): Promise<boolean> {
-    const content = this.read(slug);
-    const spec = parseSpec(content);
-    const approvedRev = (spec.frontmatter.get('approved_rev') ?? '').trim();
-    if (approvedRev === '') {
-      return false;
-    }
-    return approvedRev === approvalHash(spec);
-  }
-
-  async isBlocked(slug: string, todoId: string): Promise<boolean> {
-    const spec = parseSpec(this.read(slug));
-    const todo = spec.todos.find((t) => t.id === todoId);
-    if (todo === undefined) {
-      return true;
-    }
-    return isBlocked(todo, spec.todos);
-  }
-
-  async inputRevMatches(slug: string, todoId: string): Promise<boolean> {
-    // The plan's recorded Input_Rev. In this harness the plan run records the
-    // Input_Rev at plan time (see the SpecStore's plan-time recording below);
-    // for the single-todo happy path the OVERVIEW and todo line are unchanged
-    // between plan and execute, so the current rev matches the recorded one.
-    const recorded = this.recordedInputRev.get(`${slug}/${todoId}`);
-    const current = await this.inputRev(slug, todoId);
-    return recorded === undefined || recorded === current;
-  }
-
-  async inputRev(slug: string, todoId: string): Promise<string> {
-    const spec = parseSpec(this.read(slug));
-    return computeInputRev(spec, todoId);
-  }
-
-  /** Input_Revs captured at plan time, keyed `slug/todoId`. */
-  private readonly recordedInputRev = new Map<string, string>();
-
-  /** Record the current Input_Rev as the plan's rev (called by the harness). */
-  recordInputRev(slug: string, todoId: string): void {
-    const spec = parseSpec(this.read(slug));
-    this.recordedInputRev.set(`${slug}/${todoId}`, computeInputRev(spec, todoId));
-  }
-
-  async writeState(
-    slug: string,
-    todoId: string,
-    state: TodoState,
-    note?: string,
-  ): Promise<boolean> {
-    const current = this.read(slug);
-    const written = writeTodoState(current, todoId, state);
-    if (!isOk(written)) {
-      return false;
-    }
-    fs.writeFileSync(this.specAbsPath(slug), written.value, 'utf8');
-    // Commit the metadata change on the spec branch before the next stage
-    // (Req 17.1). The commit message follows `spec(<slug>): <id> <what>`.
-    const what = note !== undefined ? `${state} (${note})` : state;
-    await this.git.commit(`spec(${slug}): ${todoId} ${what}`);
-    return true;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -413,11 +258,6 @@ class StubSubAgentFactory implements ResultWatcherFactory {
   public readonly watchers: StubResultWatcher[] = [];
   /** Run-ids the factory saw a launch for, in order. */
   public readonly runIds: string[] = [];
-  private readonly repoRoot: string;
-
-  constructor(repoRoot: string) {
-    this.repoRoot = repoRoot;
-  }
 
   create(input: {
     slug: string;
@@ -440,7 +280,9 @@ class StubSubAgentFactory implements ResultWatcherFactory {
         // The executor changes the working tree before emitting its result so
         // the queue's execute commit captures the change with the Run-Id
         // trailer (Req 17.4).
-        writeRepoFile(this.repoRoot, 'src/greeting.ts', 'export const version = 1;\nexport const hello = () => "hi";\n');
+        // Stages run in the todo's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
+        const stageRoot = path.resolve(path.dirname(input.resultPath), '..', '..', '..');
+        writeRepoFile(stageRoot, 'src/greeting.ts', 'export const version = 1;\nexport const hello = () => "hi";\n');
       }
       // The sub-agent writes its schema-conformant result.json under its own
       // run directory. The queue's result flow re-reads it via onResult.
@@ -493,36 +335,52 @@ function modelForRole(_role: Role): { model: string; effort?: string } {
 
 interface Harness {
   repo: string;
-  git: GitService;
-  store: FileSpecStore;
+  specsDir: string;
+  git: GitWorktreeService;
+  writer: SpecBranchWriter;
+  store: SpecStore;
+  queues: TodoQueues;
   queue: RunQueue;
   factory: StubSubAgentFactory;
   terminalHost: StubTerminalHost;
   journalPath: string;
 }
 
-/** Build a fully-wired harness over a fresh temp repo. */
-function makeHarness(): Harness {
-  const repo = makeRepo();
+/** Wire a harness over `repo` the way commands.ts does: per-todo queues, one shared writer. */
+function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
+  const specsDir = path.join(repo, '.baiton', 'specs');
   const gitService = createGitService(repo);
-  const store = new FileSpecStore(repo, gitService);
-  const factory = new StubSubAgentFactory(repo);
+  const writer = createSpecBranchWriter({ specsDir, git: gitService });
+  const store = createSpecStore(specsDir, gitService, writer);
   const terminalHost = new StubTerminalHost();
-  const journalPath = path.join(repo, '.baiton', 'runs.jsonl');
-  fs.mkdirSync(path.dirname(journalPath), { recursive: true });
-
-  const queue = createRunQueue({
+  const queues = createTodoQueues({
     workspaceRoot: repo,
-    adapterForRole: () => new StubAdapter(),
+    specsDir,
     git: gitService,
+    specWriter: writer,
+    specStore: store,
     terminalHost,
     watcherFactory: factory,
-    specStore: store,
-    journalPath,
+    adapterForRole: () => new StubAdapter(),
     modelForRole,
   });
+  return {
+    repo,
+    specsDir,
+    git: gitService,
+    writer,
+    store,
+    queues,
+    queue: queues.queueFor(SLUG, TODO_ID),
+    factory: factory as unknown as StubSubAgentFactory,
+    terminalHost,
+    journalPath: specJournalPathFor(specsDir, SLUG),
+  };
+}
 
-  return { repo, git: gitService, store, queue, factory, terminalHost, journalPath };
+/** Build a fully-wired harness over a fresh temp repo. */
+function makeHarness(): Harness {
+  return wireHarness(makeRepo(), new StubSubAgentFactory());
 }
 
 /** Approve the spec directly through the git service (the control-tool path). */
@@ -700,14 +558,20 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       'a planned metadata commit landed',
     );
 
-    // Record the plan's Input_Rev so Execute's input-rev guard matches (the
-    // extension journals this at plan start; here we capture it post-plan since
-    // the todo line is unchanged by the state box under computeInputRev).
-    h.store.recordInputRev(SLUG, TODO_ID);
+    // The stages ran in the todo's worktree, on the todo branch.
+    const wt = todoWorktreeDirFor(h.repo, SLUG, TODO_ID);
+    assert.ok(fs.existsSync(wt), 'the todo worktree exists after Plan');
+    assert.strictEqual(
+      git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').trim(),
+      todoBranchFor(SLUG, TODO_ID),
+      'the worktree is on the todo branch',
+    );
+    assert.strictEqual(todoBranchFor(SLUG, TODO_ID), 'baiton-todo/demo-spec/T01');
+    const wtGit = createGitService(wt);
 
     // -- Dirty-tree refusal for Execute (Req 17.2/17.3) --------------------
     // A change OUTSIDE the spec folder makes the tree dirty; Execute is refused.
-    writeRepoFile(h.repo, 'src/greeting.ts', 'export const version = 99; // dirty\n');
+    writeRepoFile(wt, 'src/greeting.ts', 'export const version = 99; // dirty\n');
     const dirtyResult = await h.queue.dispatch({
       slug: SLUG,
       todoId: TODO_ID,
@@ -720,9 +584,9 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.ok(!dirtyResult.ok && dirtyResult.error.kind === 'dirty-tree', 'refusal reason is dirty-tree');
     assert.strictEqual(await stateOf(h), 'planned', 'state unchanged after a dirty-tree refusal');
     // Restore a clean tree before the real execute.
-    const reset = await h.git.resetWorkingTree();
+    const reset = await wtGit.resetWorkingTree();
     assert.ok(isOk(reset), 'reset restored a clean tree');
-    assert.strictEqual((await h.git.status()).clean, true, 'tree is clean again');
+    assert.strictEqual((await wtGit.status()).clean, true, 'the worktree is clean again');
 
     // -- Execute → executed, execute-1.md, Run-Id commit (Req 17.4, 21.5) --
     const executeResult = await h.queue.dispatch({
@@ -745,29 +609,44 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
 
     // Exactly one execute commit with the expected message.
     const executeSubject = `spec(${SLUG}): ${TODO_ID} execute attempt 1`;
-    const executeCount = commitSubjects(h.repo).filter((s) => s === executeSubject).length;
-    assert.strictEqual(executeCount, 1, 'exactly one execute commit landed');
+    const todoBranch = todoBranchFor(SLUG, TODO_ID);
+    const todoSubjects = git(h.repo, 'log', '--format=%s', todoBranch).split('\n');
+    assert.strictEqual(
+      todoSubjects.filter((s) => s === executeSubject).length,
+      1,
+      'exactly one execute commit landed on the todo branch',
+    );
+    assert.strictEqual(
+      commitSubjects(h.repo).filter((s) => s === executeSubject).length,
+      0,
+      'the spec branch has no execute commit before landing',
+    );
 
     // The execute commit carries the Run-Id trailer and is findable by run id.
     const executeRunId = h.factory.runIds.find((id) => id.includes('-execute-'));
     assert.ok(executeRunId, 'the execute run-id was recorded');
-    const executeCommit = await h.git.findCommitByRunId(executeRunId!);
+    const executeCommit = await wtGit.findCommitByRunId(executeRunId!);
     assert.ok(executeCommit, 'findCommitByRunId located the execute commit (Req 21.5)');
-    const executeBody = git(h.repo, 'log', '-1', executeCommit!, '--format=%B').trim();
+    const executeBody = git(wt, 'log', '-1', executeCommit!, '--format=%B').trim();
     assert.ok(
       executeBody.split('\n').some((l) => l === `Run-Id: ${executeRunId}`),
       'the execute commit body carries a Run-Id trailer line',
     );
     // The executor's source change was captured by the execute commit.
     assert.ok(
-      readRepoFile(h.repo, 'src/greeting.ts').includes('hello'),
-      'the executor working-tree change was committed',
+      readRepoFile(wt, 'src/greeting.ts').includes('hello'),
+      'the executor worktree change was committed',
+    );
+    assert.strictEqual(
+      readRepoFile(h.repo, 'src/greeting.ts'),
+      'export const version = 0;\n',
+      'the main checkout is untouched until landing',
     );
 
     // -- Review → done, review-1.md, post-run reset keeps gitignored files --
     // Create a gitignored scratch file whose survival across the reset we
     // assert (Req 15.5). It must survive `git checkout -- . && git clean -fd`.
-    const scratchAbs = path.join(h.repo, 'scratch.local');
+    const scratchAbs = path.join(wt, 'scratch.local');
     fs.writeFileSync(scratchAbs, 'keep me\n', 'utf8');
 
     const reviewResult = await h.queue.dispatch({
@@ -790,6 +669,19 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     // The non-executor post-run reset ran but left the gitignored file (Req 15.5).
     assert.ok(fs.existsSync(scratchAbs), 'gitignored scratch file survived the post-run reset');
     assert.strictEqual(fs.readFileSync(scratchAbs, 'utf8'), 'keep me\n', 'its contents are intact');
+
+    // -- Land the todo into the spec branch ---------------------------------
+    const landed = await h.writer.apply(SLUG, () =>
+      landTodoWorktree({ workspaceRoot: h.repo, git: h.git }, { slug: SLUG, todoId: TODO_ID }),
+    );
+    assert.ok(landed.ok, `land succeeded: ${JSON.stringify(landed)}`);
+    assert.ok(
+      readRepoFile(h.repo, 'src/greeting.ts').includes('hello'),
+      'the main checkout now has the executor change',
+    );
+    assert.strictEqual(git(h.repo, 'branch', '--list', todoBranch).trim(), '', 'the todo branch is gone');
+    assert.ok(!fs.existsSync(wt), 'the worktree is gone');
+    assert.strictEqual(commitSubjects(h.repo)[0], `spec(${SLUG}): land ${TODO_ID}`);
   });
 
   it('reverts to pending on a closed terminal, then Plan succeeds on the next dispatch (Req 1.1, 1.4)', async () => {
@@ -828,23 +720,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
 
     const repo = makeRepo();
     repos.push(repo);
-    const gitService = createGitService(repo);
-    const store = new FileSpecStore(repo, gitService);
-    const factory = new CloseThenSucceedFactory();
-    const terminalHost = new StubTerminalHost();
-    const journalPath = path.join(repo, '.baiton', 'runs.jsonl');
-    fs.mkdirSync(path.dirname(journalPath), { recursive: true });
-    const queue = createRunQueue({
-      workspaceRoot: repo,
-      adapterForRole: () => new StubAdapter(),
-      git: gitService,
-      terminalHost,
-      watcherFactory: factory,
-      specStore: store,
-      journalPath,
-      modelForRole,
-    });
-    const h: Harness = { repo, git: gitService, store, queue, factory: factory as unknown as StubSubAgentFactory, terminalHost, journalPath };
+    const h = wireHarness(repo, new CloseThenSucceedFactory());
 
     await approveSpec(h);
 
@@ -864,6 +740,10 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       'the refusal reports the closed outcome',
     );
     assert.strictEqual(await stateOf(h), 'pending', 'todo reverted to pending, its From_State');
+    assert.ok(
+      fs.existsSync(todoWorktreeDirFor(h.repo, SLUG, TODO_ID)),
+      'a failed stage never removes the worktree',
+    );
     const subjects = commitSubjects(h.repo);
     assert.ok(
       subjects.some((s) => s === `spec(${SLUG}): ${TODO_ID} pending (closed (exit 1))`),
@@ -881,6 +761,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     });
     assert.strictEqual(secondPlan.ok, true, 'plan succeeds once retried');
     assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned on retry');
+    assert.ok(fs.existsSync(todoWorktreeDirFor(h.repo, SLUG, TODO_ID)), 'the retry reused the worktree');
   });
 
   it('replays a lost state write on crash recovery when the Run-Id commit landed (Req 21.5)', async () => {

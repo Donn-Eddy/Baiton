@@ -520,7 +520,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
   // --- cancel against the real pipeline ------------------------------------
 
   /** A real pipeline over `repo`, with only the agent boundary stubbed. */
-  function realPipeline(repo: string, store: RunStore, runId: string) {
+  function realPipeline(repo: string, store: RunStore, runId: string, isSpecBusy?: () => boolean) {
     const terminalHost = new StubTerminalHost();
     const watcherFactory = new StubWatcherFactory();
     const pipeline = createRunPipeline({
@@ -535,6 +535,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
       newRunId: () => runId,
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
       report: () => {},
+      ...(isSpecBusy !== undefined ? { isSpecBusy } : {}),
     });
     return { pipeline, terminalHost, watcherFactory };
   }
@@ -629,5 +630,79 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
     assert.strictEqual(real.pipeline.cancel(), true);
     real.watcherFactory.watchers[0].emitClose(undefined);
     await started.completed;
+  });
+
+  describe('repository lock after per-todo queues (sub-agent-chats T05)', () => {
+    const startBug = (real: ReturnType<typeof realPipeline>) =>
+      real.pipeline.start({
+        mode: 'bug',
+        composerMode: 'bug',
+        explicitMode: false,
+        statement: 'the counter is off by one',
+        files: ['README.md'],
+        reproduction: 'Call count() with an empty list.',
+      });
+
+    it('refuses a spec-less run only while the spec draft runs', async () => {
+      const { createStageLock } = await import('../src/activation/engineFacade');
+      const repo = newRepo();
+      const runId = 'bug-20260101-000000-lck1';
+      const store = createRunStore({ workspaceRoot: repo });
+      let draftRunning = true;
+      // eslint-disable-next-line prefer-const
+      let real: ReturnType<typeof realPipeline>;
+      const lock = createStageLock({
+        specDraftRunning: () => draftRunning,
+        runRunning: () => real.pipeline.isRunning(),
+      });
+      real = realPipeline(repo, store, runId, () => lock.runPipelineBusy());
+
+      const refused = await startBug(real);
+      assert.ok(!refused.ok);
+      if (!refused.ok) {
+        assert.strictEqual(refused.error.kind, 'busy');
+      }
+      assert.ok(!fs.existsSync(path.join(repo, '.baiton', 'worktrees', runId)), 'no worktree was created');
+
+      draftRunning = false;
+      const started = await startBug(real);
+      assert.ok(started.ok, 'the run starts once the draft is idle');
+      if (!started.ok) {
+        return;
+      }
+      await waitUntil(() => real.watcherFactory.watchers.length > 0, 'the plan watcher appearing');
+      assert.strictEqual(real.pipeline.cancel(), true);
+      real.watcherFactory.watchers[0].emitClose(undefined);
+      await started.completed;
+    });
+
+    it('makes the spec draft busy while a spec-less run runs, and free once it settles', async () => {
+      const { createStageLock } = await import('../src/activation/engineFacade');
+      const repo = newRepo();
+      const store = createRunStore({ workspaceRoot: repo });
+      // eslint-disable-next-line prefer-const
+      let real: ReturnType<typeof realPipeline>;
+      const lock = createStageLock({
+        specDraftRunning: () => false,
+        runRunning: () => real.pipeline.isRunning(),
+      });
+      real = realPipeline(repo, store, 'bug-20260101-000000-lck2', () => lock.runPipelineBusy());
+      assert.strictEqual(lock.specDraftBusy(), false);
+
+      const started = await startBugRun(real);
+      assert.strictEqual(lock.specDraftBusy(), true);
+
+      assert.strictEqual(real.pipeline.cancel(), true);
+      real.watcherFactory.watchers[0].emitClose(undefined);
+      await started.completed;
+      assert.strictEqual(lock.specDraftBusy(), false);
+    });
+
+    it('has no input for todo queues: an idle spec draft never blocks a run', async () => {
+      const { createStageLock } = await import('../src/activation/engineFacade');
+      const lock = createStageLock({ specDraftRunning: () => false, runRunning: () => false });
+      assert.strictEqual(lock.runPipelineBusy(), false);
+      assert.strictEqual(lock.specDraftBusy(), false);
+    });
   });
 });

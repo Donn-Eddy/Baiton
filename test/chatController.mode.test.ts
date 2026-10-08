@@ -155,6 +155,8 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
   let startOutcome: StartRunOutcome;
   /** Everything that reached the controller's log sink. */
   let logs: string[];
+  /** The (surface, caller) of every registry call. */
+  let toolCalls: Array<{ surface: unknown; caller: unknown }>;
   let cleanup: (() => void) | undefined;
 
   interface HarnessOptions {
@@ -180,6 +182,7 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     startCalls = [];
     startOutcome = { kind: 'started', runId: 'run-b1', branch: 'baiton/bug/run-b1' };
     logs = [];
+    toolCalls = [];
     let remembered = options.storedMode;
 
     const modeMemory: ModeMemory = {
@@ -191,7 +194,18 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     };
 
     const registry = {
-      call: async (): Promise<{ ok: true; data: string }> => ({ ok: true, data: 'ok' }),
+      call: async (
+        _name: string,
+        _args: unknown,
+        _id: string,
+        _ctx: unknown,
+        _phase: unknown,
+        surface?: unknown,
+        caller?: unknown,
+      ): Promise<{ ok: true; data: string }> => {
+        toolCalls.push({ surface, caller });
+        return { ok: true, data: 'ok' };
+      },
     } as unknown as ToolRegistry;
 
     controller = new ChatController({
@@ -361,6 +375,22 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     const prompt = client.requests[0][0].content;
     assert.strictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }, undefined, 'default'));
     assert.notStrictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }));
+  });
+
+  it('top-level tool calls carry the top surface and a depth-0 caller with the derived phase', async () => {
+    client.queue.push(
+      { content: '', tool_calls: [{ id: 'c1', name: 'any_tool', arguments: '{}' }] },
+      { content: 'done', tool_calls: [] },
+    );
+    await started();
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => toolCalls.length === 1, 'the tool call');
+    assert.deepStrictEqual(phases, ['run']);
+    assert.strictEqual(toolCalls[0].surface, 'top');
+    const caller = toolCalls[0].caller as { phase: string; depth: number; sessionKey: string };
+    assert.strictEqual(caller.phase, phases[0]);
+    assert.strictEqual(caller.depth, 0);
+    assert.ok(caller.sessionKey.startsWith('workspace/'));
   });
 
   it('a spec conversation stays pinned to Spec from a Default workspace', async () => {

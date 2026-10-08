@@ -37,11 +37,22 @@
  *   running (Req 10.4) or the transition is illegal (Req 10.5). `plan-review`
  *   is not a standalone trigger — it runs inside the Plan action's review
  *   rounds — so the tool does not offer it and rejects it outright.
+ * - `land_todo(slug, todo)` (mutating, no confirm) — refuses unless the todo is
+ *   `done`, merges its branch into the spec branch through the land seam, and
+ *   reports the merge commit or `already landed`.
  * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every todo
- *   is done.
+ *   is done and landed.
+ *
+ * - `spawn_subagent(task)` and `send_to_subagent(chat_id, message)` (neither
+ *   mutating nor dispatch) — start a sub-agent chat and wait for its first
+ *   reply, or send it a follow-up. They go through the sub-agent seam, need a
+ *   calling chat, and `spawn_subagent` is refused at depth
+ *   {@link MAX_SUBAGENT_DEPTH}. They are on every phase and on both tool
+ *   surfaces; `ask_user`, `run` and the read tools are the only other
+ *   sub-agent tools.
  *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
- * `draft_spec` only while gathering requirements, `run` and `submit_pr` only
+ * `draft_spec` only while gathering requirements, `run`, `land_todo` and `submit_pr` only
  * while driving an approved spec, `approve_spec` in both, and `ask_user` in all
  * three — a run-mode conversation agrees the work through it too.
  * `start_run` and `investigate` belong only to the `run` phase, so they are
@@ -63,6 +74,7 @@ import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
 import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
+import { MAX_SUBAGENT_DEPTH } from './seams';
 import { ToolServices } from './toolServices';
 
 /** Build every control tool for the registry. */
@@ -74,7 +86,10 @@ export function createControlTools(services: ToolServices): Tool[] {
     investigateTool(services),
     approveSpecTool(services),
     runTool(services),
+    landTodoTool(services),
     submitPrTool(services),
+    spawnSubAgentTool(services),
+    sendToSubAgentTool(services),
   ];
 }
 
@@ -93,6 +108,7 @@ function askUserTool(services: ToolServices): Tool {
       'Ask the user a question and wait for their answer: offer a short list of options, accept a typed reply, or both. Use this instead of ending your turn with a question.',
     mutating: false,
     phases: ['gather', 'drive', 'run'],
+    subagent: true,
     schema: {
       type: 'object',
       properties: {
@@ -661,7 +677,7 @@ async function reapprove(
  * but a dispatch, so the guard disables it under Restricted Mode (Req 22.2).
  * Before dispatching any stage it validates the spec and refuses every stage
  * while the spec is invalid, surfacing the current validation errors until the
- * spec parses without error (Req 4.9). Refuses when a stage is already running
+ * spec parses without error (Req 4.9). Refuses when a stage is already running for that todo
  * (Req 10.4) or the transition is illegal (Req 10.5).
  *
  * The stage enum is exactly `plan | execute | review` (Req 11.1). `plan-review`
@@ -677,7 +693,9 @@ function runTool(services: ToolServices): Tool {
       'Dispatch one stage for one todo (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
     mutating: false,
     phases: ['drive'],
+    subagent: true,
     dispatch: true,
+    concurrent: true,
     schema: {
       type: 'object',
       properties: {
@@ -748,7 +766,10 @@ function runTool(services: ToolServices): Tool {
         case 'dispatched':
           return { ok: true, data: { slug, todo, stage, runId: outcome.runId } };
         case 'busy':
-          return { ok: false, error: 'a stage is already running for this repository; try again after it finishes' };
+          return {
+            ok: false,
+            error: `a stage is already running for todo "${todo}" of spec "${slug}"; wait for it to finish before dispatching another stage for this todo (other todos can run meanwhile)`,
+          };
         case 'illegal':
           return { ok: false, error: `stage "${stage}" is not allowed for todo "${todo}": ${outcome.reason}` };
         default:
@@ -765,6 +786,83 @@ function runTool(services: ToolServices): Tool {
  * returned content is byte-identical when the value was already current.
  */
 /**
+ * `land_todo(slug, todo)` — merge a done todo's branch into the spec branch and
+ * remove its worktree. Refuses any todo that is not `done` before the seam.
+ */
+function landTodoTool(services: ToolServices): Tool {
+  return {
+    name: 'land_todo',
+    description:
+      'Land a done todo: merge its branch into the spec branch and remove its worktree. Returns the merge commit, or reports that the todo is already landed.',
+    mutating: true,
+    phases: ['drive'],
+    schema: {
+      type: 'object',
+      properties: { slug: { type: 'string' }, todo: { type: 'string' } },
+      required: ['slug', 'todo'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const slug = readString(args, 'slug');
+      const todo = readString(args, 'todo');
+      if (slug === undefined || todo === undefined) {
+        return { ok: false, error: 'land_todo requires a string "slug" and "todo"' };
+      }
+      if (!isSlug(slug)) {
+        return { ok: false, error: `invalid slug: ${slug}` };
+      }
+      if (!isSlug(todo)) {
+        return { ok: false, error: `invalid todo id: ${todo}` };
+      }
+      const resolved = await tc.ctx.resolveMutatingPath(specPath(services, slug));
+      if (!resolved.ok) {
+        return { ok: false, error: resolved.error.message };
+      }
+      let content: string;
+      try {
+        content = await fs.readFile(resolved.resolved, 'utf8');
+      } catch {
+        return { ok: false, error: `spec "${slug}" was not found` };
+      }
+      const entry = parseSpec(content).todos.find((t) => t.id === todo);
+      if (entry === undefined) {
+        return { ok: false, error: `todo "${todo}" was not found in spec "${slug}"` };
+      }
+      if (entry.state !== 'done') {
+        return {
+          ok: false,
+          error: `todo "${todo}" is ${entry.state}; only a done todo can be landed. Run its remaining stages first.`,
+        };
+      }
+      if (services.landTodo === undefined) {
+        return { ok: false, error: 'land_todo is not available in this host' };
+      }
+      const outcome = await services.landTodo.land({ slug, todoId: todo });
+      switch (outcome.kind) {
+        case 'landed':
+          return {
+            ok: true,
+            data: {
+              slug,
+              todo,
+              landed: true,
+              commit: outcome.commit,
+              ...(outcome.noop ? { noop: true } : {}),
+              ...(outcome.cleanup.length > 0 ? { cleanup: [...outcome.cleanup] } : {}),
+            },
+          };
+        case 'already-landed':
+          return { ok: true, data: { slug, todo, landed: false, message: 'already landed' } };
+        case 'refused':
+          return { ok: false, error: `landing todo "${todo}" of spec "${slug}" was refused: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'land_todo returned an unknown outcome' };
+      }
+    },
+  };
+}
+
+/**
  * `submit_pr(slug)` — run Verify then the PR stage (design section 8). Like
  * approval it confirms in the UI first: the flow pushes a branch and opens a
  * pull request, which are outward-facing.
@@ -773,7 +871,7 @@ function submitPrTool(services: ToolServices): Tool {
   return {
     name: 'submit_pr',
     description:
-      'Submit the pull request for a spec whose todos are all done: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
+      'Submit the pull request for a spec whose todos are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
     mutating: true,
     phases: ['drive'],
     schema: {
@@ -826,6 +924,99 @@ const RUNNABLE_STAGES: readonly Stage[] = ['plan', 'execute', 'review'] as const
 /** Whether `value` is a stage the `run` tool may dispatch. */
 function isRunnableStage(value: string): value is Stage {
   return isStage(value) && RUNNABLE_STAGES.includes(value);
+}
+
+/** The refusal a spawn from a chat already at the nesting cap gets; shared with the sub-agent runner. */
+export function subAgentDepthRefusal(depth: number): string {
+  return `spawn_subagent refused: sub-agents may nest at most ${MAX_SUBAGENT_DEPTH} levels deep (MAX_SUBAGENT_DEPTH = ${MAX_SUBAGENT_DEPTH}) and this chat is already at depth ${depth}. Do the task yourself or report back to your parent.`;
+}
+
+function spawnSubAgentTool(services: ToolServices): Tool {
+  return {
+    name: 'spawn_subagent',
+    description:
+      'Start a sub-agent chat to do one task and wait for its first reply. The sub-agent has its own tool loop and transcript; returns its chat id (for send_to_subagent) and its reply.',
+    mutating: false,
+    concurrent: true,
+    subagent: true,
+    phases: ['gather', 'drive', 'run'],
+    schema: {
+      type: 'object',
+      properties: { task: { type: 'string' } },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const task = readString(args, 'task');
+      if (task === undefined || task.trim() === '') {
+        return { ok: false, error: 'spawn_subagent requires a non-empty string "task"' };
+      }
+      const caller = tc.caller;
+      if (caller === undefined) {
+        return { ok: false, error: 'spawn_subagent needs a calling chat; it is not available here' };
+      }
+      if (caller.depth >= MAX_SUBAGENT_DEPTH) {
+        return { ok: false, error: subAgentDepthRefusal(caller.depth) };
+      }
+      if (services.subAgents === undefined) {
+        return { ok: false, error: 'spawn_subagent is not available in this host' };
+      }
+      const outcome = await services.subAgents.spawn({ task: task.trim(), caller });
+      switch (outcome.kind) {
+        case 'replied':
+          return { ok: true, data: { chatId: outcome.chatId, reply: outcome.reply } };
+        case 'refused':
+          return { ok: false, error: `the sub-agent did not start: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'spawn_subagent returned an unknown outcome' };
+      }
+    },
+  };
+}
+
+function sendToSubAgentTool(services: ToolServices): Tool {
+  return {
+    name: 'send_to_subagent',
+    description:
+      'Send a follow-up message to a sub-agent chat you started with spawn_subagent and wait for its reply.',
+    mutating: false,
+    concurrent: true,
+    subagent: true,
+    phases: ['gather', 'drive', 'run'],
+    schema: {
+      type: 'object',
+      properties: { chat_id: { type: 'string' }, message: { type: 'string' } },
+      required: ['chat_id', 'message'],
+      additionalProperties: false,
+    },
+    async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
+      const chatId = readString(args, 'chat_id');
+      const message = readString(args, 'message');
+      if (chatId === undefined || chatId.trim() === '' || message === undefined || message.trim() === '') {
+        return { ok: false, error: 'send_to_subagent requires a non-empty string "chat_id" and "message"' };
+      }
+      const caller = tc.caller;
+      if (caller === undefined) {
+        return { ok: false, error: 'send_to_subagent needs a calling chat; it is not available here' };
+      }
+      if (services.subAgents === undefined) {
+        return { ok: false, error: 'send_to_subagent is not available in this host' };
+      }
+      const outcome = await services.subAgents.send({
+        chatId: chatId.trim(),
+        message: message.trim(),
+        caller,
+      });
+      switch (outcome.kind) {
+        case 'replied':
+          return { ok: true, data: { reply: outcome.reply } };
+        case 'refused':
+          return { ok: false, error: `sub-agent "${chatId}" did not answer: ${outcome.reason}` };
+        default:
+          return { ok: false, error: 'send_to_subagent returned an unknown outcome' };
+      }
+    },
+  };
 }
 
 /** A slug/todo id is a simple directory-safe name (no separators/traversal). */

@@ -93,6 +93,7 @@ function makeDeps(
     signal: overrides.signal ?? new AbortController().signal,
     ...(overrides.sessionId !== undefined ? { sessionId: overrides.sessionId } : {}),
     ...(overrides.budget !== undefined ? { budget: overrides.budget } : {}),
+    ...(overrides.isConcurrent !== undefined ? { isConcurrent: overrides.isConcurrent } : {}),
   };
   return { deps, appended, calls };
 }
@@ -671,5 +672,254 @@ describe('budget seam', () => {
     await runToolLoop([{ role: 'user', content: 'hi' }], deps);
     assert.strictEqual(client.requests.length, 0);
     assert.deepStrictEqual(appended, [{ role: 'assistant', content: STOPPED_NOTICE }]);
+  });
+});
+
+/** A completion that requests several tool calls at once. */
+function multiCallCompletion(calls: Array<{ id: string; name: string }>): CompletionResult {
+  return {
+    content: undefined,
+    tool_calls: calls.map((c) => ({ id: c.id, name: c.name, arguments: '{}' })),
+  };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe('concurrent tool calls', () => {
+  it('starts every concurrent call of a segment before any resolves', async () => {
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'c1', name: 'read_file' },
+        { id: 'c2', name: 'read_file' },
+        { id: 'c3', name: 'read_file' },
+      ]),
+      finalCompletion('done'),
+    ]);
+    const gates = new Map<string, ReturnType<typeof deferred<ToolResult>>>();
+    for (const id of ['c1', 'c2', 'c3']) {
+      gates.set(id, deferred<ToolResult>());
+    }
+    const started: string[] = [];
+    const { deps, appended } = makeDeps({
+      client,
+      isConcurrent: () => true,
+      call: async (_n, _a, callId) => {
+        started.push(callId);
+        return gates.get(callId)!.promise;
+      },
+    });
+
+    const run = runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    for (let i = 0; i < 10 && started.length < 3; i += 1) {
+      await new Promise((r) => setImmediate(r));
+    }
+    assert.deepStrictEqual(started, ['c1', 'c2', 'c3']);
+    gates.get('c3')!.resolve({ ok: true, data: 'r3' });
+    gates.get('c2')!.resolve({ ok: true, data: 'r2' });
+    gates.get('c1')!.resolve({ ok: true, data: 'r1' });
+    await run;
+
+    const tools = appended.filter((m) => m.role === 'tool');
+    assert.deepStrictEqual(
+      tools.map((m) => [m.tool_call_id, m.content]),
+      [
+        ['c1', 'r1'],
+        ['c2', 'r2'],
+        ['c3', 'r3'],
+      ],
+    );
+  });
+
+  it('runs non-concurrent calls alone and in order', async () => {
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'r1', name: 'read_a' },
+        { id: 'r2', name: 'read_b' },
+        { id: 'w', name: 'write' },
+        { id: 'r3', name: 'read_c' },
+      ]),
+      finalCompletion('done'),
+    ]);
+    let inFlight = 0;
+    let maxOverlap = 0;
+    let writeOverlap = 0;
+    const events: string[] = [];
+    const { deps, appended } = makeDeps({
+      client,
+      isConcurrent: (name) => name.startsWith('read'),
+      call: async (_n, _a, callId) => {
+        inFlight += 1;
+        events.push(`start:${callId}`);
+        maxOverlap = Math.max(maxOverlap, inFlight);
+        if (callId === 'w') {
+          writeOverlap = Math.max(writeOverlap, inFlight);
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+        events.push(`end:${callId}`);
+        inFlight -= 1;
+        return { ok: true, data: callId };
+      },
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    assert.strictEqual(maxOverlap, 2);
+    assert.strictEqual(writeOverlap, 1);
+    assert.ok(events.indexOf('start:r3') > events.indexOf('end:w'));
+    assert.ok(events.indexOf('start:w') > events.indexOf('end:r1'));
+    assert.ok(events.indexOf('start:w') > events.indexOf('end:r2'));
+    assert.deepStrictEqual(
+      appended.filter((m) => m.role === 'tool').map((m) => m.tool_call_id),
+      ['r1', 'r2', 'w', 'r3'],
+    );
+  });
+
+  it('without isConcurrent every call runs sequentially', async () => {
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'a', name: 'read_file' },
+        { id: 'b', name: 'read_file' },
+      ]),
+      finalCompletion('done'),
+    ]);
+    let inFlight = 0;
+    let maxOverlap = 0;
+    const { deps } = makeDeps({
+      client,
+      call: async () => {
+        inFlight += 1;
+        maxOverlap = Math.max(maxOverlap, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return { ok: true, data: 'ok' };
+      },
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+    assert.strictEqual(maxOverlap, 1);
+  });
+
+  it('a throwing concurrent call becomes an error tool message without affecting its siblings', async () => {
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'c1', name: 'read_file' },
+        { id: 'c2', name: 'read_file' },
+      ]),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({
+      client,
+      isConcurrent: () => true,
+      call: async (_n, _a, callId) => {
+        if (callId === 'c1') {
+          throw new Error('boom');
+        }
+        return { ok: true, data: 'ok' };
+      },
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    assert.deepStrictEqual(
+      appended.filter((m) => m.role === 'tool').map((m) => m.content),
+      ['Error: boom', 'ok'],
+    );
+    assert.strictEqual(appended[appended.length - 1].content, 'done');
+  });
+
+  it('abort during a concurrent segment appends every result of the segment, then the stopped notice', async () => {
+    const controller = new AbortController();
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'c1', name: 'read_file' },
+        { id: 'c2', name: 'read_file' },
+      ]),
+      finalCompletion('never'),
+    ]);
+    const { deps, appended } = makeDeps({
+      client,
+      signal: controller.signal,
+      isConcurrent: () => true,
+      call: async (_n, _a, callId) => {
+        if (callId === 'c1') {
+          controller.abort();
+        }
+        return { ok: true, data: `r-${callId}` };
+      },
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    assert.strictEqual(client.requests.length, 1);
+    assert.deepStrictEqual(
+      appended.filter((m) => m.role === 'tool').map((m) => m.tool_call_id),
+      ['c1', 'c2'],
+    );
+    assert.strictEqual(appended[appended.length - 1].content, STOPPED_NOTICE);
+  });
+
+  it('abort between segments skips later segments', async () => {
+    const controller = new AbortController();
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'r1', name: 'read_file' },
+        { id: 'w', name: 'write' },
+      ]),
+      finalCompletion('never'),
+    ]);
+    const called: string[] = [];
+    const { deps, appended } = makeDeps({
+      client,
+      signal: controller.signal,
+      isConcurrent: (name) => name === 'read_file',
+      call: async (_n, _a, callId) => {
+        called.push(callId);
+        if (callId === 'r1') {
+          controller.abort();
+        }
+        return { ok: true, data: 'ok' };
+      },
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    assert.deepStrictEqual(called, ['r1']);
+    assert.deepStrictEqual(
+      appended.filter((m) => m.role === 'tool').map((m) => m.tool_call_id),
+      ['r1'],
+    );
+    assert.strictEqual(appended[appended.length - 1].content, STOPPED_NOTICE);
+  });
+
+  it('caps oversized concurrent results', async () => {
+    const data = 'x'.repeat(TOOL_RESULT_CAP_BYTES + 100);
+    const client = new ScriptedClient([
+      multiCallCompletion([
+        { id: 'c1', name: 'read_file' },
+        { id: 'c2', name: 'read_file' },
+      ]),
+      finalCompletion('done'),
+    ]);
+    const { deps, appended } = makeDeps({
+      client,
+      isConcurrent: () => true,
+      call: async () => ({ ok: true, data }),
+    });
+
+    await runToolLoop([{ role: 'user', content: 'hi' }], deps);
+
+    const note = `\n[truncated: ${TOOL_RESULT_CAP_BYTES} of ${TOOL_RESULT_CAP_BYTES + 100} bytes]`;
+    const tools = appended.filter((m) => m.role === 'tool');
+    assert.strictEqual(tools.length, 2);
+    for (const t of tools) {
+      assert.strictEqual(t.content, 'x'.repeat(TOOL_RESULT_CAP_BYTES) + note);
+    }
   });
 });

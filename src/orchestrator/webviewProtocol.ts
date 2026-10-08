@@ -82,6 +82,11 @@ export type HostToWebview =
   /** Set which session is shown as active. */
   | { type: 'setActiveSession'; sessionId: string }
   /**
+   * Set whether the session in view is a read-only sub-agent chat: no
+   * composer, no card answers, no Stop, no delete.
+   */
+  | { type: 'setReadOnly'; readOnly: boolean }
+  /**
    * Show an inline error message, optionally with a fix action. `provider` is
    * set when the error is about one provider's missing API key, so the fix
    * action can open that provider's key prompt directly.
@@ -292,6 +297,10 @@ export interface SessionItem {
   updatedAt: string | number;
   /** The scope the session belongs to (`'workspace'` or a spec slug). */
   scopeId: string;
+  /** The parent session's id for a sub-agent chat; absent for a top-level session. */
+  parentId?: string;
+  /** Nesting depth: 0 top-level, 1 child, 2 grandchild. */
+  depth: number;
 }
 
 /** One renderable record in the conversation view. */
@@ -335,10 +344,16 @@ export interface WebviewState {
   conversations: ConversationItem[];
   /** The id of the active conversation. */
   activeId: string;
-  /** The sessions of the active conversation scope, newest first. */
+  /**
+   * The sessions of the active conversation scope in tree order (top-level
+   * newest first, each followed by its descendants depth-first), as the host
+   * posts them; the webview never reorders.
+   */
   sessions: SessionItem[];
   /** The id of the active session, or `''` when a fresh chat has no id yet. */
   activeSessionId: string;
+  /** Whether the session in view is a sub-agent chat rendered read-only. */
+  readOnly: boolean;
   /** The records rendered in the conversation view, in order. */
   records: RenderRecord[];
   /** Whether a request or the tool loop is in flight. */
@@ -378,6 +393,7 @@ export function initialWebviewState(): WebviewState {
     activeId: '',
     sessions: [],
     activeSessionId: '',
+    readOnly: false,
     records: [],
     busy: false,
     autoMode: false,
@@ -418,6 +434,7 @@ export function initialWebviewState(): WebviewState {
  * - `setActive` sets the active conversation id.
  * - `setSessions` sets the session list; `setActiveSession` sets the active
  *   session id.
+ * - `setReadOnly` sets whether the session in view is read-only.
  * - `showError` sets the inline error; `setBusy` toggles the busy flag.
  * - `setEmptyState` sets the empty-state descriptor.
  * - `setProviders` replaces the provider groups, the active selection and the
@@ -528,6 +545,8 @@ export function reduce(state: WebviewState, msg: HostToWebview): WebviewState {
       return { ...state, sessions: [...msg.items] };
     case 'setActiveSession':
       return { ...state, activeSessionId: msg.sessionId };
+    case 'setReadOnly':
+      return { ...state, readOnly: msg.readOnly };
     case 'showError':
       return { ...state, error: { message: msg.message, action: msg.action, provider: msg.provider } };
     case 'setBusy':

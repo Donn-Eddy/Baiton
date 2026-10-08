@@ -12,14 +12,17 @@
  *     cores so no cached copy is trusted (Req 6.3).
  *   - `writeState` applies the minimal state-box edit via {@link writeTodoState}
  *     to freshly re-read content, writes it back, and commits the change on the
- *     spec branch as `spec(<slug>): <id> <what>` before the next stage
+ *     spec branch as `spec(<slug>): <id> <what>`, all under the per-slug
+ *     spec-branch writer and committing only `.baiton/specs/<slug>` via
+ *     `commitPaths`, before the next stage
  *     (Req 6.1, 6.3, 17.1). It resolves `false` when the serializer aborts (the
  *     target could not be located) so the queue surfaces a `spec-write-failed`
  *     refusal and leaves state unchanged (Req 6.5).
  *
  * Approval is true iff the spec's `approved_rev` byte-equals the current
  * Approval_Hash and is non-empty (Req 5.3, 5.4). Input-rev match compares the
- * plan's recorded Input_Rev — journaled at the todo's most recent plan start
+ * plan's recorded Input_Rev — journaled at the todo's most recent plan start (looked up in the merged spec journal,
+ * spec-level + per-todo files)
  * (Req 21.1) — against the current Input_Rev; with no recorded plan rev there is
  * nothing to invalidate, so it matches (Req 18.9).
  */
@@ -32,10 +35,10 @@ import { writeTodoState } from '../model/writer';
 import { isErr } from '../model/result';
 import type { TodoState } from '../model/todoState';
 import type { Stage } from '../model/stage';
-import type { GitService } from '../git';
-import type { SpecStore } from '../engine';
+import type { GitWorktreeService } from '../git';
+import { createSpecBranchWriter, type SpecBranchWriter, type SpecStore } from '../engine';
 import { persistencePathForStage, stageArtifactIsNumbered } from '../schema';
-import { parseJournal } from '../journal';
+import { readSpecJournal, type JournalEntry } from '../journal';
 
 /**
  * Build a {@link SpecStore} rooted at a repository's `.baiton/specs/` directory,
@@ -43,15 +46,15 @@ import { parseJournal } from '../journal';
  *
  * @param specsDir absolute `.baiton/specs/` directory.
  * @param git      the git seam used to commit each state write (Req 17.1).
+ * @param writer   the per-slug spec-branch writer; defaults to one over `git`.
  */
 export function createSpecStore(
   specsDir: string,
-  git: GitService,
+  git: GitWorktreeService,
+  writer: SpecBranchWriter = createSpecBranchWriter({ specsDir, git }),
 ): SpecStore {
   const specPath = (slug: string): string =>
     path.join(specsDir, slug, 'spec.md');
-  const journalPath = (slug: string): string =>
-    path.join(specsDir, slug, 'runs.jsonl');
   const todoDir = (slug: string, todoId: string): string =>
     path.join(specsDir, slug, 'todos', todoId);
 
@@ -90,7 +93,7 @@ export function createSpecStore(
 
     async latestExecuteCommit(slug, todoId): Promise<string | undefined> {
       let commit: string | undefined;
-      for (const entry of parseJournal(journalPath(slug))) {
+      for (const entry of readSpecJournal(specsDir, slug)) {
         if (
           entry.stage === 'execute' &&
           entry.todoId === todoId &&
@@ -138,34 +141,44 @@ export function createSpecStore(
         return false;
       }
       const current = computeInputRev(spec, todoId);
-      const recorded = recordedPlanInputRev(journalPath(slug), todoId);
+      const recorded = recordedPlanInputRev(readSpecJournal(specsDir, slug), todoId);
       // No recorded plan rev: nothing to invalidate against, so it matches.
       return recorded === undefined || recorded === current;
     },
 
     async writeState(slug, todoId, state, note): Promise<boolean> {
-      let current: string;
-      try {
-        current = await fsp.readFile(specPath(slug), 'utf8');
-      } catch {
-        return false;
-      }
-      const written = writeTodoState(current, todoId, state);
-      if (isErr(written)) {
-        return false;
-      }
-      if (written.value === current) {
-        // The serializer left the file unchanged (e.g. a `done`-line edit path
-        // or an already-current state): nothing to commit (Req 4.11, 6.5).
-        return false;
-      }
-      try {
-        await fsp.writeFile(specPath(slug), written.value, 'utf8');
-        await git.commit(`spec(${slug}): ${todoId} ${what(state, note)}`);
-        return true;
-      } catch {
-        return false;
-      }
+      return writer.apply(slug, async (scope) => {
+        let current: string;
+        try {
+          current = await fsp.readFile(specPath(slug), 'utf8');
+        } catch {
+          return false;
+        }
+        const written = writeTodoState(current, todoId, state);
+        if (isErr(written)) {
+          return false;
+        }
+        if (written.value === current) {
+          // The serializer left the file unchanged (e.g. a `done`-line edit path
+          // or an already-current state): nothing to commit (Req 4.11, 6.5).
+          return false;
+        }
+        try {
+          await fsp.writeFile(specPath(slug), written.value, 'utf8');
+          await scope.commit(`spec(${slug}): ${todoId} ${what(state, note)}`);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    },
+
+    async persistArtifact(slug, artifactPath, contents): Promise<void> {
+      // Not committed here: the following state write commits the spec folder.
+      await writer.apply(slug, async () => {
+        await fsp.mkdir(path.dirname(artifactPath), { recursive: true });
+        await fsp.writeFile(artifactPath, contents, 'utf8');
+      });
     },
   };
 }
@@ -209,14 +222,14 @@ function baseName(relativePath: string): string {
 
 /**
  * The Input_Rev recorded at the todo's most recent plan start, or `undefined`
- * when the journal records no plan run for the todo (Req 18.9, 21.1).
+ * when the merged spec journal records no plan run for the todo (Req 18.9, 21.1).
  */
 function recordedPlanInputRev(
-  journalFile: string,
+  entries: JournalEntry[],
   todoId: string,
 ): string | undefined {
   let latest: string | undefined;
-  for (const entry of parseJournal(journalFile)) {
+  for (const entry of entries) {
     if (entry.stage === 'plan' && entry.todoId === todoId) {
       latest = entry.inputRev;
     }

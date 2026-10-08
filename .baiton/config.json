@@ -3,7 +3,7 @@
   "roles": {
     "spec-writer": {
       "agent": "claude",
-      "model": "claude-fable-5-1",
+      "model": "claude-opus-5-5",
       "effort": "medium"
     },
     "planner": {

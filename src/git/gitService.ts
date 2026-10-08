@@ -202,6 +202,33 @@ class ShellGitService implements GitWorktreeService {
     return (await this.status()).clean;
   }
 
+  async commitPaths(paths: readonly string[], message: string, trailers?: Record<string, string>): Promise<string> {
+    if (paths.length === 0) {
+      const error: GitError = { command: 'git commit', exitCode: undefined, stderr: 'commitPaths needs at least one path' };
+      throw error;
+    }
+    // `add -A -- <paths>` stages new files and deletions under the paths only.
+    await this.runOrThrow(['add', '-A', '--', ...paths]);
+    // A pathspec on `commit` means `--only`: the commit records exactly these
+    // paths and ignores anything else already staged, so a central spec-folder
+    // commit can never sweep unrelated changes.
+    await this.runOrThrow(['commit', '-m', withTrailers(message, trailers), '--only', '--', ...paths]);
+    return this.head();
+  }
+
+  async listBranches(prefix: string): Promise<readonly string[]> {
+    // List every head and filter in JS: for-each-ref's own pattern matching is
+    // prefix-up-to-a-slash / fnmatch, which does not express an arbitrary prefix.
+    const out = await this.runOrThrow(['for-each-ref', '--format=%(refname)', 'refs/heads/']);
+    const full = `${HEADS_PREFIX}${prefix}`;
+    return out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith(full))
+      .map((l) => l.slice(HEADS_PREFIX.length))
+      .sort();
+  }
+
   private async runOrThrow(args: string[]): Promise<string> {
     const result = await this.run(args);
     if (result.exitCode !== 0) {

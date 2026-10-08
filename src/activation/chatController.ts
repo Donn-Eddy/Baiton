@@ -66,11 +66,23 @@
  *    the full transcript;
  *  - post the context meter (`setContextUsage`) after every completion,
  *    compaction and render; compact on demand (`compactContext` /
- *    `baiton.compactContext`), refused while busy.
+ *    `baiton.compactContext`), refused while busy;
+ *  - own the {@link SubAgentRunner} over the session store and client: a
+ *    sub-agent's question card is shown on, and persisted to, its root chat;
+ *    live output is posted only for the session in view (switching re-renders
+ *    from the transcript); Stop aborts every descendant; the session list is
+ *    the tree and a child chat is read-only.
  */
 import * as path from 'path';
 import { mkdir, readFile } from 'fs/promises';
-import type { GuardContext, ToolRegistry } from '../orchestrator';
+import type {
+  GuardContext,
+  InterventionSeam,
+  SubAgentEvent,
+  SubAgentRunner,
+  SubAgentToolSurface,
+  ToolRegistry,
+} from '../orchestrator';
 import {
   MissingConfigError,
   UnreachableEndpointError,
@@ -89,6 +101,9 @@ import {
   pendingToolRecord,
   PendingAskRegistry,
   SessionStore,
+  createSubAgentRunner,
+  isDescendantKey,
+  parentIdOf,
   resolveRoundBound,
   runToolLoop,
   settledInterventionView,
@@ -477,6 +492,12 @@ export class ChatController {
   /** `<scopeKey>/<sessionId>` of the session a run is in flight on, if any. */
   private runningKey: string | undefined;
 
+  /** The session a run is in flight on, with its scope. */
+  private runningSession: { scope: SessionScope; sessionId: string } | undefined;
+
+  /** The sub-agent runner over this controller's session store and client. */
+  public readonly subAgents: SubAgentRunner;
+
   /** One context tracker per conversation, keyed `<scopeKey>/<sessionId>`. */
   private readonly trackers = new Map<string, ContextTracker>();
 
@@ -508,6 +529,77 @@ export class ChatController {
     // conversation starts in) rather than poisoning the phase.
     const stored = deps.modeMemory?.get();
     this.mode = stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
+    this.subAgents = createSubAgentRunner({
+      sessions: this.sessions,
+      client: deps.client,
+      tools: () => deps.registry as unknown as SubAgentToolSurface,
+      guardContext: () => deps.guardContext(),
+      roundBound: () => deps.roundBound(),
+      readSpec: (slug) => this.readSpec(slug),
+      asks: this.asks,
+      onEvent: (e) => void this.onSubAgentEvent(e),
+      log: (m) => deps.log(`Baiton chat: ${m}`),
+    });
+  }
+
+  /** Wrap the host's intervention seam so a sub-agent's asks carry their origin. */
+  public subAgentInterventionSeam(base: InterventionSeam): InterventionSeam {
+    return this.subAgents.interventionSeam(base);
+  }
+
+  /** Split a session key at its first '/' into scope and session id. */
+  private sessionOfKey(key: string): { scope: SessionScope; sessionId: string } | undefined {
+    const i = key.indexOf('/');
+    if (i <= 0 || i === key.length - 1) {
+      return undefined;
+    }
+    const scopeKey = key.slice(0, i);
+    const sessionId = key.slice(i + 1);
+    return {
+      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'spec', slug: scopeKey },
+      sessionId,
+    };
+  }
+
+  /** React to a sub-agent's progress: post live output only when its chat is in view. */
+  private async onSubAgentEvent(e: SubAgentEvent): Promise<void> {
+    try {
+      const inView = e.key === this.viewKey();
+      switch (e.type) {
+        case 'started':
+          return;
+        case 'delta':
+          if (inView) {
+            this.deps.webview.post({ type: 'streamDelta', text: e.text });
+          }
+          return;
+        case 'appended': {
+          const origin = this.sessionOfKey(e.key);
+          if (inView && origin !== undefined) {
+            if (e.record.intervention !== undefined) {
+              await this.renderConversation(this.sessions.pathFor(origin.scope, e.chatId));
+            } else {
+              this.postAppended(e.record);
+            }
+          }
+          if (e.record.role === 'user' && origin !== undefined && scopeId(origin.scope) === scopeId(this.activeScope())) {
+            await this.postSessions(this.activeScope());
+          }
+          return;
+        }
+        case 'finished': {
+          const origin = this.sessionOfKey(e.key);
+          if (inView && origin !== undefined) {
+            this.deps.webview.post({ type: 'streamEnd' });
+            await this.renderConversation(this.sessions.pathFor(origin.scope, e.chatId));
+          }
+          await this.postSessions(this.activeScope());
+          return;
+        }
+      }
+    } catch (err) {
+      this.deps.log(`Baiton chat: could not post a sub-agent event: ${describe(err)}`);
+    }
   }
 
   /**
@@ -536,6 +628,7 @@ export class ChatController {
     this.selectionSub = undefined;
     this.runsSub?.();
     this.runsSub = undefined;
+    this.subAgents.dispose();
   }
 
   /**
@@ -846,22 +939,52 @@ export class ChatController {
    * agent/role/run directory rather than a fallback profile.
    */
   public async presentIntervention(ask: Intervention, context?: AutoModeRunContext): Promise<void> {
-    const scope = await this.scopeForAsk(ask);
+    let scope: SessionScope | undefined;
+    let sessionId: string | undefined;
+    let sessionKey: string | undefined;
+    let view = toInterventionView(ask);
+    if (ask.origin !== undefined) {
+      const root =
+        this.runningKey === ask.origin.rootKey && this.runningSession !== undefined
+          ? this.runningSession
+          : this.sessionOfKey(ask.origin.rootKey);
+      if (root !== undefined) {
+        scope = root.scope;
+        sessionId = root.sessionId;
+        sessionKey = ask.origin.rootKey;
+        view = { ...view, prompt: `Sub-agent \`${leafOf(ask.origin.chatId)}\` asks: ${view.prompt}` };
+      } else {
+        this.deps.log(`Baiton chat: unknown root session for a sub-agent ask (${ask.origin.rootKey})`);
+      }
+    } else if (
+      this.runningSession !== undefined &&
+      (ask.scopeId === undefined || ask.scopeId === scopeId(this.runningSession.scope))
+    ) {
+      scope = this.runningSession.scope;
+      sessionId = this.runningSession.sessionId;
+      sessionKey = this.runningKey;
+    }
+    if (scope === undefined || sessionId === undefined) {
+      scope = await this.scopeForAsk(ask);
+      sessionId = this.activeSessions.get(scopeId(scope)) ?? this.newSessionId(scope);
+      sessionKey = undefined;
+    }
     const key = scopeId(scope);
-    const sessionId = this.activeSessions.get(key) ?? this.newSessionId(scope);
     const transcript = this.transcriptFor(scope, sessionId);
-    const view = toInterventionView(ask);
     const outcome = await this.autoDecision(ask, context);
     if (outcome !== undefined && outcome.kind === 'approve') {
-      await this.autoApprove(ask.id, view, transcript, outcome);
+      await this.autoApprove(ask.id, view, transcript, outcome, { key, sessionKey });
       return;
     }
     const card =
       outcome === undefined || ask.kind !== 'permission'
         ? view
         : escalatedInterventionView(view, cardEscalation(ask, outcome));
-    this.cards.set(ask.id, { view: card, transcript, scopeKey: key });
-    this.deps.webview.post({ type: 'showIntervention', intervention: card });
+    const pending: PendingCard = { view: card, transcript, scopeKey: key, ...(sessionKey !== undefined ? { sessionKey } : {}) };
+    this.cards.set(ask.id, pending);
+    if (this.cardVisible(pending)) {
+      this.deps.webview.post({ type: 'showIntervention', intervention: card });
+    }
     if (outcome !== undefined) {
       // Audit the escalation now, while it happens: the same id is appended
       // again, settled, once the user answers, and `toRenderRecords` renders
@@ -915,6 +1038,7 @@ export class ChatController {
     view: InterventionView,
     transcript: ChatTranscript,
     outcome: Extract<AutoModeOutcome, { kind: 'approve' }>,
+    where: { key: string; sessionKey: string | undefined },
   ): Promise<void> {
     const answer: InterventionAnswer = { kind: 'approved' };
     if (this.asks.resolve(id, answer).kind !== 'resolved') {
@@ -922,8 +1046,18 @@ export class ChatController {
     }
     const rationale = autoApprovalRationale(outcome);
     const settled = settledInterventionView(view, answer, { rationale, auto: true });
-    this.deps.webview.post({ type: 'showIntervention', intervention: settled });
+    const visible = this.cardVisible({ scopeKey: where.key, ...(where.sessionKey !== undefined ? { sessionKey: where.sessionKey } : {}) });
+    if (visible) {
+      this.deps.webview.post({ type: 'showIntervention', intervention: settled });
+    }
     await this.append(transcript, interventionTranscriptRecord(settled));
+  }
+
+  /** Whether a card belongs on the conversation in view. */
+  private cardVisible(card: { scopeKey: string; sessionKey?: string }): boolean {
+    return card.sessionKey === undefined
+      ? card.scopeKey === scopeId(this.activeScope())
+      : card.sessionKey === this.viewKey();
   }
 
   /**
@@ -985,17 +1119,24 @@ export class ChatController {
    * control back instead of hanging.
    */
   private onStop(): void {
-    this.abort?.abort();
-    void this.declinePendingAsks(STOP_DECLINE_REASON);
-  }
-
-  /** Decline every pending ask, settling each card it is showing. */
-  private async declinePendingAsks(reason: string): Promise<void> {
-    for (const ask of this.asks.pending()) {
-      await this.declineAsk(ask.id, reason);
+    const ids = new Set([...this.asks.pending().map((a) => a.id), ...this.cards.keys()]);
+    const answer: InterventionAnswer = { kind: 'declined', reason: STOP_DECLINE_REASON };
+    // Resolve before aborting so the controller wins the race with the runner's chained abort.
+    for (const id of ids) {
+      this.asks.resolve(id, answer);
     }
-    // Safety net for asks raised before any card was shown.
-    this.asks.rejectAll(reason);
+    this.abort?.abort();
+    if (this.runningKey !== undefined) {
+      this.subAgents.stopDescendants(this.runningKey, STOP_DECLINE_REASON);
+    }
+    void (async () => {
+      for (const id of ids) {
+        if (this.cards.has(id)) {
+          await this.settleCard(id, answer, { rationale: STOP_DECLINE_REASON });
+        }
+      }
+      this.asks.rejectAll(STOP_DECLINE_REASON);
+    })();
   }
 
   /** Decline one pending ask, settling its card and transcript. */
@@ -1033,14 +1174,18 @@ export class ChatController {
    * a running loop keeps writing to the session the user can see.
    */
   private async onSelectSession(sessionId: string): Promise<void> {
-    if (this.busy) {
-      this.deps.webview.post({
-        type: 'showError',
-        message: 'Wait for the current run to finish',
-      });
-      return;
-    }
     const scope = this.activeScope();
+    if (this.busy) {
+      const target = `${scopeId(scope)}/${sessionId}`;
+      const running = this.runningKey;
+      if (running === undefined || (target !== running && !isDescendantKey(target, running))) {
+        this.deps.webview.post({
+          type: 'showError',
+          message: 'Wait for the current run to finish',
+        });
+        return;
+      }
+    }
     await this.setActiveSession(scope, sessionId);
     await this.refresh();
   }
@@ -1053,6 +1198,10 @@ export class ChatController {
    */
   private async onDeleteSession(sessionId: string): Promise<void> {
     const scope = this.activeScope();
+    if (parentIdOf(sessionId) !== undefined) {
+      this.deps.webview.post({ type: 'showError', message: 'Sub-agent chats are deleted with their parent.' });
+      return;
+    }
     const key = `${scopeId(scope)}/${sessionId}`;
     if (this.busy && this.runningKey === key) {
       this.deps.webview.post({
@@ -1081,7 +1230,11 @@ export class ChatController {
       });
       return;
     }
-    if (this.activeSessions.get(scopeId(scope)) === sessionId) {
+    const activeId = this.activeSessions.get(scopeId(scope));
+    if (
+      activeId !== undefined &&
+      (activeId === sessionId || isDescendantKey(`${scopeId(scope)}/${activeId}`, key))
+    ) {
       const remaining = await this.sessions.list(scope);
       const next = remaining[0]?.id;
       if (next === undefined) {
@@ -1105,6 +1258,10 @@ export class ChatController {
   private async onSend(text: string): Promise<void> {
     if (this.busy) {
       return;
+    }
+    const activeId = this.activeSessions.get(scopeId(this.activeScope()));
+    if (activeId !== undefined && parentIdOf(activeId) !== undefined) {
+      return; // a sub-agent chat is read-only
     }
     const trimmed = text.trim();
     if (trimmed.length === 0 || text.length > MAX_INPUT_CHARS) {
@@ -1145,6 +1302,7 @@ export class ChatController {
     this.setBusy(true);
     const key = `${scopeId(scope)}/${sessionId}`;
     this.runningKey = key;
+    this.runningSession = { scope, sessionId };
     const tools = this.deps.toolsFor(phase);
     this.abort = new AbortController();
     try {
@@ -1160,26 +1318,38 @@ export class ChatController {
         client: this.deps.client,
         tools,
         call: (name, args, callId, signal) =>
-          this.callTool(name, args, callId, signal, phase),
+          this.callTool(name, args, callId, signal, phase, scope, key),
+        isConcurrent: (name) => (this.deps.registry.definitions?.() ?? []).some((t) => t.name === name && t.concurrent === true),
         systemPrompt: () => this.buildPrompt(slug, mode),
         append: async (m) => {
           await this.append(transcript, m);
-          this.postAppended(m);
+          if (key === this.viewKey()) {
+            this.postAppended(m);
+          }
         },
         roundBound: resolveRoundBound(this.deps.roundBound()),
         signal: this.abort.signal,
-        onDelta: (text) => this.deps.webview.post({ type: 'streamDelta', text }),
+        onDelta: (text) => {
+          if (key === this.viewKey()) {
+            this.deps.webview.post({ type: 'streamDelta', text });
+          }
+        },
         sessionId,
         budget: this.contextBudget(key, tools, autoApprovedLines, transcript, sessionId),
       });
-      await this.renderConversation(transcript.path);
+      if (key === this.viewKey()) {
+        await this.renderConversation(transcript.path);
+      }
     } catch (err) {
       // Keep any partially streamed text on screen next to the error.
-      this.deps.webview.post({ type: 'streamEnd' });
+      if (key === this.viewKey()) {
+        this.deps.webview.post({ type: 'streamEnd' });
+      }
       this.surfaceError(err);
     } finally {
       this.abort = undefined;
       this.runningKey = undefined;
+      this.runningSession = undefined;
       this.setBusy(false);
       // The session's title and updated time are derived from the transcript,
       // so the list is re-posted once the run has written to it.
@@ -1201,12 +1371,20 @@ export class ChatController {
     callId: string,
     signal: AbortSignal,
     phase: OrchestratorPhase,
+    scope: SessionScope,
+    key: string,
   ): Promise<ToolResult> {
     if (signal.aborted) {
       return { ok: false, error: 'the run was stopped before the tool call' };
     }
     const parsed = parseArgs(args);
-    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), phase);
+    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), phase, 'top', {
+      sessionKey: key,
+      depth: 0,
+      phase,
+      kind: scope,
+      signal,
+    });
   }
 
   /**
@@ -1264,6 +1442,7 @@ export class ChatController {
     const active = await this.resolveActiveSession(scope, listed);
     if (active === undefined) {
       // A fresh chat with no transcript yet: show the empty state.
+      this.deps.webview.post({ type: 'setReadOnly', readOnly: false });
       await this.renderConversation(undefined);
       const window = this.deps.contextWindow?.();
       this.deps.webview.post({
@@ -1272,12 +1451,14 @@ export class ChatController {
         window: window !== undefined && Number.isInteger(window) && window > 0 ? window : null,
         source: 'estimate',
       });
-      this.repostPendingCards(scopeId(scope));
+      this.repostPendingCards();
       return;
     }
+    const readOnly = parentIdOf(active) !== undefined;
+    this.deps.webview.post({ type: 'setReadOnly', readOnly });
     await this.renderConversation(this.sessions.pathFor(scope, active));
     const viewKey = `${scopeId(scope)}/${active}`;
-    if (!this.trackers.has(viewKey)) {
+    if (!readOnly && !this.trackers.has(viewKey)) {
       // Not measured in this window yet (e.g. after a reload): estimate it.
       try {
         const history = toHistory(await readTranscript(this.sessions.pathFor(scope, active)));
@@ -1287,13 +1468,13 @@ export class ChatController {
       }
     }
     this.postContextUsage(viewKey);
-    this.repostPendingCards(scopeId(scope));
+    this.repostPendingCards();
   }
 
   /** Re-post the pending cards belonging to the rendered conversation. */
-  private repostPendingCards(key: string): void {
+  private repostPendingCards(): void {
     for (const card of this.cards.values()) {
-      if (card.scopeKey === key) {
+      if (this.cardVisible(card)) {
         this.deps.webview.post({ type: 'showIntervention', intervention: card.view });
       }
     }
@@ -1324,7 +1505,7 @@ export class ChatController {
   private async postSessions(scope: SessionScope): Promise<SessionMeta[]> {
     let listed: SessionMeta[] = [];
     try {
-      listed = await this.sessions.list(scope);
+      listed = await this.sessions.listTree(scope);
     } catch (err) {
       this.deps.log(`Baiton chat: could not list chat sessions: ${describe(err)}`);
     }
@@ -1479,6 +1660,10 @@ export class ChatController {
     const slug = this.activeSpec;
     const scope = this.activeScope();
     const sessionId = this.activeSessions.get(scopeId(scope));
+    if (sessionId !== undefined && parentIdOf(sessionId) !== undefined) {
+      this.deps.webview.post({ type: 'showError', message: 'Sub-agent chats are read-only.' });
+      return;
+    }
     if (sessionId === undefined || (await this.sessions.meta(scope, sessionId)) === undefined) {
       this.deps.webview.post({ type: 'showError', message: 'There is nothing to compact in this conversation yet.' });
       return;
@@ -1495,6 +1680,7 @@ export class ChatController {
     const key = `${scopeId(scope)}/${sessionId}`;
     this.setBusy(true);
     this.runningKey = key;
+    this.runningSession = { scope, sessionId };
     this.abort = new AbortController();
     try {
       const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
@@ -1506,6 +1692,7 @@ export class ChatController {
     } finally {
       this.abort = undefined;
       this.runningKey = undefined;
+      this.runningSession = undefined;
       this.setBusy(false);
     }
   }
@@ -1648,7 +1835,9 @@ export class ChatController {
     };
     const rec = compactionTranscriptRecord(summary, marker);
     await this.append(transcript, rec);
-    this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(rec) });
+    if (key === this.viewKey()) {
+      this.deps.webview.post({ type: 'appendMessage', record: toRenderRecord(rec) });
+    }
     this.trackerFor(key).reset();
     return toHistory(await readTranscript(transcript.path));
   }
@@ -1854,6 +2043,8 @@ function toSessionItems(scope: SessionScope, metas: readonly SessionMeta[]): Ses
     title: meta.title,
     updatedAt: meta.updatedAt,
     scopeId: scopeId(scope),
+    depth: meta.depth,
+    ...(meta.parentId !== undefined ? { parentId: meta.parentId } : {}),
   }));
 }
 
@@ -1956,6 +2147,13 @@ interface PendingCard {
   view: InterventionView;
   transcript: ChatTranscript;
   scopeKey: string;
+  /** The session the card belongs to; undefined keeps the scope-wide behaviour. */
+  sessionKey?: string;
+}
+
+/** The last '/' segment of a sub-agent chat id. */
+function leafOf(chatId: string): string {
+  return chatId.slice(chatId.lastIndexOf('/') + 1);
 }
 
 /** A short, safe description of a thrown value for a user-facing message. */

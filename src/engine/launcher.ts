@@ -65,7 +65,8 @@ export interface LaunchStageInput {
    * Optional absolute run root the launch resolves against: the terminal cwd
    * and the `.baiton/runs/<launch-id>/` brief, result and asks directories
    * live under it instead of under `workspaceRoot`. Set by the spec-less run
-   * pipeline to launch a stage inside `.baiton/worktrees/<run-id>/`, so the
+   * pipeline (`.baiton/worktrees/<run-id>/`) and by the run queue (the todo
+   * worktree `.baiton/worktrees/<slug>/<todoId>/`) to launch a stage inside it, so the
    * role profiles' RELATIVE run-dir grants (`.baiton/runs/<launch-id>/`) still
    * resolve to the same directory the launcher wrote. Absent, the launch is
    * byte-identical to a launch without the field.
