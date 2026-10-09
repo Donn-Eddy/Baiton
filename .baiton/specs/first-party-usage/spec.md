@@ -1,12 +1,12 @@
 ---
 version: 1
 name: first-party-usage
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 5c95b9629bbbaced778fd067e40381b0237cfb1d
+branch: baiton/first-party-usage
+approved_rev: 24be8225f515841e329f8f0828ebcceedce756387ef0807a20d9deb61b25dcf8
 ---
 
 # OVERVIEW
