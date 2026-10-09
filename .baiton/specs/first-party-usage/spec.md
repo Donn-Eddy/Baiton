@@ -94,7 +94,7 @@ Add a test (test/usageView.view.test.ts) in the style of configPanel.view.test.t
   - add the `baiton.usage.refresh` command, with a view/title menu entry;
   - add the `baiton.usage.refreshIntervalSeconds` setting with a sane default and minimum.
 Confirm the Spec Explorer, Runs and Configuration entries are unchanged, and that `npm run compile`, `npm run lint` and `npm test` pass. (after T08, T09; files: src/activation/usageView.ts, src/activation/configPanel.ts, src/activation/surface.ts, src/activation/executable.ts, src/activation/index.ts, src/extension.ts, package.json)
-- [reviewing] T11 Document the Usage view in README.md:
+- [done] T11 Document the Usage view in README.md:
 - what each row shows;
 - the refresh setting and command;
 - the credential policy (CLI routes first, stored-credential fallback only, never logged or persisted, none read in Restricted Mode).
