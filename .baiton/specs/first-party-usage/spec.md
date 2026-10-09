@@ -63,7 +63,7 @@ Reuse the existing app-server spawner seam and the executable override. Parse ev
 - quota or state files it writes under its config directory;
 - only as a fallback, the provider's quota or available-models endpoint called with the credential agy already stored, held in memory only.
 Parse per-model quota buckets (remaining fraction or percent, plus reset) when they exist. If no workable route exists, the reader must return unavailable with a precise reason and must never return a placeholder or extrapolated figure. Write the probe findings, including the mechanisms found unusable, into the module header. Test with faked seams in test/usage.antigravity.test.ts. (after T01; files: src/usage/antigravity.ts, src/adapter/antigravity.ts, test/usage.antigravity.test.ts)
-- [planned] T06 Establish and implement the OpenCode Go usage reader in src/usage/opencode.ts. Probe:
+- [executing] T06 Establish and implement the OpenCode Go usage reader in src/usage/opencode.ts. Probe:
 - the installed opencode CLI for a usage/stats subcommand;
 - the `opencode serve` HTTP surface that src/adapter/opencode.ts already starts, for any usage, limit or account route;
 - files opencode writes itself;
