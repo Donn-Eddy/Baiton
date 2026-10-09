@@ -13,8 +13,8 @@ branch and worktree.
 Baiton contributes two view containers, one on each side of the window:
 
 - the **activity bar** container (the `$(rocket)` icon, titled **Baiton**),
-  holding the **Spec Explorer**, the **Runs** view and the collapsed
-  **Configuration** section;
+  holding the **Spec Explorer**, the **Runs** view, the collapsed **Usage**
+  section and the collapsed **Configuration** section;
 - the **secondary side bar** container (the `$(comment-discussion)` icon,
   titled **Baiton Chat**), holding the **Chat** view. If the secondary side bar
   is hidden, run **View: Toggle Secondary Side Bar** to reveal it.
@@ -51,6 +51,18 @@ The views:
 - **Runs** — a tree of the spec-less runs a non-Spec conversation dispatched,
   split into **Active** and **Complete**, with **Cancel**, **View diff** and
   **Merge** as its item actions. See **The Runs view** below.
+
+- **Usage** — a collapsed webview showing remaining usage for Claude Code,
+  Codex, Antigravity and OpenCode Go, in that order. Each row shows its windows
+  (a bar only when the source gives a percentage), the reset time, the
+  scope/tier, a source line with provenance (provider-reported or
+  Baiton-derived, labelled) and the read time, and a status of ok, stale or
+  unavailable with a reason. Nothing is probed or spawned before the section is
+  first expanded; it re-reads when it becomes visible and every
+  `baiton.usage.refreshIntervalSeconds` while visible, and polling stops when it
+  is hidden or closed. A read that overruns 15 s settles as stale or
+  unavailable. In Restricted Mode no stored credential is read and the row says
+  why. Nothing is written. See [Usage view (per-tool probe findings)](#usage-view-per-tool-probe-findings).
 
 - **Chat** — a webview hosting the orchestrator conversations: one Workspace
   conversation for creating new specs, plus one conversation per spec. Selecting
@@ -1076,6 +1088,9 @@ The Usage view reads each first-party tool's remaining usage through the real me
   moves keyboard focus to the Chat view.
 - **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
   container and moves keyboard focus to the Configuration view.
+- **Baiton: Refresh Usage** (`baiton.usage.refresh`) — re-reads every tool now;
+  also the refresh button in the Usage view title. If the view has never been
+  expanded it reveals it (which performs the first read).
 - **Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) — picks one of
   the keyed providers, then sets or clears its API key with a masked input,
   stored in VS Code SecretStorage under `baiton.orchestrator.key.<provider>`.
@@ -1098,6 +1113,8 @@ merge additionally require `!baiton.restricted`.
 
 ## Settings
 
+- `baiton.usage.refreshIntervalSeconds` — seconds between Usage view re-reads
+  while it is visible; default 300, clamped to 30–86400.
 - `baiton.orchestrator.endpoint` — base URL of the OpenAI-compatible
   chat-completions endpoint used by the **OpenAI / Custom** provider. No other
   provider reads it: the builtins and models.dev providers take their base URL

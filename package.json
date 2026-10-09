@@ -48,6 +48,12 @@
           "type": "tree"
         },
         {
+          "id": "baiton.usageView",
+          "name": "Usage",
+          "type": "webview",
+          "visibility": "collapsed"
+        },
+        {
           "id": "baiton.configPanel",
           "name": "Configuration",
           "type": "webview",
@@ -172,6 +178,12 @@
         "command": "baiton.runs.merge",
         "title": "Merge Run",
         "category": "Baiton"
+      },
+      {
+        "command": "baiton.usage.refresh",
+        "title": "Refresh Usage",
+        "category": "Baiton",
+        "icon": "$(refresh)"
       }
     ],
     "menus": {
@@ -319,6 +331,13 @@
           "when": "view == baiton.runsView && viewItem =~ /\\bmerge\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@2"
         }
+      ],
+      "view/title": [
+        {
+          "command": "baiton.usage.refresh",
+          "when": "view == baiton.usageView",
+          "group": "navigation"
+        }
       ]
     },
     "configuration": {
@@ -419,6 +438,13 @@
           "default": 20,
           "minimum": 1,
           "description": "Maximum number of model completions in a single orchestrator tool-loop run. Values that are unset, not a positive integer, or less than 1 fall back to 20."
+        },
+        "baiton.usage.refreshIntervalSeconds": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 30,
+          "maximum": 86400,
+          "description": "How often, in seconds, the Usage view re-reads remaining usage while it is visible. Nothing is read before the view is first expanded, and polling stops when the view is hidden or closed. Values outside 30–86400 are clamped."
         }
       }
     }
