@@ -1033,6 +1033,20 @@ A launched stage's `.baiton/runs/<launch-id>/asks/<ask-id>.json` is a harness as
 
 The state table above is the thing that decides which relay each adapter uses: the selection it records is the selection encoded in `ASK_RELAY_KIND` / `askRelayKind()` in `src/adapter/index.ts`, so the documented findings and the shipped behaviour have one source.
 
+### Usage view (per-tool probe findings)
+
+The Usage view reads each first-party tool's remaining usage through the real mechanism recorded below; nothing is shown that the source did not give (no source percentage means no bar, and a figure from a stale snapshot is dropped rather than zeroed).
+
+- **codex findings** (probed `codex --version` → 0.157.0, 2026-10-08):
+  - **Established route (primary): `codex app-server` over stdio JSON-RPC.** Framing is JSONL: `initialize` (id 1, `clientInfo` `{name:"baiton",version:"1.0.0"}`), the `initialized` notification, then `{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}`. The stdin must stay open until the reply arrives (the reply came a moment after the request; closing stdin early gave no id 2 reply).
+  - **Returned:** `result.rateLimits = {limitId, limitName, primary:{usedPercent, windowDurationMins:300, resetsAt}, secondary:{usedPercent, windowDurationMins:10080, resetsAt}, credits, planType:"plus", …}` plus the same bucket under `result.rateLimitsByLimitId.codex`. `resetsAt` is unix seconds; `usedPercent` is the provider's own figure (example: `{"usedPercent":0,"windowDurationMins":300,"resetsAt":1791535100}`). The reply also carries `accountId` and reset-credit details, which Baiton ignores and never displays.
+  - **Probed, unusable as the route:** a CLI subcommand. `codex --help` (and `codex doctor`, `codex debug`, `codex app-server --help`) list no non-interactive usage or limits command; `/status` exists only as a TUI slash command.
+  - **Probed, kept as second route:** the newest `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Its `event_msg` lines with `payload.type == "token_count"` carry `rate_limits.{primary,secondary}.{used_percent, window_minutes, resets_at}` and `plan_type`. It is only as recent as the last Codex session (the newest file on the probe machine was days old), so Baiton reports it with the snapshot time as `readAt` and drops any window whose `resets_at` has passed.
+  - **Probed, fallback only:** `GET https://chatgpt.com/backend-api/wham/usage` with `Authorization: Bearer <stored access token>` and `ChatGPT-Account-Id` returned HTTP 200 with `plan_type` and `rate_limit.{primary_window,secondary_window}.{used_percent, limit_window_seconds, reset_at, reset_after_seconds}`. The endpoint is undocumented and may change, so it is tried last. API-key logins (`OPENAI_API_KEY` only, no `tokens`) have no plan windows, so the reason says so. The API-key case was not run against a real API-key login (**unverified**).
+  - **Fallback handling:** the stored login (`$CODEX_HOME/auth.json`, default `~/.codex/auth.json`) is read only in a trusted workspace, held in a local variable for one request, and never put in a reading, reason or log line (all messages pass through `redactSecrets`).
+  - **Restricted Mode:** the app-server and rollout reads are unchanged; only the stored-login read and the HTTP request are skipped, and the reason reads "Restricted Mode: Baiton does not read the stored Codex login."
+  - **Unverified:** how the app-server behaves under an API-key login, and the exact behaviour on other codex versions.
+
 ## Commands
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and

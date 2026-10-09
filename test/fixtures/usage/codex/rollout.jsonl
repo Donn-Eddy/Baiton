@@ -1,0 +1,3 @@
+{"timestamp":"2026-09-28T05:10:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}
+{"timestamp":"2026-09-28T05:12:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":1.0,"window_minutes":300,"resets_at":1790590000},"secondary":{"used_percent":0.5,"window_minutes":10080,"resets_at":1791073029},"plan_type":"plus"}}}
+{"timestamp":"2026-09-28T05:18:57.676Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":2.0,"window_minutes":300,"resets_at":1790590626},"secondary":{"used_percent":1.0,"window_minutes":10080,"resets_at":1791073029},"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"plan_type":"plus"}}}
