@@ -3,3 +3,4 @@ export * from './model';
 export * from './usageService';
 export * from './codex';
 export * from './claude';
+export * from './antigravity';

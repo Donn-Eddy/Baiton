@@ -629,6 +629,9 @@ function defaultRunAntigravityModelsCli(options: { cwd?: string; timeoutMs: numb
  *    unchanged. Unverified: whether agy re-reads `hooks.json` while running;
  *    the hook denies any tool call that names an `.agents` `hooks.json` so
  *    the agent cannot rewrite it either way.
+ *
+ * Usage/quota is not read here: the `agy models` listing carries no quota.
+ * The Usage view reads it with `agy -p /usage` in src/usage/antigravity.ts.
  */
 export class AntigravityAdapter implements Adapter {
   readonly id = 'antigravity' as const;
