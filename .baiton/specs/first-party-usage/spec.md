@@ -51,7 +51,7 @@ Add constructors that enforce the invariants: a reason is never empty, a bar is 
 - it emits a change event with the four readings in fixed order;
 - it does nothing until the first refresh call.
 Unit-test the coalescing, timeout, stale-retention, throw-to-unavailable and no-read-before-first-refresh paths in test/usage.service.test.ts. (after T01; files: src/usage/usageService.ts, src/usage/model.ts, test/usage.service.test.ts)
-- [pending] T03 Establish and implement the Codex usage reader in src/usage/codex.ts. Probe the installed codex CLI for a real route, in this order:
+- [planning] T03 Establish and implement the Codex usage reader in src/usage/codex.ts. Probe the installed codex CLI for a real route, in this order:
 1. the `codex app-server` stdio JSON-RPC that src/adapter/codex.ts already drives (e.g. an account/rate-limits method returning primary/secondary windows with used percent, window length, reset and plan type);
 2. rate-limit snapshots codex writes into its own session rollout files;
 3. only as a fallback, the provider usage endpoint called with the token from codex's auth.json, held in memory only.
