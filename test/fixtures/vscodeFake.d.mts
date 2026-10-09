@@ -17,10 +17,15 @@ export const window: {
 
 export const commands: {
   executeCommand: (command: string, ...args: unknown[]) => Promise<unknown>;
+  registerCommand: (id: string, cb: (...args: unknown[]) => unknown) => unknown;
 };
 
 export const workspace: {
   createFileSystemWatcher: (pattern: unknown, ...args: unknown[]) => unknown;
+  getConfiguration: (section?: string, scope?: unknown) => unknown;
+  readonly isTrusted: boolean;
+  onDidGrantWorkspaceTrust: (listener: () => void) => unknown;
+  onDidChangeConfiguration: (listener: (e: { affectsConfiguration(section: string): boolean }) => void) => unknown;
 };
 
 export class RelativePattern {

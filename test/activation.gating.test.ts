@@ -26,6 +26,11 @@ import type {
   RunPipelineStart,
 } from '../src/engine/runPipeline';
 import type { RunManifest } from '../src/engine/runStore';
+import {
+  DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS,
+  MAX_USAGE_REFRESH_INTERVAL_SECONDS,
+  MIN_USAGE_REFRESH_INTERVAL_SECONDS,
+} from '../src/usage/usageService';
 
 /**
  * Unit tests for workspace resolution, the engine-version guard, executable
@@ -414,7 +419,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer, the Runs view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+  it('contributes the Spec Explorer, the Runs view, the collapsed Usage view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
     interface ViewContrib {
       id: string;
       name?: string;
@@ -442,8 +447,12 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.ok(views, 'views must be present');
     assert.deepStrictEqual(
       views.baiton?.map((v) => v.id),
-      ['baiton.specExplorer', 'baiton.runsView', 'baiton.configPanel'],
+      ['baiton.specExplorer', 'baiton.runsView', 'baiton.usageView', 'baiton.configPanel'],
     );
+    const usageView = views.baiton?.find((v) => v.id === 'baiton.usageView');
+    assert.strictEqual(usageView?.name, 'Usage');
+    assert.strictEqual(usageView?.type, 'webview');
+    assert.strictEqual(usageView?.visibility, 'collapsed');
     const configView = views.baiton?.find((v) => v.id === 'baiton.configPanel');
     assert.strictEqual(configView?.type, 'webview');
     assert.strictEqual(configView?.visibility, 'collapsed');
@@ -490,6 +499,35 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
       assert.strictEqual(entry.type, 'string');
       assert.strictEqual(entry.default, '');
     }
+  });
+
+  it('contributes baiton.usage.refresh as a Usage view title button, not gated in the palette', () => {
+    const contributes = pkg.contributes as {
+      commands?: { command: string; title: string; category?: string; icon?: string }[];
+      menus?: Record<string, { command: string; when?: string; group?: string }[]>;
+    };
+    const cmd = contributes.commands?.find((c) => c.command === 'baiton.usage.refresh');
+    assert.ok(cmd, 'baiton.usage.refresh must be contributed');
+    assert.strictEqual(cmd.category, 'Baiton');
+    assert.strictEqual(cmd.icon, '$(refresh)');
+    const title = contributes.menus?.['view/title']?.find((m) => m.command === 'baiton.usage.refresh');
+    assert.ok(title, 'baiton.usage.refresh must be in menus["view/title"]');
+    assert.strictEqual(title.when, 'view == baiton.usageView');
+    assert.strictEqual(title.group, 'navigation');
+    const palette = contributes.menus?.commandPalette ?? [];
+    assert.strictEqual(palette.find((m) => m.command === 'baiton.usage.refresh'), undefined);
+  });
+
+  it('contributes baiton.usage.refreshIntervalSeconds matching the usage service bounds', () => {
+    const props = (pkg.contributes as { configuration: { properties: Record<string, Record<string, unknown>> } })
+      .configuration.properties;
+    const entry = props['baiton.usage.refreshIntervalSeconds'];
+    assert.ok(entry, 'setting must be contributed');
+    assert.strictEqual(entry.type, 'integer');
+    assert.strictEqual(entry.default, DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS);
+    assert.strictEqual(entry.minimum, MIN_USAGE_REFRESH_INTERVAL_SECONDS);
+    assert.strictEqual(entry.maximum, MAX_USAGE_REFRESH_INTERVAL_SECONDS);
+    assert.deepStrictEqual([entry.default, entry.minimum, entry.maximum], [300, 30, 86400]);
   });
 
   it('contributes baiton.openConfigPanel without commandPalette gating', () => {
