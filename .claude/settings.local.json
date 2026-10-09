@@ -5,7 +5,9 @@
       "Bash(npm test *)",
       "Bash(npx mocha *)",
       "Bash(node *)",
-      "Bash(npx ts-node *)"
+      "Bash(npx ts-node *)",
+      "Read(//tmp/**)",
+      "Bash(timeout 25 claude -p '/usage' --output-format json)"
     ]
   }
 }

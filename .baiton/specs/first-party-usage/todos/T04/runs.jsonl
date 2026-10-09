@@ -3,3 +3,4 @@
 {"type":"start","runId":"first-party-usage-T04-execute-1-1791518665460","todoId":"T04","stage":"execute","attempt":1,"startHead":"bfa41b3a653934135e32045310dfb8b494eb760f","inputRev":"4489cc3bedf0eeb87e4b67988c28a175595786966f22277d3b84f3fceebe0aca","terminalPid":428878,"fromState":"planned","sessionId":"b378c8d1-ad5b-426b-8ce3-d06baa84a875"}
 {"type":"completion","runId":"first-party-usage-T04-execute-1-1791518665460","result":"completed","commit":"5240e83d7b8a615fb9fd38f41a0d015e998137c3"}
 {"type":"start","runId":"first-party-usage-T04-review-1-1791521827096","todoId":"T04","stage":"review","attempt":1,"startHead":"5240e83d7b8a615fb9fd38f41a0d015e998137c3","inputRev":"4489cc3bedf0eeb87e4b67988c28a175595786966f22277d3b84f3fceebe0aca","terminalPid":477844,"fromState":"executed","sessionId":"39db52b4-d0d4-436f-bab8-201434e8eee2"}
+{"type":"completion","runId":"first-party-usage-T04-review-1-1791521827096","result":"completed"}
