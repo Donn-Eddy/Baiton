@@ -43,7 +43,7 @@ Add a collapsible **Usage** WebviewView (`baiton.usageView`) to the `baiton` act
 - a source { mechanism, provenance: 'provider' | 'baiton-derived', readAt };
 - a status of ok | stale (with age and failure reason) | unavailable (with a non-empty reason).
 Add constructors that enforce the invariants: a reason is never empty, a bar is allowed only when a percent was given, and a Baiton-derived source must be labelled. Add pure formatters for the row text (e.g. '5h window · 62% left · resets 14:30') and the source/age line. Unit-test it in test/usage.model.test.ts. (files: src/usage/model.ts, test/usage.model.test.ts)
-- [planned] T02 Implement the host-free UsageService in src/usage/usageService.ts. It takes an injected reader per tool, an injected clock and timer, and a per-read timeout. Behaviour:
+- [executing] T02 Implement the host-free UsageService in src/usage/usageService.ts. It takes an injected reader per tool, an injected clock and timer, and a per-read timeout. Behaviour:
 - refreshAll()/refresh(tool) coalesce, so a second trigger while a read is in flight joins that promise instead of starting a new probe;
 - each read is timeboxed;
 - a reader that throws, rejects or overruns settles as unavailable with a reason, or as stale if there is a last good reading, which is kept with its age and the failure reason rather than blanked;
