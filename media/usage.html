@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<!--
+  Usage view webview markup — spec first-party-usage, todo T09.
+
+  This is the static shell the Usage WebviewView provider loads. The provider
+  substitutes three placeholders at load time before handing the HTML to the
+  webview, exactly as the Config_Panel provider does for config.html:
+
+    ${nonce}     — a fresh, unpredictable per-load nonce. The <script> tag and
+                   the <style> tag carry it; the CSP admits only code bearing
+                   this exact nonce.
+    ${cspSource} — the webview's cspSource, used to allow the media/ styles and
+                   fonts that VS Code rewrites to vscode-webview-resource: URIs.
+    ${baseUri}   — the webview URI of the media/ folder, used to resolve the
+                   sibling script. localResourceRoots is limited to media/ by
+                   the provider.
+
+  Every color is a VS Code theme CSS variable, so the view follows the active
+  theme. The view writes textContent only — never HTML — and every card is
+  built by media/usage.js; this file supplies the shell and the styling.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; font-src ${cspSource};"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Baiton Usage</title>
+    <style nonce="${nonce}">
+      /* Every color is derived from a VS Code theme variable. */
+      :root {
+        --baiton-gap: 8px;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        box-sizing: border-box;
+        padding: var(--baiton-gap);
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-foreground);
+        background-color: var(--vscode-sideBar-background);
+      }
+
+      .toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--baiton-gap);
+        padding: var(--baiton-gap) 0;
+        background-color: var(--vscode-sideBar-background);
+        border-bottom: 1px solid var(--vscode-panel-border);
+        margin-bottom: var(--baiton-gap);
+      }
+
+      #summary {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      #restricted-note {
+        display: none;
+        padding: var(--baiton-gap);
+        margin-bottom: var(--baiton-gap);
+        color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+        background-color: var(--vscode-inputValidation-warningBackground);
+        border: 1px solid var(--vscode-inputValidation-warningBorder);
+      }
+
+      #restricted-note.visible {
+        display: block;
+      }
+
+      .card {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        padding: var(--baiton-gap);
+        margin-bottom: var(--baiton-gap);
+      }
+
+      .card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-bottom: 4px;
+      }
+
+      .card-title {
+        font-weight: bold;
+        color: var(--vscode-foreground);
+      }
+
+      .badges {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      .badge {
+        font-size: 0.85em;
+        padding: 1px 6px;
+        border-radius: 3px;
+        border: 1px solid currentColor;
+      }
+
+      .badge.ok {
+        color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+      }
+
+      .badge.stale {
+        color: var(--vscode-editorWarning-foreground);
+      }
+
+      .badge.unavailable,
+      .badge.loading {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .badge.derived {
+        color: var(--vscode-badge-foreground);
+        background-color: var(--vscode-badge-background);
+        border-color: transparent;
+      }
+
+      .tier,
+      .reason,
+      .source-line,
+      .muted {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.9em;
+      }
+
+      .refreshing {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.9em;
+      }
+
+      .window {
+        margin: 6px 0;
+      }
+
+      .window-label {
+        color: var(--vscode-foreground);
+      }
+
+      .window-figure {
+        color: var(--vscode-foreground);
+      }
+
+      .window-reset,
+      .window-scope {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.9em;
+      }
+
+      .bar {
+        height: 6px;
+        margin: 3px 0;
+        background-color: var(--vscode-editorWidget-background);
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+
+      .bar-fill {
+        height: 100%;
+        width: 0;
+        background-color: var(--vscode-progressBar-background);
+      }
+
+      button {
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+        color: var(--vscode-button-foreground);
+        background-color: var(--vscode-button-background);
+        border: 1px solid var(--vscode-button-border, transparent);
+        padding: 4px 12px;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        background-color: var(--vscode-button-hoverBackground);
+      }
+
+      button.secondary {
+        color: var(--vscode-button-secondaryForeground);
+        background-color: var(--vscode-button-secondaryBackground);
+      }
+
+      button.secondary:hover:not(:disabled) {
+        background-color: var(--vscode-button-secondaryHoverBackground);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="toolbar">
+      <span id="summary" aria-live="polite"></span>
+      <button id="refresh" class="secondary" type="button">Refresh</button>
+    </header>
+
+    <div id="restricted-note" role="note"></div>
+
+    <div id="cards"></div>
+
+    <script nonce="${nonce}" src="${baseUri}/usage.js"></script>
+  </body>
+</html>
