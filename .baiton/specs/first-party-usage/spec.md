@@ -77,7 +77,7 @@ If the only figure available is a local token tally (e.g. opencode's own stats),
 - A manual refresh is routed through the same coalesced service.
 - It posts readings to the webview.
 Unit-test the never-before-expand, re-expand-refresh, interval-tick, overlap and disposal paths with a fake webview and fake timers in test/usageView.controller.test.ts. (after T02, T07; files: src/usage/protocol.ts, src/activation/usageViewController.ts, src/activation/configPanelController.ts, test/usageView.controller.test.ts)
-- [pending] T09 Create the static webview shell media/usage.html and media/usage.js, following config.html/config.js. Use a nonce placeholder, a strict CSP, VS Code theme variables only, no inline handlers and no external resources. Render one card per tool in fixed order with:
+- [planning] T09 Create the static webview shell media/usage.html and media/usage.js, following config.html/config.js. Use a nonce placeholder, a strict CSP, VS Code theme variables only, no inline handlers and no external resources. Render one card per tool in fixed order with:
 - each window line, plus model/plan scope and tier;
 - the source's raw numbers;
 - a progress bar only when a percent is present;
