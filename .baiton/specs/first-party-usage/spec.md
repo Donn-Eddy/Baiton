@@ -37,7 +37,7 @@ Add a collapsible **Usage** WebviewView (`baiton.usageView`) to the `baiton` act
 
 # TODOS
 
-- [executed] T01 Define the host-free usage reading model in src/usage/model.ts. Tool ids in the fixed display order (claude, codex, antigravity, opencode-go). A reading type that carries:
+- [reviewing] T01 Define the host-free usage reading model in src/usage/model.ts. Tool ids in the fixed display order (claude, codex, antigravity, opencode-go). A reading type that carries:
 - one or more windows, each with a label, an optional percent remaining, optional raw used/limit numbers with units, an optional reset time, and the model/plan scope it applies to;
 - an optional account tier;
 - a source { mechanism, provenance: 'provider' | 'baiton-derived', readAt };
