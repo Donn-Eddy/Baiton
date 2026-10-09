@@ -674,9 +674,17 @@ function describeProbeError(e: unknown): string {
 }
 
 /** `$CLAUDE_CONFIG_DIR` when set and non-empty, else `~/.claude`. */
-function claudeConfigDir(): string {
+export function claudeConfigDir(): string {
   const env = process.env.CLAUDE_CONFIG_DIR;
   return env !== undefined && env.length > 0 ? env : path.join(os.homedir(), '.claude');
+}
+
+/** The file where the Claude CLI stores its OAuth login on Linux/Windows (macOS uses the keychain). */
+export const CLAUDE_CREDENTIALS_FILE = '.credentials.json';
+
+/** `<config dir>/.credentials.json`. Read only by the Usage view, only in a trusted workspace. */
+export function claudeCredentialsPath(): string {
+  return path.join(claudeConfigDir(), CLAUDE_CREDENTIALS_FILE);
 }
 
 /** The directory holding the CLI's own `*-cc.json` model catalogs. */
