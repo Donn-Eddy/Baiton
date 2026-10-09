@@ -86,7 +86,7 @@ Unit-test the never-before-expand, re-expand-refresh, interval-tick, overlap and
 - a non-empty reason for unavailable rows;
 - a visible 'Baiton-derived, not provider quota' label where provenance says so.
 Add a test (test/usageView.view.test.ts) in the style of configPanel.view.test.ts covering the CSP/nonce shell and the rendering rules. (after T08; files: media/usage.html, media/usage.js, media/config.html, media/config.js, test/usageView.view.test.ts)
-- [pending] T10 Wire the glue and contributions.
+- [planning] T10 Wire the glue and contributions.
 - src/activation/usageView.ts: a WebviewViewProvider for `baiton.usageView` with a per-load nonce, localResourceRoots limited to media/, and visibility-change forwarding to the controller, holding no logic of its own.
 - Register it from src/extension.ts alongside registerConfigPanel. Bind the real seams (child_process, fs, fetch, executable resolution from the baiton.agents.*.path overrides, vscode.workspace.isTrusted), log only mechanism and reason via Surface, and run no probe at activation.
 - package.json:
