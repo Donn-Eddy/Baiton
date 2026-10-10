@@ -12,7 +12,7 @@ if ! command -v code >/dev/null 2>&1; then
 fi
 
 echo "==> Installing dependencies"
-npm ci
+npm install
 
 echo "==> Compiling (copy:media + tsc)"
 npm run package
