@@ -155,6 +155,7 @@
       windows: [],
       reason: '',
       ageText: '',
+      badgeHint: '',
       sourceLine: '',
       derived: false,
     };
@@ -163,7 +164,8 @@
     if (status === 'unavailable') {
       view.reason = str(reading.reason);
       var tried = MECHANISM_LABELS[reading.mechanism];
-      if (tried) view.sourceLine = 'Tried: ' + tried;
+      if (tried) view.badgeHint = 'Tried: ' + tried;
+      view.sourceLine = view.badgeHint;
       return view;
     }
 
@@ -183,7 +185,8 @@
     if (mech || str(source.detail)) pieces.push(mech + (mech && source.detail ? ' — ' : '') + str(source.detail));
     pieces.push(sourceDerived ? 'Baiton-derived' : 'Provider-reported');
     if (age) pieces.push('read ' + age);
-    view.sourceLine = pieces.join(' · ');
+    view.badgeHint = pieces.join(' · ');
+    view.sourceLine = view.badgeHint;
     return view;
   }
 
@@ -237,7 +240,13 @@
     var header = el('div', 'card-header');
     header.appendChild(el('span', 'card-title', v.label));
     var badges = el('span', 'badges');
-    badges.appendChild(el('span', 'badge ' + v.status, v.badge));
+    var statusBadge = el('span', 'badge ' + v.status, v.badge);
+    if (v.status !== 'loading' && v.badgeHint) {
+      statusBadge.title = v.badgeHint;
+      statusBadge.setAttribute('aria-label', v.badgeHint);
+      statusBadge.setAttribute('tabindex', '0');
+    }
+    badges.appendChild(statusBadge);
     if (v.derived) badges.appendChild(el('span', 'badge derived', 'Baiton-derived'));
     if (v.refreshing) badges.appendChild(el('span', 'refreshing', 'Refreshing…'));
     header.appendChild(badges);
@@ -279,7 +288,6 @@
     });
 
     if (v.reason) card.appendChild(el('div', 'reason', v.reason));
-    if (v.sourceLine) card.appendChild(el('div', 'source-line', v.sourceLine));
     return card;
   }
 
