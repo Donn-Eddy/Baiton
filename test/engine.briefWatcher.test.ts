@@ -217,11 +217,12 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.ok(schemaIdx < stopIdx, 'schema comes before the write-and-stop instruction');
     });
 
-    it('carries the read-only instruction and the todo grammar rules', () => {
+    it('carries the read-only instruction and the phase grammar rules', () => {
       const text = brief();
       assert.match(text, /read-only/i);
       assert.match(text, /never assign an id/i);
-      assert.ok(text.includes('T01'), 'brief explains the assigned id form');
+      assert.ok(text.includes('P01'), 'brief explains the assigned id form');
+      assert.ok(!text.includes('T01'), 'brief does not use legacy todo ids');
       assert.match(text, /1-based positions/i);
       assert.match(text, /`files` lists/);
     });
@@ -232,8 +233,9 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
 
     it('embeds the plan-draft result schema, not another stage schema', () => {
       const text = brief();
-      assert.ok(text.includes('"overview"'), 'schema section carries the overview property');
-      assert.ok(text.includes('"todos"'), 'schema section carries the todos property');
+      for (const property of ['endstate', 'changes', 'constraints', 'phases']) {
+        assert.ok(text.includes(`"${property}"`), `schema section carries the ${property} property`);
+      }
     });
 
     it('does not carry the executor no-git instruction', () => {

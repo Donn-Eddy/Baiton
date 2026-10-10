@@ -13,7 +13,7 @@ import { submitPr } from '../src/engine/submitPr';
 import type { PrTool } from '../src/engine/prTool';
 import { createRunPipeline } from '../src/engine/runPipeline';
 import { createRunStore } from '../src/engine/runStore';
-import { createSpecDraftRunner } from '../src/engine/specDraft';
+import { createPlanDraftRunner } from '../src/engine/planDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
@@ -831,7 +831,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let runPipeline!: ReturnType<typeof createRunPipeline>;
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
-    let draftRunner!: ReturnType<typeof createSpecDraftRunner>;
+    let draftRunner!: ReturnType<typeof createPlanDraftRunner>;
     const lock = createStageLock({
       specDraftRunning: () => draftRunner.isRunning(),
       runRunning: () => runPipeline.isRunning(),
@@ -850,9 +850,8 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
       isPlanBusy: () => lock.runPipelineBusy(),
     });
-    draftRunner = createSpecDraftRunner({
+    draftRunner = createPlanDraftRunner({
       workspaceRoot: repo,
-      specsDir: h.specsDir,
       terminalHost: new StubTerminalHost(),
       watcherFactory: draftWatchers,
       services: h.services,

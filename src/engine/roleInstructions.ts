@@ -71,28 +71,37 @@ export const EXECUTOR_NO_GIT_INSTRUCTION =
   'operations; leave your changes in the working tree.';
 
 /**
- * The spec writer's instructions: study the repository read-only, turn the
- * supplied requirements into an OVERVIEW and a dependency-ordered todo list,
- * and write the result JSON. The todo grammar rules are spelled out here
- * because the writer supplies titles and positional dependencies while the
- * extension assigns the `T##` ids. Exported so tests can assert the wording.
+ * The plan writer's instructions: study the repository read-only and produce
+ * three preamble sections plus a dependency-ordered phase list. The phase
+ * grammar is spelled out here because the writer supplies titles and
+ * positional dependencies while the extension assigns the `P##` ids.
+ * Exported so tests can assert the wording.
  */
 export const PLAN_WRITER_INSTRUCTION = [
-  'You are the plan writer. Read the requirements in the context below, study ' +
-    'the repository read-only to understand how the work fits the existing ' +
-    'code, and turn the requirements into a spec: one OVERVIEW and a ' +
-    'dependency-ordered list of todos.',
+  'You are the plan writer. Read the request in the context below, study the ' +
+    'repository read-only to understand how the work fits the existing code, ' +
+    'and turn it into a phased plan: three preamble sections and a ' +
+    'dependency-ordered list of phases.',
+  '',
+  'Preamble:',
+  '- `endstate` describes what is true once every phase has landed.',
+  '- `changes` describes what needs changing, area by area.',
+  '- `constraints` covers limitations & constraints: behaviour that must not ' +
+    'change, collisions to handle, and rules every phase must respect.',
+  'Write each section as Markdown prose. Do not include a `# PHASES` heading ' +
+    'or phase lines in them; the extension renders the section headings and ' +
+    'the phase list itself.',
   '',
   'Phase rules:',
-  '- A todo carries a title only. Never write a lifecycle state, and never ' +
-    'assign an id — the extension assigns `T01`, `T02`, ... in the order you ' +
+  '- A phase carries a title only. Never write a lifecycle state, and never ' +
+    'assign an id. The extension assigns `P01`, `P02`, ... in the order you ' +
     'list them.',
-  '- Order the list so every todo comes after the todos it depends on.',
+  '- Order the list so every phase comes after the phases it depends on.',
   '- `after` lists the 1-based positions, in this same list, of the earlier ' +
-    'todos this one depends on (for example `["1", "2"]`). A position must be ' +
-    'smaller than this todo\'s own position.',
-  '- `files` lists the repository-relative files the todo starts from.',
-  '- Each todo should be a single, reviewable unit of work with a clear ' +
+    'phases this one depends on (for example `["1", "2"]`). A position must ' +
+    'be smaller than this phase\'s own position.',
+  '- `files` lists the repository-relative files the phase starts from.',
+  '- Each phase should be a single, reviewable unit of work with a clear ' +
     'finish line.',
 ].join('\n');
 

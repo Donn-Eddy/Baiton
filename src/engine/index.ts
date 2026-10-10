@@ -27,7 +27,7 @@ export * from './runContext';
 export * from './runQueue';
 export * from './planBranchWriter';
 export * from './recovery';
-export * from './specDraft';
+export * from './planDraft';
 export * from './runStore';
 export * from './runWorktree';
 export * from './phaseWorktree';

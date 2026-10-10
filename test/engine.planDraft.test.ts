@@ -4,8 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createStageLock } from '../src/activation/engineFacade';
-import { createSpecDraftRunner } from '../src/engine/specDraft';
-import type { SpecDraftOutcome } from '../src/engine/specDraft';
+import { createPlanDraftRunner, renderPlan } from '../src/engine/planDraft';
+import type { PlanDraftOutcome } from '../src/engine/planDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type {
@@ -23,15 +23,15 @@ import { parseJournal } from '../src/journal';
 import { Result, ok } from '../src/model/result';
 
 /**
- * Unit tests for the plan-draft runner (the harness writes the spec).
+ * Unit tests for the plan-draft runner (the harness writes the plan).
  *
  * The agent boundary is stubbed exactly as the plan/execute/review integration
  * test stubs it — an inert adapter, a terminal that only records disposal, and
  * a result watcher the test drives directly — so the runner's real behaviour is
  * exercised without a Claude CLI, a terminal, or a VS Code host: the Brief is
  * written under `.baiton/runs/<runId>/`, the result is validated against the
- * plan-draft schema, the spec is rendered and committed, and the run is
- * journaled to the spec's `runs.jsonl`.
+ * plan-draft schema, the plan is rendered and committed, and the run is
+ * journaled to the plan's `runs.jsonl`.
  */
 
 /** A stub adapter whose probe verdict the test controls. */
@@ -164,8 +164,7 @@ function makeHarness(
   options: { probeOk?: boolean; commitFails?: boolean; unknownAgent?: boolean; isQueueRunning?: () => boolean } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-draft-'));
-  const specsDir = path.join(root, '.baiton', 'specs');
-  fs.mkdirSync(specsDir, { recursive: true });
+  const baitonDir = path.join(root, '.baiton');
 
   const adapter = new StubAdapter(options.probeOk ?? true);
   const terminalHost = new StubTerminalHost();
@@ -182,13 +181,12 @@ function makeHarness(
     gitSettings: { remote: 'origin', base: 'main' },
   } as unknown as ToolServices;
 
-  const outcomes: SpecDraftOutcome[] = [];
+  const outcomes: PlanDraftOutcome[] = [];
   const reports: string[] = [];
   let queueRunning = false;
 
-  const runner = createSpecDraftRunner({
+  const runner = createPlanDraftRunner({
     workspaceRoot: root,
-    specsDir,
     terminalHost,
     watcherFactory,
     services,
@@ -203,7 +201,7 @@ function makeHarness(
 
   return {
     root,
-    specsDir,
+    baitonDir,
     adapter,
     terminalHost,
     watcherFactory,
@@ -214,15 +212,18 @@ function makeHarness(
     setQueueRunning: (v: boolean) => {
       queueRunning = v;
     },
-    specFile: (slug: string) => path.join(specsDir, slug, 'spec.md'),
-    journal: (slug: string) => path.join(specsDir, slug, 'runs.jsonl'),
+    planFile: (slug: string) => path.join(baitonDir, 'plans', slug, 'plan.md'),
+    legacySpecFile: (slug: string) => path.join(baitonDir, 'specs', slug, 'spec.md'),
+    journal: (slug: string) => path.join(baitonDir, 'plans', slug, 'runs.jsonl'),
   };
 }
 
 /** A schema-conformant plan-draft result. */
 const DRAFT_RESULT = JSON.stringify({
-  overview: 'Add a greeting module and cover it with tests.',
-  todos: [
+  endstate: 'A greeting module exists and is tested.',
+  changes: 'Add src/greeting.ts and its test.',
+  constraints: 'No new dependencies.',
+  phases: [
     { title: 'Add the greeting function', files: ['src/greeting.ts'] },
     { title: 'Test the greeting function', after: ['1'], files: ['test/greeting.test.ts'] },
   ],
@@ -264,7 +265,8 @@ describe('plan-draft runner (unit)', () => {
     );
     assert.match(brief, /plan writer/i);
     assert.ok(brief.includes('Goal: add a greeting module.'));
-    assert.ok(brief.includes('"todos"'));
+    assert.ok(brief.includes('"phases"'));
+    assert.ok(brief.includes('"endstate"'));
 
     // The launch used the plan-writer role and the configured model.
     assert.deepStrictEqual(
@@ -283,7 +285,7 @@ describe('plan-draft runner (unit)', () => {
     await started.completed;
   });
 
-  it('renders and commits a valid spec once the writer reports a result', async () => {
+  it('writes and commits a valid plan once the writer reports a result', async () => {
     const h = track(makeHarness());
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
     assert.ok(started.ok);
@@ -298,26 +300,34 @@ describe('plan-draft runner (unit)', () => {
     if (!outcome.ok) {
       return;
     }
-    assert.strictEqual(outcome.todoCount, 2);
-    assert.strictEqual(outcome.specPath, '.baiton/specs/greeting/spec.md');
+    assert.strictEqual(outcome.phaseCount, 2);
+    assert.strictEqual(outcome.planPath, '.baiton/plans/greeting/plan.md');
 
-    const content = fs.readFileSync(h.specFile('greeting'), 'utf8');
-    const spec = parsePlan(content);
-    assert.deepStrictEqual(validatePlan(spec, content), [], 'the drafted spec must be valid');
+    const content = fs.readFileSync(h.planFile('greeting'), 'utf8');
+    const plan = parsePlan(content);
+    assert.strictEqual(plan.kind, 'plan');
+    assert.deepStrictEqual(validatePlan(plan, content), [], 'the drafted plan must be valid');
     assert.deepStrictEqual(
-      spec.phases.map((t) => [t.id, t.state, t.title]),
+      plan.phases.map((phase) => [phase.id, phase.state, phase.title]),
       [
-        ['T01', 'pending', 'Add the greeting function'],
-        ['T02', 'pending', 'Test the greeting function'],
+        ['P01', 'pending', 'Add the greeting function'],
+        ['P02', 'pending', 'Test the greeting function'],
       ],
     );
     // The 1-based position in the writer's list became the assigned id.
-    assert.deepStrictEqual(spec.phases[1].after, ['T01']);
-    assert.deepStrictEqual(spec.phases[0].files, ['src/greeting.ts']);
-    assert.strictEqual((spec.frontmatter.get('status') ?? '').trim(), 'draft');
+    assert.deepStrictEqual(plan.phases[1].after, ['P01']);
+    assert.deepStrictEqual(plan.phases[0].files, ['src/greeting.ts']);
+    assert.strictEqual((plan.frontmatter.get('status') ?? '').trim(), 'draft');
+    assert.ok(content.includes('# Endstate'));
+    assert.ok(content.includes('A greeting module exists and is tested.'));
+    assert.ok(content.includes('# What needs changing'));
+    assert.ok(content.includes('Add src/greeting.ts and its test.'));
+    assert.ok(content.includes('# Limitations & constraints'));
+    assert.ok(content.includes('No new dependencies.'));
 
-    // The spec was committed under the spec-folder commit convention.
-    assert.deepStrictEqual(h.commits, ['spec(greeting): greeting draft spec']);
+    // The plan was committed using its plan-draft commit message.
+    assert.deepStrictEqual(h.commits, ['plan(greeting): greeting draft plan']);
+    assert.ok(!fs.existsSync(path.join(h.baitonDir, 'specs')));
 
     // The run was journaled to completion and the lock released.
     const entries = parseJournal(h.journal('greeting'));
@@ -339,10 +349,10 @@ describe('plan-draft runner (unit)', () => {
     }
 
     h.watcherFactory.watchers[0].emitResult('{ not json');
-    h.watcherFactory.watchers[0].emitResult(JSON.stringify({ overview: 'missing todos' }));
+    h.watcherFactory.watchers[0].emitResult(JSON.stringify({ endstate: 'missing the rest' }));
     assert.strictEqual(h.runner.isRunning(), true, 'an invalid result keeps the run open');
     assert.strictEqual(h.reports.length, 2, 'each invalid result is surfaced');
-    assert.ok(!fs.existsSync(h.specFile('greeting')), 'nothing is written while invalid');
+    assert.ok(!fs.existsSync(h.planFile('greeting')), 'nothing is written while invalid');
 
     h.watcherFactory.watchers[0].emitResult(DRAFT_RESULT);
     const outcome = await started.completed;
@@ -364,7 +374,7 @@ describe('plan-draft runner (unit)', () => {
     if (!outcome.ok) {
       assert.match(outcome.message, /did not produce a result/i);
     }
-    assert.ok(!fs.existsSync(h.specFile('greeting')), 'no spec is written on a failure');
+    assert.ok(!fs.existsSync(h.planFile('greeting')), 'no plan is written on a failure');
     assert.ok(
       fs.existsSync(path.join(h.root, '.baiton', 'runs', 'draft-run-1', 'brief.md')),
       'a failed run keeps its run directory',
@@ -390,10 +400,10 @@ describe('plan-draft runner (unit)', () => {
     }
   });
 
-  it('refuses a slug that already exists, without launching anything', async () => {
+  it('refuses a slug with an existing plan, without launching anything', async () => {
     const h = track(makeHarness());
-    fs.mkdirSync(path.join(h.specsDir, 'greeting'), { recursive: true });
-    fs.writeFileSync(path.join(h.specsDir, 'greeting', 'spec.md'), '# OVERVIEW\n', 'utf8');
+    fs.mkdirSync(path.dirname(h.planFile('greeting')), { recursive: true });
+    fs.writeFileSync(h.planFile('greeting'), '# PHASES\n', 'utf8');
 
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
 
@@ -404,7 +414,40 @@ describe('plan-draft runner (unit)', () => {
     assert.strictEqual(h.terminalHost.created.length, 0);
   });
 
-  it('refuses while a spec-less run is in flight, and reports itself busy to it', async () => {
+  it('refuses a slug with an existing legacy spec, without launching anything', async () => {
+    const h = track(makeHarness());
+    fs.mkdirSync(path.dirname(h.legacySpecFile('greeting')), { recursive: true });
+    fs.writeFileSync(h.legacySpecFile('greeting'), '# OVERVIEW\n', 'utf8');
+
+    const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
+
+    assert.strictEqual(started.ok, false);
+    if (!started.ok) {
+      assert.strictEqual(started.error.kind, 'duplicate-slug');
+      assert.strictEqual(started.error.message, 'legacy spec "greeting" already exists');
+    }
+    assert.strictEqual(h.terminalHost.created.length, 0);
+  });
+
+  it('drafts under plans when a legacy spec directory only has a journal', async () => {
+    const h = track(makeHarness());
+    const legacyDir = path.dirname(h.legacySpecFile('greeting'));
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, 'runs.jsonl'), '', 'utf8');
+
+    const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
+    assert.ok(started.ok);
+    if (!started.ok) return;
+
+    h.watcherFactory.watchers[0].emitResult(DRAFT_RESULT);
+    const outcome = await started.completed;
+    assert.strictEqual(outcome.ok, true);
+    assert.ok(fs.existsSync(h.planFile('greeting')));
+    assert.ok(!fs.existsSync(h.legacySpecFile('greeting')));
+    assert.ok(fs.existsSync(path.join(legacyDir, 'runs.jsonl')));
+  });
+
+  it('refuses while a planless run is in flight, and reports itself busy to it', async () => {
     const h = track(makeHarness());
     h.setQueueRunning(true);
 
@@ -434,9 +477,9 @@ describe('plan-draft runner (unit)', () => {
     await started.completed;
   });
 
-  it('is not blocked by per-todo stages: only a spec-less run holds the lock', async () => {
+  it('is not blocked by phase stages: only a planless run holds the lock', async () => {
     let runRunning = false;
-    const todoStageRunning = true; // deliberately not consulted by the lock
+    const phaseStageRunning = true; // deliberately not consulted by the lock
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let h!: ReturnType<typeof makeHarness>;
     const lock = createStageLock({
@@ -444,19 +487,19 @@ describe('plan-draft runner (unit)', () => {
       runRunning: () => runRunning,
     });
     h = track(makeHarness({ isQueueRunning: () => lock.specDraftBusy() }));
-    assert.strictEqual(todoStageRunning, true);
+    assert.strictEqual(phaseStageRunning, true);
 
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
-    assert.ok(started.ok, 'a running todo stage does not block the draft');
+    assert.ok(started.ok, 'a running phase stage does not block the draft');
     if (!started.ok) {
       return;
     }
-    assert.strictEqual(lock.runPipelineBusy(), true, 'the running draft blocks a spec-less run');
+    assert.strictEqual(lock.runPipelineBusy(), true, 'the running draft blocks a planless run');
     h.watcherFactory.watchers[0].emitResult(DRAFT_RESULT);
     await started.completed;
     assert.strictEqual(lock.runPipelineBusy(), false);
 
-    // A spec-less run in flight does block it, before any terminal is created.
+    // A planless run in flight does block it, before any terminal is created.
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let blockedHarness!: ReturnType<typeof makeHarness>;
     const blockedLock = createStageLock({
@@ -510,5 +553,29 @@ describe('plan-draft runner (unit)', () => {
     }
     assert.strictEqual(h.adapter.probeCount, 0, 'no probe runs for an unknown agent');
     assert.strictEqual(h.terminalHost.created.length, 0, 'no terminal is created for an unknown agent');
+  });
+});
+
+describe('renderPlan', () => {
+  it('numbers phases, maps only earlier dependencies, and drops blank files', () => {
+    const content = renderPlan(
+      'example',
+      { endstate: 'Done.', changes: 'Make changes.', constraints: 'Keep rules.' },
+      [
+        { title: 'First', after: ['1', '10', '0', 'bad'], files: ['', '   '] },
+        { title: 'Second', after: ['1', '2', '3', '99', '1'], files: ['src/two.ts', ' '] },
+        ...Array.from({ length: 8 }, (_, index) => `Phase ${index + 3}`),
+      ],
+    );
+    const plan = parsePlan(content);
+
+    assert.strictEqual(plan.kind, 'plan');
+    assert.deepStrictEqual(validatePlan(plan, content), []);
+    assert.strictEqual(plan.phases.length, 10);
+    assert.strictEqual(plan.phases[9].id, 'P10');
+    assert.deepStrictEqual(plan.phases[0].after, []);
+    assert.deepStrictEqual(plan.phases[0].files, []);
+    assert.deepStrictEqual(plan.phases[1].after, ['P01']);
+    assert.deepStrictEqual(plan.phases[1].files, ['src/two.ts']);
   });
 });

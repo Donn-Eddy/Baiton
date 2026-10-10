@@ -122,10 +122,12 @@ const prArb: fc.Arbitrary<PrResult> = fc.record({
   body: textArb,
 });
 
-/** A spec draft: an overview plus a dependency-ordered todo list. */
-const specDraftArb: fc.Arbitrary<PlanDraftResult> = fc.record({
-  overview: textArb,
-  todos: fc.array(
+/** A plan draft: three preamble sections plus dependency-ordered phases. */
+const planDraftArb: fc.Arbitrary<PlanDraftResult> = fc.record({
+  endstate: fc.string({ minLength: 1, maxLength: 30 }),
+  changes: fc.string({ minLength: 1, maxLength: 30 }),
+  constraints: fc.string({ minLength: 1, maxLength: 30 }),
+  phases: fc.array(
     fc.record({
       title: fc.string({ minLength: 1, maxLength: 40 }),
       after: fc.array(fc.string({ minLength: 1, maxLength: 3 }), { maxLength: 3 }),
@@ -143,7 +145,7 @@ const investigateArb: fc.Arbitrary<InvestigateResult> = fc.record({
 });
 
 const RESULT_ARBS: Record<Stage, fc.Arbitrary<StageResult>> = {
-  'plan-draft': specDraftArb as fc.Arbitrary<StageResult>,
+  'plan-draft': planDraftArb as fc.Arbitrary<StageResult>,
   plan: planArb as fc.Arbitrary<StageResult>,
   'plan-review': planReviewArb as fc.Arbitrary<StageResult>,
   execute: executeArb as fc.Arbitrary<StageResult>,

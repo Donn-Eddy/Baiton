@@ -21,68 +21,89 @@ import { isOk, isErr } from '../src/model/result';
  */
 describe('stage result schema examples (unit)', () => {
   describe('plan-draft stage', () => {
-    it('accepts a well-formed spec draft', () => {
+    it('accepts a well-formed plan draft', () => {
       const value = {
-        overview: 'Add a greeting module and cover it with tests.',
-        todos: [
+        endstate: 'A greeting module exists and is tested.',
+        changes: 'Add a greeting module and cover it with tests.',
+        constraints: 'Do not add dependencies.',
+        phases: [
           { title: 'Add the greeting function', files: ['src/greeting.ts'] },
           { title: 'Test the greeting function', after: ['1'], files: ['test/greeting.test.ts'] },
         ],
       };
       const result = validatePlanDraftResult(value);
-      assert.ok(isOk(result), 'a well-formed spec draft should validate');
+      assert.ok(isOk(result), 'a well-formed plan draft should validate');
     });
 
-    it('accepts a draft whose todos carry a title only', () => {
+    it('accepts phases that carry a title only', () => {
       const result = validatePlanDraftResult({
-        overview: 'Do the thing.',
-        todos: [{ title: 'Do it' }],
+        endstate: 'The thing is done.',
+        changes: 'Do the thing.',
+        constraints: 'Keep existing behaviour.',
+        phases: [{ title: 'Do it' }],
       });
       assert.ok(isOk(result));
     });
 
-    it('accepts a draft with an empty todo list', () => {
-      assert.ok(isOk(validatePlanDraftResult({ overview: 'Nothing yet.', todos: [] })));
+    it('accepts a draft with an empty phase list', () => {
+      assert.ok(isOk(validatePlanDraftResult({
+        endstate: 'Nothing yet.', changes: 'Nothing yet.', constraints: 'Nothing yet.', phases: [],
+      })));
     });
 
-    it('rejects a draft missing the required `overview` field', () => {
-      const result = validatePlanDraftResult({ todos: [{ title: 'Do it' }] });
-      assert.ok(isErr(result));
+    for (const field of ['endstate', 'changes', 'constraints', 'phases']) {
+      it(`rejects a draft missing the required \`${field}\` field`, () => {
+        const value: Record<string, unknown> = {
+          endstate: 'Endstate.', changes: 'Changes.', constraints: 'Constraints.', phases: [],
+        };
+        delete value[field];
+        assert.ok(isErr(validatePlanDraftResult(value)));
+      });
+    }
+
+    it('rejects an empty endstate', () => {
+      assert.ok(isErr(validatePlanDraftResult({
+        endstate: '', changes: 'Changes.', constraints: 'Constraints.', phases: [],
+      })));
     });
 
-    it('rejects a draft missing the required `todos` field', () => {
-      assert.ok(isErr(validatePlanDraftResult({ overview: 'Only prose.' })));
+    it('rejects a phase with an empty title', () => {
+      assert.ok(isErr(validatePlanDraftResult({
+        endstate: 'x', changes: 'x', constraints: 'x', phases: [{ title: '' }],
+      })));
     });
 
-    it('rejects a todo with an empty title', () => {
-      assert.ok(isErr(validatePlanDraftResult({ overview: 'x', todos: [{ title: '' }] })));
-    });
-
-    it('rejects a todo carrying a lifecycle state (an unexpected extra property)', () => {
+    it('rejects a phase carrying a lifecycle state (an unexpected extra property)', () => {
       const result = validatePlanDraftResult({
-        overview: 'x',
-        todos: [{ title: 'Do it', state: 'pending' }],
+        endstate: 'x', changes: 'x', constraints: 'x',
+        phases: [{ title: 'Do it', state: 'pending' }],
       });
       assert.ok(isErr(result), 'additionalProperties:false must reject a state');
     });
 
     it('rejects a draft carrying an unexpected extra property', () => {
-      assert.ok(
-        isErr(validatePlanDraftResult({ overview: 'x', todos: [], slug: 'mine' })),
-      );
+      assert.ok(isErr(validatePlanDraftResult({
+        endstate: 'x', changes: 'x', constraints: 'x', phases: [], slug: 'mine',
+      })));
     });
 
     it('rejects `after` positions that are not strings', () => {
       const result = validatePlanDraftResult({
-        overview: 'x',
-        todos: [{ title: 'Do it', after: [1] }],
+        endstate: 'x', changes: 'x', constraints: 'x',
+        phases: [{ title: 'Do it', after: [1] }],
       });
       assert.ok(isErr(result));
     });
 
+    it('rejects the legacy overview and todos shape', () => {
+      assert.ok(isErr(validatePlanDraftResult({ overview: 'x', todos: [] })));
+    });
+
     it('reaches the same validator through validateStageResult', () => {
-      assert.ok(isOk(validateStageResult('plan-draft', { overview: 'x', todos: [] })));
-      assert.ok(isErr(validateStageResult('plan-draft', { overview: 'x' })));
+      assert.ok(isOk(validateStageResult('plan-draft', {
+        endstate: 'x', changes: 'x', constraints: 'x', phases: [],
+      })));
+      assert.ok(isErr(validateStageResult('plan-draft', { endstate: 'x' })));
     });
   });
 
