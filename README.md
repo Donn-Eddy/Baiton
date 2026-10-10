@@ -53,12 +53,19 @@ The views:
   **Merge** as its item actions. See **The Runs view** below.
 
 - **Usage** — a collapsed webview showing remaining usage for Claude Code,
-  Codex, Antigravity and OpenCode Go, in that order. Each row shows its windows
-  (a bar only when the source gives a percentage), the reset time, the
-  scope/tier, a source line with provenance (provider-reported or
-  Baiton-derived, labelled) and the read time, and a status of ok, stale or
-  unavailable with a reason. Nothing is probed or spawned before the section is
-  first expanded; it re-reads when it becomes visible and every
+  Codex, Antigravity and OpenCode Go, in that order. Each tool card shows a
+  status badge (ok, stale or unavailable) and, for each window, one compact row:
+  the label and figure sit together on the left, with the reset time on the
+  right (wrapping below when narrow). The window scope and any bar sit below
+  the row; the tool tier appears in the card, and a bar appears only when the
+  source gives a percentage. For ok and stale cards, the status badge's
+  hover/focus hint gives the source, its provenance (provider-reported or
+  Baiton-derived) and the read time; unavailable cards show
+  `Tried: <mechanism>` there, and loading badges have no hint. A
+  Baiton-derived figure stays marked in the card itself (a Baiton-derived badge
+  and a suffix on the window label). Stale and unavailable cards still show their
+  reason. Nothing is probed or spawned before the section is first expanded; it
+  re-reads when it becomes visible and every
   `baiton.usage.refreshIntervalSeconds` while visible, and polling stops when it
   is hidden or closed. A read that overruns 15 s settles as stale or
   unavailable. In Restricted Mode no stored credential is read and the row says
@@ -1047,7 +1054,7 @@ The state table above is the thing that decides which relay each adapter uses: t
 
 ### Usage view (per-tool probe findings)
 
-The Usage view reads each first-party tool's remaining usage through the real mechanism recorded below; nothing is shown that the source did not give (no source percentage means no bar, and a figure from a stale snapshot is dropped rather than zeroed). Rows appear in the fixed order Claude Code, Codex, Antigravity, OpenCode Go; each tool's read is coalesced and timeboxed (15 s); a failed read keeps the last good reading as stale with its age and the failure reason, or reports unavailable with a reason when there was none; a stored credential is a fallback only, read only in a trusted workspace, for one request, and never logged, stored, put in a reading or sent to the webview.
+The Usage view reads each first-party tool's remaining usage through the real mechanism recorded below; nothing is shown that the source did not give (no source percentage means no bar, and a figure from a stale snapshot is dropped rather than zeroed). Rows appear in the fixed order Claude Code, Codex, Antigravity, OpenCode Go; each tool's read is coalesced and timeboxed (15 s); a failed read keeps the last good reading as stale with its age and the failure reason, or reports unavailable with a reason when there was none; a stored credential is a fallback only, read only in a trusted workspace, for one request, and never logged, stored, put in a reading or sent to the webview. Each window uses one compact row, with its label and figure on the left and reset on the right (wrapping below when narrow); its scope and any bar sit beneath, while the tool tier appears in the card. For ok and stale cards, the source line (mechanism, detail, provenance and read time) is the status badge's hover and keyboard-focus hint; unavailable cards show `Tried: <mechanism>` there and loading badges have no hint, while any Baiton-derived figure remains marked in the card with its badge and window-label suffix.
 
 - **claude (Claude Code) findings** (probed `claude --version` → 2.1.295 (Claude Code), 2026-10-08):
   - **Established route (primary): `claude -p /usage --output-format json`.** The built-in `/usage` command runs locally in print mode: `local_command: "usage"`, `num_turns: 0`, `total_cost_usd: 0`, so no model turn is spent and nothing was written under `~/.claude`. Baiton runs it from a neutral directory with no shell (mechanism `cli-command`).
