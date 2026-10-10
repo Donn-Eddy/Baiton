@@ -15,18 +15,18 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 import { Stage } from '../src/model/stage';
 
 /**
- * Feature: baiton-first-pass, Property 5: Invalid specs block every stage
+ * Feature: baiton-first-pass, Property 5: Invalid plans block every phase stage
  *
- * For any spec the validator reports invalid, the extension refuses to dispatch
- * ANY stage for that spec: the `run` control tool returns an error, surfaces the
+ * For any document the validator reports invalid, the extension refuses to dispatch
+ * ANY stage for that plan: the `run` control tool returns an error, surfaces the
  * validation problem, and never reaches the run queue — for every stage the
- * tool accepts (plan, execute, review) and every todo (Req 4.9).
- * As a positive control, a clean spec free of every malformed construct and of
+ * tool accepts (plan, execute, review) and every phase (Req 4.9).
+ * As a positive control, a clean document free of every malformed construct and of
  * dependency cycles is allowed to dispatch.
  *
  * Validates: Requirements 4.9
  *
- * Strategy: generate a clean, acyclic base spec, then inject exactly one
+ * Strategy: generate a clean, acyclic base document, then inject exactly one
  * malformed construct so `validatePlan` reports it invalid. Drive `run` through
  * the real tool registry against a temp repo, using a run-queue seam that throws
  * if it is ever dispatched into. Because the gate reads and validates the spec
@@ -38,7 +38,7 @@ import { Stage } from '../src/model/stage';
 
 // --- Spec generators (shared shape with the validator property test) -------
 
-/** A todo id: `T` followed by two or more decimal digits (Req 3.3). */
+/** A legacy phase id: `T` followed by two or more decimal digits (Req 3.3). */
 const idArb: fc.Arbitrary<string> = fc
   .integer({ min: 0, max: 999999 })
   .map((n) => 'T' + String(n).padStart(2, '0'));
@@ -244,12 +244,12 @@ function makeServices(
 function makeGuard(repoRoot: string): GuardContext {
   return new GuardContext({
     repoRoot,
-    specsDir: path.join(repoRoot, '.baiton', 'specs'),
+    baitonDir: path.join(repoRoot, '.baiton'),
     restricted: false,
   });
 }
 
-/** Write a spec.md for `slug` under the temp repo. */
+/** Legacy: write a spec.md for `slug` under the temp repo. */
 function writeSpec(repoRoot: string, slug: string, content: string): void {
   const specDir = path.join(repoRoot, '.baiton', 'specs', slug);
   fs.mkdirSync(specDir, { recursive: true });
@@ -295,11 +295,11 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
 
           const queue = spyingQueue();
           const registry = createToolRegistry(makeServices(repo, queue));
-          const todo = base.todos[seed % base.todos.length].id;
+          const phase = base.todos[seed % base.todos.length].id;
 
           const result = await registry.call(
             'run',
-            { slug, todo, stage },
+            { slug, phase, stage },
             undefined,
             makeGuard(repo),
             'drive',
@@ -351,11 +351,11 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
 
           const queue = spyingQueue();
           const registry = createToolRegistry(makeServices(repo, queue));
-          const todo = base.todos[seed % base.todos.length].id;
+          const phase = base.todos[seed % base.todos.length].id;
 
           const result = await registry.call(
             'run',
-            { slug, todo, stage },
+            { slug, phase, stage },
             undefined,
             makeGuard(repo),
             'drive',

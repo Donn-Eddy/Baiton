@@ -414,7 +414,7 @@ describe('intervention records (Task T03)', () => {
       ts: '2024-01-01T00:00:01.000Z',
       role: 'assistant',
       content: '',
-      tool_calls: [{ id: 'call_ok', name: 'approve_spec', arguments: '{}' }],
+      tool_calls: [{ id: 'call_ok', name: 'approve_plan', arguments: '{}' }],
     };
     const card: TranscriptRecord = {
       ts: '2024-01-01T00:00:02.000Z',

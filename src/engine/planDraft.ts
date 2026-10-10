@@ -1,7 +1,7 @@
 /**
  * The plan-draft runner: the harness writes the plan, and the orchestrator
- * gathers the requirements. The `draft_spec(slug, requirements)` tool hands
- * those requirements to this runner, which launches the `plan-writer` role on
+ * gathers the request. The `draft_plan(slug, request)` tool hands
+ * that request to this runner, which launches the `plan-writer` role on
  * the `plan-draft` stage and writes a schema-valid result to
  * `.baiton/plans/<slug>/plan.md`.
  *
@@ -25,7 +25,7 @@ import type { Adapter } from '../adapter';
 import type { Role } from '../model/role';
 import type { PlanDraftResult } from '../schema';
 import { appendCompletion, appendStart } from '../journal';
-import { gitCommitErrorMessage } from '../orchestrator/specWriteTools';
+import { gitCommitErrorMessage } from '../orchestrator/planWriteTools';
 import type { ToolServices } from '../orchestrator/toolServices';
 import { locationFor } from '../storage/documentLocation';
 import { launchStage } from './launcher';
@@ -104,7 +104,7 @@ export interface PlanDraftDeps {
   report?: (message: string) => void;
 }
 
-/** The runner the `draft_spec` tool dispatches into. */
+/** The runner the `draft_plan` tool dispatches into. */
 export interface PlanDraftRunner {
   /**
    * Launch a plan draft. Resolves as soon as the sub-agent is running (or was

@@ -33,7 +33,7 @@ import type { PlanStore } from '../src/engine/runQueue';
 import { createToolRegistry, type ToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
 import type { SubmitPrOutcome, ToolServices } from '../src/orchestrator/toolServices';
-import type { LandTodoSeam } from '../src/orchestrator/seams';
+import type { LandPhaseSeam } from '../src/orchestrator/seams';
 import { systemClock } from '../src/orchestrator/seams';
 import { SessionStore, type SessionScope } from '../src/orchestrator/sessionStore';
 import { SubAgentRunner, chatSessionKey } from '../src/orchestrator/subAgent';
@@ -60,7 +60,7 @@ import type {
  * drives its own todo through plan, execute and review via `run`, the two todos
  * in flight at once (a per-stage barrier fails the test when the stages are
  * serialised) in separate worktrees without losing a state write; `submit_pr`
- * refuses while todos are unlanded; `land_todo` lands both; and a spec-less
+ * refuses while todos are unlanded; `land_phase` lands both; and a spec-less
  * bug run and the spec draft still work while a todo stage is in flight.
  */
 
@@ -400,10 +400,10 @@ function calls(...list: Array<{ id: string; name: string; args: unknown }>): Com
   };
 }
 
-function subScript(todo: TodoName): Script {
+function subScript(phase: TodoName): Script {
   const run = (stage: StageName): CompletionResult =>
-    calls({ id: `${todo}-${stage}`, name: 'run', args: { slug: SLUG, todo, stage } });
-  return [run('plan'), run('execute'), run('review'), reply(`${todo} is done`)];
+    calls({ id: `${phase}-${stage}`, name: 'run', args: { slug: SLUG, phase, stage } });
+  return [run('plan'), run('execute'), run('review'), reply(`${phase} is done`)];
 }
 
 class ScriptedClient implements ModelClient {
@@ -484,16 +484,16 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const confirmCalls: string[] = [];
   const prCalls: string[] = [];
 
-  const landTodo: LandTodoSeam = {
-    land: async ({ slug, todoId }) => {
-      if (queues.find(slug, todoId)?.isRunning()) {
-        return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
+  const landPhase: LandPhaseSeam = {
+    land: async ({ slug, phaseId }) => {
+      if (queues.find(slug, phaseId)?.isRunning()) {
+        return { kind: 'refused', reason: `a stage is still running for phase "${phaseId}"` };
       }
       return writer.apply(slug, async () => {
-        if ((await gitService.branchHead(phaseBranchFor(slug, todoId, 'legacy-spec'))) === undefined) {
+        if ((await gitService.branchHead(phaseBranchFor(slug, phaseId, 'legacy-spec'))) === undefined) {
           return { kind: 'already-landed' as const };
         }
-        const landed = await landPhaseWorktree({ workspaceRoot: repo, git: gitService }, { slug, phaseId: todoId });
+        const landed = await landPhaseWorktree({ workspaceRoot: repo, git: gitService }, { slug, phaseId });
         if (landed.ok) {
           return {
             kind: 'landed' as const,
@@ -545,7 +545,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
 
   const sessions = new SessionStore({ baitonDir, specsDir });
   const scope: SessionScope = { kind: 'spec', slug: SLUG };
-  const guard = new GuardContext({ repoRoot: repo, specsDir, restricted: false });
+  const guard = new GuardContext({ repoRoot: repo, baitonDir: path.join(repo, '.baiton'), restricted: false });
   const client = new ScriptedClient();
 
   // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
@@ -556,7 +556,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     tools: () => registry,
     guardContext: () => guard,
     roundBound: () => 10,
-    readSpec: async (s) => fs.promises.readFile(path.join(specsDir, s, 'spec.md'), 'utf8'),
+    readPlan: async (s) => fs.promises.readFile(path.join(specsDir, s, 'spec.md'), 'utf8'),
   });
 
   const services: ToolServices = {
@@ -570,7 +570,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
       },
     },
     runQueue: createRunQueueSeam(queues.queueFor, path.dirname(specsDir), () => new StubAdapter()),
-    landTodo,
+    landPhase,
     submitPr: submitPrForSlug,
     subAgents: runner,
     clock: { now: () => new Date().toISOString() },
@@ -661,10 +661,10 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       ),
       calls({ id: 'pr-1', name: 'submit_pr', args: { slug: SLUG } }),
       calls(
-        { id: 'land-1', name: 'land_todo', args: { slug: SLUG, todo: 'T01' } },
-        { id: 'land-2', name: 'land_todo', args: { slug: SLUG, todo: 'T02' } },
+        { id: 'land-1', name: 'land_phase', args: { slug: SLUG, phase: 'T01' } },
+        { id: 'land-2', name: 'land_phase', args: { slug: SLUG, phase: 'T02' } },
       ),
-      calls({ id: 'land-3', name: 'land_todo', args: { slug: SLUG, todo: 'T01' } }),
+      calls({ id: 'land-3', name: 'land_phase', args: { slug: SLUG, phase: 'T01' } }),
       calls({ id: 'pr-2', name: 'submit_pr', args: { slug: SLUG } }),
       reply('done'),
     ]);
@@ -729,16 +729,16 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       for (const wanted of ['run', 'spawn_subagent', 'send_to_subagent']) {
         assert.ok(names.includes(wanted), `a sub-agent is offered ${wanted}`);
       }
-      for (const banned of ['land_todo', 'submit_pr', 'approve_spec', 'draft_spec', 'start_run']) {
+      for (const banned of ['land_phase', 'submit_pr', 'approve_plan', 'draft_plan', 'start_run']) {
         assert.ok(!names.includes(banned), `a sub-agent must not be offered ${banned}`);
       }
     }
 
-    // -- submit_pr refuses before landing, land_todo lands both ---------------
+    // -- submit_pr refuses before landing, land_phase lands both ---------------
     const pr1 = toolContent(history, 'pr-1');
     assert.ok(pr1.startsWith('Error:'), pr1);
     assert.ok(pr1.includes('still unlanded: T01, T02'), pr1);
-    assert.ok(pr1.includes('land_todo'), pr1);
+    assert.ok(pr1.includes('land_phase'), pr1);
     assert.ok(h.confirmCalls.length >= 1, 'submit_pr asked for confirmation');
     assert.deepStrictEqual(h.prCalls, [], 'nothing was pushed or created');
 

@@ -1,38 +1,38 @@
 /**
- * The orchestrator's spec-writing tools (Requirements 9.5–9.10, 17.1, 23.5).
+ * The orchestrator's plan-writing tools (Requirements 9.5–9.10, 17.1, 23.5).
  *
- * The orchestrator refines spec files through these tools and never edits
+ * The orchestrator refines plan and legacy document files through these tools and never edits
  * source (Req 8.1). All four are mutating, so the guard requires an
  * idempotency key, replays a seen key unchanged, and disables them under
  * Restricted Mode; each resolves its target through
  * {@link GuardContext.resolveMutatingPath} so the write can only land under
- * `.baiton/specs/` (Req 8.1, 8.2).
+ * `.baiton/plans/` or legacy `.baiton/specs/` (Req 8.1, 8.2).
  *
- * The spec file itself is no longer written here: the `draft_spec` control tool
- * hands the requirements to the plan-writer harness, and the plan-draft runner
- * in `src/engine/planDraft.ts` renders and commits the resulting plan. These
- * tools refine legacy spec documents after they exist.
+ * The `draft_plan` control tool hands the request to the plan-writer harness,
+ * and the plan-draft runner in `src/engine/planDraft.ts` renders and commits
+ * new plans. These tools refine plans and legacy spec documents after they exist.
  *
- * - `update_overview(slug, text)` rewrites the OVERVIEW section, leaving
- *   frontmatter and todos untouched.
- * - `add_todo` / `edit_todo` / `remove_todo` change exactly one todo line and
- *   never take a todo state as an argument (Req 9.6, 9.7). `edit_todo` and
- *   `remove_todo` refuse a todo whose state is `done`, `failed`, or a running
+ * - `update_overview(slug, text)` rewrites the preamble, leaving frontmatter
+ *   and phases untouched.
+ * - `add_phase` / `edit_phase` / `remove_phase` change exactly one phase line and
+ *   never take a phase state as an argument (Req 9.6, 9.7). `edit_phase` and
+ *   `remove_phase` refuse a phase whose state is `done`, `failed`, or a running
  *   state (`planning`/`executing`/`reviewing`) (Req 9.8).
  *
- * Every write under the spec folder is committed on the spec branch as
- * `spec(<slug>): <id> <what>` before any subsequent stage, using the git
- * service seam (Req 17.1). A todo-scoped write uses that todo's id; a
- * spec-scoped write (draft/overview) uses the slug as the `<id>` field.
+ * Every write under either document root is committed on the plan branch as
+ * `plan(<slug>): <id> <what>` before any subsequent stage, using the git
+ * service seam (Req 17.1). A phase-scoped write uses that phase's id; a
+ * plan-scoped write (overview) uses the slug as the `<id>` field.
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { parsePlan } from '../model/parser';
+import { DocumentKind, parsePlan, phaseIdPattern, phaseIdPrefix } from '../model/parser';
 import { PhaseState } from '../model/phaseState';
+import { resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { ToolServices } from './toolServices';
 
-/** The states a todo cannot be edited or removed from (Req 9.8). */
+/** The states a phase cannot be edited or removed from (Req 9.8). */
 const PROTECTED_STATES: ReadonlySet<PhaseState> = new Set<PhaseState>([
   'done',
   'failed',
@@ -41,27 +41,24 @@ const PROTECTED_STATES: ReadonlySet<PhaseState> = new Set<PhaseState>([
   'reviewing',
 ]);
 
-/** A todo id is `T` followed by two or more decimal digits (Req 3.3). */
-const TODO_ID = /^T\d{2,}$/;
-
-/** Build every spec-writing tool for the registry. */
-export function createSpecWriteTools(services: ToolServices): Tool[] {
+/** Build every plan-writing tool for the registry. */
+export function createPlanWriteTools(services: ToolServices): Tool[] {
   return [
     updateOverviewTool(services),
-    addTodoTool(services),
-    editTodoTool(services),
-    removeTodoTool(services),
+    addPhaseTool(services),
+    editPhaseTool(services),
+    removePhaseTool(services),
   ];
 }
 
 /**
- * `update_overview(slug, text)` — replace the OVERVIEW section body with `text`,
- * leaving frontmatter and every todo line unchanged.
+ * `update_overview(slug, text)` — replace the plan preamble (or legacy OVERVIEW)
+ * with `text`, leaving frontmatter and every phase line unchanged.
  */
 function updateOverviewTool(services: ToolServices): Tool {
   return {
     name: 'update_overview',
-    description: "Rewrite a spec's OVERVIEW section, leaving frontmatter and todos untouched.",
+    description: "Rewrite a plan's preamble (Endstate, What needs changing, Limitations & constraints; or a legacy spec's OVERVIEW), leaving frontmatter and phases untouched.",
     mutating: true,
     phases: ['gather', 'drive'],
     schema: {
@@ -76,13 +73,21 @@ function updateOverviewTool(services: ToolServices): Tool {
       if (slug === undefined || text === undefined) {
         return { ok: false, error: 'update_overview requires a string "slug" and a string "text"' };
       }
-      const loaded = await loadSpecForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, tc);
       if (!loaded.ok) {
         return loaded.error;
       }
-      const rewritten = replaceOverview(loaded.content, text);
+      const rewritten = loaded.kind === 'plan'
+        ? replacePreamble(loaded.content, text)
+        // Legacy: retain the OVERVIEW section edit for existing spec.md files.
+        : replaceOverview(loaded.content, text);
       if (rewritten === undefined) {
-        return { ok: false, error: `spec "${slug}" has no OVERVIEW/TODOS structure to update` };
+        return {
+          ok: false,
+          error: loaded.kind === 'plan'
+            ? `plan "${slug}" has no preamble/PHASES structure to update`
+            : `plan "${slug}" has no OVERVIEW/TODOS structure to update`,
+        };
       }
       const write = await writeAndCommit(services, loaded.absolute, rewritten, slug, slug, 'update overview');
       if (!write.ok) {
@@ -94,14 +99,14 @@ function updateOverviewTool(services: ToolServices): Tool {
 }
 
 /**
- * `add_todo(slug, id, title, after?, files?)` — append a new `pending` todo line.
- * A state is never accepted (Req 9.7); the todo is created `pending`. The id
- * must be a fresh `T##` not already present in the spec.
+ * `add_phase(slug, id, title, after?, files?)` — append a new `pending` phase line.
+ * A state is never accepted (Req 9.7); the phase is created `pending`. The id
+ * must be a fresh id with this document kind's prefix.
  */
-function addTodoTool(services: ToolServices): Tool {
+function addPhaseTool(services: ToolServices): Tool {
   return {
-    name: 'add_todo',
-    description: 'Append a new pending todo line to a spec with an id, title and optional hints.',
+    name: 'add_phase',
+    description: 'Append a new pending phase line to a plan with an id (P## for a plan, T## for a legacy spec), title and optional hints.',
     mutating: true,
     phases: ['gather', 'drive'],
     schema: {
@@ -123,21 +128,21 @@ function addTodoTool(services: ToolServices): Tool {
       const after = readStringArray(args, 'after') ?? [];
       const files = readStringArray(args, 'files') ?? [];
       if (slug === undefined || id === undefined || title === undefined) {
-        return { ok: false, error: 'add_todo requires a string "slug", "id", and "title"' };
+        return { ok: false, error: 'add_phase requires a string "slug", "id", and "title"' };
       }
-      if (!TODO_ID.test(id)) {
-        return { ok: false, error: `add_todo "id" must be "T" followed by two or more digits: ${id}` };
-      }
-      const loaded = await loadSpecForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, tc);
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parsePlan(loaded.content);
-      if (spec.phases.some((t) => t.id === id)) {
-        return { ok: false, error: `add_todo: todo "${id}" already exists in spec "${slug}"` };
+      if (!phaseIdPattern(loaded.kind).test(id)) {
+        return { ok: false, error: `add_phase "id" must be "${phaseIdPrefix(loaded.kind)}" followed by two or more digits: ${id}` };
       }
-      const line = renderTodoLine('pending', id, title, after, files);
-      const updated = appendTodoLine(loaded.content, line);
+      const plan = parsePlan(loaded.content, loaded.kind);
+      if (plan.phases.some((phase) => phase.id === id)) {
+        return { ok: false, error: `add_phase: phase "${id}" already exists in plan "${slug}"` };
+      }
+      const line = renderPhaseLine('pending', id, title, after, files);
+      const updated = appendPhaseLine(loaded.content, line, loaded.kind);
       const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `add ${id}`);
       if (!write.ok) {
         return write;
@@ -148,14 +153,14 @@ function addTodoTool(services: ToolServices): Tool {
 }
 
 /**
- * `edit_todo(slug, id, title?, after?, files?)` — rewrite a todo's title and/or
+ * `edit_phase(slug, id, title?, after?, files?)` — rewrite a phase's title and/or
  * hints, preserving its existing state (a state is never an argument, Req 9.7).
- * Refuses when the todo is in a protected state (Req 9.8).
+ * Refuses when the phase is in a protected state (Req 9.8).
  */
-function editTodoTool(services: ToolServices): Tool {
+function editPhaseTool(services: ToolServices): Tool {
   return {
-    name: 'edit_todo',
-    description: "Rewrite a todo's title and hints, preserving its state; refuses protected states.",
+    name: 'edit_phase',
+    description: "Rewrite a phase's title and hints, preserving its state; refuses protected states.",
     mutating: true,
     phases: ['gather', 'drive'],
     schema: {
@@ -174,30 +179,30 @@ function editTodoTool(services: ToolServices): Tool {
       const slug = readString(args, 'slug');
       const id = readString(args, 'id');
       if (slug === undefined || id === undefined) {
-        return { ok: false, error: 'edit_todo requires a string "slug" and "id"' };
+        return { ok: false, error: 'edit_phase requires a string "slug" and "id"' };
       }
-      const loaded = await loadSpecForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, tc);
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parsePlan(loaded.content);
-      const todo = spec.phases.find((t) => t.id === id);
-      if (todo === undefined) {
-        return { ok: false, error: `edit_todo: todo "${id}" was not found in spec "${slug}"` };
+      const plan = parsePlan(loaded.content, loaded.kind);
+      const phase = plan.phases.find((item) => item.id === id);
+      if (phase === undefined) {
+        return { ok: false, error: `edit_phase: phase "${id}" was not found in plan "${slug}"` };
       }
-      if (PROTECTED_STATES.has(todo.state)) {
+      if (PROTECTED_STATES.has(phase.state)) {
         return {
           ok: false,
-          error: `edit_todo refused: todo "${id}" is in a protected state (${todo.state})`,
+          error: `edit_phase refused: phase "${id}" is in a protected state (${phase.state})`,
         };
       }
 
-      const title = readString(args, 'title') ?? todo.title;
-      const after = readStringArray(args, 'after') ?? todo.after;
-      const files = readStringArray(args, 'files') ?? todo.files;
+      const title = readString(args, 'title') ?? phase.title;
+      const after = readStringArray(args, 'after') ?? phase.after;
+      const files = readStringArray(args, 'files') ?? phase.files;
       // Preserve the existing state; only the title and hints may change.
-      const newLine = renderTodoLine(todo.state, id, title, after, files);
-      const updated = replaceLine(loaded.content, todo.lineIndex, newLine);
+      const newLine = renderPhaseLine(phase.state, id, title, after, files);
+      const updated = replaceLine(loaded.content, phase.lineIndex, newLine);
       const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `edit ${id}`);
       if (!write.ok) {
         return write;
@@ -208,13 +213,13 @@ function editTodoTool(services: ToolServices): Tool {
 }
 
 /**
- * `remove_todo(slug, id)` — delete a todo line. Refuses when the todo is in a
+ * `remove_phase(slug, id)` — delete a phase line. Refuses when the phase is in a
  * protected state (Req 9.8).
  */
-function removeTodoTool(services: ToolServices): Tool {
+function removePhaseTool(services: ToolServices): Tool {
   return {
-    name: 'remove_todo',
-    description: 'Delete a todo line from a spec; refuses when the todo is in a protected state.',
+    name: 'remove_phase',
+    description: 'Delete a phase line from a plan; refuses when the phase is in a protected state.',
     mutating: true,
     phases: ['gather', 'drive'],
     schema: {
@@ -227,24 +232,24 @@ function removeTodoTool(services: ToolServices): Tool {
       const slug = readString(args, 'slug');
       const id = readString(args, 'id');
       if (slug === undefined || id === undefined) {
-        return { ok: false, error: 'remove_todo requires a string "slug" and "id"' };
+        return { ok: false, error: 'remove_phase requires a string "slug" and "id"' };
       }
-      const loaded = await loadSpecForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, tc);
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parsePlan(loaded.content);
-      const todo = spec.phases.find((t) => t.id === id);
-      if (todo === undefined) {
-        return { ok: false, error: `remove_todo: todo "${id}" was not found in spec "${slug}"` };
+      const plan = parsePlan(loaded.content, loaded.kind);
+      const phase = plan.phases.find((item) => item.id === id);
+      if (phase === undefined) {
+        return { ok: false, error: `remove_phase: phase "${id}" was not found in plan "${slug}"` };
       }
-      if (PROTECTED_STATES.has(todo.state)) {
+      if (PROTECTED_STATES.has(phase.state)) {
         return {
           ok: false,
-          error: `remove_todo refused: todo "${id}" is in a protected state (${todo.state})`,
+          error: `remove_phase refused: phase "${id}" is in a protected state (${phase.state})`,
         };
       }
-      const updated = deleteLine(loaded.content, todo.lineIndex);
+      const updated = deleteLine(loaded.content, phase.lineIndex);
       const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `remove ${id}`);
       if (!write.ok) {
         return write;
@@ -255,25 +260,25 @@ function removeTodoTool(services: ToolServices): Tool {
 }
 
 /**
- * Load a spec's on-disk content for a mutating write, resolving containment
+ * Load a plan or legacy spec's on-disk content for a mutating write, resolving containment
  * through the guard first (Req 8.1, 8.2) and re-reading the current bytes so
  * the edit applies to the latest content (Req 6.3). Returns a discriminated
  * result carrying the absolute path and content on success, or a
  * {@link ToolResult} error to return directly.
  */
-async function loadSpecForWrite(
+async function loadPlanForWrite(
   services: ToolServices,
   slug: string,
   tc: ToolContext,
 ): Promise<
-  | { ok: true; absolute: string; content: string }
+  | { ok: true; absolute: string; content: string; kind: DocumentKind }
   | { ok: false; error: ToolResult }
 > {
   if (!isSlug(slug)) {
     return { ok: false, error: { ok: false, error: `invalid slug: ${slug}` } };
   }
-  const specFile = specPath(services, slug);
-  const resolved = await tc.ctx.resolveMutatingPath(specFile);
+  const location = resolveDocument(services.baitonDir, slug);
+  const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
   if (!resolved.ok) {
     return { ok: false, error: { ok: false, error: resolved.error.message } };
   }
@@ -281,18 +286,18 @@ async function loadSpecForWrite(
   try {
     content = await fs.readFile(resolved.resolved, 'utf8');
   } catch {
-    return { ok: false, error: { ok: false, error: `spec "${slug}" was not found` } };
+    return { ok: false, error: { ok: false, error: `plan "${slug}" was not found` } };
   }
-  return { ok: true, absolute: resolved.resolved, content };
+  return { ok: true, absolute: resolved.resolved, content, kind: location.kind };
 }
 
 /**
- * Write `content` to the spec file and commit it on the spec branch as
- * `spec(<slug>): <id> <what>` before any subsequent stage (Req 17.1). Returns
+ * Write `content` to the plan file and commit it on the plan branch as
+ * `plan(<slug>): <id> <what>` before any subsequent stage (Req 17.1). Returns
  * the new commit sha on success, or a {@link ToolResult} error preserving the
- * failure. The parent directory is created for a fresh spec.
+ * failure. The parent directory is created for a fresh document.
  *
- * Exported so the spec-writing tools share one write-and-commit path.
+ * Exported so the plan-writing tools share one write-and-commit path.
  */
 export async function writeAndCommit(
   services: ToolServices,
@@ -306,18 +311,18 @@ export async function writeAndCommit(
     await fs.mkdir(path.dirname(absolute), { recursive: true });
     await fs.writeFile(absolute, content, 'utf8');
   } catch (e) {
-    return { ok: false, error: `failed to write spec file: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `failed to write plan file: ${e instanceof Error ? e.message : String(e)}` };
   }
   try {
-    const commit = await services.git.commit(`spec(${slug}): ${id} ${what}`);
+    const commit = await services.git.commit(`plan(${slug}): ${id} ${what}`);
     return { ok: true, commit };
   } catch (e) {
     return { ok: false, error: gitCommitErrorMessage(e) };
   }
 }
 
-/** Render a single `- [<state>] <id> <title>` line with optional hints. */
-function renderTodoLine(
+/** Render a single `- [<state>] <id> <title>` phase line with optional hints. */
+function renderPhaseLine(
   state: PhaseState,
   id: string,
   title: string,
@@ -336,7 +341,7 @@ function renderTodoLine(
 }
 
 /**
- * Replace the OVERVIEW section body (between `# OVERVIEW` and the next header)
+ * Replace the legacy OVERVIEW section body (between `# OVERVIEW` and the next header)
  * with `text`, leaving frontmatter, the header lines and the TODOS section
  * untouched. Returns undefined when there is no OVERVIEW header to update.
  */
@@ -365,21 +370,47 @@ function replaceOverview(content: string, text: string): string | undefined {
   return rebuilt.join('\n');
 }
 
-/** Append a todo line at the end of the TODOS section. */
-function appendTodoLine(content: string, todoLine: string): string {
+/** Replace the plan preamble between frontmatter and `# PHASES`. */
+function replacePreamble(content: string, text: string): string | undefined {
   const lines = content.split('\n');
-  const todosIdx = lines.findIndex((l) => isHeader(l, 'TODOS'));
-  if (todosIdx === -1) {
-    // No TODOS section: append a header and the line at the end.
-    return `${content.replace(/\s+$/, '')}\n\n# TODOS\n\n${todoLine}\n`;
+  let bodyStart = 0;
+  if (lines[0]?.trim() === '---') {
+    const closing = lines.findIndex((line, idx) => idx > 0 && line.trim() === '---');
+    if (closing !== -1) bodyStart = closing + 1;
   }
-  // Insert after the last existing todo/content line within the section, before
-  // any trailing blank lines at end of file.
-  let insertAt = lines.length;
-  while (insertAt > todosIdx + 1 && lines[insertAt - 1].trim() === '') {
+  const phasesIdx = lines.findIndex((line, idx) => idx >= bodyStart && isHeader(line, 'PHASES'));
+  if (phasesIdx === -1) return undefined;
+  return [
+    ...lines.slice(0, bodyStart),
+    '',
+    text.replace(/\s+$/, ''),
+    '',
+    ...lines.slice(phasesIdx),
+  ].join('\n');
+}
+
+/** Append a phase line to the kind's phase section; TODOS is legacy. */
+function appendPhaseLine(content: string, phaseLine: string, kind: DocumentKind): string {
+  const lines = content.split('\n');
+  const section = kind === 'plan' ? 'PHASES' : 'TODOS';
+  const sectionIdx = lines.findIndex((line) => isHeader(line, section));
+  if (sectionIdx === -1) {
+    // Legacy: preserve the old TODOS header for existing spec.md documents.
+    return `${content.replace(/\s+$/, '')}\n\n# ${section}\n\n${phaseLine}\n`;
+  }
+  let sectionEnd = lines.length;
+  for (let index = sectionIdx + 1; index < lines.length; index++) {
+    if (/^#+\s+/.test(lines[index])) {
+      sectionEnd = index;
+      break;
+    }
+  }
+  // Insert after the last phase/content line, before a later section or blanks.
+  let insertAt = sectionEnd;
+  while (insertAt > sectionIdx + 1 && lines[insertAt - 1].trim() === '') {
     insertAt--;
   }
-  lines.splice(insertAt, 0, todoLine);
+  lines.splice(insertAt, 0, phaseLine);
   return lines.join('\n');
 }
 
@@ -401,11 +432,6 @@ function deleteLine(content: string, lineIndex: number): string {
 function isHeader(line: string, name: string): boolean {
   const m = /^#+\s+(.*)$/.exec(line);
   return m !== null && m[1].trim() === name;
-}
-
-/** The absolute path of a spec's `spec.md`. */
-function specPath(services: ToolServices, slug: string): string {
-  return path.join(services.baitonDir, 'specs', slug, 'spec.md');
 }
 
 /** A slug is a simple directory-safe name (no separators or traversal). */

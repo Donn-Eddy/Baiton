@@ -11,7 +11,7 @@
  *   change (Req 8.5). The seen-key → result map is kept per repository, in
  *   memory, for the session (design "Orchestrator: tool registry and guard").
  * - **Path containment** — a mutating tool's target must resolve under
- *   `.baiton/specs/` (Req 8.1, 8.2); a read tool's target has its symlinks
+ *   `.baiton/plans/` or legacy `.baiton/specs/` (Req 8.1, 8.2); a read tool's target has its symlinks
  *   resolved and any path escaping the repository root is rejected with no read
  *   (Req 9.2, 9.3); read results are truncated to a fixed cap with a truncation
  *   flag (Req 9.4). The path checks are exposed as helpers on the
@@ -29,6 +29,7 @@
 import * as fs from 'fs/promises';
 import { realpathSync } from 'fs';
 import * as path from 'path';
+import { LEGACY_SPECS_SUBDIR, PLANS_SUBDIR } from '../storage/documentLocation';
 import type { ConversationKind } from './systemPrompt';
 
 /**
@@ -48,14 +49,14 @@ export type ToolResult =
  *
  * - `repoRoot`   — absolute path of the repository root; read paths may not
  *                  resolve outside it (Req 9.3).
- * - `specsDir`   — absolute path of `.baiton/specs/`; mutating paths must
- *                  resolve under it (Req 8.1).
+ * - `baitonDir`  — absolute path of `.baiton/`; mutating paths must resolve
+ *                  under `plans/` or legacy `specs/` (Req 8.1).
  * - `restricted` — whether the workspace is in VS Code Restricted Mode; when
  *                  true, writes and dispatch are disabled (Req 22.1, 22.2).
  */
 export interface GuardWorkspace {
   repoRoot: string;
-  specsDir: string;
+  baitonDir: string;
   restricted: boolean;
 }
 
@@ -70,7 +71,7 @@ export interface GuardWorkspace {
  *              helpers so a tool resolves its argument paths through the guard.
  * - `caller` — the chat making the call, so a tool such as `spawn_subagent`
  *              knows who is asking. Absent when the host does not say (e.g.
- *              existing direct calls such as commands.ts approve_spec).
+ *              existing direct calls such as commands.ts approve_plan).
  */
 export interface ToolContext {
   callId: string | undefined;
@@ -82,31 +83,26 @@ export interface ToolContext {
  * Which of the orchestrator's three jobs a conversation is doing right now
  * (Req 11.1).
  *
- * - `gather` — a Workspace conversation, or a spec still in `draft`: ask
+ * - `gather` — a Workspace conversation, or a plan still in `draft`: ask
  *              clarifying questions until the requirements are agreed, then
- *              hand them to the spec writer through `draft_spec`.
- * - `drive`  — an approved spec being driven to completion: dispatch the next
- *              legal stage through `run` until every todo is done, then
+ *              hand them to the plan writer through `draft_plan`.
+ * - `drive`  — an approved plan being driven to completion: dispatch the next
+ *              legal stage through `run` until every phase is done, then
  *              `submit_pr`.
- * - `run`    — a non-Spec (Bug/Quick/Refactor/Investigate) Workspace
+ * - `run`    — a non-plan (Bug/Quick/Refactor/Investigate) Workspace
  *              conversation: inspect the repository with the read tools, agree
- *              the work, then dispatch one spec-less run through `start_run` or
+ *              the work, then dispatch one plan-less run through `start_run` or
  *              `investigate`.
  *
- * Beware: the PHASE named `run` is not the TOOL named `run`. The `run` tool
- * stays `phases: ['drive']` and dispatches a spec stage for a todo, while the
- * `run` phase advertises `start_run`/`investigate` and never sees `run`.
- *
- * Each tool declares the phases it belongs to, so the tool surface advertised
- * to the model — and the surface the registry will actually run — is exactly
- * the set the current job needs.
+ * Each tool declares its conversation phases, so the tool surface advertised
+ * to the model and the surface the registry will run match the current job.
  */
 export type OrchestratorPhase = 'gather' | 'drive' | 'run';
 
 /** All three orchestrator phases, for iteration in assembly and tests. */
 export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive', 'run'] as const;
 
-/** Who is asking for the tool surface: a top-level chat, or a sub-agent chat a parent spawned. A sub-agent sees only the read tools, ask_user, run (drive phase) and the two spawn tools; only a top-level chat finishes a spec. */
+/** Who is asking for the tool surface: a top-level chat, or a sub-agent chat a parent spawned. A sub-agent sees only the read tools, ask_user, run (drive phase) and the two spawn tools; only a top-level chat finishes a plan. */
 export type ToolSurface = 'top' | 'subagent';
 export const TOOL_SURFACES: readonly ToolSurface[] = ['top', 'subagent'] as const;
 
@@ -126,7 +122,7 @@ export interface ToolCaller {
  *                idempotency key and are disabled under Restricted Mode.
  * - `dispatch` — whether the tool dispatches a stage (e.g. `run`, `start_run`,
  *                `investigate`). Dispatch is disabled under Restricted Mode
- *                (Req 22.2) even though the dispatch tool writes no spec file
+ *                (Req 22.2) even though the dispatch tool writes no plan file
  *                itself.
  * - `concurrent` — whether the tool loop may run this call in parallel with
  *                adjacent concurrent-flagged calls of the same completion.
@@ -151,7 +147,7 @@ export interface Tool {
    * Whether the tool loop may run this call in parallel with the adjacent
    * concurrent-flagged calls of the same completion. Only side-effect-free or
    * self-serializing tools set it (the read tools, `run`); a tool that writes
-   * spec files, raises a card or finishes a spec leaves it unset so it runs alone.
+   * plan files, raises a card or finishes a plan leaves it unset so it runs alone.
    */
   concurrent?: boolean;
   /**
@@ -170,7 +166,7 @@ export interface Tool {
 
 /**
  * The fixed maximum size, in bytes of UTF-8 text, a read tool result is
- * truncated to (Req 9.4). Chosen large enough to carry a spec or a bounded file
+ * truncated to (Req 9.4). Chosen large enough to carry a plan or a bounded file
  * range but small enough to keep a single tool result well within a model
  * context budget.
  */
@@ -235,8 +231,8 @@ export function boundToolResult(text: string): string {
 
 /** Why a guarded path resolution was rejected. */
 export type PathError =
-  /** A mutating target resolved outside `.baiton/specs/` (Req 8.2). */
-  | { kind: 'outside-specs'; requested: string; message: string }
+  /** A mutating target resolved outside `.baiton/plans/` and legacy `.baiton/specs/` (Req 8.2). */
+  | { kind: 'outside-documents'; requested: string; message: string }
   /** A read target resolved outside the repository root (Req 9.3). */
   | { kind: 'outside-repo'; requested: string; message: string };
 
@@ -255,7 +251,7 @@ export type PathResolution =
  * *create* a file — so we walk up to the nearest existing ancestor, resolve
  * that, and re-join the missing tail. This still defeats symlink escapes
  * through any existing ancestor (Req 9.2) while allowing not-yet-created
- * targets under `.baiton/specs/`.
+ * targets under `.baiton/plans/` or legacy `.baiton/specs/`.
  */
 async function realpathAllowingMissing(target: string): Promise<string> {
   const absolute = path.resolve(target);
@@ -319,15 +315,21 @@ function isWithin(parent: string, child: string): boolean {
  */
 export class GuardContext {
   private readonly workspace: GuardWorkspace;
+  private readonly documentRoots: readonly string[];
 
   constructor(workspace: GuardWorkspace) {
     // Resolve the roots once, symlinks included, so containment checks compare
     // them against targets in the same resolved form.
+    const baitonDir = realpathSyncAllowingMissing(workspace.baitonDir);
+    const plansDir = realpathSyncAllowingMissing(path.join(baitonDir, PLANS_SUBDIR));
+    // Legacy: protect the old document root while existing spec.md files remain supported.
+    const legacySpecsDir = realpathSyncAllowingMissing(path.join(baitonDir, LEGACY_SPECS_SUBDIR));
     this.workspace = {
       repoRoot: realpathSyncAllowingMissing(workspace.repoRoot),
-      specsDir: realpathSyncAllowingMissing(workspace.specsDir),
+      baitonDir,
       restricted: workspace.restricted,
     };
+    this.documentRoots = [plansDir, legacySpecsDir];
   }
 
   /** Whether the workspace is in Restricted Mode (Req 22.1, 22.2). */
@@ -335,9 +337,14 @@ export class GuardContext {
     return this.workspace.restricted;
   }
 
-  /** Absolute, normalized `.baiton/specs/` directory. */
-  public get specsDir(): string {
-    return this.workspace.specsDir;
+  /** Absolute, normalized `.baiton/plans/` directory. */
+  public get plansDir(): string {
+    return this.documentRoots[0];
+  }
+
+  /** Absolute, normalized legacy `.baiton/specs/` directory. */
+  public get legacySpecsDir(): string {
+    return this.documentRoots[1];
   }
 
   /** Absolute, normalized repository root. */
@@ -347,20 +354,20 @@ export class GuardContext {
 
   /**
    * Resolves a mutating tool's target path and confirms it lies under
-   * `.baiton/specs/` after symlink resolution (Req 8.1, 8.2). A target outside
-   * that subtree is rejected with an `outside-specs` error and the caller must
+   * `.baiton/plans/` or legacy `.baiton/specs/` after symlink resolution (Req 8.1, 8.2). A target outside
+   * those roots is rejected with an `outside-documents` error and the caller must
    * make no change. The target need not yet exist (a create is allowed), but
    * any existing ancestor symlink is collapsed first so it cannot escape.
    */
   public async resolveMutatingPath(requested: string): Promise<PathResolution> {
     const resolved = await realpathAllowingMissing(this.absoluteFrom(requested));
-    if (!isWithin(this.workspace.specsDir, resolved)) {
+    if (!this.documentRoots.some((root) => isWithin(root, resolved))) {
       return {
         ok: false,
         error: {
-          kind: 'outside-specs',
+          kind: 'outside-documents',
           requested,
-          message: `mutating tool target is outside .baiton/specs/: ${requested}`,
+          message: `mutating tool target is outside .baiton/plans/ and .baiton/specs/: ${requested}`,
         },
       };
     }

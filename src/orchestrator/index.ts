@@ -15,7 +15,7 @@ export * from './systemPrompt';
 export * from './toolLoop';
 export * from './sanitizer';
 export * from './readTools';
-export * from './specWriteTools';
+export * from './planWriteTools';
 export * from './controlTools';
 export * from './registry';
 export * from './subAgent';

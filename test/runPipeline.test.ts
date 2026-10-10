@@ -1024,7 +1024,7 @@ describe('spec-less run pipeline (T07)', () => {
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
         assert.strictEqual(refused.error.kind, 'invalid-mode');
-        assert.match(refused.error.message, /draft_spec/);
+        assert.match(refused.error.message, /draft_plan/);
       }
       assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));
     });
@@ -1035,7 +1035,7 @@ describe('spec-less run pipeline (T07)', () => {
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
         assert.strictEqual(refused.error.kind, 'invalid-mode');
-        assert.match(refused.error.message, /draft_spec/);
+        assert.match(refused.error.message, /draft_plan/);
         assert.match(refused.error.message, /default/);
       }
       assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));

@@ -6,23 +6,22 @@
  *   mutating nor dispatch) — ask the user a question through the intervention
  *   seam and return their answer as the tool result. The call blocks until the
  *   card is answered; a decline (including Stop) comes back as a refusal.
- * - `approve_spec(slug)` (mutating) — confirm in the UI first (Req 10.1); on a
- *   decline or cancel leave the spec unchanged (Req 10.2). On a fresh approval
- *   it checks the tree is clean except the spec's own folder (Req 16.1, 16.2),
+ * - `approve_plan(slug)` (mutating) — confirm in the UI first (Req 10.1); on a
+ *   decline or cancel leave the plan unchanged (Req 10.2). On a fresh approval
+ *   it checks the tree is clean except the plan's own folder (Req 16.1, 16.2),
  *   fetches the remote and resolves the base branch to a commit, recording it
- *   as `base_commit` (Req 16.3, 16.4), creates the spec branch from that
+ *   as `base_commit` (Req 16.3, 16.4), creates the plan branch from that
  *   commit, checks it out (Req 16.5, 16.6), records `branch` and `status:
  *   approved`, computes the Approval_Hash into `approved_rev` (Req 5.2), and
- *   commits `spec(<slug>): approve` (Req 16.5). A re-approval (the spec already
+ *   commits `plan(<slug>): approve` (Req 16.5). A re-approval (the plan already
  *   carries an `approved_rev`) recomputes the Approval_Hash into `approved_rev`
- *   and leaves every todo's state unchanged (Req 5.5).
- * - `draft_spec(slug, requirements)` (dispatch) — hand an agreed requirements
- *   document to the plan-writer harness, which drafts the spec's OVERVIEW and
- *   todo list and writes `.baiton/specs/<slug>/spec.md`. Confirms a summary of
- *   the requirements through the confirm seam first; a decline drafts nothing.
+ *   and leaves every phase's state unchanged (Req 5.5).
+ * - `draft_plan(slug, request)` (dispatch) — hand an agreed request to the
+ *   plan-writer agent, which studies the repository and drafts the phased plan.
+ *   Confirms the request through the confirm seam first; a decline drafts nothing.
  *   Returns as soon as the sub-agent is running, carrying its run id.
  * - `start_run(mode, statement, files, reproduction?)` (dispatch) — start one
- *   spec-less bug/quick/refactor run. It raises the confirm card (mode,
+ *   plan-less bug/quick/refactor run. It raises the confirm card (mode,
  *   one-line statement, guessed files, target branch) through the intervention
  *   seam, returns as soon as the run is launched, and writes nothing on a
  *   decline.
@@ -31,18 +30,17 @@
  *   one-line statement, guessed files, target branch) through the intervention
  *   seam, returns as soon as the run is launched, and writes nothing on a
  *   decline.
- * - `run(slug, todo, stage)` (dispatch) — dispatch exactly one legal stage
+ * - `run(slug, phase, stage)` (dispatch) — dispatch exactly one legal stage
  *   transition (`plan`, `execute` or `review`) through the run-queue seam and
  *   block until it reaches a terminal outcome; refuse when a stage is already
  *   running (Req 10.4) or the transition is illegal (Req 10.5). `plan-review`
  *   is not a standalone trigger — it runs inside the Plan action's review
  *   rounds — so the tool does not offer it and rejects it outright.
- * - `land_todo(slug, todo)` (mutating, no confirm) — refuses unless the todo is
- *   `done`, merges its branch into the spec branch through the land seam, and
+ * - `land_phase(slug, phase)` (mutating, no confirm) — refuses unless the phase
+ *   is `done`, merges its branch into the plan branch through the land seam, and
  *   reports the merge commit or `already landed`.
- * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every todo
+ * - `submit_pr(slug)` (mutating) — run Verify then the PR stage once every phase
  *   is done and landed.
- *
  * - `spawn_subagent(task)` and `send_to_subagent(chat_id, message)` (neither
  *   mutating nor dispatch) — start a sub-agent chat and wait for its first
  *   reply, or send it a follow-up. They go through the sub-agent seam, need a
@@ -52,26 +50,26 @@
  *   sub-agent tools.
  *
  * Each tool declares the orchestrator phases it belongs to (Req 11.1):
- * `draft_spec` only while gathering requirements, `run`, `land_todo` and `submit_pr` only
- * while driving an approved spec, `approve_spec` in both, and `ask_user` in all
+ * `draft_plan` only while gathering requirements, `run`, `land_phase` and `submit_pr` only
+ * while driving an approved plan, `approve_plan` in both, and `ask_user` in all
  * three — a run-mode conversation agrees the work through it too.
  * `start_run` and `investigate` belong only to the `run` phase, so they are
- * unavailable in a Spec conversation, exactly as `draft_spec`, `run` and
+ * unavailable in a Plan conversation, exactly as `draft_plan`, `run` and
  * `submit_pr` are unavailable in a run-mode one.
  *
- * Every extension write under the spec folder is committed on the spec branch
- * as `spec(<slug>): <id> <what>` before any subsequent stage (Req 17.1); the
- * approval commit uses the fixed `spec(<slug>): approve` message the design
- * mandates (Req 16.5).
+ * Every extension write under either document root is committed on the plan
+ * branch as `plan(<slug>): <id> <what>` before any subsequent stage (Req 17.1);
+ * the approval commit uses the fixed `plan(<slug>): approve` message (Req 16.5).
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { approvalHash } from '../model/hash';
-import { parsePlan } from '../model/parser';
+import { parsePlan, phaseIdPattern } from '../model/parser';
 import { validatePlan } from '../model/validator';
 import { RunMode, isRunMode } from '../model/mode';
 import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
+import { DocumentLocation, locationFor, resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
 import { MAX_SUBAGENT_DEPTH } from './seams';
@@ -81,12 +79,12 @@ import { ToolServices } from './toolServices';
 export function createControlTools(services: ToolServices): Tool[] {
   return [
     askUserTool(services),
-    draftSpecTool(services),
+    draftPlanTool(services),
     startRunTool(services),
     investigateTool(services),
-    approveSpecTool(services),
+    approvePlanTool(services),
     runTool(services),
-    landTodoTool(services),
+    landPhaseTool(services),
     submitPrTool(services),
     spawnSubAgentTool(services),
     sendToSubAgentTool(services),
@@ -191,20 +189,18 @@ function askUserTool(services: ToolServices): Tool {
 }
 
 /**
- * `draft_spec(slug, requirements)` — dispatch the plan-writer harness to turn an
- * agreed requirements document into a spec.
+ * `draft_plan(slug, request)` — hand an agreed request to the plan-writer agent
+ * to study the repository and draft the phased plan.
  *
- * The orchestrator gathers the requirements with the user and never proposes
- * the todos itself; the configured plan-writer agent studies the repository and
- * drafts them. Like every dispatch tool it is disabled under Restricted Mode.
- * The user confirms a summary of the requirements before anything launches; a
+ * The user confirms a summary of the endstate, what needs changing, and
+ * limitations & constraints before anything launches; a
  * decline leaves the repository untouched.
  */
-function draftSpecTool(services: ToolServices): Tool {
+function draftPlanTool(services: ToolServices): Tool {
   return {
-    name: 'draft_spec',
+    name: 'draft_plan',
     description:
-      'Hand an agreed requirements document to the plan-writer agent, which studies the repository and drafts the spec (overview and todos) for a new slug.',
+      'Hand an agreed request (endstate, what needs changing, limitations & constraints) to the plan-writer agent, which studies the repository and drafts the phased plan for a new slug.',
     mutating: false,
     phases: ['gather'],
     dispatch: true,
@@ -212,52 +208,52 @@ function draftSpecTool(services: ToolServices): Tool {
       type: 'object',
       properties: {
         slug: { type: 'string' },
-        requirements: { type: 'string' },
+        request: { type: 'string' },
       },
-      required: ['slug', 'requirements'],
+      required: ['slug', 'request'],
       additionalProperties: false,
     },
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
-      const requirements = readString(args, 'requirements');
-      if (slug === undefined || requirements === undefined) {
+      const request = readString(args, 'request');
+      if (slug === undefined || request === undefined) {
         return {
           ok: false,
-          error: 'draft_spec requires a string "slug" and a string "requirements"',
+          error: 'draft_plan requires a string "slug" and a string "request"',
         };
       }
       if (!isSlug(slug)) {
         return { ok: false, error: `invalid slug: ${slug}` };
       }
-      if (requirements.trim().length === 0) {
-        return { ok: false, error: 'draft_spec "requirements" must not be empty' };
+      if (request.trim().length === 0) {
+        return { ok: false, error: 'draft_plan "request" must not be empty' };
       }
-      if (services.draftSpec === undefined) {
-        return { ok: false, error: 'draft_spec is not available in this host' };
+      if (services.draftPlan === undefined) {
+        return { ok: false, error: 'draft_plan is not available in this host' };
       }
 
-      // The draft creates the spec folder, so resolve the target through the
-      // guard: it may only ever land under `.baiton/specs/` (Req 8.1, 8.2).
-      const resolved = await tc.ctx.resolveMutatingPath(specPath(services, slug));
+      // New drafts always write under plans/.
+      const newPlan = locationFor(services.baitonDir, slug, 'plan');
+      const resolved = await tc.ctx.resolveMutatingPath(newPlan.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
-      // A draft only ever creates a spec; it never overwrites one.
-      if (await exists(resolved.resolved)) {
-        return { ok: false, error: `spec "${slug}" already exists` };
+      // Legacy: refuse a slug with a spec.md so a draft cannot shadow it.
+      if (await exists(resolveDocument(services.baitonDir, slug).documentPath)) {
+        return { ok: false, error: `plan "${slug}" already exists` };
       }
 
       const confirmed = await services.confirm.confirm(
-        draftConfirmation(slug, requirements),
+        draftConfirmation(slug, request),
       );
       if (!confirmed) {
         return {
           ok: false,
-          error: `drafting spec "${slug}" was declined; nothing was written`,
+          error: `drafting plan "${slug}" was declined; nothing was written`,
         };
       }
 
-      const outcome = await services.draftSpec.draft({ slug, requirements });
+      const outcome = await services.draftPlan.draft({ slug, requirements: request });
       switch (outcome.kind) {
         case 'started':
           return { ok: true, data: { runId: outcome.runId } };
@@ -267,9 +263,9 @@ function draftSpecTool(services: ToolServices): Tool {
             error: 'a stage is already running for this repository; try again after it finishes',
           };
         case 'refused':
-          return { ok: false, error: `the spec draft did not start: ${outcome.reason}` };
+          return { ok: false, error: `the plan draft did not start: ${outcome.reason}` };
         default:
-          return { ok: false, error: 'draft_spec dispatch returned an unknown outcome' };
+          return { ok: false, error: 'draft_plan dispatch returned an unknown outcome' };
       }
     },
   };
@@ -277,7 +273,7 @@ function draftSpecTool(services: ToolServices): Tool {
 
 /**
  * The confirmation message shown before a draft launches: the slug plus a
- * bounded summary of the requirements so the user sees what the spec writer is
+ * bounded summary of the request so the user sees what the plan writer is
  * being handed.
  */
 function draftConfirmation(slug: string, requirements: string): string {
@@ -285,9 +281,10 @@ function draftConfirmation(slug: string, requirements: string): string {
   const summary =
     trimmed.length > 1200 ? `${trimmed.slice(0, 1200)}\n…` : trimmed;
   return (
-    `Draft spec "${slug}" from these requirements? ` +
+    `Draft plan "${slug}" from this request? ` +
     'The configured plan-writer agent will study the repository and write the ' +
-    `overview and todos.\n\n${summary}`
+    'endstate, what needs changing, limitations & constraints, and phases.' +
+    `\n\n${summary}`
   );
 }
 
@@ -302,7 +299,7 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * `start_run(mode, statement, files, reproduction?)` — start one spec-less
+ * `start_run(mode, statement, files, reproduction?)` — start one plan-less
  * bug/quick/refactor run through the run-pipeline seam.
  *
  * Every argument is validated before the card is raised and before the seam is
@@ -315,7 +312,7 @@ function startRunTool(services: ToolServices): Tool {
   return {
     name: 'start_run',
     description:
-      'Start a spec-less run (bug, quick or refactor): hand a one-line statement of the work and the files involved to the planner, which plans, executes and reviews it on its own branch.',
+      'Start a plan-less run (bug, quick or refactor): hand a one-line statement of the work and the files involved to the planner, which plans, executes and reviews it on its own branch.',
     mutating: false,
     phases: ['run'],
     dispatch: true,
@@ -337,7 +334,7 @@ function startRunTool(services: ToolServices): Tool {
           ok: false,
           error:
             `start_run "mode" must be one of bug, quick, refactor: ${mode}. ` +
-            'Use investigate for a read-only question, and the spec tools for spec work.',
+            'Use investigate for a read-only question, and draft_plan for phased-plan work.',
         };
       }
 
@@ -502,11 +499,11 @@ function investigateTool(services: ToolServices): Tool {
   };
 }
 
-/** `approve_spec(slug)` — approve (or re-approve) a spec (Req 16, 5.2, 5.5). */
-function approveSpecTool(services: ToolServices): Tool {
+/** `approve_plan(slug)` — approve (or re-approve) a plan (Req 16, 5.2, 5.5). */
+function approvePlanTool(services: ToolServices): Tool {
   return {
-    name: 'approve_spec',
-    description: 'Approve or re-approve a spec: create its branch and record the approval hash.',
+    name: 'approve_plan',
+    description: 'Approve or re-approve a plan: create its branch and record the approval hash.',
     mutating: true,
     phases: ['gather', 'drive'],
     schema: {
@@ -518,14 +515,14 @@ function approveSpecTool(services: ToolServices): Tool {
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
       if (slug === undefined) {
-        return { ok: false, error: 'approve_spec requires a string "slug"' };
+        return { ok: false, error: 'approve_plan requires a string "slug"' };
       }
       if (!isSlug(slug)) {
         return { ok: false, error: `invalid slug: ${slug}` };
       }
 
-      const specFile = specPath(services, slug);
-      const resolved = await tc.ctx.resolveMutatingPath(specFile);
+      const location = documentFor(services, slug);
+      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -533,31 +530,31 @@ function approveSpecTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `spec "${slug}" was not found` };
+        return { ok: false, error: `plan "${slug}" was not found` };
       }
 
       // Req 10.1: confirm in the UI before performing any change. A decline or
-      // cancel leaves the spec unchanged (Req 10.2).
+      // cancel leaves the plan unchanged (Req 10.2).
       const confirmed = await services.confirm.confirm(
-        `Approve spec "${slug}"? This creates its branch from the resolved base commit and records the approval.`,
+        `Approve plan "${slug}"? This creates its branch from the resolved base commit and records the approval.`,
       );
       if (!confirmed) {
         return {
           ok: false,
-          error: `approval of spec "${slug}" was declined; the spec is unchanged`,
+          error: `approval of plan "${slug}" was declined; the plan is unchanged`,
         };
       }
 
-      const spec = parsePlan(content);
-      const alreadyApproved = (spec.frontmatter.get('approved_rev') ?? '').trim() !== '';
+      const plan = parsePlan(content, location.kind);
+      const alreadyApproved = (plan.frontmatter.get('approved_rev') ?? '').trim() !== '';
 
       // A re-approval only recomputes the Approval_Hash into `approved_rev` and
-      // leaves every todo state (and the branch) unchanged (Req 5.5).
+      // leaves every phase state (and the branch) unchanged (Req 5.5).
       if (alreadyApproved) {
-        return reapprove(services, resolved.resolved, content, spec, slug);
+        return reapprove(services, resolved.resolved, content, plan, slug);
       }
 
-      return freshApprove(services, resolved.resolved, content, spec, slug);
+      return freshApprove(services, resolved.resolved, content, plan, slug, location);
     },
   };
 }
@@ -565,16 +562,17 @@ function approveSpecTool(services: ToolServices): Tool {
 /**
  * A fresh approval: clean-tree check, fetch/resolve/record base_commit, create
  * and check out the branch, record branch/status/approved_rev, and commit
- * `spec(<slug>): approve` (Req 16.1–16.5, 5.2).
+ * `plan(<slug>): approve` (Req 16.1–16.5, 5.2).
  */
 async function freshApprove(
   services: ToolServices,
   absolute: string,
   content: string,
-  spec: ReturnType<typeof parsePlan>,
+  plan: ReturnType<typeof parsePlan>,
   slug: string,
+  location: DocumentLocation,
 ): Promise<ToolResult> {
-  // Req 16.1/16.2: clean only if every change is confined to the spec folder.
+  // Req 16.1/16.2: clean only if every change is confined to this document folder.
   let clean: boolean;
   try {
     clean = await services.git.isCleanExceptSpecFolder(slug);
@@ -585,14 +583,13 @@ async function freshApprove(
     return {
       ok: false,
       error:
-        `approval refused: the working tree has changes outside .baiton/specs/${slug}/. ` +
-        'Commit or revert them first; the spec is unchanged.',
+        `approval refused: the working tree has changes outside ${location.pathspec}/. Commit or revert them first; the plan is unchanged.`,
     };
   }
 
   // Req 16.3/16.4: fetch the remote and resolve the base branch to a commit.
-  // The base branch comes from the spec frontmatter when set, else config.
-  const baseBranch = (spec.frontmatter.get('base') ?? '').trim() || services.gitSettings.base;
+  // The base branch comes from the plan frontmatter when set, else config.
+  const baseBranch = (plan.frontmatter.get('base') ?? '').trim() || services.gitSettings.base;
   let baseCommit: string;
   try {
     await services.git.fetch(services.gitSettings.remote);
@@ -600,11 +597,11 @@ async function freshApprove(
   } catch (e) {
     return {
       ok: false,
-      error: `approval halted: could not fetch/resolve base "${baseBranch}": ${gitErrorMessage(e)}. The spec is unchanged.`,
+      error: `approval halted: could not fetch/resolve base "${baseBranch}": ${gitErrorMessage(e)}. The plan is unchanged.`,
     };
   }
 
-  // Req 16.5: create the spec branch from the resolved base commit and check it
+  // Req 16.5: create the plan branch from the resolved base commit and check it
   // out. The branch name is derived from the slug.
   const branch = `baiton/${slug}`;
   try {
@@ -626,16 +623,16 @@ async function freshApprove(
   updated = setFrontmatterKey(updated, 'base_commit', baseCommit);
   updated = setFrontmatterKey(updated, 'branch', branch);
   updated = setFrontmatterKey(updated, 'status', 'approved');
-  const hash = approvalHash(parsePlan(updated));
+  const hash = approvalHash(parsePlan(updated, location.kind));
   updated = setFrontmatterKey(updated, 'approved_rev', hash);
 
-  // Persist and commit the carried-over spec folder as `spec(<slug>): approve`
+  // Persist and commit the carried-over document as `plan(<slug>): approve`
   // (Req 16.5). The branch was created from base_commit and checked out; the
-  // spec folder is written here so it lands on the new branch.
+  // document is written here so it lands on the new branch.
   try {
     await fs.mkdir(path.dirname(absolute), { recursive: true });
     await fs.writeFile(absolute, updated, 'utf8');
-    const commit = await services.git.commit(`spec(${slug}): approve`);
+    const commit = await services.git.commit(`plan(${slug}): approve`);
     return {
       ok: true,
       data: { slug, branch, base_commit: baseCommit, approved_rev: hash, commit },
@@ -647,16 +644,16 @@ async function freshApprove(
 
 /**
  * A re-approval: recompute the Approval_Hash into `approved_rev` and commit the
- * metadata change, leaving every todo state and the branch unchanged (Req 5.5).
+ * metadata change, leaving every phase state and the branch unchanged (Req 5.5).
  */
 async function reapprove(
   services: ToolServices,
   absolute: string,
   content: string,
-  spec: ReturnType<typeof parsePlan>,
+  plan: ReturnType<typeof parsePlan>,
   slug: string,
 ): Promise<ToolResult> {
-  const hash = approvalHash(spec);
+  const hash = approvalHash(plan);
   const updated = setFrontmatterKey(content, 'approved_rev', hash);
   if (updated === content) {
     // The hash was already current; nothing to write or commit.
@@ -664,7 +661,7 @@ async function reapprove(
   }
   try {
     await fs.writeFile(absolute, updated, 'utf8');
-    const commit = await services.git.commit(`spec(${slug}): ${slug} re-approve`);
+    const commit = await services.git.commit(`plan(${slug}): ${slug} re-approve`);
     return { ok: true, data: { slug, approved_rev: hash, commit } };
   } catch (e) {
     return { ok: false, error: `re-approval halted while committing: ${gitErrorMessage(e)}` };
@@ -672,16 +669,16 @@ async function reapprove(
 }
 
 /**
- * `run(slug, todo, stage)` — dispatch one legal stage transition through the
+ * `run(slug, phase, stage)` — dispatch one legal stage transition through the
  * run-queue seam and resolve with its terminal outcome. Not a file mutation,
  * but a dispatch, so the guard disables it under Restricted Mode (Req 22.2).
- * Before dispatching any stage it validates the spec and refuses every stage
- * while the spec is invalid, surfacing the current validation errors until the
- * spec parses without error (Req 4.9). Refuses when a stage is already running for that todo
+ * Before dispatching any stage it validates the plan and refuses every stage
+ * while the plan is invalid, surfacing the current validation errors until the
+ * plan parses without error (Req 4.9). Refuses when a stage is already running for that phase
  * (Req 10.4) or the transition is illegal (Req 10.5).
  *
  * The stage enum is exactly `plan | execute | review` (Req 11.1). `plan-review`
- * runs inside the Plan action's own review rounds and `pr` is spec-scoped
+ * runs inside the Plan action's own review rounds and `pr` is plan-scoped
  * (`submit_pr` runs it), so neither is a value this tool accepts: both are
  * rejected here with a message naming the three legal stages, before the queue
  * seam is reached.
@@ -690,7 +687,7 @@ function runTool(services: ToolServices): Tool {
   return {
     name: 'run',
     description:
-      'Dispatch one stage for one todo (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
+      'Dispatch one stage for one phase (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
     mutating: false,
     phases: ['drive'],
     subagent: true,
@@ -700,26 +697,26 @@ function runTool(services: ToolServices): Tool {
       type: 'object',
       properties: {
         slug: { type: 'string' },
-        todo: { type: 'string' },
+        phase: { type: 'string' },
         stage: {
           type: 'string',
           enum: ['plan', 'execute', 'review'],
         },
       },
-      required: ['slug', 'todo', 'stage'],
+      required: ['slug', 'phase', 'stage'],
       additionalProperties: false,
     },
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
-      const todo = readString(args, 'todo');
+      const phase = readString(args, 'phase');
       const stage = readString(args, 'stage');
-      if (slug === undefined || todo === undefined || stage === undefined) {
-        return { ok: false, error: 'run requires a string "slug", "todo", and "stage"' };
+      if (slug === undefined || phase === undefined || stage === undefined) {
+        return { ok: false, error: 'run requires a string "slug", "phase", and "stage"' };
       }
       if (!isRunnableStage(stage)) {
         // `plan-review` runs inside the Plan action's review rounds and is not
-        // a standalone trigger; `pr` is per spec, not per todo (`submit_pr`
-        // runs it); `plan-draft` belongs to `draft_spec`. None of them reach
+        // a standalone trigger; `pr` is per plan, not per phase (`submit_pr`
+        // runs it); `plan-draft` belongs to `draft_plan`. None of them reach
         // the queue from here.
         return {
           ok: false,
@@ -732,13 +729,13 @@ function runTool(services: ToolServices): Tool {
         return { ok: false, error: `invalid slug: ${slug}` };
       }
 
-      // Req 4.9: while the spec is invalid, refuse to start any stage and
-      // surface the current validation errors. The spec is re-read and
-      // re-validated on every dispatch so the refusal lifts only once the spec
-      // parses without error. A spec that cannot be read is treated as a
+      // Req 4.9: while the plan is invalid, refuse to start any stage and
+      // surface the current validation errors. The plan is re-read and
+      // re-validated on every dispatch so the refusal lifts only once the plan
+      // parses without error. A plan that cannot be read is treated as a
       // not-found refusal rather than a dispatch.
-      const specFile = specPath(services, slug);
-      const resolved = await tc.ctx.resolveReadPath(specFile);
+      const location = documentFor(services, slug);
+      const resolved = await tc.ctx.resolveReadPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -746,9 +743,9 @@ function runTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `spec "${slug}" was not found` };
+        return { ok: false, error: `plan "${slug}" was not found` };
       }
-      const errors = validatePlan(parsePlan(content), content);
+      const errors = validatePlan(parsePlan(content, location.kind), content);
       if (errors.length > 0) {
         const detail = errors
           .map((e) => `line ${e.line}: ${e.reason}`)
@@ -756,22 +753,22 @@ function runTool(services: ToolServices): Tool {
         return {
           ok: false,
           error:
-            `spec "${slug}" is invalid; no stage can run until it is fixed. ` +
+            `plan "${slug}" is invalid; no stage can run until it is fixed. ` +
             `Validation errors: ${detail}`,
         };
       }
 
-      const outcome = await services.runQueue.dispatch({ slug, phaseId: todo, stage });
+      const outcome = await services.runQueue.dispatch({ slug, phaseId: phase, stage });
       switch (outcome.kind) {
         case 'dispatched':
-          return { ok: true, data: { slug, todo, stage, runId: outcome.runId } };
+          return { ok: true, data: { slug, phase, stage, runId: outcome.runId } };
         case 'busy':
           return {
             ok: false,
-            error: `a stage is already running for todo "${todo}" of spec "${slug}"; wait for it to finish before dispatching another stage for this todo (other todos can run meanwhile)`,
+            error: `a stage is already running for phase "${phase}" of plan "${slug}"; wait for it to finish before dispatching another stage for this phase (other phases can run meanwhile)`,
           };
         case 'illegal':
-          return { ok: false, error: `stage "${stage}" is not allowed for todo "${todo}": ${outcome.reason}` };
+          return { ok: false, error: `stage "${stage}" is not allowed for phase "${phase}": ${outcome.reason}` };
         default:
           return { ok: false, error: 'run dispatch returned an unknown outcome' };
       }
@@ -780,41 +777,33 @@ function runTool(services: ToolServices): Tool {
 }
 
 /**
- * Set a managed frontmatter key, inserting it into the `---` block when the key
- * is absent so approval can record keys a user-authored spec omitted. When the
- * key already exists, {@link writeFrontmatterKey} rewrites only its value; the
- * returned content is byte-identical when the value was already current.
+ * `land_phase(slug, phase)` — merge a done phase's branch into the plan branch
+ * and remove its worktree. Refuses any phase that is not `done` before the seam.
  */
-/**
- * `land_todo(slug, todo)` — merge a done todo's branch into the spec branch and
- * remove its worktree. Refuses any todo that is not `done` before the seam.
- */
-function landTodoTool(services: ToolServices): Tool {
+function landPhaseTool(services: ToolServices): Tool {
   return {
-    name: 'land_todo',
+    name: 'land_phase',
     description:
-      'Land a done todo: merge its branch into the spec branch and remove its worktree. Returns the merge commit, or reports that the todo is already landed.',
+      'Land a done phase: merge its branch into the plan branch and remove its worktree. Returns the merge commit, or reports that the phase is already landed.',
     mutating: true,
     phases: ['drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' }, todo: { type: 'string' } },
-      required: ['slug', 'todo'],
+      properties: { slug: { type: 'string' }, phase: { type: 'string' } },
+      required: ['slug', 'phase'],
       additionalProperties: false,
     },
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
-      const todo = readString(args, 'todo');
-      if (slug === undefined || todo === undefined) {
-        return { ok: false, error: 'land_todo requires a string "slug" and "todo"' };
+      const phase = readString(args, 'phase');
+      if (slug === undefined || phase === undefined) {
+        return { ok: false, error: 'land_phase requires a string "slug" and "phase"' };
       }
       if (!isSlug(slug)) {
         return { ok: false, error: `invalid slug: ${slug}` };
       }
-      if (!isSlug(todo)) {
-        return { ok: false, error: `invalid todo id: ${todo}` };
-      }
-      const resolved = await tc.ctx.resolveMutatingPath(specPath(services, slug));
+      const location = documentFor(services, slug);
+      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -822,29 +811,32 @@ function landTodoTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `spec "${slug}" was not found` };
+        return { ok: false, error: `plan "${slug}" was not found` };
       }
-      const entry = parsePlan(content).phases.find((t) => t.id === todo);
+      if (!phaseIdPattern(location.kind).test(phase)) {
+        return { ok: false, error: `invalid phase id: ${phase}` };
+      }
+      const entry = parsePlan(content, location.kind).phases.find((item) => item.id === phase);
       if (entry === undefined) {
-        return { ok: false, error: `todo "${todo}" was not found in spec "${slug}"` };
+        return { ok: false, error: `phase "${phase}" was not found in plan "${slug}"` };
       }
       if (entry.state !== 'done') {
         return {
           ok: false,
-          error: `todo "${todo}" is ${entry.state}; only a done todo can be landed. Run its remaining stages first.`,
+          error: `phase "${phase}" is ${entry.state}; only a done phase can be landed. Run its remaining stages first.`,
         };
       }
-      if (services.landTodo === undefined) {
-        return { ok: false, error: 'land_todo is not available in this host' };
+      if (services.landPhase === undefined) {
+        return { ok: false, error: 'land_phase is not available in this host' };
       }
-      const outcome = await services.landTodo.land({ slug, todoId: todo });
+      const outcome = await services.landPhase.land({ slug, phaseId: phase });
       switch (outcome.kind) {
         case 'landed':
           return {
             ok: true,
             data: {
               slug,
-              todo,
+              phase,
               landed: true,
               commit: outcome.commit,
               ...(outcome.noop ? { noop: true } : {}),
@@ -852,18 +844,18 @@ function landTodoTool(services: ToolServices): Tool {
             },
           };
         case 'already-landed':
-          return { ok: true, data: { slug, todo, landed: false, message: 'already landed' } };
+          return { ok: true, data: { slug, phase, landed: false, message: 'already landed' } };
         case 'refused':
-          return { ok: false, error: `landing todo "${todo}" of spec "${slug}" was refused: ${outcome.reason}` };
+          return { ok: false, error: `landing phase "${phase}" of plan "${slug}" was refused: ${outcome.reason}` };
         default:
-          return { ok: false, error: 'land_todo returned an unknown outcome' };
+          return { ok: false, error: 'land_phase returned an unknown outcome' };
       }
     },
   };
 }
 
 /**
- * `submit_pr(slug)` — run Verify then the PR stage (design section 8). Like
+ * `submit_pr(slug)` — run Verify then the PR stage for a plan (design section 8). Like
  * approval it confirms in the UI first: the flow pushes a branch and opens a
  * pull request, which are outward-facing.
  */
@@ -871,7 +863,7 @@ function submitPrTool(services: ToolServices): Tool {
   return {
     name: 'submit_pr',
     description:
-      'Submit the pull request for a spec whose todos are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
+      'Submit the pull request for a plan whose phases are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
     mutating: true,
     phases: ['drive'],
     schema: {
@@ -888,7 +880,8 @@ function submitPrTool(services: ToolServices): Tool {
       if (!isSlug(slug)) {
         return { ok: false, error: `invalid slug: ${slug}` };
       }
-      const resolved = await tc.ctx.resolveMutatingPath(specPath(services, slug));
+      const location = documentFor(services, slug);
+      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -896,10 +889,10 @@ function submitPrTool(services: ToolServices): Tool {
         return { ok: false, error: 'submit_pr is not available in this host' };
       }
       const confirmed = await services.confirm.confirm(
-        `Submit a pull request for spec "${slug}"? This pushes its branch and opens the PR.`,
+        `Submit a pull request for plan "${slug}"? This pushes its branch and opens the PR.`,
       );
       if (!confirmed) {
-        return { ok: false, error: `submitting the PR for spec "${slug}" was declined; nothing was pushed` };
+        return { ok: false, error: `submitting the PR for plan "${slug}" was declined; nothing was pushed` };
       }
       const outcome = await services.submitPr(slug);
       if (!outcome.ok) {
@@ -910,18 +903,18 @@ function submitPrTool(services: ToolServices): Tool {
   };
 }
 
-function specPath(services: ToolServices, slug: string): string {
-  return path.join(services.baitonDir, 'specs', slug, 'spec.md');
+function documentFor(services: ToolServices, slug: string): DocumentLocation {
+  return resolveDocument(services.baitonDir, slug);
 }
 
 /**
- * The three todo-scoped stages the `run` tool dispatches (Req 11.1). Every
+ * The three phase-scoped stages the `run` tool dispatches (Req 11.1). Every
  * other {@link Stage} — `plan-review`, `pr`, `plan-draft` — is owned by some
  * other trigger, so `run` rejects it before the queue seam.
  */
 const RUNNABLE_STAGES: readonly Stage[] = ['plan', 'execute', 'review'] as const;
 
-/** Whether `value` is a stage the `run` tool may dispatch. */
+/** Whether `value` is one of the phase-scoped stages the `run` tool may dispatch. */
 function isRunnableStage(value: string): value is Stage {
   return isStage(value) && RUNNABLE_STAGES.includes(value);
 }
@@ -1019,7 +1012,7 @@ function sendToSubAgentTool(services: ToolServices): Tool {
   };
 }
 
-/** A slug/todo id is a simple directory-safe name (no separators/traversal). */
+/** A slug or phase id is a simple directory-safe name (no separators/traversal). */
 function isSlug(slug: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(slug) && slug !== '.' && slug !== '..';
 }

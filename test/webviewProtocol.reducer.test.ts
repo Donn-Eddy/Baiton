@@ -260,7 +260,7 @@ describe('toRenderRecords', () => {
 
   it('emits no text bubble for an assistant record that is only tool calls', () => {
     const records: ConversationRecord[] = [
-      { role: 'assistant', content: '   ', tool_calls: [call('c1', 'list_specs', '{}')] },
+      { role: 'assistant', content: '   ', tool_calls: [call('c1', 'list_plans', '{}')] },
       { role: 'tool', content: 'ok', tool_call_id: 'c1' },
     ];
     const out = toRenderRecords(records);
@@ -398,7 +398,7 @@ describe('toRenderRecords', () => {
 
   it('still projects a tool row after an intervention record', () => {
     const records: ConversationRecord[] = [
-      { role: 'assistant', content: '', tool_calls: [call('c1', 'approve_spec', '{}')] },
+      { role: 'assistant', content: '', tool_calls: [call('c1', 'approve_plan', '{}')] },
       { role: 'system', content: 'Approve?', intervention: { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'resolved', answer: { kind: 'approved' } } },
       { role: 'tool', content: 'ok', tool_call_id: 'c1' },
     ];

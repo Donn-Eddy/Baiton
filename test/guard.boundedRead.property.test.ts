@@ -51,7 +51,7 @@ function isValidUtf8(s: string): boolean {
 function makeContext(): GuardContext {
   return new GuardContext({
     repoRoot: '/repo',
-    specsDir: '/repo/.baiton/specs',
+    baitonDir: '/repo/.baiton',
     restricted: false,
   });
 }

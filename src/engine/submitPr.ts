@@ -316,7 +316,7 @@ async function checkReady(
     if (unlanded.length > 0) {
       return fail({
         kind: 'not-ready',
-        message: `every phase must be landed before submitting a PR; still unlanded: ${unlanded.join(', ')}. Land each phase with land_todo, then try again.`,
+        message: `every phase must be landed before submitting a PR; still unlanded: ${unlanded.join(', ')}. Land each phase with land_phase, then try again.`,
       });
     }
   }

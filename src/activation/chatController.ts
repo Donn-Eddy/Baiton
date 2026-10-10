@@ -536,7 +536,7 @@ export class ChatController {
       tools: () => deps.registry as unknown as SubAgentToolSurface,
       guardContext: () => deps.guardContext(),
       roundBound: () => deps.roundBound(),
-      readSpec: (slug) => this.readSpec(slug),
+      readPlan: (slug) => this.readSpec(slug),
       asks: this.asks,
       onEvent: (e) => void this.onSubAgentEvent(e),
       log: (m) => deps.log(`Baiton chat: ${m}`),

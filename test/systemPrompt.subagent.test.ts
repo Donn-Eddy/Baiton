@@ -49,7 +49,7 @@ describe('buildSubAgentPrompt', () => {
       assert.ok(!prompt.includes(DRIVE_TEXT));
       assert.ok(!prompt.includes(SCOPE_TEXT));
       assert.ok(!prompt.includes('`submit_pr`'));
-      assert.ok(!prompt.includes('`draft_spec`'));
+      assert.ok(!prompt.includes('`draft_plan`'));
       assert.ok(!prompt.includes('offer to `submit_pr`'));
     }
   });

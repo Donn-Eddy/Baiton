@@ -323,14 +323,14 @@ class DefaultRunPipeline implements RunPipeline {
     if (req.mode === 'plan' || !isPlanless(req.mode)) {
       return refuse({
         kind: 'invalid-mode',
-        message: 'mode "plan" has no run pipeline: a plan conversation dispatches draft_spec',
+        message: 'mode "plan" has no run pipeline: a plan conversation dispatches draft_plan',
       });
     }
     if (req.mode === 'default') {
       return refuse({
         kind: 'invalid-mode',
         message:
-          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a plan conversation dispatches draft_spec',
+          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a plan conversation dispatches draft_plan',
       });
     }
 

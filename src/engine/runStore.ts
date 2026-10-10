@@ -565,7 +565,7 @@ export class RunStore {
         kind: 'invalid-id',
         runId: input.id,
         message:
-          'mode "plan" has no run manifest: a plan conversation dispatches draft_spec, not a run.',
+          'mode "plan" has no run manifest: a plan conversation dispatches draft_plan, not a run.',
       });
     }
     if (input.mode === 'default') {
@@ -573,7 +573,7 @@ export class RunStore {
         kind: 'invalid-id',
         runId: input.id,
         message:
-          'mode "default" has no run manifest: Default dispatches the picked mode (start_run or investigate), and a plan conversation dispatches draft_spec, not a run.',
+          'mode "default" has no run manifest: Default dispatches the picked mode (start_run or investigate), and a plan conversation dispatches draft_plan, not a run.',
       });
     }
     if (this.exists(input.id)) {

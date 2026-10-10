@@ -171,7 +171,7 @@ describe('mode-scoped system prompt: run prompt content', () => {
 
     it(`omits every spec-only section from the ${mode} run prompt`, () => {
       const prompt = buildSystemPrompt(WORKSPACE, undefined, mode);
-      assert.ok(!/draft_spec/.test(prompt), 'no spec flow');
+      assert.ok(!/draft_plan/.test(prompt), 'no spec flow');
       assert.ok(!/submit_pr/.test(prompt), 'no drive stage table');
       assert.ok(!/Phase line grammar/.test(prompt), 'no todo grammar');
       assert.ok(!/Spec frontmatter rules/.test(prompt), 'no frontmatter rules');
@@ -286,7 +286,7 @@ describe('mode-scoped system prompt: Default recommends and confirms', () => {
   });
 
   it('never mentions spec-writing tools', () => {
-    assert.ok(!/draft_spec/.test(flow), 'no draft_spec');
+    assert.ok(!/draft_plan/.test(flow), 'no draft_plan');
   });
 });
 

@@ -15,9 +15,9 @@
  * (Req 11.1):
  *
  * - **gather** — a Workspace conversation, or a spec still in `draft`: the
- *   ask-then-agree-then-`draft_spec` flow (Req 11.2).
+ *   ask-then-agree-then-`draft_plan` flow (Req 11.2).
  * - **drive** — a spec whose `status` has moved past `draft`: the
- *   next-legal-step table (plan, execute, review, land_todo), one todo at a time,
+ *   next-legal-step table (plan, execute, review, land_phase), one todo at a time,
  *   and `submit_pr` when every todo is done and landed.
  * - **run** — a non-Plan Workspace conversation (Default/Bug/Quick/Refactor/
  *   Investigate): inspect with the read tools, state the work and the guessed
@@ -149,8 +149,8 @@ export const PROHIBITION_LINES: readonly string[] = [
  */
 export const SCOPE_TEXT = [
   'You have exactly two jobs.',
-  '1. Help the user create a spec. Ask clarifying questions until you and the user agree on what the work is, then hand the agreed requirements to the spec writer with `draft_spec`.',
-  '2. Drive an approved spec to completion. Dispatch each stage with `run`, land each done todo with `land_todo`, and when every todo is done and landed finish with `submit_pr`.',
+  '1. Help the user create a spec. Ask clarifying questions until you and the user agree on what the work is, then hand the agreed requirements to the spec writer with `draft_plan`.',
+  '2. Drive an approved spec to completion. Dispatch each stage with `run`, land each done todo with `land_phase`, and when every todo is done and landed finish with `submit_pr`.',
   'That is the whole job. Everything else belongs to someone else:',
   ...PROHIBITION_LINES,
 ].join('\n');
@@ -186,7 +186,7 @@ export const ASK_USER_TEXT = [
 /**
  * The drive-phase text: the next legal stage for each todo state, that `run`
  * blocks until its stage finishes, that only one todo is driven at a time, and
- * that a done todo is landed with `land_todo`, and what to offer once every
+ * that a done todo is landed with `land_phase`, and what to offer once every
  * todo is done and landed (Req 11.1).
  */
 export const DRIVE_TEXT = [
@@ -196,7 +196,7 @@ export const DRIVE_TEXT = [
   '- `planned` -> `run` the `execute` stage.',
   '- `executed` -> `run` the `review` stage.',
   '- A review that sends the todo back -> `run` the `execute` stage again.',
-  '- `done` (unlanded) -> `land_todo` it, which merges its branch into the spec branch.',
+  '- `done` (unlanded) -> `land_phase` it, which merges its branch into the spec branch.',
   'A todo can be planned only once every todo it comes `after` is done and landed.',
   '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the spec file already reflects it.',
   'Drive one todo at a time. Take the next todo only when the one before it is `done`; land a done todo whenever you choose, but before any todo that comes `after` it is planned.',
@@ -310,7 +310,7 @@ export const MODE_PROPOSAL_TEXT = [
 
 /**
  * The new-spec flow: gather requirements, get agreement, then hand them to the
- * plan-writer harness through `draft_spec`. The orchestrator never proposes the
+ * plan-writer harness through `draft_plan`. The orchestrator never proposes the
  * todos itself — a configured sub-agent studies the repository and drafts them.
  */
 const FLOW_TEXT = [
@@ -318,10 +318,10 @@ const FLOW_TEXT = [
   '1. When the user describes work, inspect the repository with the read tools and ask clarifying questions until you understand what is wanted.',
   '2. Write a short requirements document covering the goal, the constraints, the acceptance criteria, and the files of interest.',
   '3. Get the user to agree to that document. Revise it until they do.',
-  '4. Once they agree, call `draft_spec` with a slug and the agreed requirements document.',
+  '4. Once they agree, call `draft_plan` with a slug and the agreed request.',
   '5. Then tell the user the draft is being written by the configured harness, and that they can watch it in the plan-writer terminal and see the spec appear in the Spec Explorer once it lands.',
-  'You never propose the todo list yourself. `draft_spec` hands the requirements to the plan-writer agent, which studies the repository and drafts the OVERVIEW and todos.',
-  'After a draft lands you may refine it with `update_overview`, `add_todo`, `edit_todo` and `remove_todo`.',
+  'You never propose the todo list yourself. `draft_plan` hands the requirements to the plan-writer agent, which studies the repository and drafts the OVERVIEW and todos.',
+  'After a draft lands you may refine it with `update_overview`, `add_phase`, `edit_phase` and `remove_phase`.',
 ].join('\n');
 
 /**
@@ -379,8 +379,8 @@ export function buildSystemPrompt(
   // control flow narrows `mode` to `PlanlessMode` with no cast. The run prompt
   // deliberately omits TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT and the
   // `Current spec file content:` block: a run-phase conversation has no
-  // spec-writing tool at all (`controlTools.ts` keeps `draft_spec`, `add_todo`,
-  // `edit_todo`, `remove_todo`, `update_overview`, `approve_spec`, `run` and
+  // spec-writing tool at all (`controlTools.ts` keeps `draft_plan`, `add_phase`,
+  // `edit_phase`, `remove_phase`, `update_overview`, `approve_plan`, `run` and
   // `submit_pr` off the `run` phase), so spec grammar would describe files it
   // cannot touch.
   if (kind.kind === 'workspace' && mode !== 'plan') {
@@ -425,7 +425,7 @@ export const SUBAGENT_DRIVE_TEXT = [
   '- `planned` -> `run` the `execute` stage.',
   '- `executed` -> `run` the `review` stage.',
   '- A review that sends the todo back -> `run` the `execute` stage again.',
-  "- `done` -> stop and report; landing it with `land_todo` is your parent's job.",
+  "- `done` -> stop and report; landing it with `land_phase` is your parent's job.",
   '`run` blocks until the stage finishes and returns its outcome; there is nothing to poll afterwards.',
 ].join('\n');
 

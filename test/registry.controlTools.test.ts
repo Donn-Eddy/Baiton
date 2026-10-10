@@ -16,10 +16,10 @@ import type { DispatchResult, RunQueue, RunRequest } from '../src/engine';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import {
-  DraftSpecOutcome,
-  DraftSpecRequest,
-  LandTodoOutcome,
-  LandTodoRequest,
+  DraftPlanOutcome,
+  DraftPlanRequest,
+  LandPhaseOutcome,
+  LandPhaseRequest,
   RunDispatchOutcome,
   MAX_SUBAGENT_DEPTH,
   RunDispatchRequest,
@@ -43,7 +43,7 @@ import type {
  * Covers:
  *  - Tool presence: the registry advertises every read, spec-writing and
  *    control tool the design names (Req 9.1, 9.5, 9.6).
- *  - `approve_spec` confirmation and decline: the tool asks the confirm seam
+ *  - `approve_plan` confirmation and decline: the tool asks the confirm seam
  *    first (Req 10.1) and, on a decline, leaves the spec byte-for-byte
  *    unchanged and returns an error while touching no git (Req 10.2).
  *  - Phase scoping: each tool is advertised in exactly the orchestrator phases
@@ -64,27 +64,27 @@ import type {
 /** The complete tool surface the registry must advertise (Req 9.1, 9.5, 9.6, 10.1, 10.6). */
 const EXPECTED_TOOLS = [
   // Read tools (Req 9.1)
-  'list_specs',
-  'read_spec',
+  'list_plans',
+  'read_plan',
   'list_files',
   'read_file',
   'search',
   'git_status',
   'git_diff',
   'git_log',
-  // Spec-writing tools (Req 9.6)
+  // Plan-writing tools (Req 9.6)
   'update_overview',
-  'add_todo',
-  'edit_todo',
-  'remove_todo',
+  'add_phase',
+  'edit_phase',
+  'remove_phase',
   // Control tools (Req 10.1, 10.3)
   'ask_user',
-  'draft_spec',
+  'draft_plan',
   'start_run',
   'investigate',
-  'approve_spec',
+  'approve_plan',
   'run',
-  'land_todo',
+  'land_phase',
   'submit_pr',
   'spawn_subagent',
   'send_to_subagent',
@@ -116,15 +116,15 @@ function throwingGit(): GitService {
 }
 
 /** A benign git stub (used where a control tool is not expected to reach git). */
-function benignGit(): GitService {
+function benignGit(commits: string[] = [], branches: string[] = []): GitService {
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
     isCleanExceptSpecFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async () => undefined,
+    createSpecBranch: async (branch: string) => { branches.push(branch); },
     checkout: async () => undefined,
-    commit: async () => 'a'.repeat(40),
+    commit: async (message: string) => { commits.push(message); return 'a'.repeat(40); },
     head: async () => 'a'.repeat(40),
     currentBranch: async () => 'main',
     diff: async () => '',
@@ -178,12 +178,12 @@ const noRunQueue = {
 
 /** A plan-draft seam that records the requests it received. */
 function recordingDraft(
-  outcome: DraftSpecOutcome = { kind: 'started', runId: 'draft-1' },
-): { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome>; calls: DraftSpecRequest[] } {
-  const calls: DraftSpecRequest[] = [];
+  outcome: DraftPlanOutcome = { kind: 'started', runId: 'draft-1' },
+): { draft: (req: DraftPlanRequest) => Promise<DraftPlanOutcome>; calls: DraftPlanRequest[] } {
+  const calls: DraftPlanRequest[] = [];
   return {
     calls,
-    draft: async (req: DraftSpecRequest): Promise<DraftSpecOutcome> => {
+    draft: async (req: DraftPlanRequest): Promise<DraftPlanOutcome> => {
       calls.push(req);
       return outcome;
     },
@@ -243,7 +243,7 @@ function makeServices(
   repoRoot: string,
   git: GitService,
   confirm: { confirm: (message: string) => Promise<boolean> },
-  draftSpec?: { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome> },
+  draftPlan?: { draft: (req: DraftPlanRequest) => Promise<DraftPlanOutcome> },
   runQueue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> } = noRunQueue,
   intervention?: InterventionSeam,
   runPipeline?: { start: (req: StartRunRequest) => Promise<StartRunOutcome> },
@@ -258,7 +258,7 @@ function makeServices(
     submitPr: async (): Promise<never> => {
       throw new Error('submit_pr must not reach the PR flow on this path');
     },
-    ...(draftSpec !== undefined ? { draftSpec } : {}),
+    ...(draftPlan !== undefined ? { draftPlan } : {}),
     ...(intervention !== undefined ? { intervention } : {}),
     ...(runPipeline !== undefined ? { runPipeline } : {}),
     ...(subAgents !== undefined ? { subAgents } : {}),
@@ -272,7 +272,7 @@ function makeServices(
 function makeGuard(repoRoot: string): GuardContext {
   return new GuardContext({
     repoRoot,
-    specsDir: path.join(repoRoot, '.baiton', 'specs'),
+    baitonDir: path.join(repoRoot, '.baiton'),
     restricted: false,
   });
 }
@@ -281,7 +281,7 @@ function makeGuard(repoRoot: string): GuardContext {
 function makeRestrictedGuard(repoRoot: string): GuardContext {
   return new GuardContext({
     repoRoot,
-    specsDir: path.join(repoRoot, '.baiton', 'specs'),
+    baitonDir: path.join(repoRoot, '.baiton'),
     restricted: true,
   });
 }
@@ -291,8 +291,8 @@ function makeRepo(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-registry-'));
 }
 
-/** Write a spec.md for `slug` under the temp repo and return its absolute path. */
-function writeSpec(repoRoot: string, slug: string, content: string): string {
+/** Legacy: write a spec.md for `slug` under the temp repo and return its absolute path. */
+function writeLegacySpec(repoRoot: string, slug: string, content: string): string {
   const specDir = path.join(repoRoot, '.baiton', 'specs', slug);
   fs.mkdirSync(specDir, { recursive: true });
   const specFile = path.join(specDir, 'spec.md');
@@ -300,8 +300,17 @@ function writeSpec(repoRoot: string, slug: string, content: string): string {
   return specFile;
 }
 
-/** A minimal draft spec covering frontmatter + OVERVIEW + one todo. */
-function draftSpec(): string {
+/** Write a plan.md for `slug` under the temp repo and return its absolute path. */
+function writePlan(repoRoot: string, slug: string, content: string): string {
+  const planDir = path.join(repoRoot, '.baiton', 'plans', slug);
+  fs.mkdirSync(planDir, { recursive: true });
+  const planFile = path.join(planDir, 'plan.md');
+  fs.writeFileSync(planFile, content, 'utf8');
+  return planFile;
+}
+
+/** Legacy: minimal spec document with frontmatter, OVERVIEW and one T01. */
+function legacySpecDocument(): string {
   return [
     '---',
     'version: 1',
@@ -320,23 +329,51 @@ function draftSpec(): string {
   ].join('\n');
 }
 
+/** A minimal phased plan document with frontmatter, preamble headings and P01. */
+function draftPlanDoc(): string {
+  return [
+    '---',
+    'version: 1',
+    'name: sample',
+    'status: draft',
+    '---',
+    '',
+    '# Endstate',
+    '',
+    'A complete greeting module.',
+    '',
+    '# What needs changing',
+    '',
+    'Add a module.',
+    '',
+    '# Limitations & constraints',
+    '',
+    'Keep it small.',
+    '',
+    '# PHASES',
+    '',
+    '- [pending] P01 Do the first thing',
+    '',
+  ].join('\n');
+}
+
 /** A land seam that records the requests it received and answers a fixed outcome. */
-function recordingLand(outcome: LandTodoOutcome): {
-  calls: LandTodoRequest[];
-  land: (req: LandTodoRequest) => Promise<LandTodoOutcome>;
+function recordingLand(outcome: LandPhaseOutcome): {
+  calls: LandPhaseRequest[];
+  land: (req: LandPhaseRequest) => Promise<LandPhaseOutcome>;
 } {
-  const calls: LandTodoRequest[] = [];
+  const calls: LandPhaseRequest[] = [];
   return {
     calls,
-    land: async (req: LandTodoRequest): Promise<LandTodoOutcome> => {
+    land: async (req: LandPhaseRequest): Promise<LandPhaseOutcome> => {
       calls.push(req);
       return outcome;
     },
   };
 }
 
-/** An approved spec with one todo in `state`. */
-function approvedSpec(state: string): string {
+/** Legacy: approved spec document with one T01 phase in `state`. */
+function approvedLegacySpec(state: string): string {
   return [
     '---',
     'version: 1',
@@ -425,10 +462,35 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
   });
 
-  describe('draft_spec', () => {
+  describe('plan document read tools', () => {
+    it('lists both document roots once and prefers plans when a slug exists in both', async () => {
+      const repo = newRepo();
+      writePlan(repo, 'both', draftPlanDoc());
+      writeLegacySpec(repo, 'both', legacySpecDocument());
+      writeLegacySpec(repo, 'legacy-only', legacySpecDocument());
+      writePlan(repo, 'plan-only', draftPlanDoc());
+      const registry = createToolRegistry(makeServices(repo, benignGit(), recordingConfirm(true)));
+
+      const listed = await registry.call('list_plans', {}, undefined, makeGuard(repo), 'gather');
+      assert.deepStrictEqual(listed, { ok: true, data: { plans: ['both', 'legacy-only', 'plan-only'] } });
+
+      const preferred = await registry.call('read_plan', { slug: 'both' }, undefined, makeGuard(repo), 'gather');
+      assert.strictEqual(preferred.ok, true);
+      if (preferred.ok) {
+        assert.strictEqual((preferred.data as { kind: string }).kind, 'plan');
+        assert.ok((preferred.data as { text: string }).text.includes('# PHASES'));
+      }
+
+      const legacy = await registry.call('read_plan', { slug: 'legacy-only' }, undefined, makeGuard(repo), 'gather');
+      assert.strictEqual(legacy.ok, true);
+      if (legacy.ok) assert.strictEqual((legacy.data as { kind: string }).kind, 'legacy-spec');
+    });
+  });
+
+  describe('draft_plan', () => {
     const REQUIREMENTS = 'Goal: add a greeting module.\nAcceptance: it is tested.';
 
-    it('confirms the requirements, then dispatches and returns the run id', async () => {
+    it('confirms the request, passes it as requirements to the runner, and returns the run id', async () => {
       const repo = newRepo();
       const confirm = recordingConfirm(true);
       const draft = recordingDraft();
@@ -437,8 +499,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: 'greeting', request: REQUIREMENTS },
         'call-draft-1',
         makeGuard(repo),
         'gather',
@@ -452,7 +514,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.ok(confirm.calls[0].includes('greeting'), 'the prompt names the slug');
       assert.ok(
         confirm.calls[0].includes('add a greeting module'),
-        'the prompt summarizes the requirements',
+        'the prompt summarizes the request',
       );
       assert.deepStrictEqual(draft.calls, [
         { slug: 'greeting', requirements: REQUIREMENTS },
@@ -468,8 +530,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: 'greeting', request: REQUIREMENTS },
         'call-draft-2',
         makeGuard(repo),
         'gather',
@@ -482,15 +544,15 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(confirm.calls.length, 1);
       assert.strictEqual(draft.calls.length, 0, 'a decline dispatches nothing');
       assert.ok(
-        !fs.existsSync(path.join(repo, '.baiton', 'specs', 'greeting')),
-        'a decline creates no spec folder',
+        !fs.existsSync(path.join(repo, '.baiton', 'plans', 'greeting')),
+        'a decline creates no plan folder',
       );
     });
 
-    it('refuses a slug that already has a spec, before confirming or dispatching', async () => {
+    it('refuses a slug that already has a legacy spec, before confirming or dispatching', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      const specFile = writeSpec(repo, slug, draftSpec());
+      const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
       const before = fs.readFileSync(specFile, 'utf8');
       const confirm = recordingConfirm(true);
       const draft = recordingDraft();
@@ -499,8 +561,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug, requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug, request: REQUIREMENTS },
         'call-draft-3',
         makeGuard(repo),
         'gather',
@@ -508,11 +570,25 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
-        assert.match(result.error, /already exists/i);
+        assert.strictEqual(result.error, 'plan "sample" already exists');
       }
       assert.strictEqual(confirm.calls.length, 0, 'a duplicate slug never prompts');
       assert.strictEqual(draft.calls.length, 0, 'a duplicate slug never dispatches');
-      assert.strictEqual(fs.readFileSync(specFile, 'utf8'), before, 'the spec is untouched');
+      assert.strictEqual(fs.readFileSync(specFile, 'utf8'), before, 'the legacy document is untouched');
+    });
+
+    it('refuses a slug that already has a plan document too', async () => {
+      const repo = newRepo();
+      writePlan(repo, 'sample', draftPlanDoc());
+      const draft = recordingDraft();
+      const confirm = recordingConfirm(true);
+      const registry = createToolRegistry(makeServices(repo, throwingGit(), confirm, draft));
+      const result = await registry.call(
+        'draft_plan', { slug: 'sample', request: REQUIREMENTS }, 'call-draft-plan-duplicate', makeGuard(repo), 'gather',
+      );
+      assert.deepStrictEqual(result, { ok: false, error: 'plan "sample" already exists' });
+      assert.strictEqual(confirm.calls.length, 0);
+      assert.strictEqual(draft.calls.length, 0);
     });
 
     it('reports a busy repository without writing anything', async () => {
@@ -522,8 +598,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: 'greeting', request: REQUIREMENTS },
         'call-draft-4',
         makeGuard(repo),
         'gather',
@@ -547,8 +623,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: 'greeting', request: REQUIREMENTS },
         'call-draft-5',
         makeGuard(repo),
         'gather',
@@ -568,15 +644,15 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const empty = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: '   ' },
+        'draft_plan',
+        { slug: 'greeting', request: '   ' },
         'call-draft-6',
         makeGuard(repo),
         'gather',
       );
       const bad = await registry.call(
-        'draft_spec',
-        { slug: '../escape', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: '../escape', request: REQUIREMENTS },
         'call-draft-7',
         makeGuard(repo),
         'gather',
@@ -594,8 +670,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: REQUIREMENTS },
+        'draft_plan',
+        { slug: 'greeting', request: REQUIREMENTS },
         'call-draft-8',
         makeGuard(repo),
         'gather',
@@ -608,11 +684,11 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
   });
 
-  describe('approve_spec confirmation and decline (Req 10.1, 10.2)', () => {
+  describe('approve_plan confirmation and decline (Req 10.1, 10.2)', () => {
     it('asks the confirm seam and, on decline, leaves the spec unchanged and returns an error', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      const specFile = writeSpec(repo, slug, draftSpec());
+      const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
       const before = fs.readFileSync(specFile, 'utf8');
 
       // Decline the confirmation; a throwing git proves no git side effects run.
@@ -622,7 +698,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'approve_spec',
+        'approve_plan',
         { slug },
         'call-approve-1',
         makeGuard(repo),
@@ -630,7 +706,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       // Req 10.1: the confirmation was requested before any change.
-      assert.strictEqual(confirm.calls.length, 1, 'approve_spec must ask to confirm');
+      assert.strictEqual(confirm.calls.length, 1, 'approve_plan must ask to confirm');
       assert.match(confirm.calls[0], new RegExp(slug), 'the prompt names the spec');
 
       // Req 10.2: declined => error result and the spec is byte-for-byte unchanged.
@@ -642,17 +718,54 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(after, before, 'a declined approval leaves the spec unchanged');
     });
 
-    it('requires an idempotency key for the mutating approve_spec call (Req 8.4)', async () => {
+    it('approves plans and legacy specs, records metadata, and uses plan commit messages', async () => {
+      const commits: string[] = [];
+      const branches: string[] = [];
+      const git = benignGit(commits, branches);
+      const confirm = recordingConfirm(true);
+      const cases = [
+        { slug: 'new-plan', file: (repo: string) => writePlan(repo, 'new-plan', draftPlanDoc()) },
+        { slug: 'legacy-plan', file: (repo: string) => writeLegacySpec(repo, 'legacy-plan', legacySpecDocument()) },
+      ];
+
+      for (const [index, item] of cases.entries()) {
+        const repo = newRepo();
+        const file = item.file(repo);
+        const registry = createToolRegistry(makeServices(repo, git, confirm));
+        const approved = await registry.call('approve_plan', { slug: item.slug }, `approve-${index}`, makeGuard(repo), 'gather');
+        assert.strictEqual(approved.ok, true);
+        const content = fs.readFileSync(file, 'utf8');
+        assert.match(content, /^status: approved$/m);
+        assert.match(content, new RegExp(`^branch: baiton/${item.slug}$`, 'm'));
+        assert.match(content, /^base: main$/m);
+        assert.match(content, new RegExp(`^base_commit: ${'0'.repeat(40)}$`, 'm'));
+        assert.match(content, /^approved_rev: .+$/m);
+      }
+
+      assert.deepStrictEqual(branches, ['baiton/new-plan', 'baiton/legacy-plan']);
+      assert.deepStrictEqual(commits, ['plan(new-plan): approve', 'plan(legacy-plan): approve']);
+
+      const repo = newRepo();
+      const slug = 'reapproved';
+      const file = writePlan(repo, slug, draftPlanDoc());
+      const registry = createToolRegistry(makeServices(repo, git, confirm));
+      assert.strictEqual((await registry.call('approve_plan', { slug }, 'approve-re', makeGuard(repo), 'gather')).ok, true);
+      fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('A complete greeting module.', 'A changed greeting module.'), 'utf8');
+      assert.strictEqual((await registry.call('approve_plan', { slug }, 'reapprove-re', makeGuard(repo), 'drive')).ok, true);
+      assert.ok(commits.includes(`plan(${slug}): ${slug} re-approve`));
+    });
+
+    it('requires an idempotency key for the mutating approve_plan call (Req 8.4)', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
 
       // No callId: the guard rejects the mutating call before confirming.
       const confirm = recordingConfirm(true);
       const registry = createToolRegistry(makeServices(repo, throwingGit(), confirm));
 
       const result = await registry.call(
-        'approve_spec',
+        'approve_plan',
         { slug },
         undefined,
         makeGuard(repo),
@@ -673,7 +786,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
      * The tool surface of each orchestrator phase. `gather` asks clarifying
      * questions and hands the agreed requirements to the spec writer; `drive`
      * dispatches stages for an approved spec. The repository read tools and
-     * `draft_spec` belong to the first, `run` and `submit_pr` to the second,
+     * `draft_plan` belong to the first, `run` and `submit_pr` to the second,
      * and the spec-write tools plus the cheap orientation reads to both. The
      * third phase, `run`, is a spec-less (Bug/Quick/Refactor/Investigate)
      * conversation: it sees the read tools, `ask_user` and the two dispatch
@@ -682,8 +795,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
      */
     const EXPECTED_PHASE_TOOLS: Record<OrchestratorPhase, string[]> = {
       gather: [
-        'list_specs',
-        'read_spec',
+        'list_plans',
+        'read_plan',
         'list_files',
         'read_file',
         'search',
@@ -691,34 +804,34 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         'git_diff',
         'git_log',
         'update_overview',
-        'add_todo',
-        'edit_todo',
-        'remove_todo',
+        'add_phase',
+        'edit_phase',
+        'remove_phase',
         'ask_user',
-        'draft_spec',
-        'approve_spec',
+        'draft_plan',
+        'approve_plan',
         'spawn_subagent',
         'send_to_subagent',
       ],
       drive: [
-        'list_specs',
-        'read_spec',
+        'list_plans',
+        'read_plan',
         'git_status',
         'update_overview',
-        'add_todo',
-        'edit_todo',
-        'remove_todo',
+        'add_phase',
+        'edit_phase',
+        'remove_phase',
         'ask_user',
-        'approve_spec',
+        'approve_plan',
         'run',
-        'land_todo',
+        'land_phase',
         'submit_pr',
         'spawn_subagent',
         'send_to_subagent',
       ],
       run: [
-        'list_specs',
-        'read_spec',
+        'list_plans',
+        'read_plan',
         'list_files',
         'read_file',
         'search',
@@ -765,7 +878,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('refuses a drive-only tool while gathering, before it can write anything', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      const specFile = writeSpec(repo, slug, draftSpec());
+      const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
       const before = fs.readFileSync(specFile, 'utf8');
 
       // `submit_pr` is mutating and drive-only: a throwing git and a throwing
@@ -803,8 +916,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const result = await registry.call(
-        'draft_spec',
-        { slug: 'greeting', requirements: 'Goal: add a greeting module.' },
+        'draft_plan',
+        { slug: 'greeting', request: 'Goal: add a greeting module.' },
         'call-phase-2',
         makeGuard(repo),
         'drive',
@@ -812,7 +925,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
-        assert.match(result.error, /draft_spec/);
+        assert.match(result.error, /draft_plan/);
         assert.match(result.error, /drive/);
       }
       assert.strictEqual(draft.calls.length, 0, 'the spec writer was never dispatched');
@@ -844,22 +957,22 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('runs the same tool when it is called in a phase it belongs to', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
 
-      // `read_spec` is in both phases: the refusals above are about the phase,
+      // `read_plan` is in both phases: the refusals above are about the phase,
       // not a blanket block.
       for (const phase of ORCHESTRATOR_PHASES) {
         const result = await registry.call(
-          'read_spec',
+          'read_plan',
           { slug },
           undefined,
           makeGuard(repo),
           phase,
         );
-        assert.strictEqual(result.ok, true, `read_spec runs while ${phase}`);
+        assert.strictEqual(result.ok, true, `read_plan runs while ${phase}`);
       }
     });
 
@@ -892,7 +1005,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('refuses every spec tool while in the run phase, changing nothing', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      const specFile = writeSpec(repo, slug, draftSpec());
+      const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
       const before = fs.readFileSync(specFile, 'utf8');
       const queue = {
         calls: [] as RunDispatchRequest[],
@@ -908,12 +1021,12 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       const calls: [string, unknown][] = [
-        ['run', { slug, todo: 'T01', stage: 'plan' }],
-        ['draft_spec', { slug: 'other', requirements: 'Goal: something.' }],
-        ['land_todo', { slug, todo: 'T01' }],
+        ['run', { slug, phase: 'T01', stage: 'plan' }],
+        ['draft_plan', { slug: 'other', request: 'Goal: something.' }],
+        ['land_phase', { slug, phase: 'T01' }],
         ['submit_pr', { slug }],
-        ['approve_spec', { slug }],
-        ['add_todo', { slug, text: 'T02 Another thing' }],
+        ['approve_plan', { slug }],
+        ['add_phase', { slug, text: 'T02 Another thing' }],
       ];
       for (const [name, args] of calls) {
         const result = await registry.call(name, args, `call-run-phase-${name}`, makeGuard(repo), 'run');
@@ -1313,7 +1426,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('rejects plan-review itself, never reaching the run queue', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
       const queue = spyingQueue();
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
@@ -1321,7 +1434,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       const result = await registry.call(
         'run',
-        { slug, todo: 'T01', stage: 'plan-review' },
+        { slug, phase: 'T01', stage: 'plan-review' },
         undefined,
         makeGuard(repo),
         'drive',
@@ -1342,7 +1455,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('rejects the spec-scoped pr stage and points at submit_pr', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
       const queue = spyingQueue();
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
@@ -1350,7 +1463,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       const result = await registry.call(
         'run',
-        { slug, todo: 'T01', stage: 'pr' },
+        { slug, phase: 'T01', stage: 'pr' },
         undefined,
         makeGuard(repo),
         'drive',
@@ -1383,7 +1496,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('dispatches a legal stage through to the queue (positive control)', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
       const queue = spyingQueue();
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
@@ -1391,7 +1504,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       const result = await registry.call(
         'run',
-        { slug, todo: 'T01', stage: 'plan' },
+        { slug, phase: 'T01', stage: 'plan' },
         undefined,
         makeGuard(repo),
         'drive',
@@ -1399,6 +1512,21 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       assert.strictEqual(result.ok, true, 'a legal stage still dispatches');
       assert.deepStrictEqual(queue.calls, [{ slug, phaseId: 'T01', stage: 'plan' }]);
+    });
+
+    it('validates a plan document and dispatches its P01 phase id', async () => {
+      const repo = newRepo();
+      const slug = 'phased';
+      writePlan(repo, slug, draftPlanDoc());
+      const queue = spyingQueue();
+      const registry = createToolRegistry(
+        makeServices(repo, benignGit(), recordingConfirm(true), undefined, queue),
+      );
+      const result = await registry.call(
+        'run', { slug, phase: 'P01', stage: 'plan' }, undefined, makeGuard(repo), 'drive',
+      );
+      assert.strictEqual(result.ok, true);
+      assert.deepStrictEqual(queue.calls, [{ slug, phaseId: 'P01', stage: 'plan' }]);
     });
   });
 
@@ -1662,7 +1790,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
   });
 
-  describe('run over per-todo queues', () => {
+  describe('run over per-phase queues', () => {
     interface FakeQueue extends RunQueue {
       requests: RunRequest[];
       running: boolean;
@@ -1685,10 +1813,10 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     }
     const dispatched: DispatchResult = { ok: true, outcome: { kind: 'planned' } } as unknown as DispatchResult;
 
-    it('names the todo when the seam answers busy', async () => {
+    it('names the phase when the seam answers busy', async () => {
       const repo = newRepo();
       const slug = 'sample';
-      writeSpec(repo, slug, draftSpec());
+      writeLegacySpec(repo, slug, legacySpecDocument());
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true), undefined, {
           dispatch: async () => ({ kind: 'busy' }),
@@ -1696,19 +1824,19 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
       const result = await registry.call(
         'run',
-        { slug, todo: 'T01', stage: 'plan' },
+        { slug, phase: 'T01', stage: 'plan' },
         undefined,
         makeGuard(repo),
         'drive',
       );
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
-        assert.match(result.error, /todo "T01"/);
-        assert.match(result.error, /other todos can run/);
+        assert.match(result.error, /phase "T01"/);
+        assert.match(result.error, /other phases can run/);
       }
     });
 
-    it('answers busy per todo, dispatches other todos, and clears in-flight state', async () => {
+    it('answers busy per phase, dispatches other phases, and clears in-flight state', async () => {
       const specsDir = path.join(newRepo(), '.baiton', 'specs');
       const queues = new Map<string, FakeQueue>([
         ['demo/T01', fakeQueue()],
@@ -1753,35 +1881,51 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.deepStrictEqual(await refused, { kind: 'illegal', reason: 'm' });
     });
   });
-  describe('land_todo', () => {
+  describe('land_phase', () => {
     const slug = 'sample';
     const COMMIT = 'c'.repeat(40);
 
-    function setup(state: string, outcome: LandTodoOutcome, wired = true) {
+    function setup(state: string, outcome: LandPhaseOutcome, wired = true) {
       const repo = newRepo();
-      writeSpec(repo, slug, approvedSpec(state));
+      writeLegacySpec(repo, slug, approvedLegacySpec(state));
       const seam = recordingLand(outcome);
       const confirm = recordingConfirm(true);
       const base = makeServices(repo, benignGit(), confirm);
-      const registry = createToolRegistry(wired ? { ...base, landTodo: seam } : base);
+      const registry = createToolRegistry(wired ? { ...base, landPhase: seam } : base);
       return { repo, seam, confirm, registry };
     }
-    const LANDED: LandTodoOutcome = { kind: 'landed', commit: 'c'.repeat(40), noop: false, cleanup: [] };
+    const LANDED: LandPhaseOutcome = { kind: 'landed', commit: 'c'.repeat(40), noop: false, cleanup: [] };
 
     it('lands a done todo without a confirm card', async () => {
       const { repo, seam, confirm, registry } = setup('done', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-a', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-a', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, true);
       if (result.ok) {
-        assert.deepStrictEqual(result.data, { slug, todo: 'T01', landed: true, commit: COMMIT });
+        assert.deepStrictEqual(result.data, { slug, phase: 'T01', landed: true, commit: COMMIT });
       }
-      assert.deepStrictEqual(seam.calls, [{ slug, todoId: 'T01' }]);
+      assert.deepStrictEqual(seam.calls, [{ slug, phaseId: 'T01' }]);
       assert.strictEqual(confirm.calls.length, 0);
+    });
+
+    it('lands a done P01 phase in a plan', async () => {
+      const repo = newRepo();
+      const slug = 'phased';
+      const content = draftPlanDoc().replace('- [pending] P01', '- [done] P01');
+      writePlan(repo, slug, content);
+      const seam = recordingLand(LANDED);
+      const registry = createToolRegistry({
+        ...makeServices(repo, benignGit(), recordingConfirm(true)),
+        landPhase: seam,
+      });
+      const result = await registry.call('land_phase', { slug, phase: 'P01' }, 'land-plan-p01', makeGuard(repo), 'drive');
+      assert.strictEqual(result.ok, true);
+      assert.deepStrictEqual(seam.calls, [{ slug, phaseId: 'P01' }]);
+      if (result.ok) assert.deepStrictEqual(result.data, { slug, phase: 'P01', landed: true, commit: COMMIT });
     });
 
     it('reports an already-landed todo', async () => {
       const { repo, registry } = setup('done', { kind: 'already-landed' });
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-b', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-b', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, true);
       if (result.ok) {
         const data = result.data as { landed: boolean; message: string };
@@ -1792,7 +1936,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('refuses a todo that is not done', async () => {
       const { repo, seam, registry } = setup('executed', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-c', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-c', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /executed/);
@@ -1803,7 +1947,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('refuses an unknown todo id', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T09' }, 'call-land-d', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T09' }, 'call-land-d', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /T09/);
@@ -1814,7 +1958,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('relays a seam refusal', async () => {
       const { repo, registry } = setup('done', { kind: 'refused', reason: 'the merge conflicts' });
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-e', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-e', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.ok(result.error.includes('the merge conflicts'));
@@ -1824,7 +1968,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('reports itself unavailable when no land seam is wired', async () => {
       const { repo, registry } = setup('done', LANDED, false);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-f', makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-f', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /not available/);
@@ -1833,15 +1977,15 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('is idempotent by call id', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
-      const first = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
-      const second = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
+      const first = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
+      const second = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-1', makeGuard(repo), 'drive');
       assert.strictEqual(seam.calls.length, 1);
       assert.deepStrictEqual(second, first);
     });
 
     it('requires a call id', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, undefined, makeGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, undefined, makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
         assert.match(result.error, /idempotency key/);
@@ -1851,17 +1995,17 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('is disabled under Restricted Mode', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-r', makeRestrictedGuard(repo), 'drive');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-r', makeRestrictedGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
       assert.strictEqual(seam.calls.length, 0);
     });
 
     it('is refused while gathering', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
-      const result = await registry.call('land_todo', { slug, todo: 'T01' }, 'call-land-g', makeGuard(repo), 'gather');
+      const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-g', makeGuard(repo), 'gather');
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
-        assert.match(result.error, /land_todo/);
+        assert.match(result.error, /land_phase/);
         assert.match(result.error, /gather/);
       }
       assert.strictEqual(seam.calls.length, 0);
@@ -1869,15 +2013,15 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
   });
 
   describe('sub-agent surface', () => {
-    const READS = ['list_specs', 'read_spec', 'list_files', 'read_file', 'search', 'git_status', 'git_diff', 'git_log'];
+    const READS = ['list_plans', 'read_plan', 'list_files', 'read_file', 'search', 'git_status', 'git_diff', 'git_log'];
     const EXPECTED_SUBAGENT_TOOLS: Record<OrchestratorPhase, string[]> = {
       gather: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
-      drive: ['list_specs', 'read_spec', 'git_status', 'ask_user', 'run', 'spawn_subagent', 'send_to_subagent'],
+      drive: ['list_plans', 'read_plan', 'git_status', 'ask_user', 'run', 'spawn_subagent', 'send_to_subagent'],
       run: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
     };
     const TOP_ONLY = [
-      'draft_spec', 'approve_spec', 'submit_pr', 'land_todo', 'start_run', 'investigate',
-      'update_overview', 'add_todo', 'edit_todo', 'remove_todo',
+      'draft_plan', 'approve_plan', 'submit_pr', 'land_phase', 'start_run', 'investigate',
+      'update_overview', 'add_phase', 'edit_phase', 'remove_phase',
     ];
 
     function registryFor(repo: string, extra?: { confirm?: ReturnType<typeof recordingConfirm>; draft?: ReturnType<typeof recordingDraft>; pipeline?: ReturnType<typeof spyingPipeline> }) {
@@ -1927,7 +2071,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('refuses top-only tools on the sub-agent surface before anything runs', async () => {
       const repo = newRepo();
-      const specFile = writeSpec(repo, 'sample', draftSpec());
+      const specFile = writeLegacySpec(repo, 'sample', legacySpecDocument());
       const before = fs.readFileSync(specFile);
       const confirm = recordingConfirm(true);
       const draft = recordingDraft();
@@ -1936,8 +2080,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const guard = makeGuard(repo);
       const cases: Array<[string, unknown, OrchestratorPhase]> = [
         ['submit_pr', { slug: 'sample' }, 'drive'],
-        ['land_todo', { slug: 'sample', todo: 'T01' }, 'drive'],
-        ['draft_spec', { slug: 'sample', requirements: 'x' }, 'gather'],
+        ['land_phase', { slug: 'sample', phase: 'T01' }, 'drive'],
+        ['draft_plan', { slug: 'sample', request: 'x' }, 'gather'],
         ['start_run', { mode: 'bug', statement: 's', files: [] }, 'run'],
       ];
       for (const [name, args, phase] of cases) {
@@ -1954,13 +2098,13 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.deepStrictEqual(fs.readFileSync(specFile), before);
     });
 
-    it('lets a sub-agent call read_spec in every phase', async () => {
+    it('lets a sub-agent call read_plan in every phase', async () => {
       const repo = newRepo();
-      writeSpec(repo, 'sample', draftSpec());
+      writeLegacySpec(repo, 'sample', legacySpecDocument());
       const registry = registryFor(repo);
       for (const phase of ORCHESTRATOR_PHASES) {
-        const result = await registry.call('read_spec', { slug: 'sample' }, undefined, makeGuard(repo), phase, 'subagent');
-        assert.strictEqual(result.ok, true, `read_spec in ${phase}`);
+        const result = await registry.call('read_plan', { slug: 'sample' }, undefined, makeGuard(repo), phase, 'subagent');
+        assert.strictEqual(result.ok, true, `read_plan in ${phase}`);
       }
     });
   });
