@@ -8,7 +8,7 @@ import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
 import type { GitWorktreeService } from '../src/git';
 import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
-import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor, unlandedTodos } from '../src/engine/todoWorktree';
+import { landPhaseWorktree, phaseBranchFor, phaseWorktreeDirFor, unlandedPhases } from '../src/engine/phaseWorktree';
 import { submitPr } from '../src/engine/submitPr';
 import type { PrTool } from '../src/engine/prTool';
 import { createRunPipeline } from '../src/engine/runPipeline';
@@ -53,7 +53,7 @@ import type {
  * Everything below the agent boundary is real: a real temporary git repository,
  * the real git service, spec-branch writer, spec store, per-todo run queues,
  * run-queue seam, tool registry, sub-agent runner, session store, tool loop,
- * `submitPr` and `landTodoWorktree`. Only the agent boundary (adapter, terminal
+ * `submitPr` and `landPhaseWorktree`. Only the agent boundary (adapter, terminal
  * host, result watcher) and the model client are stubbed.
  *
  * What it pins: a parent chat spawns two sub-agents in one completion; each
@@ -473,8 +473,8 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     workspaceRoot: repo,
     baitonDir: path.dirname(specsDir),
     git: gitService,
-    specWriter: writer,
-    specStore: store,
+    planWriter: writer,
+    planStore: store,
     terminalHost,
     watcherFactory: factory,
     adapterForRole: () => new StubAdapter(),
@@ -490,10 +490,10 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
         return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
       }
       return writer.apply(slug, async () => {
-        if ((await gitService.branchHead(todoBranchFor(slug, todoId))) === undefined) {
+        if ((await gitService.branchHead(phaseBranchFor(slug, todoId, 'legacy-spec'))) === undefined) {
           return { kind: 'already-landed' as const };
         }
-        const landed = await landTodoWorktree({ workspaceRoot: repo, git: gitService }, { slug, todoId });
+        const landed = await landPhaseWorktree({ workspaceRoot: repo, git: gitService }, { slug, phaseId: todoId });
         if (landed.ok) {
           return {
             kind: 'landed' as const,
@@ -535,7 +535,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
       remote: 'origin',
       modelForRole,
       adapterForRole: (role) => (role === 'pr-writer' ? new StubAdapter(false) : new StubAdapter()),
-      unlandedTodos: (s) => unlandedTodos({ git: gitService }, s),
+      unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repo, git: gitService }, s),
     });
     if (result.ok) {
       return { ok: true, url: result.pr.url, reused: result.reused, title: result.title };
@@ -770,7 +770,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       for (const suffix of ['planning', 'planned', 'executed', 'done']) {
         assert.ok(subjects.includes(`plan(${SLUG}): ${id} ${suffix}`), `missing state commit "${id} ${suffix}"`);
       }
-      assert.ok(subjects.includes(`spec(${SLUG}): land ${id}`), `missing land commit for ${id}`);
+      assert.ok(subjects.includes(`plan(${SLUG}): land ${id}`), `missing land commit for ${id}`);
     }
     const stateCommits = git(repo, 'log', '--format=%H%x09%s', `baiton/${SLUG}`)
       .split('\n')
@@ -788,16 +788,16 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     // -- Worktree isolation ---------------------------------------------------
     for (const id of ['T01', 'T02']) {
       assert.strictEqual(
-        subjects.filter((s) => s === `spec(${SLUG}): ${id} execute attempt 1`).length,
+        subjects.filter((s) => s === `plan(${SLUG}): ${id} execute attempt 1`).length,
         1,
         `${id}'s own execute commit arrived through its merge, exactly once`,
       );
-      assert.ok(!fs.existsSync(todoWorktreeDirFor(repo, SLUG, id)), `${id}'s worktree was removed`);
-      assert.strictEqual(git(repo, 'branch', '--list', todoBranchFor(SLUG, id)).trim(), '', `${id}'s branch was removed`);
+      assert.ok(!fs.existsSync(phaseWorktreeDirFor(repo, SLUG, id)), `${id}'s worktree was removed`);
+      assert.strictEqual(git(repo, 'branch', '--list', phaseBranchFor(SLUG, id, 'legacy-spec')).trim(), '', `${id}'s branch was removed`);
     }
     assert.ok(readRepoFile(repo, 'src/one.ts').includes('export const one = 1;'));
     assert.ok(readRepoFile(repo, 'src/two.ts').includes('export const two = 2;'));
-    assert.deepStrictEqual(await unlandedTodos({ git: h.git }, SLUG), []);
+    assert.deepStrictEqual(await unlandedPhases({ workspaceRoot: repo, git: h.git }, SLUG), []);
     await assertOnlyJournalsDirty(h.git, 'the main checkout');
     assert.strictEqual(await h.git.currentBranch(), `baiton/${SLUG}`);
 
@@ -848,7 +848,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       verify: () => 'npm test',
       newRunId: () => 'bug-20260101-000000-aaaa',
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
-      isSpecBusy: () => lock.runPipelineBusy(),
+      isPlanBusy: () => lock.runPipelineBusy(),
     });
     draftRunner = createSpecDraftRunner({
       workspaceRoot: repo,
@@ -863,11 +863,11 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     });
 
     // A todo stage goes in flight and stays there.
-    const planning = h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T01', stage: 'plan' });
+    const planning = h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T01', stage: 'plan' });
     await waitUntil(() => factory.created.some((c) => c.todo === 'T01' && c.stage === 'plan'), 'the T01 plan watcher');
     assert.strictEqual(h.queues.isRunning(SLUG), true);
-    assert.deepStrictEqual(await h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T01', stage: 'plan' }), { kind: 'busy' });
-    const t02 = await h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T02', stage: 'plan' });
+    assert.deepStrictEqual(await h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T01', stage: 'plan' }), { kind: 'busy' });
+    const t02 = await h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T02', stage: 'plan' });
     assert.strictEqual(t02.kind, 'dispatched', 'another todo is not blocked by it');
     assert.strictEqual(await h.store.currentState(SLUG, 'T02'), 'planned');
 

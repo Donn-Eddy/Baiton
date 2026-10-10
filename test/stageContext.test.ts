@@ -6,15 +6,15 @@ import { parsePlan, type ParsedPlan } from '../src/model/parser';
  * Unit tests for the per-stage Brief context assembler (Requirement 18.3;
  * design "Correctness Properties", Property 15).
  *
- * Each todo-level stage is briefed with exactly its own inputs, so a sub-agent
- * never has to open `spec.md` or another todo's artifacts:
+ * Each phase-level stage is briefed with exactly its own inputs, so a sub-agent
+ * never has to open `plan document` or another phase's artifacts:
  *
- *   - plan        — OVERVIEW, the todo line, and the execution summaries of the
- *                   todo's `after` targets (never their plans).
- *   - plan-review — OVERVIEW, the todo line, the plan.
- *   - execute     — the todo line and the plan, with NO OVERVIEW; a retry or a
+ *   - plan        — OVERVIEW, the phase line, and the execution summaries of the
+ *                   phase's `after` targets (never their plans).
+ *   - plan-review — OVERVIEW, the phase line, the plan.
+ *   - execute     — the phase line and the plan, with NO OVERVIEW; a retry or a
  *                   resumed session also carries the latest review.
- *   - review      — the todo line, the plan, the execution summary, and the
+ *   - review      — the phase line, the plan, the execution summary, and the
  *                   execute commit to inspect (or a statement that it is
  *                   unknown).
  *
@@ -28,7 +28,7 @@ const PLAN_MARK = 'PLANMARK';
 const REVIEW_MARK = 'REVIEWMARK';
 const EXEC_MARK = 'EXECMARK';
 
-/** A two-todo spec where `T02` depends on `T01`. */
+/** A two-phase spec where `T02` depends on `T01`. */
 function makeSpec(): ParsedPlan {
   return parsePlan(
     [
@@ -40,8 +40,8 @@ function makeSpec(): ParsedPlan {
       `Overview prose ${OVERVIEW_MARK}.`,
       '',
       '# TODOS',
-      '- [done] T01 First todo TODO-ONE',
-      '- [planned] T02 Second todo TODO-TWO (after T01)',
+      '- [done] T01 First phase TODO-ONE',
+      '- [planned] T02 Second phase TODO-TWO (after T01)',
       '',
     ].join('\n'),
   );
@@ -49,17 +49,17 @@ function makeSpec(): ParsedPlan {
 
 describe('buildStageContext', () => {
   describe('plan', () => {
-    it('carries the OVERVIEW, the todo line, and each after target execution summary', () => {
+    it('carries the OVERVIEW, the phase line, and each after target execution summary', () => {
       const context = buildStageContext({
         stage: 'plan',
-        spec: makeSpec(),
-        todoId: 'T02',
+        plan: makeSpec(),
+        phaseId: 'T02',
         afterExecutes: { T01: `Execution of T01 ${EXEC_MARK}` },
       });
 
       assert.ok(context.includes('# OVERVIEW'), 'plan carries the OVERVIEW heading');
       assert.ok(context.includes(OVERVIEW_MARK), 'plan carries the OVERVIEW text');
-      assert.ok(context.includes('TODO-TWO'), 'plan carries the target todo line');
+      assert.ok(context.includes('TODO-TWO'), 'plan carries the target phase line');
       assert.ok(
         context.includes('## After target T01'),
         'plan carries a heading per after target',
@@ -67,68 +67,78 @@ describe('buildStageContext', () => {
       assert.ok(context.includes(EXEC_MARK), "plan carries the after target's execution summary");
       assert.ok(
         !context.includes('TODO-ONE'),
-        "plan does not carry another todo's own line",
+        "plan does not carry another phase's own line",
       );
     });
 
     it('omits after targets with no execution summary on file', () => {
       const context = buildStageContext({
         stage: 'plan',
-        spec: makeSpec(),
-        todoId: 'T02',
+        plan: makeSpec(),
+        phaseId: 'T02',
         afterExecutes: {},
       });
 
       assert.ok(context.includes(OVERVIEW_MARK), 'the OVERVIEW is still carried');
-      assert.ok(context.includes('TODO-TWO'), 'the todo line is still carried');
+      assert.ok(context.includes('TODO-TWO'), 'the phase line is still carried');
       assert.ok(
         !context.includes('## After target'),
         'an after target with no artifact contributes nothing at all',
       );
     });
 
-    it('yields just the OVERVIEW for a todo the spec does not carry', () => {
+    it('yields just the OVERVIEW for a phase the plan does not carry', () => {
       const context = buildStageContext({
         stage: 'plan',
-        spec: makeSpec(),
-        todoId: 'T99',
+        plan: makeSpec(),
+        phaseId: 'T99',
         afterExecutes: { T01: EXEC_MARK },
       });
 
       assert.ok(context.includes(OVERVIEW_MARK));
-      assert.ok(!context.includes('# Phase'), 'no todo line is fabricated');
-      assert.ok(!context.includes(EXEC_MARK), 'no after content without a target todo');
+      assert.ok(!context.includes('# Phase'), 'no phase line is fabricated');
+      assert.ok(!context.includes(EXEC_MARK), 'no after content without a target phase');
     });
   });
 
   describe('plan-review', () => {
-    it('carries the OVERVIEW, the todo line and the plan under review', () => {
+    it('carries the OVERVIEW, the phase line and the plan under review', () => {
       const context = buildStageContext({
         stage: 'plan-review',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: `Plan body ${PLAN_MARK}`,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: `Plan body ${PLAN_MARK}`,
       });
 
       assert.ok(context.includes(OVERVIEW_MARK), 'plan-review carries the OVERVIEW');
-      assert.ok(context.includes('TODO-TWO'), 'plan-review carries the todo line');
+      assert.ok(context.includes('TODO-TWO'), 'plan-review carries the phase line');
       assert.ok(context.includes('# Plan'), 'the plan is delimited by its own heading');
       assert.ok(context.includes(PLAN_MARK), 'plan-review carries the plan text');
+    });
+
+    it('names a phase that is absent from the plan', () => {
+      const context = buildStageContext({
+        stage: 'plan-review',
+        plan: makeSpec(),
+        phaseId: 'T99',
+        phasePlan: PLAN_MARK,
+      });
+      assert.ok(context.includes('The phase "T99" is not present in the plan.'));
     });
   });
 
   describe('execute', () => {
-    it('carries the todo line and the plan but never the OVERVIEW', () => {
+    it('carries the phase line and the plan but never the OVERVIEW', () => {
       const context = buildStageContext({
         stage: 'execute',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: `Plan body ${PLAN_MARK}`,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: `Plan body ${PLAN_MARK}`,
         attempt: 1,
         resume: false,
       });
 
-      assert.ok(context.includes('TODO-TWO'), 'execute carries the todo line');
+      assert.ok(context.includes('TODO-TWO'), 'execute carries the phase line');
       assert.ok(context.includes(PLAN_MARK), 'execute carries the plan');
       assert.ok(!context.includes('# OVERVIEW'), 'execute carries no OVERVIEW heading');
       assert.ok(!context.includes(OVERVIEW_MARK), 'execute carries no OVERVIEW text');
@@ -137,9 +147,9 @@ describe('buildStageContext', () => {
     it('omits the latest review on the first attempt', () => {
       const context = buildStageContext({
         stage: 'execute',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: PLAN_MARK,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
         attempt: 1,
         resume: false,
@@ -152,9 +162,9 @@ describe('buildStageContext', () => {
     it('carries the latest review from the second attempt on', () => {
       const context = buildStageContext({
         stage: 'execute',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: PLAN_MARK,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
         attempt: 2,
         resume: false,
@@ -167,9 +177,9 @@ describe('buildStageContext', () => {
     it('carries the latest review on a resumed first attempt', () => {
       const context = buildStageContext({
         stage: 'execute',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: PLAN_MARK,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
         attempt: 1,
         resume: true,
@@ -180,17 +190,17 @@ describe('buildStageContext', () => {
   });
 
   describe('review', () => {
-    it('carries the todo line, plan, execution summary and the commit to inspect', () => {
+    it('carries the phase line, plan, execution summary and the commit to inspect', () => {
       const context = buildStageContext({
         stage: 'review',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: `Plan body ${PLAN_MARK}`,
+        plan: makeSpec(),
+        phaseId: 'T02',
+        phasePlan: `Plan body ${PLAN_MARK}`,
         latestExecute: `Execution ${EXEC_MARK}`,
         executeCommit: 'abc1234',
       });
 
-      assert.ok(context.includes('TODO-TWO'), 'review carries the todo line');
+      assert.ok(context.includes('TODO-TWO'), 'review carries the phase line');
       assert.ok(context.includes(PLAN_MARK), 'review carries the plan it judges against');
       assert.ok(context.includes(EXEC_MARK), 'review carries the execution summary');
       assert.ok(context.includes('abc1234'), 'review names the commit');
@@ -201,15 +211,15 @@ describe('buildStageContext', () => {
       assert.ok(!context.includes(OVERVIEW_MARK), 'review carries no OVERVIEW');
     });
 
-    it('says so when the execute commit is unknown', () => {
+    it('says so when the plan and execute commit are not on file', () => {
       const context = buildStageContext({
         stage: 'review',
-        spec: makeSpec(),
-        todoId: 'T02',
-        plan: PLAN_MARK,
-        latestExecute: EXEC_MARK,
+        plan: makeSpec(),
+        phaseId: 'T02',
       });
 
+      assert.ok(context.includes('No plan is on file for this phase.'));
+      assert.ok(context.includes('No execution summary is on file for this phase.'));
       assert.ok(
         context.includes('# Execute commit'),
         'the section is present either way so the reviewer is never left guessing',

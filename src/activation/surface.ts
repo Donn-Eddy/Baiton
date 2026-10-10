@@ -114,7 +114,7 @@ function isHardHalt(kind: DispatchError['kind']): boolean {
     case 'launch-failed':
     case 'reset-failed':
     case 'git-state-changed':
-    case 'spec-write-failed':
+    case 'plan-write-failed':
     case 'unknown-agent':
       return true;
     default:

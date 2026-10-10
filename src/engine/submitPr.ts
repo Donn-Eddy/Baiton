@@ -11,7 +11,7 @@
  *   3. Launches the pr-writer like any stage — Brief, terminal, result
  *      watcher — with a context section naming the plan folder and a
  *      `diff.patch` of the cumulative change from `base_commit`, journaled
- *      under the pseudo phase id {@link PR_TODO_ID}.
+ *      under the pseudo phase id {@link PR_PHASE_ID}.
  *   4. On a valid `{title, body}` result: commits the persisted draft, pushes
  *      the branch with upstream set, reuses an open PR for that head or creates one, writes `pr:` and
  *      `status: pr` into the frontmatter, and commits the metadata. Each of
@@ -42,7 +42,7 @@ import type { ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
 /** The journal `todoId` a PR run is recorded under; no phase carries this id. */
-export const PR_TODO_ID = 'PR';
+export const PR_PHASE_ID = 'PR';
 
 /** The cumulative diff file written into the run directory for the writer. */
 export const PR_DIFF_FILE_NAME = 'diff.patch';
@@ -77,7 +77,7 @@ export interface SubmitPrDeps {
   /**
    * The phase ids of `slug` whose branch still exists (not yet landed); the readiness check refuses while any remain.
    */
-  unlandedTodos?: (slug: string) => Promise<readonly string[]>;
+  unlandedPhases?: (slug: string) => Promise<readonly string[]>;
   clock?: () => number;
   newSessionId?: () => string;
 }
@@ -189,7 +189,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
   const terminalPid = await resolvePid(terminal);
   appendStart(journalPath, {
     runId,
-    todoId: PR_TODO_ID,
+    todoId: PR_PHASE_ID,
     stage: 'pr',
     attempt,
     startHead,
@@ -306,10 +306,10 @@ async function checkReady(
     });
   }
 
-  if (deps.unlandedTodos !== undefined) {
+  if (deps.unlandedPhases !== undefined) {
     let unlanded: readonly string[];
     try {
-      unlanded = await deps.unlandedTodos(slug);
+      unlanded = await deps.unlandedPhases(slug);
     } catch (e) {
       return fail({ kind: 'not-ready', message: `could not list the unlanded phases of plan "${slug}": ${errorMessage(e)}` });
     }
@@ -360,8 +360,8 @@ export function prContext(input: {
       ]
     : [
         // Legacy: preserve the original spec.md overview and todos/ artifact layout.
-        `The spec is \`${input.location.documentPath}\`; its OVERVIEW and todo list describe the work.`,
-        `Each todo's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<todo-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
+        `The spec is \`${input.location.documentPath}\`; its OVERVIEW and phase list describe the work.`,
+        `Each phase's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<phase-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
       ];
   return [
     ...layout,

@@ -370,7 +370,7 @@ function makeHarness(
     adapterForRole: () => (options.unknownAgent === true ? undefined : adapter),
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
-    isSpecBusy: () => specBusy,
+    isPlanBusy: () => specBusy,
     createService: () => {
       createServiceCalls += 1;
       return worktreeGit;

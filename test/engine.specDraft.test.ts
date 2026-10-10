@@ -416,7 +416,7 @@ describe('plan-draft runner (unit)', () => {
     assert.strictEqual(h.terminalHost.created.length, 0);
 
     // With the run idle the draft starts and then itself reports busy, which
-    // is what the run pipeline's `isSpecBusy` hook reads.
+    // is what the run pipeline's `isPlanBusy` hook reads.
     h.setQueueRunning(false);
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
     assert.ok(started.ok);

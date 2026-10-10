@@ -520,7 +520,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
   // --- cancel against the real pipeline ------------------------------------
 
   /** A real pipeline over `repo`, with only the agent boundary stubbed. */
-  function realPipeline(repo: string, store: RunStore, runId: string, isSpecBusy?: () => boolean) {
+  function realPipeline(repo: string, store: RunStore, runId: string, isPlanBusy?: () => boolean) {
     const terminalHost = new StubTerminalHost();
     const watcherFactory = new StubWatcherFactory();
     const pipeline = createRunPipeline({
@@ -535,7 +535,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
       newRunId: () => runId,
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
       report: () => {},
-      ...(isSpecBusy !== undefined ? { isSpecBusy } : {}),
+      ...(isPlanBusy !== undefined ? { isPlanBusy } : {}),
     });
     return { pipeline, terminalHost, watcherFactory };
   }

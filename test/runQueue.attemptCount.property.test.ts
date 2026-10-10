@@ -240,9 +240,9 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
     unlanded: async () => [],
   };
 
-  const specStore: PlanStore = {
+  const planStore: PlanStore = {
     currentState: async () => 'planned',
-    readSpec: async () => undefined,
+    readPlan: async () => undefined,
     readArtifact: async () => '# Plan T01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
@@ -266,7 +266,7 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
     git,
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath,
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
     ...(worktreeMode ? { worktrees } : {}),
@@ -275,7 +275,7 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
       let t = 0;
       return () => t++;
     })(),
-    newRunId: (req) => `${req.slug}-${req.todoId}-${req.attempt}-${idCounter++}`,
+    newRunId: (req) => `${req.slug}-${req.phaseId}-${req.attempt}-${idCounter++}`,
   };
 
   return {
@@ -292,7 +292,7 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
 function executeRequest(index: number): RunRequest {
   return {
     slug: 'demo',
-    todoId: `todo-${index}`,
+    phaseId: `todo-${index}`,
     action: 'execute',
     role: 'executor',
     attempt: index + 1,
@@ -407,7 +407,7 @@ describe('run queue attempt counting (property harness)', () => {
             assert.strictEqual(rig.mainCommits(), 0, 'the main checkout is never committed to');
             assert.strictEqual(rig.worktreeCommits.length, expectedAttempts);
             for (const c of rig.worktreeCommits) {
-              assert.match(c.message, /^spec\(demo\): todo-\d+ execute attempt \d+$/);
+              assert.match(c.message, /^plan\(demo\): todo-\d+ execute attempt \d+$/);
               assert.ok(c.trailers?.['Run-Id']?.startsWith('demo-todo-'), 'Run-Id trailer');
             }
           }

@@ -5,8 +5,8 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createGitService } from '../src/git/gitService';
-import { unlandedTodos } from '../src/engine/todoWorktree';
-import { submitPr, PR_DIFF_FILE_NAME, PR_TODO_ID } from '../src/engine/submitPr';
+import { unlandedPhases } from '../src/engine/phaseWorktree';
+import { submitPr, PR_DIFF_FILE_NAME, PR_PHASE_ID } from '../src/engine/submitPr';
 import type { SubmitPrDeps } from '../src/engine/submitPr';
 import type { CreatePrInput, PrTool, PullRequest } from '../src/engine/prTool';
 import {
@@ -142,7 +142,7 @@ function makeRepo(states: string[], withRemote = true): Repo {
   write(root, `.baiton/specs/${SLUG}/plan.md`, '# plan\n');
   write(root, 'src/greeting.ts', 'export const greet = (n: string) => `hi ${n}`;\n');
   git(root, 'add', '-A');
-  git(root, 'commit', '-q', '-m', `spec(${SLUG}): T01 execute attempt 1`);
+  git(root, 'commit', '-q', '-m', `plan(${SLUG}): T01 execute attempt 1`);
 
   return { root, remote, specsDir: path.join(root, '.baiton', 'specs'), baitonDir: path.join(root, '.baiton') };
 }
@@ -275,7 +275,7 @@ async function deliverDraft(h: Harness, draft: unknown): Promise<void> {
 
 const DRAFT = { title: 'Add greeting', body: 'Adds greet().\n\nVerified by tests.' };
 
-function readSpec(repo: Repo): ReturnType<typeof parsePlan> {
+function readPlan(repo: Repo): ReturnType<typeof parsePlan> {
   return parsePlan(fs.readFileSync(path.join(repo.specsDir, SLUG, 'spec.md'), 'utf8'));
 }
 
@@ -293,7 +293,7 @@ describe('submitPr (design section 8 "PR")', () => {
   });
 
   it('refuses while a todo branch is unlanded, naming the todos', async () => {
-    const h = harness(makeRepo(['done', 'done']), { unlandedTodos: async () => ['T01', 'T02'] });
+    const h = harness(makeRepo(['done', 'done']), { unlandedPhases: async () => ['T01', 'T02'] });
     const result = await submitPr(SLUG, h.deps);
     assert.strictEqual(result.ok, false);
     if (!result.ok) {
@@ -308,8 +308,8 @@ describe('submitPr (design section 8 "PR")', () => {
   it('reads unlanded todos from real todo branches', async () => {
     const repo = makeRepo(['done']);
     git(repo.root, 'branch', 'baiton-todo/greeting/T01');
-    const lookup = (s: string) => unlandedTodos({ git: createGitService(repo.root) }, s);
-    const h = harness(repo, { unlandedTodos: lookup });
+    const lookup = (s: string) => unlandedPhases({ workspaceRoot: repo.root, git: createGitService(repo.root) }, s);
+    const h = harness(repo, { unlandedPhases: lookup });
     const result = await submitPr(SLUG, h.deps);
     assert.strictEqual(result.ok, false);
     if (!result.ok) {
@@ -319,7 +319,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(h.terminals.created.length, 0);
 
     git(repo.root, 'branch', '-D', 'baiton-todo/greeting/T01');
-    const h2 = harness(repo, { unlandedTodos: lookup });
+    const h2 = harness(repo, { unlandedPhases: lookup });
     const pending = submitPr(SLUG, h2.deps);
     (await awaitWatcher(h2)).emitClose(1);
     const second = await pending;
@@ -328,7 +328,7 @@ describe('submitPr (design section 8 "PR")', () => {
 
   it('reports a failing unlanded lookup as not-ready', async () => {
     const h = harness(makeRepo(['done']), {
-      unlandedTodos: async () => {
+      unlandedPhases: async () => {
         throw new Error('boom');
       },
     });
@@ -425,7 +425,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(git(h.repo.root, 'rev-parse', '--abbrev-ref', `${BRANCH}@{upstream}`).trim(), `origin/${BRANCH}`);
 
     // The metadata was recorded and committed; the draft persisted as pr.md.
-    const spec = readSpec(h.repo);
+    const spec = readPlan(h.repo);
     assert.strictEqual(spec.frontmatter.get('pr'), 'https://example.test/pull/42');
     assert.strictEqual(spec.frontmatter.get('status'), 'pr');
     assert.strictEqual(git(h.repo.root, 'log', '-1', '--format=%s').trim(), `plan(${SLUG}): pr`);
@@ -436,7 +436,7 @@ describe('submitPr (design section 8 "PR")', () => {
     const entries = parseJournal(path.join(h.repo.specsDir, SLUG, 'runs.jsonl'));
     assert.strictEqual(entries.length, 1);
     assert.strictEqual(entries[0].stage, 'pr');
-    assert.strictEqual(entries[0].todoId, PR_TODO_ID);
+    assert.strictEqual(entries[0].todoId, PR_PHASE_ID);
     assert.strictEqual(entries[0].result, 'completed');
     assert.deepStrictEqual(entries[0].pr, { push: true, create: true, record: true });
   });
@@ -479,7 +479,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(result.reused, true);
     assert.strictEqual(result.pr.url, 'https://example.test/pull/7');
     assert.strictEqual(h.pr.created.length, 0);
-    assert.strictEqual(readSpec(h.repo).frontmatter.get('pr'), 'https://example.test/pull/7');
+    assert.strictEqual(readPlan(h.repo).frontmatter.get('pr'), 'https://example.test/pull/7');
   });
 
   it('halts with push-failed and journals push:false when the push is rejected', async () => {
@@ -491,8 +491,8 @@ describe('submitPr (design section 8 "PR")', () => {
     if (result.ok) return;
     assert.strictEqual(result.error.kind, 'push-failed');
     assert.strictEqual(h.pr.created.length, 0, 'no PR is created after a rejected push');
-    assert.strictEqual(readSpec(h.repo).frontmatter.get('pr'), '', 'pr key untouched');
-    assert.strictEqual(readSpec(h.repo).frontmatter.get('status'), 'approved');
+    assert.strictEqual(readPlan(h.repo).frontmatter.get('pr'), '', 'pr key untouched');
+    assert.strictEqual(readPlan(h.repo).frontmatter.get('status'), 'approved');
     const entries = parseJournal(path.join(h.repo.specsDir, SLUG, 'runs.jsonl'));
     assert.deepStrictEqual(entries[0].pr, { push: false, create: false, record: false });
   });

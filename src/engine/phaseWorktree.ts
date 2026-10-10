@@ -1,19 +1,19 @@
 /**
- * Per-todo worktree lifecycle (host-free core).
+ * Per-phase worktree lifecycle (host-free core).
  *
- * Each todo of a spec executes in its own linked worktree at
- * `.baiton/worktrees/<slug>/<todo-id>/`, checked out on the branch
- * `baiton-todo/<slug>/<todo-id>` that starts at the head of the spec branch
+ * Each phase of a plan executes in its own linked worktree at
+ * `.baiton/worktrees/<slug>/<phase-id>/`, checked out on the branch
+ * `baiton-phase/<slug>/<phase-id>` that starts at the head of the plan branch
  * `baiton/<slug>`. This module composes the worktree and merge primitives of
  * {@link GitWorktreeService} into:
  *
  * - **create/reuse** the worktree, idempotently: a registered worktree is reused
  *   as-is and never reset;
- * - **find** a todo's registered worktree;
- * - **land** the todo branch into the spec branch in the main checkout, refusing
+ * - **find** a phase's registered worktree;
+ * - **land** the phase branch into the plan branch in the main checkout, refusing
  *   with a named reason and preserving the branch on conflict;
  * - **remove** the worktree and optionally its branch; and
- * - list the **unlanded** todos of a spec (those whose branch still exists).
+ * - list the **unlanded** phases of a plan (those whose branch still exists).
  *
  * Every expected failure is a returned {@link Result}, never a throw, mirroring
  * `runWorktree.ts`. No `vscode` import, sync `fs` like its engine neighbours, so
@@ -23,49 +23,63 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from 'fs';
 import * as path from 'path';
 
 import { Result, err, ok } from '../model/result';
+import type { DocumentKind } from '../model/parser';
 import { createGitService } from '../git/gitService';
 import type { GitError, GitWorktree, GitWorktreeService } from '../git/types';
+import { resolveDocument } from '../storage/documentLocation';
 import { RUN_WORKTREES_DIR, asGitError, safeRealpath } from './runWorktree';
 
 /**
- * The ref namespace every todo branch lives under. NOT `baiton/`: the spec branch
+ * The ref namespace every phase branch lives under. NOT `baiton/`: the plan branch
  * `baiton/<slug>` is a ref file, so `baiton/<slug>/<id>` would be an impossible
  * ref ("cannot lock ref ... exists").
  */
-export const TODO_BRANCH_NAMESPACE = 'baiton-todo';
+export const PHASE_BRANCH_NAMESPACE = 'baiton-phase';
+// Legacy: phases of a legacy .baiton/specs/ document keep the baiton-todo/ namespace so in-flight branches still resolve.
+export const LEGACY_TODO_BRANCH_NAMESPACE = 'baiton-todo';
 
-/** The spec's own branch, `baiton/<slug>`. */
-export function specBranchFor(slug: string): string {
+/** Namespace selected for branches of one document kind. */
+export function phaseBranchNamespace(kind: DocumentKind): string {
+  return kind === 'plan' ? PHASE_BRANCH_NAMESPACE : LEGACY_TODO_BRANCH_NAMESPACE;
+}
+
+/** The plan's own branch, `baiton/<slug>`. */
+export function planBranchFor(slug: string): string {
   return `baiton/${slug}`;
 }
 
-/** The prefix (ending in `/`) of every todo branch of one spec. */
-export function todoBranchPrefix(slug: string): string {
-  return `${TODO_BRANCH_NAMESPACE}/${slug}/`;
+/** Resolve the existing document kind for a slug, preferring plans when both exist. */
+export function documentKindFor(workspaceRoot: string, slug: string): DocumentKind {
+  return resolveDocument(path.join(workspaceRoot, '.baiton'), slug).kind;
 }
 
-/** One todo's branch, `baiton-todo/<slug>/<todo-id>`. */
-export function todoBranchFor(slug: string, todoId: string): string {
-  return `${todoBranchPrefix(slug)}${todoId}`;
+/** The prefix (ending in `/`) of every phase branch of one plan. */
+export function phaseBranchPrefix(slug: string, kind: DocumentKind): string {
+  return `${phaseBranchNamespace(kind)}/${slug}/`;
 }
 
-/** One todo's absolute worktree directory. */
-export function todoWorktreeDirFor(workspaceRoot: string, slug: string, todoId: string): string {
-  return path.join(workspaceRoot, '.baiton', RUN_WORKTREES_DIR, slug, todoId);
+/** One phase's branch, `baiton-phase/<slug>/<phase-id>`. */
+export function phaseBranchFor(slug: string, phaseId: string, kind: DocumentKind): string {
+  return `${phaseBranchPrefix(slug, kind)}${phaseId}`;
 }
 
-/** One todo's worktree directory, repository-relative and in forward-slash form. */
-export function todoWorktreeRelativeDir(slug: string, todoId: string): string {
-  return `.baiton/${RUN_WORKTREES_DIR}/${slug}/${todoId}`;
+/** One phase's absolute worktree directory. */
+export function phaseWorktreeDirFor(workspaceRoot: string, slug: string, phaseId: string): string {
+  return path.join(workspaceRoot, '.baiton', RUN_WORKTREES_DIR, slug, phaseId);
 }
 
-/** The default merge commit message when a todo lands. */
-export function todoLandMessage(slug: string, todoId: string): string {
-  return `spec(${slug}): land ${todoId}`;
+/** One phase's worktree directory, repository-relative and in forward-slash form. */
+export function phaseWorktreeRelativeDir(slug: string, phaseId: string): string {
+  return `.baiton/${RUN_WORKTREES_DIR}/${slug}/${phaseId}`;
 }
 
-/** A slug or todo id usable as both a path segment and a ref component. */
-export function isTodoWorktreeKey(value: string): boolean {
+/** The default merge commit message when a phase lands. */
+export function phaseLandMessage(slug: string, phaseId: string): string {
+  return `plan(${slug}): land ${phaseId}`;
+}
+
+/** A slug or phase id usable as both a path segment and a ref component. */
+export function isPhaseWorktreeKey(value: string): boolean {
   return (
     /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) &&
     !value.includes('..') &&
@@ -75,21 +89,21 @@ export function isTodoWorktreeKey(value: string): boolean {
 }
 
 /**
- * A git service bound to one todo's worktree directory, so that todo's
+ * A git service bound to one phase's worktree directory, so that phase's
  * head/commit/diff calls go through the worktree rather than the main checkout.
  * The factory is injectable for tests.
  */
-export function createTodoGitService(
+export function createPhaseGitService(
   workspaceRoot: string,
   slug: string,
-  todoId: string,
+  phaseId: string,
   factory: (dir: string) => GitWorktreeService = createGitService,
 ): GitWorktreeService {
-  return factory(todoWorktreeDirFor(workspaceRoot, slug, todoId));
+  return factory(phaseWorktreeDirFor(workspaceRoot, slug, phaseId));
 }
 
-/** How the todo worktree operations are bound to a workspace and to git. */
-export interface TodoWorktreeDeps {
+/** How the phase worktree operations are bound to a workspace and to git. */
+export interface PhaseWorktreeDeps {
   /** Absolute workspace root; `.baiton/worktrees/` resolves under it. */
   workspaceRoot: string;
   /** Service bound to the MAIN checkout (`createGitService(workspaceRoot)`). */
@@ -98,61 +112,62 @@ export interface TodoWorktreeDeps {
   createService?: (dir: string) => GitWorktreeService;
 }
 
-/** Everything a created (or reused) todo worktree is identified by. */
-export interface TodoWorktreeInfo {
+/** Everything a created (or reused) phase worktree is identified by. */
+export interface PhaseWorktreeInfo {
   slug: string;
-  todoId: string;
-  /** `baiton-todo/<slug>/<todo-id>`. */
+  phaseId: string;
+  kind: DocumentKind;
+  /** `baiton-phase/<slug>/<phase-id>`. */
   branch: string;
   /** `baiton/<slug>`. */
-  specBranch: string;
+  planBranch: string;
   /** Absolute worktree directory. */
   worktreeDir: string;
   /** Repository-relative worktree directory. */
   relativeWorktreeDir: string;
-  /** Head of the todo branch as found/created. */
+  /** Head of the phase branch as found/created. */
   head: string;
   /** True when an existing registered worktree was reused. */
   reused: boolean;
 }
 
 /** Every expected failure of the create/remove operations, classified. */
-export type TodoWorktreeError =
-  | { kind: 'invalid-id'; slug: string; todoId: string; message: string }
-  | { kind: 'no-spec-branch'; slug: string; todoId: string; specBranch: string; message: string }
+export type PhaseWorktreeError =
+  | { kind: 'invalid-id'; slug: string; phaseId: string; message: string }
+  | { kind: 'no-plan-branch'; slug: string; phaseId: string; planBranch: string; message: string }
   // Non-empty unregistered directory.
-  | { kind: 'exists'; slug: string; todoId: string; path: string; message: string }
+  | { kind: 'exists'; slug: string; phaseId: string; path: string; message: string }
   // Registered worktree on another branch, or detached.
   | {
       kind: 'wrong-branch';
       slug: string;
-      todoId: string;
+      phaseId: string;
       path: string;
       expected: string;
       actual: string | undefined;
       message: string;
     }
   // Registered but prunable, or its directory is missing.
-  | { kind: 'stale'; slug: string; todoId: string; path: string; message: string }
+  | { kind: 'stale'; slug: string; phaseId: string; path: string; message: string }
   // The branch exists but has no worktree.
-  | { kind: 'orphan-branch'; slug: string; todoId: string; branch: string; message: string }
-  | { kind: 'git'; slug: string; todoId: string; message: string; error?: GitError }
-  | { kind: 'io'; slug: string; todoId: string; path: string; message: string };
+  | { kind: 'orphan-branch'; slug: string; phaseId: string; branch: string; message: string }
+  | { kind: 'git'; slug: string; phaseId: string; message: string; error?: GitError }
+  | { kind: 'io'; slug: string; phaseId: string; path: string; message: string };
 
-/** What a landed todo produced. */
-export interface TodoLandOutcome {
-  /** The spec branch's head after landing. */
+/** What a landed phase produced. */
+export interface PhaseLandOutcome {
+  /** The plan branch's head after landing. */
   commit: string;
-  specBranch: string;
+  planBranch: string;
   branch: string;
-  /** True when the branch was already contained in the spec branch: no merge commit was made. */
+  /** True when the branch was already contained in the plan branch: no merge commit was made. */
   noop: boolean;
   /** Non-fatal cleanup problems after a successful merge (worktree/branch removal). */
   cleanup: readonly string[];
 }
 
 /** Why a land was refused, as one named reason. */
-export type TodoLandRefusal =
+export type PhaseLandRefusal =
   | { reason: 'invalid-id'; message: string }
   | { reason: 'wrong-branch'; expected: string; actual: string; message: string }
   | { reason: 'dirty-tree'; changes: readonly string[]; message: string }
@@ -161,12 +176,12 @@ export type TodoLandRefusal =
   | { reason: 'git'; message: string };
 
 /** What a removal actually did, so a caller can report it precisely. */
-export interface TodoWorktreeRemoval {
+export interface PhaseWorktreeRemoval {
   /** True when a registered worktree was deregistered by git. */
   worktreeRemoved: boolean;
   /** True when a leftover directory was deleted directly. */
   dirRemoved: boolean;
-  /** True when the todo branch was deleted. */
+  /** True when the phase branch was deleted. */
   branchDeleted: boolean;
   /** Non-fatal problems, e.g. a directory that could not be removed. */
   warnings: readonly string[];
@@ -184,59 +199,60 @@ function gitErrorPart(e: unknown): { error?: GitError } {
 }
 
 /**
- * The registered worktree of one todo, or `undefined` when git does not know it.
+ * The registered worktree of one phase, or `undefined` when git does not know it.
  * Both sides of the comparison go through `safeRealpath`, as in `findRunWorktree`.
  */
-export async function findTodoWorktree(
-  deps: TodoWorktreeDeps,
+export async function findPhaseWorktree(
+  deps: PhaseWorktreeDeps,
   slug: string,
-  todoId: string,
+  phaseId: string,
 ): Promise<GitWorktree | undefined> {
-  const target = safeRealpath(todoWorktreeDirFor(deps.workspaceRoot, slug, todoId));
+  const target = safeRealpath(phaseWorktreeDirFor(deps.workspaceRoot, slug, phaseId));
   const worktrees = await deps.git.listWorktrees();
   return worktrees.find((w) => safeRealpath(w.dir) === target);
 }
 
 /**
- * Create a todo's worktree, idempotently: `.baiton/worktrees/<slug>/<todo-id>/`
- * on the new branch `baiton-todo/<slug>/<todo-id>` at the head of the spec branch
+ * Create a phase's worktree, idempotently: `.baiton/worktrees/<slug>/<phase-id>/`
+ * on the new branch `baiton-phase/<slug>/<phase-id>` at the head of the plan branch
  * `baiton/<slug>` (the BRANCH's head, not whatever the main checkout has out).
  *
  * An already-registered worktree on the right branch is reused untouched: the
- * worktree takes the spec head the first time only and then keeps its own history.
+ * worktree takes the plan head the first time only and then keeps its own history.
  *
  * Nothing is created before every check has passed: each failure returns
  * immediately with its own `kind`.
  */
-export async function createTodoWorktree(
-  deps: TodoWorktreeDeps,
-  input: { slug: string; todoId: string },
-): Promise<Result<TodoWorktreeInfo, TodoWorktreeError>> {
-  const { slug, todoId } = input;
-  if (!isTodoWorktreeKey(slug) || !isTodoWorktreeKey(todoId)) {
+export async function createPhaseWorktree(
+  deps: PhaseWorktreeDeps,
+  input: { slug: string; phaseId: string; kind?: DocumentKind },
+): Promise<Result<PhaseWorktreeInfo, PhaseWorktreeError>> {
+  const { slug, phaseId } = input;
+  if (!isPhaseWorktreeKey(slug) || !isPhaseWorktreeKey(phaseId)) {
     return err({
       kind: 'invalid-id',
       slug,
-      todoId,
+      phaseId,
       message:
-        `${JSON.stringify(slug)} / ${JSON.stringify(todoId)} is not a valid slug and todo id: ` +
+        `${JSON.stringify(slug)} / ${JSON.stringify(phaseId)} is not a valid slug and phase id: ` +
         'use letters, digits, dots, underscores and hyphens, starting with a letter or digit.',
     });
   }
 
-  const worktreeDir = todoWorktreeDirFor(deps.workspaceRoot, slug, todoId);
-  const branch = todoBranchFor(slug, todoId);
-  const specBranch = specBranchFor(slug);
-  const relativeWorktreeDir = todoWorktreeRelativeDir(slug, todoId);
+  const kind = input.kind ?? documentKindFor(deps.workspaceRoot, slug);
+  const worktreeDir = phaseWorktreeDirFor(deps.workspaceRoot, slug, phaseId);
+  const branch = phaseBranchFor(slug, phaseId, kind);
+  const planBranch = planBranchFor(slug);
+  const relativeWorktreeDir = phaseWorktreeRelativeDir(slug, phaseId);
 
   let registered: GitWorktree | undefined;
   try {
-    registered = await findTodoWorktree(deps, slug, todoId);
+    registered = await findPhaseWorktree(deps, slug, phaseId);
   } catch (e) {
     return err({
       kind: 'git',
       slug,
-      todoId,
+      phaseId,
       message: `Could not list this repository's worktrees: ${describeError(e)}.`,
       ...gitErrorPart(e),
     });
@@ -246,18 +262,18 @@ export async function createTodoWorktree(
       return err({
         kind: 'stale',
         slug,
-        todoId,
+        phaseId,
         path: worktreeDir,
         message:
-          `The worktree for ${todoId} at ${worktreeDir} is registered but its directory is ` +
-          'missing. Remove it with removeTodoWorktree, then dispatch again.',
+          `The worktree for ${phaseId} at ${worktreeDir} is registered but its directory is ` +
+          'missing. Remove it with removePhaseWorktree, then dispatch again.',
       });
     }
     if (registered.branch !== branch) {
       return err({
         kind: 'wrong-branch',
         slug,
-        todoId,
+        phaseId,
         path: worktreeDir,
         expected: branch,
         actual: registered.branch,
@@ -272,15 +288,16 @@ export async function createTodoWorktree(
         return err({
           kind: 'git',
           slug,
-          todoId,
+          phaseId,
           message: `Could not resolve the head of ${branch}.`,
         });
       }
       return ok({
         slug,
-        todoId,
+        phaseId,
+        kind,
         branch,
-        specBranch,
+        planBranch,
         worktreeDir,
         relativeWorktreeDir,
         head,
@@ -290,43 +307,43 @@ export async function createTodoWorktree(
       return err({
         kind: 'git',
         slug,
-        todoId,
+        phaseId,
         message: `Could not resolve the head of ${branch}: ${describeError(e)}.`,
         ...gitErrorPart(e),
       });
     }
   }
 
-  let specHead: string | undefined;
+  let planHead: string | undefined;
   try {
     if ((await deps.git.branchHead(branch)) !== undefined) {
       return err({
         kind: 'orphan-branch',
         slug,
-        todoId,
+        phaseId,
         branch,
         message:
           `The branch ${branch} exists but has no worktree (its directory may have been ` +
-          'removed by hand). Land it, or remove it with removeTodoWorktree and deleteBranch.',
+          'removed by hand). Land it, or remove it with removePhaseWorktree and deleteBranch.',
       });
     }
-    specHead = await deps.git.branchHead(specBranch);
+    planHead = await deps.git.branchHead(planBranch);
   } catch (e) {
     return err({
       kind: 'git',
       slug,
-      todoId,
+      phaseId,
       message: `Could not inspect the branches of ${slug}: ${describeError(e)}.`,
       ...gitErrorPart(e),
     });
   }
-  if (specHead === undefined) {
+  if (planHead === undefined) {
     return err({
-      kind: 'no-spec-branch',
+      kind: 'no-plan-branch',
       slug,
-      todoId,
-      specBranch,
-      message: `The spec branch ${specBranch} does not exist, so ${todoId} has nothing to branch from.`,
+      phaseId,
+      planBranch,
+      message: `The plan branch ${planBranch} does not exist, so ${phaseId} has nothing to branch from.`,
     });
   }
 
@@ -339,7 +356,7 @@ export async function createTodoWorktree(
       return err({
         kind: 'io',
         slug,
-        todoId,
+        phaseId,
         path: worktreeDir,
         message: `Could not inspect the existing directory at ${worktreeDir}: ${describeError(e)}.`,
       });
@@ -348,11 +365,11 @@ export async function createTodoWorktree(
       return err({
         kind: 'exists',
         slug,
-        todoId,
+        phaseId,
         path: worktreeDir,
         message:
           `A non-empty directory already exists at ${worktreeDir}. Remove it before creating ` +
-          `the worktree for ${todoId} again.`,
+          `the worktree for ${phaseId} again.`,
       });
     }
   }
@@ -363,21 +380,21 @@ export async function createTodoWorktree(
     return err({
       kind: 'io',
       slug,
-      todoId,
+      phaseId,
       path: path.dirname(worktreeDir),
       message: `Could not create ${path.dirname(worktreeDir)}: ${describeError(e)}.`,
     });
   }
 
   try {
-    await deps.git.addWorktree(worktreeDir, branch, specHead);
+    await deps.git.addWorktree(worktreeDir, branch, planHead);
   } catch (e) {
     return err({
       kind: 'git',
       slug,
-      todoId,
+      phaseId,
       message:
-        `Could not create the worktree for ${todoId} on branch ${branch} at ${worktreeDir}: ` +
+        `Could not create the worktree for ${phaseId} on branch ${branch} at ${worktreeDir}: ` +
         `${describeError(e)}.`,
       ...gitErrorPart(e),
     });
@@ -385,40 +402,42 @@ export async function createTodoWorktree(
 
   return ok({
     slug,
-    todoId,
+    phaseId,
+    kind,
     branch,
-    specBranch,
+    planBranch,
     worktreeDir,
     relativeWorktreeDir,
-    head: specHead,
+    head: planHead,
     reused: false,
   });
 }
 
 /**
- * Remove a todo's worktree, and optionally its branch.
+ * Remove a phase's worktree, and optionally its branch.
  *
  * Tolerant of every partial state, so it can be retried: nothing on disk is an
  * all-false `ok`. This is never called for a failed or stopped stage — those keep
  * worktree and branch for inspection; it is the post-land step of
- * {@link landTodoWorktree} and an explicit cleanup path.
+ * {@link landPhaseWorktree} and an explicit cleanup path.
  */
-export async function removeTodoWorktree(
-  deps: TodoWorktreeDeps,
-  input: { slug: string; todoId: string; deleteBranch?: boolean; force?: boolean },
-): Promise<Result<TodoWorktreeRemoval, TodoWorktreeError>> {
-  const { slug, todoId } = input;
-  if (!isTodoWorktreeKey(slug) || !isTodoWorktreeKey(todoId)) {
+export async function removePhaseWorktree(
+  deps: PhaseWorktreeDeps,
+  input: { slug: string; phaseId: string; kind?: DocumentKind; deleteBranch?: boolean; force?: boolean },
+): Promise<Result<PhaseWorktreeRemoval, PhaseWorktreeError>> {
+  const { slug, phaseId } = input;
+  if (!isPhaseWorktreeKey(slug) || !isPhaseWorktreeKey(phaseId)) {
     return err({
       kind: 'invalid-id',
       slug,
-      todoId,
-      message: `${JSON.stringify(slug)} / ${JSON.stringify(todoId)} is not a valid slug and todo id.`,
+      phaseId,
+      message: `${JSON.stringify(slug)} / ${JSON.stringify(phaseId)} is not a valid slug and phase id.`,
     });
   }
 
-  const worktreeDir = todoWorktreeDirFor(deps.workspaceRoot, slug, todoId);
-  const branch = todoBranchFor(slug, todoId);
+  const kind = input.kind ?? documentKindFor(deps.workspaceRoot, slug);
+  const worktreeDir = phaseWorktreeDirFor(deps.workspaceRoot, slug, phaseId);
+  const branch = phaseBranchFor(slug, phaseId, kind);
   const warnings: string[] = [];
   let worktreeRemoved = false;
   let dirRemoved = false;
@@ -426,12 +445,12 @@ export async function removeTodoWorktree(
 
   let registered: GitWorktree | undefined;
   try {
-    registered = await findTodoWorktree(deps, slug, todoId);
+    registered = await findPhaseWorktree(deps, slug, phaseId);
   } catch (e) {
     return err({
       kind: 'git',
       slug,
-      todoId,
+      phaseId,
       message: `Could not list this repository's worktrees: ${describeError(e)}.`,
       ...gitErrorPart(e),
     });
@@ -445,7 +464,7 @@ export async function removeTodoWorktree(
       return err({
         kind: 'git',
         slug,
-        todoId,
+        phaseId,
         message: `Could not remove the worktree at ${worktreeDir}: ${describeError(e)}.`,
         ...gitErrorPart(e),
       });
@@ -461,7 +480,7 @@ export async function removeTodoWorktree(
     }
   }
 
-  // Drop the now-empty `.baiton/worktrees/<slug>/` folder so a fully landed spec
+  // Drop the now-empty `.baiton/worktrees/<slug>/` folder so a fully landed plan
   // leaves nothing behind.
   const parent = path.dirname(worktreeDir);
   try {
@@ -475,7 +494,7 @@ export async function removeTodoWorktree(
   if (input.deleteBranch === true) {
     try {
       if ((await deps.git.branchHead(branch)) !== undefined) {
-        // Force: an abandoned todo's branch is legitimately unmerged.
+        // Force: an abandoned phase's branch is legitimately unmerged.
         await deps.git.deleteBranch(branch, true);
         branchDeleted = true;
       }
@@ -488,36 +507,37 @@ export async function removeTodoWorktree(
 }
 
 /**
- * Land a todo: merge its branch into the spec branch, then remove the worktree
+ * Land a phase: merge its branch into the plan branch, then remove the worktree
  * and the branch.
  *
  * The merge always runs in the MAIN checkout (`deps.git`). The check order is
  * pinned — **invalid-id → wrong-branch → dirty-tree → missing-branch → merge** —
  * and tests assert it. `dirty-tree` ignores changes inside
- * `.baiton/specs/<slug>/`. There is deliberately NO base-moved check: the spec
- * branch advances with state commits while a todo is in flight.
+ * the resolved document folder. There is deliberately NO base-moved check: the plan
+ * branch advances with state commits while a phase is in flight.
  *
- * A conflicting merge is aborted by git; the spec branch, the todo branch and
+ * A conflicting merge is aborted by git; the plan branch, the phase branch and
  * the worktree are then left untouched (no cleanup). A branch already contained
- * in the spec branch lands as `noop: true` and is cleaned up like any other,
- * because {@link unlandedTodos} is defined by branch existence.
+ * in the plan branch lands as `noop: true` and is cleaned up like any other,
+ * because {@link unlandedPhases} is defined by branch existence.
  *
- * No locking here: serializing land with state commits is the spec-branch
+ * No locking here: serializing land with state commits is the plan-branch
  * writer's job.
  */
-export async function landTodoWorktree(
-  deps: TodoWorktreeDeps,
-  input: { slug: string; todoId: string; message?: string },
-): Promise<Result<TodoLandOutcome, TodoLandRefusal>> {
-  const { slug, todoId } = input;
-  if (!isTodoWorktreeKey(slug) || !isTodoWorktreeKey(todoId)) {
+export async function landPhaseWorktree(
+  deps: PhaseWorktreeDeps,
+  input: { slug: string; phaseId: string; kind?: DocumentKind; message?: string },
+): Promise<Result<PhaseLandOutcome, PhaseLandRefusal>> {
+  const { slug, phaseId } = input;
+  if (!isPhaseWorktreeKey(slug) || !isPhaseWorktreeKey(phaseId)) {
     return err({
       reason: 'invalid-id',
-      message: `Cannot land: ${JSON.stringify(slug)} / ${JSON.stringify(todoId)} is not a valid slug and todo id.`,
+      message: `Cannot land: ${JSON.stringify(slug)} / ${JSON.stringify(phaseId)} is not a valid slug and phase id.`,
     });
   }
 
-  const specBranch = specBranchFor(slug);
+  const kind = input.kind ?? documentKindFor(deps.workspaceRoot, slug);
+  const planBranch = planBranchFor(slug);
   let actual: string;
   try {
     actual = await deps.git.currentBranch();
@@ -527,22 +547,22 @@ export async function landTodoWorktree(
       message: `Cannot land: could not read the current branch: ${describeError(e)}.`,
     });
   }
-  if (actual !== specBranch) {
+  if (actual !== planBranch) {
     return err({
       reason: 'wrong-branch',
-      expected: specBranch,
+      expected: planBranch,
       actual,
       message:
-        `Cannot land ${todoId}: ${actual} is checked out, not ${specBranch}. ` +
-        `Check out ${specBranch}, then land again.`,
+        `Cannot land ${phaseId}: ${actual} is checked out, not ${planBranch}. ` +
+        `Check out ${planBranch}, then land again.`,
     });
   }
 
   let outside: string[];
   try {
     const status = await deps.git.status();
-    const specFolder = `.baiton/specs/${slug}/`;
-    outside = status.changes.map((c) => c.path).filter((p) => !p.startsWith(specFolder));
+    const documentFolder = `${resolveDocument(path.join(deps.workspaceRoot, '.baiton'), slug).pathspec}/`;
+    outside = status.changes.map((c) => c.path).filter((p) => !p.startsWith(documentFolder));
   } catch (e) {
     return err({
       reason: 'git',
@@ -554,19 +574,19 @@ export async function landTodoWorktree(
       reason: 'dirty-tree',
       changes: outside,
       message:
-        `Cannot land ${todoId}: the working tree has ${outside.length} uncommitted change(s) ` +
-        'outside the spec folder. Commit or stash them, then land again.',
+        `Cannot land ${phaseId}: the working tree has ${outside.length} uncommitted change(s) ` +
+        'outside the plan folder. Commit or stash them, then land again.',
     });
   }
 
-  const branch = todoBranchFor(slug, todoId);
+  const branch = phaseBranchFor(slug, phaseId, kind);
   let before: string;
   try {
     if ((await deps.git.branchHead(branch)) === undefined) {
       return err({
         reason: 'missing-branch',
         branch,
-        message: `Cannot land ${todoId}: the branch ${branch} does not exist. It may already have been landed.`,
+        message: `Cannot land ${phaseId}: the branch ${branch} does not exist. It may already have been landed.`,
       });
     }
     before = await deps.git.head();
@@ -577,15 +597,15 @@ export async function landTodoWorktree(
     });
   }
 
-  const merged = await deps.git.merge(branch, input.message ?? todoLandMessage(slug, todoId));
+  const merged = await deps.git.merge(branch, input.message ?? phaseLandMessage(slug, phaseId));
   if (!merged.ok) {
     return err({
       reason: 'conflict',
       branch,
       error: merged.error,
       message:
-        `Cannot land ${branch} into ${specBranch}: the merge conflicts and was aborted, so ` +
-        `${specBranch} is unchanged and the todo branch and worktree are untouched.`,
+        `Cannot land ${branch} into ${planBranch}: the merge conflicts and was aborted, so ` +
+        `${planBranch} is unchanged and the phase branch and worktree are untouched.`,
     });
   }
 
@@ -595,26 +615,27 @@ export async function landTodoWorktree(
 
   // Cleanup never turns a landed merge into a failure.
   const cleanup: string[] = [];
-  const removed = await removeTodoWorktree(deps, { slug, todoId, deleteBranch: true });
+  const removed = await removePhaseWorktree(deps, { slug, phaseId, kind, deleteBranch: true });
   if (removed.ok) {
     cleanup.push(...removed.value.warnings);
   } else {
     cleanup.push(removed.error.message);
   }
 
-  return ok({ commit: merged.value, specBranch, branch, noop, cleanup });
+  return ok({ commit: merged.value, planBranch, branch, noop, cleanup });
 }
 
 /**
- * The todo ids of `slug` whose branch `baiton-todo/<slug>/<id>` still exists,
+ * The phase ids of `slug` whose kind-specific phase branch still exists,
  * i.e. that have not been landed. The prefix ends in `/`, so slug `foo` never
  * matches the branches of slug `foo-bar`. Rejects on a git failure.
  */
-export async function unlandedTodos(
-  deps: Pick<TodoWorktreeDeps, 'git'>,
+export async function unlandedPhases(
+  deps: Pick<PhaseWorktreeDeps, 'git' | 'workspaceRoot'>,
   slug: string,
+  kind?: DocumentKind,
 ): Promise<readonly string[]> {
-  const prefix = todoBranchPrefix(slug);
+  const prefix = phaseBranchPrefix(slug, kind ?? documentKindFor(deps.workspaceRoot, slug));
   return (await deps.git.listBranches(prefix))
     .map((b) => b.slice(prefix.length))
     .filter((id) => id.length > 0 && !id.includes('/'))

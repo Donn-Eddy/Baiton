@@ -31,7 +31,7 @@
  *
  * If resolving the workspace root or writing the Brief fails, it halts before
  * creating any terminal and returns a {@link Result} error; the caller leaves
- * the todo's state unchanged (Req 11.5). All git-forbidding executor guidance
+ * the phase's state unchanged (Req 11.5). All git-forbidding executor guidance
  * lives in the Brief (Req 17.5), carried by the role instructions.
  *
  * The launcher is host-independent: the adapter computes launch args, the
@@ -64,9 +64,9 @@ export interface LaunchStageInput {
   /**
    * Optional absolute run root the launch resolves against: the terminal cwd
    * and the `.baiton/runs/<launch-id>/` brief, result and asks directories
-   * live under it instead of under `workspaceRoot`. Set by the spec-less run
-   * pipeline (`.baiton/worktrees/<run-id>/`) and by the run queue (the todo
-   * worktree `.baiton/worktrees/<slug>/<todoId>/`) to launch a stage inside it, so the
+   * live under it instead of under `workspaceRoot`. Set by the plan-less run
+   * pipeline (`.baiton/worktrees/<run-id>/`) and by the run queue (the phase
+   * worktree `.baiton/worktrees/<slug>/<phaseId>/`) to launch a stage inside it, so the
    * role profiles' RELATIVE run-dir grants (`.baiton/runs/<launch-id>/`) still
    * resolve to the same directory the launcher wrote. Absent, the launch is
    * byte-identical to a launch without the field.
@@ -108,7 +108,7 @@ export interface LaunchStageOutput {
   resultPath: string;
   /** The exact initial prompt sent to the terminal (Req 11.4). */
   initialPrompt: string;
-  /** The launch spec the terminal was created from (Req 11.1). */
+  /** The launch plan the terminal was created from (Req 11.1). */
   launchSpec: LaunchSpec;
   /** The ask-relay descriptor handed to the adapter, when the relay was enabled. */
   relay?: AskRelayDescriptor;
@@ -118,7 +118,7 @@ export interface LaunchStageOutput {
 
 /**
  * Why a launch was halted before the Sub_Agent ran (Req 11.5). Both variants
- * mean no terminal was created and the caller must leave the todo unchanged.
+ * mean no terminal was created and the caller must leave the phase unchanged.
  *
  * - `root-resolution` — the workspace root, or the `cwd` override, could not
  *                       be resolved.

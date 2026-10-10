@@ -204,7 +204,8 @@ export interface GitWorktreeService extends GitService {
   commitPaths(paths: readonly string[], message: string, trailers?: Record<string, string>): Promise<string>;
   /**
    * Every local branch whose short name starts with `prefix` (e.g.
-   * `baiton-todo/<slug>/`), as short names (no `refs/heads/`), sorted.
+   * `baiton-phase/<slug>/` (or legacy `baiton-todo/<slug>/`), as short names
+   * (no `refs/heads/`), sorted.
    */
   listBranches(prefix: string): Promise<readonly string[]>;
 }

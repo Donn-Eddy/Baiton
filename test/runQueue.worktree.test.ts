@@ -18,11 +18,11 @@ import type { ResultWatcher } from '../src/engine/resultWatcher';
 import { createPlanBranchWriter } from '../src/engine/planBranchWriter';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import {
-  createTodoWorktree,
-  landTodoWorktree,
-  todoBranchFor,
-  todoWorktreeDirFor,
-} from '../src/engine/todoWorktree';
+  createPhaseWorktree,
+  landPhaseWorktree,
+  phaseBranchFor,
+  phaseWorktreeDirFor,
+} from '../src/engine/phaseWorktree';
 import { createGitService } from '../src/git/gitService';
 import { readPlanJournal, phaseJournalPathFor } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
@@ -111,8 +111,8 @@ interface Rig {
   states: Map<string, PhaseState>;
   stages: DrivenStage[];
   created: Array<string | undefined>;
-  queueFor(todoId: string): RunQueue;
-  dispatch(todoId: string, action: RunRequest['action'], role: Role, attempt?: number): Promise<DispatchResult>;
+  queueFor(phaseId: string): RunQueue;
+  dispatch(phaseId: string, action: RunRequest['action'], role: Role, attempt?: number): Promise<DispatchResult>;
 }
 
 function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
@@ -123,23 +123,23 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
   const stages: DrivenStage[] = [];
   const created: Array<string | undefined> = [];
 
-  const artifactDir = (todoId: string): string => path.join(specsDir, SLUG, 'todos', todoId);
-  const latest = (todoId: string, stage: Stage): string | undefined => {
+  const artifactDir = (phaseId: string): string => path.join(specsDir, SLUG, 'todos', phaseId);
+  const latest = (phaseId: string, stage: Stage): string | undefined => {
     let names: string[] = [];
     try {
-      names = fs.readdirSync(artifactDir(todoId)).filter((n) => n.startsWith(`${stage}-`));
+      names = fs.readdirSync(artifactDir(phaseId)).filter((n) => n.startsWith(`${stage}-`));
     } catch {
       return undefined;
     }
     names.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     const last = names[names.length - 1];
-    return last === undefined ? undefined : fs.readFileSync(path.join(artifactDir(todoId), last), 'utf8');
+    return last === undefined ? undefined : fs.readFileSync(path.join(artifactDir(phaseId), last), 'utf8');
   };
 
-  const specStore: PlanStore = {
-    currentState: async (_slug, todoId) => states.get(todoId),
-    readSpec: async () => parsePlan(SPEC_TEXT),
-    readArtifact: async (_slug, todoId, stage) => (stage === 'plan' ? '# Plan\n' : latest(todoId, stage)),
+  const planStore: PlanStore = {
+    currentState: async (_slug, phaseId) => states.get(phaseId),
+    readPlan: async () => parsePlan(SPEC_TEXT),
+    readArtifact: async (_slug, phaseId, stage) => (stage === 'plan' ? '# Plan\n' : latest(phaseId, stage)),
     latestExecuteCommit: async () => undefined,
     persistArtifact: (slug, artifactPath, contents) =>
       writer.apply(slug, () => {
@@ -150,8 +150,8 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
     isBlocked: async () => false,
     inputRevMatches: async () => true,
     inputRev: async () => 'rev0',
-    writeState: async (_slug, todoId, state) => {
-      states.set(todoId, state);
+    writeState: async (_slug, phaseId, state) => {
+      states.set(phaseId, state);
       return true;
     },
   };
@@ -237,27 +237,27 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
   const worktrees = createQueueWorktreeSeam({ workspaceRoot: repo, git: mainGit, writer });
   let counter = 0;
   const queues = new Map<string, RunQueue>();
-  const queueFor = (todoId: string): RunQueue => {
-    let q = queues.get(todoId);
+  const queueFor = (phaseId: string): RunQueue => {
+    let q = queues.get(phaseId);
     if (q === undefined) {
       q = createRunQueue({
         workspaceRoot: repo,
         git: mainGit,
         slug: SLUG,
-        todoId,
+        phaseId,
         worktrees,
-        specWriter: writer,
+        planWriter: writer,
         terminalHost,
         watcherFactory,
-        specStore,
+        planStore,
         journalPath: path.join(specsDir, SLUG, 'runs.jsonl'),
         journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), SLUG, id),
         readJournal: () => readPlanJournal(path.dirname(specsDir), SLUG),
         modelForRole: () => ({ model: 'test-model' }),
         adapterForRole: () => adapter,
-        newRunId: (req) => `run-${req.todoId}-${req.action}-${req.attempt}-${counter++}`,
+        newRunId: (req) => `run-${req.phaseId}-${req.action}-${req.attempt}-${counter++}`,
       });
-      queues.set(todoId, q);
+      queues.set(phaseId, q);
     }
     return q;
   };
@@ -269,8 +269,8 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
     stages,
     created,
     queueFor,
-    dispatch: (todoId, action, role, attempt = 1) =>
-      queueFor(todoId).dispatch({ slug: SLUG, todoId, action, role, attempt, resume: false }),
+    dispatch: (phaseId, action, role, attempt = 1) =>
+      queueFor(phaseId).dispatch({ slug: SLUG, phaseId, action, role, attempt, resume: false }),
   };
 }
 
@@ -289,7 +289,7 @@ async function until(pred: () => boolean, what: string): Promise<void> {
   assert.fail(`timed out waiting for ${what}`);
 }
 
-describe('run queue per-todo worktrees (real repo)', () => {
+describe('run queue per-phase worktrees (real repo)', () => {
   const repos: string[] = [];
 
   function newRepo(): string {
@@ -310,7 +310,7 @@ describe('run queue per-todo worktrees (real repo)', () => {
     }
   });
 
-  it('runs two todos concurrently, each committing only on its own todo branch', async () => {
+  it('runs two phases concurrently, each committing only on its own phase branch', async () => {
     const repo = newRepo();
     const rig = makeRig(repo, { T01: 'planned', T02: 'planned' });
     const mainHeadBefore = git(repo, 'rev-parse', 'HEAD').trim();
@@ -320,8 +320,8 @@ describe('run queue per-todo worktrees (real repo)', () => {
     await until(() => rig.stages.length === 2, 'both stages to launch');
 
     assert.ok(rig.queueFor('T01').isRunning() && rig.queueFor('T02').isRunning(), 'both in flight');
-    const wt1 = todoWorktreeDirFor(repo, SLUG, 'T01');
-    const wt2 = todoWorktreeDirFor(repo, SLUG, 'T02');
+    const wt1 = phaseWorktreeDirFor(repo, SLUG, 'T01');
+    const wt2 = phaseWorktreeDirFor(repo, SLUG, 'T02');
     assert.deepStrictEqual([...rig.created].sort(), [wt1, wt2].sort());
     assert.strictEqual(rig.queueFor('T01').currentRun()?.worktreeDir, wt1);
     const registered = git(repo, 'worktree', 'list', '--porcelain');
@@ -330,7 +330,7 @@ describe('run queue per-todo worktrees (real repo)', () => {
       [wt2, 'T02'],
     ]) {
       assert.ok(fs.existsSync(dir));
-      assert.ok(registered.includes(`branch refs/heads/${todoBranchFor(SLUG, id)}`));
+      assert.ok(registered.includes(`branch refs/heads/${phaseBranchFor(SLUG, id, 'legacy-spec')}`));
     }
 
     const stageFor = (dir: string): DrivenStage => rig.stages.find((s) => s.cwd === dir) as DrivenStage;
@@ -348,10 +348,10 @@ describe('run queue per-todo worktrees (real repo)', () => {
       ['T01', 'src/t01.txt', 'src/t02.txt'],
       ['T02', 'src/t02.txt', 'src/t01.txt'],
     ]) {
-      const branch = todoBranchFor(SLUG, id);
+      const branch = phaseBranchFor(SLUG, id, 'legacy-spec');
       const runId = (rig.stages.find((s) => s.runId.startsWith(`run-${id}-`)) as DrivenStage).runId;
       const body = git(repo, 'log', '-1', '--format=%B', branch);
-      assert.ok(body.startsWith(`spec(${SLUG}): ${id} execute attempt 1`), body);
+      assert.ok(body.startsWith(`plan(${SLUG}): ${id} execute attempt 1`), body);
       assert.ok(body.includes(`Run-Id: ${runId}`), body);
       const files = git(repo, 'show', '--name-only', '--format=', branch).trim().split('\n');
       assert.deepStrictEqual(files, [file], `${id} commit holds only its own file (not ${other})`);
@@ -379,7 +379,7 @@ describe('run queue per-todo worktrees (real repo)', () => {
   it('reuses the worktree for a later stage and resets it after a completed review', async () => {
     const repo = newRepo();
     const rig = makeRig(repo, { T01: 'planned' });
-    const wt = todoWorktreeDirFor(repo, SLUG, 'T01');
+    const wt = phaseWorktreeDirFor(repo, SLUG, 'T01');
 
     const first = rig.dispatch('T01', 'execute', 'executor');
     await until(() => rig.stages.length === 1, 'execute to launch');
@@ -408,9 +408,9 @@ describe('run queue per-todo worktrees (real repo)', () => {
   it('checks the clean-tree guard on the worktree, not the main checkout', async () => {
     const repo = newRepo();
     const rig = makeRig(repo, { T01: 'planned' });
-    const wt = todoWorktreeDirFor(repo, SLUG, 'T01');
+    const wt = phaseWorktreeDirFor(repo, SLUG, 'T01');
     // Create the worktree up front, then dirty a tracked file in it.
-    const created = await createTodoWorktree({ workspaceRoot: repo, git: createGitService(repo) }, { slug: SLUG, todoId: 'T01' });
+    const created = await createPhaseWorktree({ workspaceRoot: repo, git: createGitService(repo) }, { slug: SLUG, phaseId: 'T01' });
     assert.ok(created.ok);
     fs.appendFileSync(path.join(wt, 'src/base.txt'), 'dirty\n');
 
@@ -426,14 +426,14 @@ describe('run queue per-todo worktrees (real repo)', () => {
     rig.stages[0].complete(EXECUTE_RESULT);
     const result = await run;
     assert.ok(result.ok, 'a dirty main checkout does not block a clean worktree');
-    assert.ok(!git(repo, 'show', '--name-only', '--format=', todoBranchFor(SLUG, 'T01')).includes('untracked-main.txt'));
+    assert.ok(!git(repo, 'show', '--name-only', '--format=', phaseBranchFor(SLUG, 'T01', 'legacy-spec')).includes('untracked-main.txt'));
   });
 
   it('refuses Plan while a dependency is unlanded and plans in a fresh worktree once it is landed', async () => {
     const repo = newRepo();
     const rig = makeRig(repo, { T01: 'done', T03: 'pending' });
     const deps = { workspaceRoot: repo, git: createGitService(repo) };
-    const t01 = await createTodoWorktree(deps, { slug: SLUG, todoId: 'T01' });
+    const t01 = await createPhaseWorktree(deps, { slug: SLUG, phaseId: 'T01' });
     assert.ok(t01.ok);
     writeFile(t01.value.worktreeDir, 'src/t01.txt', 'one\n');
     git(t01.value.worktreeDir, 'add', '-A');
@@ -441,15 +441,15 @@ describe('run queue per-todo worktrees (real repo)', () => {
 
     const refused = await rig.dispatch('T03', 'plan', 'planner');
     assert.ok(!refused.ok && refused.error.kind === 'deps-unlanded', JSON.stringify(refused));
-    assert.ok(!fs.existsSync(todoWorktreeDirFor(repo, SLUG, 'T03')), 'no worktree for a refused Plan');
+    assert.ok(!fs.existsSync(phaseWorktreeDirFor(repo, SLUG, 'T03')), 'no worktree for a refused Plan');
     assert.strictEqual(rig.stages.length, 0);
 
-    const landed = await landTodoWorktree(deps, { slug: SLUG, todoId: 'T01' });
+    const landed = await landPhaseWorktree(deps, { slug: SLUG, phaseId: 'T01' });
     assert.ok(landed.ok, JSON.stringify(landed));
 
     const plan = rig.dispatch('T03', 'plan', 'planner');
     await until(() => rig.stages.length === 1, 'plan to launch');
-    const wt3 = todoWorktreeDirFor(repo, SLUG, 'T03');
+    const wt3 = phaseWorktreeDirFor(repo, SLUG, 'T03');
     assert.strictEqual(rig.stages[0].cwd, wt3);
     assert.ok(fs.existsSync(path.join(wt3, 'src/t01.txt')), "the new worktree contains T01's file");
     rig.stages[0].complete(PLAN_RESULT);
@@ -468,7 +468,7 @@ describe('run queue per-todo worktrees (real repo)', () => {
 
     assert.ok(!result.ok && result.error.kind === 'outcome');
     assert.strictEqual(rig.states.get('T01'), 'planned', 'state reverted');
-    assert.ok(fs.existsSync(todoWorktreeDirFor(repo, SLUG, 'T01')));
-    assert.ok(git(repo, 'branch', '--list', todoBranchFor(SLUG, 'T01')).includes(todoBranchFor(SLUG, 'T01')));
+    assert.ok(fs.existsSync(phaseWorktreeDirFor(repo, SLUG, 'T01')));
+    assert.ok(git(repo, 'branch', '--list', phaseBranchFor(SLUG, 'T01', 'legacy-spec')).includes(phaseBranchFor(SLUG, 'T01', 'legacy-spec')));
   });
 });

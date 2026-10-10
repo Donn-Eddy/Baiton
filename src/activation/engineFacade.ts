@@ -142,7 +142,7 @@ export function dispatchTrigger(
     // Control actions launch no sub-agent; role/attempt/resume are unused.
     return queue.dispatch({
       slug: trigger.slug,
-      todoId: trigger.todoId,
+      phaseId: trigger.todoId,
       action: trigger.action,
       role: 'planner',
       attempt: 1,
@@ -192,7 +192,7 @@ export function dispatchTrigger(
 
   return queue.dispatch({
     slug: trigger.slug,
-    todoId: trigger.todoId,
+    phaseId: trigger.todoId,
     action,
     role,
     attempt,
@@ -210,12 +210,12 @@ export function todoQueueKey(slug: string, todoId: string): string {
 export type TodoQueuesDeps = Omit<
   RunQueueDeps,
   | 'slug'
-  | 'todoId'
+  | 'phaseId'
   | 'journalPath'
   | 'journalPathFor'
   | 'readJournal'
   | 'worktrees'
-  | 'specWriter'
+  | 'planWriter'
   | 'isExternallyBusy'
   | 'git'
 > & {
@@ -223,7 +223,7 @@ export type TodoQueuesDeps = Omit<
   /** Git service over the main checkout. */
   git: GitWorktreeService;
   /** The one writer shared with the spec store so per-slug writes serialize. */
-  specWriter: PlanBranchWriter;
+  planWriter: PlanBranchWriter;
   worktrees?: QueueWorktreeSeam;
 };
 
@@ -245,13 +245,13 @@ export interface TodoQueues {
  * their own worktrees, outside the repository lock.
  */
 export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
-  const { baitonDir, specWriter, worktrees, ...rest } = deps;
+  const { baitonDir, planWriter, worktrees, ...rest } = deps;
   const seam =
     worktrees ??
     createQueueWorktreeSeam({
       workspaceRoot: deps.workspaceRoot,
       git: deps.git,
-      writer: specWriter,
+      writer: planWriter,
     });
   const queues = new Map<string, { slug: string; queue: RunQueue }>();
   return {
@@ -264,9 +264,9 @@ export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
       const queue = createRunQueue({
         ...rest,
         slug,
-        todoId,
+        phaseId: todoId,
         worktrees: seam,
-        specWriter,
+        planWriter,
         journalPath: planJournalPathFor(baitonDir, slug),
         journalPathFor: (id) => phaseJournalPathFor(baitonDir, slug, id),
         readJournal: () => readPlanJournal(baitonDir, slug),
@@ -331,8 +331,8 @@ export function createRunQueueSeam(
   const inFlight = new Set<string>();
   return {
     async dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome> {
-      const key = todoQueueKey(req.slug, req.todoId);
-      const queue = queueFor(req.slug, req.todoId);
+      const key = todoQueueKey(req.slug, req.phaseId);
+      const queue = queueFor(req.slug, req.phaseId);
       if (inFlight.has(key) || queue.isRunning()) {
         return { kind: 'busy' };
       }
@@ -345,7 +345,7 @@ export function createRunQueueSeam(
           {
             kind: 'stage',
             slug: req.slug,
-            todoId: req.todoId,
+            todoId: req.phaseId,
             stage: req.stage,
           },
           adapterForRole,
