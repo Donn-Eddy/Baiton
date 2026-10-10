@@ -28,7 +28,7 @@
     },
     "pr-writer": {
       "agent": "opencode",
-      "model": "opencode/longcat-2.5-preview-free",
+      "model": "opencode/space-bunny-free",
       "effort": "medium"
     }
   },
