@@ -17,9 +17,9 @@
       "effort": "medium"
     },
     "executor": {
-      "agent": "claude",
-      "model": "claude-sonnet-5-5",
-      "effort": "medium"
+      "agent": "codex",
+      "model": "gpt-6-luna",
+      "effort": "xhigh"
     },
     "reviewer": {
       "agent": "antigravity",

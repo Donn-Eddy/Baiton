@@ -33,6 +33,7 @@ interface WindowView {
   remainingPercent?: number;
   figure: string;
   resetText: string;
+  resetAbsolute: string;
   derived: boolean;
 }
 interface CardView {
@@ -45,8 +46,15 @@ interface CardView {
   windows: WindowView[];
   reason: string;
   ageText: string;
+  badgeHint: string;
   sourceLine: string;
   derived: boolean;
+}
+interface WindowRow {
+  label: string;
+  figure: string;
+  reset: string;
+  resetTitle: string;
 }
 interface UsageMirror {
   TOOL_ORDER: string[];
@@ -56,6 +64,7 @@ interface UsageMirror {
   formatReset(resetsAt: unknown, now: unknown): { relative: string; absolute: string };
   formatRaw(raw: unknown): string;
   windowView(w: unknown, now: unknown): WindowView;
+  windowRow(w: unknown): WindowRow;
   cardView(row: unknown, now: unknown): CardView;
 }
 
@@ -127,6 +136,20 @@ describe('usage.js source', () => {
       assert.ok(!script.includes(bad), `usage.js must not contain ${bad}`);
     }
   });
+
+  it('no longer draws a source-line in the card body', () => {
+    assert.ok(!script.includes('source-line'), 'usage.js must not append a .source-line element');
+  });
+
+  it('puts the badge hint on the status badge as title, aria-label and tabindex', () => {
+    assert.ok(/statusBadge\.title\s*=\s*v\.badgeHint/.test(script));
+    assert.ok(/statusBadge\.setAttribute\(\s*'aria-label'\s*,\s*v\.badgeHint\s*\)/.test(script));
+    assert.ok(/statusBadge\.setAttribute\(\s*'tabindex'\s*,\s*'0'\s*\)/.test(script));
+    assert.ok(/v\.status\s*!==\s*'loading'/.test(script));
+    assert.ok(/windowRow\(w\)/.test(script));
+    assert.ok(html.includes('focus-visible'));
+    assert.ok(html.includes('var(--vscode-focusBorder)'));
+  });
 });
 
 describe('usage.js mirror', () => {
@@ -160,6 +183,42 @@ describe('usage.js mirror', () => {
     assert.strictEqual(mirror.formatRaw({ remaining: 38, unit: 'requests' }), '38 requests remaining');
     assert.strictEqual(mirror.formatRaw({}), '');
     assert.strictEqual(mirror.formatRaw(undefined), '');
+  });
+
+  it('windowRow puts the figure beside the label and the reset on the right', () => {
+    const resetsAt = NOW + 90 * 60_000;
+    const reading = okReading('codex', source(), [win({ usedPercent: 30, resetsAt })]);
+    const w = mirror.cardView(rowFor(reading), NOW).windows[0];
+    const r = plain(mirror.windowRow(w));
+    assert.strictEqual(r.label, '5-hour');
+    assert.strictEqual(r.figure, '70% remaining');
+    assert.strictEqual(r.reset, 'resets in 1h 30m');
+    assert.strictEqual(r.resetTitle, mirror.formatReset(resetsAt, NOW).absolute);
+    assert.notStrictEqual(r.resetTitle, '');
+  });
+
+  it('windowRow has an empty reset when resetsAt is absent', () => {
+    const reading = okReading('codex', source(), [win({ usedPercent: 30 })]);
+    const w = mirror.cardView(rowFor(reading), NOW).windows[0];
+    const r = plain(mirror.windowRow(w));
+    assert.strictEqual(r.reset, '');
+    assert.strictEqual(r.resetTitle, '');
+  });
+
+  it('windowRow shows the raw figure when there is no percent', () => {
+    const reading = okReading('codex', source(), [win({ raw: { used: 12, limit: 50, unit: 'requests' } })]);
+    const w = mirror.cardView(rowFor(reading), NOW).windows[0];
+    const r = plain(mirror.windowRow(w));
+    assert.strictEqual(r.figure, '12 / 50 requests used');
+    assert.ok(!r.figure.includes('%'));
+    assert.strictEqual(r.reset, '');
+  });
+
+  it('windowRow keeps the Baiton-derived label suffix', () => {
+    const reading = okReading('opencode-go', source('baiton-derived'), [win({ usedPercent: 50, provenance: 'baiton-derived' })]);
+    const w = mirror.cardView(rowFor(reading), NOW).windows[0];
+    const r = plain(mirror.windowRow(w));
+    assert.strictEqual(r.label, '5-hour · Baiton-derived');
   });
 
   it('ok reading with a percent shows a remaining bar', () => {
@@ -208,6 +267,38 @@ describe('usage.js mirror', () => {
     assert.ok(v.sourceLine.includes('Baiton-derived'));
   });
 
+  it('badgeHint carries the source line per status', () => {
+    const ok = okReading('codex', source(), [win({ usedPercent: 30 })]);
+    const okView = plain(mirror.cardView(rowFor(ok), NOW));
+    assert.strictEqual(okView.badgeHint, 'CLI server — codex app-server · Provider-reported · read 5 min ago');
+    assert.strictEqual(okView.sourceLine, okView.badgeHint);
+
+    const good = okReading('claude', source(), [win({ usedPercent: 10 })]) as OkUsageReading;
+    const stale = staleReading(good, 'timed out', NOW);
+    const staleView = plain(mirror.cardView(rowFor(stale), NOW));
+    assert.strictEqual(staleView.badgeHint, 'CLI server — codex app-server · Provider-reported · read 5 min ago');
+    assert.strictEqual(staleView.sourceLine, staleView.badgeHint);
+    assert.ok(staleView.reason.startsWith('Last read failed:'));
+
+    const derived = okReading('opencode-go', source('baiton-derived'), [win({ usedPercent: 50 })]);
+    const derivedView = plain(mirror.cardView(rowFor(derived), NOW));
+    assert.ok(derivedView.badgeHint.includes('Baiton-derived'));
+    assert.strictEqual(derivedView.derived, true);
+
+    const unavailable = unavailableReading('antigravity', 'not installed', NOW, 'cli-command');
+    const unavailableView = plain(mirror.cardView(rowFor(unavailable), NOW));
+    assert.strictEqual(unavailableView.badgeHint, 'Tried: CLI command');
+    assert.strictEqual(unavailableView.reason, 'not installed');
+
+    const unknownMechanism = unavailableReading('antigravity', 'not installed', NOW);
+    const unknownView = plain(mirror.cardView(rowFor(unknownMechanism), NOW));
+    assert.strictEqual(unknownView.badgeHint, '');
+    assert.strictEqual(unknownView.sourceLine, '');
+
+    const loadingView = plain(mirror.cardView({ tool: 'claude', label: 'Claude Code', refreshing: false }, NOW));
+    assert.strictEqual(loadingView.badgeHint, '');
+  });
+
   it('row without a reading is loading', () => {
     const v = plain(mirror.cardView({ tool: 'claude', label: 'Claude Code', refreshing: false }, NOW));
     assert.strictEqual(v.status, 'loading');
@@ -218,6 +309,8 @@ describe('usage.js mirror', () => {
     assert.doesNotThrow(() => mirror.cardView({}, NaN));
     assert.doesNotThrow(() => mirror.cardView(null, undefined));
     assert.doesNotThrow(() => mirror.windowView(null, 0));
+    assert.doesNotThrow(() => mirror.windowRow(null));
+    assert.deepStrictEqual(plain(mirror.windowRow(null)), { label: '', figure: '', reset: '', resetTitle: '' });
     assert.doesNotThrow(() => mirror.cardView({ reading: { status: 'ok', windows: 'x', source: 5 } }, NOW));
   });
 });

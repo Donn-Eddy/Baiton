@@ -127,6 +127,17 @@
     };
   }
 
+  function windowRow(w) {
+    var v = isObject(w) ? w : {};
+    var reset = str(v.resetText);
+    return {
+      label: str(v.label) + (v.derived === true ? ' · Baiton-derived' : ''),
+      figure: str(v.figure),
+      reset: reset,
+      resetTitle: reset ? str(v.resetAbsolute) : '',
+    };
+  }
+
   function cardView(row, now) {
     var r = isObject(row) ? row : {};
     var reading = isObject(r.reading) ? r.reading : undefined;
@@ -144,6 +155,7 @@
       windows: [],
       reason: '',
       ageText: '',
+      badgeHint: '',
       sourceLine: '',
       derived: false,
     };
@@ -152,7 +164,8 @@
     if (status === 'unavailable') {
       view.reason = str(reading.reason);
       var tried = MECHANISM_LABELS[reading.mechanism];
-      if (tried) view.sourceLine = 'Tried: ' + tried;
+      if (tried) view.badgeHint = 'Tried: ' + tried;
+      view.sourceLine = view.badgeHint;
       return view;
     }
 
@@ -172,7 +185,8 @@
     if (mech || str(source.detail)) pieces.push(mech + (mech && source.detail ? ' — ' : '') + str(source.detail));
     pieces.push(sourceDerived ? 'Baiton-derived' : 'Provider-reported');
     if (age) pieces.push('read ' + age);
-    view.sourceLine = pieces.join(' · ');
+    view.badgeHint = pieces.join(' · ');
+    view.sourceLine = view.badgeHint;
     return view;
   }
 
@@ -186,6 +200,7 @@
       formatReset: formatReset,
       formatRaw: formatRaw,
       windowView: windowView,
+      windowRow: windowRow,
       cardView: cardView,
     };
   }
@@ -225,7 +240,13 @@
     var header = el('div', 'card-header');
     header.appendChild(el('span', 'card-title', v.label));
     var badges = el('span', 'badges');
-    badges.appendChild(el('span', 'badge ' + v.status, v.badge));
+    var statusBadge = el('span', 'badge ' + v.status, v.badge);
+    if (v.status !== 'loading' && v.badgeHint) {
+      statusBadge.title = v.badgeHint;
+      statusBadge.setAttribute('aria-label', v.badgeHint);
+      statusBadge.setAttribute('tabindex', '0');
+    }
+    badges.appendChild(statusBadge);
     if (v.derived) badges.appendChild(el('span', 'badge derived', 'Baiton-derived'));
     if (v.refreshing) badges.appendChild(el('span', 'refreshing', 'Refreshing…'));
     header.appendChild(badges);
@@ -237,8 +258,19 @@
     }
 
     v.windows.forEach(function (w) {
+      var r = windowRow(w);
       var box = el('div', 'window');
-      box.appendChild(el('div', 'window-label', w.label + (w.derived ? ' · Baiton-derived' : '')));
+      var rowEl = el('div', 'window-row');
+      var head = el('div', 'window-head');
+      head.appendChild(el('span', 'window-label', r.label));
+      head.appendChild(el('span', 'window-figure', r.figure));
+      rowEl.appendChild(head);
+      if (r.reset) {
+        var reset = el('span', 'window-reset', r.reset);
+        if (r.resetTitle) reset.title = r.resetTitle;
+        rowEl.appendChild(reset);
+      }
+      box.appendChild(rowEl);
       if (w.scopeText) box.appendChild(el('div', 'window-scope', w.scopeText));
       if (w.hasBar) {
         var track = el('div', 'bar');
@@ -252,17 +284,10 @@
         track.appendChild(fill);
         box.appendChild(track);
       }
-      box.appendChild(el('div', 'window-figure', w.figure));
-      if (w.resetText) {
-        var reset = el('div', 'window-reset', w.resetText);
-        if (w.resetAbsolute) reset.title = w.resetAbsolute;
-        box.appendChild(reset);
-      }
       card.appendChild(box);
     });
 
     if (v.reason) card.appendChild(el('div', 'reason', v.reason));
-    if (v.sourceLine) card.appendChild(el('div', 'source-line', v.sourceLine));
     return card;
   }
 
