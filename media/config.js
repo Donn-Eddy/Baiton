@@ -1,6 +1,6 @@
 // @ts-check
 /*
- * Config_Panel entry script — spec "Configuration Panel" (config-panel), todos T04, T10, T11.
+ * Config_Panel entry script.
  *
  * **src/config/configPanel.ts is the source of truth.** This file is its
  * plain-script mirror, exactly as media/protocol.js mirrors
@@ -400,7 +400,7 @@
   }
 
   /** One dynamic option, from a plain id or a `{ value, text }` pair. */
-  function optionSpec(item) {
+  function optionEntry(item) {
     if (item !== null && typeof item === 'object') {
       var value = String(item.value);
       return {
@@ -428,7 +428,7 @@
     var desired = [];
     var i;
     for (i = 0; i < source.length; i++) {
-      desired.push(optionSpec(source[i]));
+      desired.push(optionEntry(source[i]));
     }
     var current = [];
     for (i = 0; i < selectEl.children.length; i++) {

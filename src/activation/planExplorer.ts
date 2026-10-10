@@ -1,29 +1,15 @@
 /**
- * The Spec_Explorer tree provider (task 10.1; design "SpecExplorer
- * TreeDataProvider", "SpecExplorer inline actions", "SpecExplorer refresh";
- * Requirements 2, 3, 4, 5, 6, 18.2, 18.4).
+ * The Plan Explorer tree provider for plan documents and phases.
  *
- * This is the thin `vscode` glue over the host-free tree model. On each refresh
- * it:
- *   1. runs {@link listPlans} — the only new `fs` reach — to read each present
- *      `.baiton/specs/<slug>/spec.md` in ascending slug order (Req 2.1, 6.5);
- *   2. obtains each spec's approval fact from the {@link PlanStore} (never
- *      recomputed here, Req 2.4);
- *   3. builds the ordered nodes with {@link buildPlanTree}, reusing the pure
- *      `parsePlan`/`validatePlan`/`isBlocked` cores (Req 18.1);
- *   4. maps each `PlanNode`/`PhaseNode`/`ErrorNode` to a `TreeItem`.
+ * The explorer lists both document roots: `.baiton/plans/<slug>/plan.md` and
+ * the legacy `.baiton/specs/<slug>/spec.md`. `listPlans` and `resolveDocument`
+ * prefer the plans root when a slug exists in both locations. Refreshes derive
+ * the tree from disk, approval state, plan journals, and phase plans.
  *
- * A `FileSystemWatcher` over `.baiton/specs/**` (create/change/delete) drives a
- * ~500 ms debounced/coalescing refresh that re-derives everything from disk
- * with no pre-event cache: one root per present `spec.md`, dropping roots for
- * removed files (Req 6.1–6.6).
- *
- * Click-to-open reveals a spec's `spec.md` and sets it as the Chat_View active
- * spec through an injected sink; when `spec.md` cannot be opened, an error is
- * surfaced and the active spec is left unchanged (Req 2.6, 2.7). Inline actions
- * are attached via `contextValue`s and invoke the existing `baiton.*` commands
- * with the CodeLens argument order; the `view/item/context` `when` clauses in
- * `package.json` (task 14.1) hide them under Restricted Mode (Req 5, 5.6, 5.7).
+ * A watcher over `{plans,specs}/**` coalesces filesystem changes; `specs` is
+ * the legacy document root. Root clicks open the resolved plan document and
+ * update the active plan. Inline actions use the existing command arguments
+ * and are hidden in Restricted Mode through package.json context clauses.
  */
 import * as vscode from 'vscode';
 import { resolveDocument } from '../storage/documentLocation';
@@ -42,53 +28,51 @@ import { listPlans, listPhasePlans } from './planLister';
 import type { Surface } from './surface';
 
 /**
- * A sink the explorer notifies when the user clicks a spec root: the Chat_View
- * active spec follows the explorer selection (Req 2.6, design "ChatController").
- * Wired to the {@link ChatController} in task 12.1; supplied as `undefined`
- * until then so the provider stays usable without the chat surface.
+ * A sink the explorer notifies when the user clicks a plan root: the Chat_View
+ * active plan follows the explorer selection. The sink is optional when no chat
+ * surface is wired.
  */
-export type SetActiveSpec = (slug: string | undefined) => void;
+export type SetActivePlan = (slug: string | undefined) => void;
 
-/** The command id the tree item click invokes to open a spec's `spec.md`. */
-const OPEN_SPEC_COMMAND = 'baiton.specExplorer.openSpec';
+/** The command id a tree item invokes to open the resolved plan document. */
+const OPEN_PLAN_COMMAND = 'baiton.planExplorer.openPlan';
 
 /** The debounce window for coalescing filesystem events into one refresh (Req 6.2). */
 const REFRESH_DEBOUNCE_MS = 500;
 
 /**
  * The `contextValue`s the `view/item/context` menu contributions match on to
- * surface the inline actions (design "SpecExplorer inline actions"). A todo
- * node's contextValue is `baiton.todo` plus one token per legal action (built
- * by {@link phaseContextValue}); a valid spec root's is `baiton.spec` plus one
+ * surface the inline actions (inline tree actions). A phase
+ * node's contextValue is `baiton.phase` plus one token per legal action (built
+ * by {@link phaseContextValue}); a valid plan root's is `baiton.planRoot` plus one
  * token per legal action (built by {@link planContextValue}), so it offers
  * Approve, Submit PR or Show PR only when that action is legal. An invalid or
  * unreadable root keeps the fixed error context value below and offers none.
  */
-const CONTEXT_ERROR = 'baiton.specError';
+const CONTEXT_ERROR = 'baiton.planError';
 
 /**
- * One node in the tree: a spec root, a todo child, or an error child. This is
- * the element VS Code hands the `view/item/context` command handlers, so the
- * inline-action wiring (task 14.2) reads `node.slug`/`node.id` off it to invoke
- * `baiton.*` with the CodeLens argument order (design "SpecExplorer inline
+ * One node in the tree: a plan root, a phase child, or an error child. This is
+ * the element VS Code hands to the `view/item/context` command handlers, which read `node.slug`/`node.id` off it to invoke
+ * `baiton.*` with the CodeLens argument order (design "PlanExplorer inline
  * actions"). Exported for that wiring and its {@link treeNodeTarget} helper.
  */
 export type TreeNode =
-  | { kind: 'spec'; node: PlanNode }
-  | { kind: 'todo'; node: PhaseNode }
+  | { kind: 'plan'; node: PlanNode }
+  | { kind: 'phase'; node: PhaseNode }
   | { kind: 'error'; node: ErrorNode };
 
 /**
- * The `[slug]` or `[slug, todoId]` a `view/item/context` action forwards to the
+ * The `[slug]` or `[slug, phaseId]` a `view/item/context` action forwards to the
  * matching `baiton.*` command from a clicked {@link TreeNode} (Req 5.2, 5.5,
- * 18.4). A spec root yields `[slug]` (Approve/Submit PR/Show PR); a todo yields `[slug, todoId]`
+ * 18.4). A plan root yields `[slug]` (Approve/Submit PR/Show PR); a phase yields `[slug, phaseId]`
  * (Plan/Execute/Review/Re-plan/Stop); an error child has no action.
  */
 export function treeNodeTarget(node: TreeNode): string[] | undefined {
   switch (node.kind) {
-    case 'spec':
+    case 'plan':
       return [node.node.slug];
-    case 'todo':
+    case 'phase':
       return [node.node.slug, node.node.id];
     case 'error':
       return undefined;
@@ -96,11 +80,11 @@ export function treeNodeTarget(node: TreeNode): string[] | undefined {
 }
 
 /**
- * The Spec_Explorer {@link vscode.TreeDataProvider}. Construct it, register it
- * as a tree data provider, register the open-spec command it emits, and start
- * its watcher; dispose the returned {@link SpecExplorer.dispose} on teardown.
+ * The Plan Explorer {@link vscode.TreeDataProvider}. Construct it, register it
+ * as a tree data provider, register the open-plan command it emits, and start
+ * its watcher; dispose the returned {@link PlanExplorer.dispose} on teardown.
  */
-export class SpecExplorer
+export class PlanExplorer
   implements vscode.TreeDataProvider<TreeNode>, vscode.Disposable
 {
   private readonly emitter = new vscode.EventEmitter<TreeNode | undefined>();
@@ -116,33 +100,32 @@ export class SpecExplorer
   private refreshSeq = 0;
 
   /**
-   * @param specsDir     absolute `.baiton/specs/` directory to scan (Req 2.1).
-   * @param specStore    supplies each spec's approval fact (Req 2.4).
+   * @param baitonDir     absolute `.baiton/` directory; both document roots are scanned under it.
+   * @param planStore    supplies each plan's approval fact (Req 2.4).
    * @param surface      the shared notification surface for open failures (Req 2.7).
    * @param restricted   whether the workspace is in Restricted Mode; sets the
    *                     `baiton.restricted` context key the inline-action
    *                     `when` clauses negate to hide actions (Req 5.6, 5.7).
-   * @param setActiveSpec sink notified on a root click; may be `undefined`
-   *                      until the Chat_View lands (task 12.1).
+   * @param setActivePlan sink notified on a root click; optional when no chat surface is wired.
    */
   constructor(
     private readonly baitonDir: string,
-    private readonly specStore: PlanStore,
+    private readonly planStore: PlanStore,
     private readonly surface: Surface,
     private readonly restricted: boolean,
-    private readonly setActiveSpec?: SetActiveSpec,
+    private readonly setActivePlan?: SetActivePlan,
   ) {}
 
   /**
-   * Register the open-spec command and a `FileSystemWatcher` over
-   * `.baiton/specs/**`, then run the first refresh. Returns `this` so callers
+   * Register the open-plan command and a `FileSystemWatcher` over
+   * `{plans,specs}/**` (specs is the legacy root), then run the first refresh. Returns `this` so callers
    * can register it as a tree data provider and push it onto their
    * subscriptions.
    */
   public start(): this {
     // Publish the restricted-mode context key the inline-action `when` clauses
     // negate, so all actions hide under Restricted Mode and show otherwise
-    // (Req 5.6, 5.7; design "SpecExplorer inline actions").
+    // (Req 5.6, 5.7).
     void vscode.commands.executeCommand(
       'setContext',
       'baiton.restricted',
@@ -150,12 +133,12 @@ export class SpecExplorer
     );
 
     this.disposables.push(
-      vscode.commands.registerCommand(OPEN_SPEC_COMMAND, (slug: string) =>
-        this.openSpec(slug),
+      vscode.commands.registerCommand(OPEN_PLAN_COMMAND, (slug: string) =>
+        this.openPlan(slug),
       ),
     );
 
-    // The watcher fires on create/change/delete under the specs tree; each
+    // The watcher observes both document roots; specs is the legacy root; each
     // event schedules a single coalesced refresh (Req 6.1, 6.2, 6.4).
     const pattern = new vscode.RelativePattern(this.baitonDir, '{plans,specs}/**');
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -185,15 +168,15 @@ export class SpecExplorer
 
   public getChildren(element?: TreeNode): TreeNode[] {
     if (element === undefined) {
-      // Roots: one per present spec, in the lister's ascending-slug order.
-      return this.roots.map((node) => ({ kind: 'spec', node }));
+      // Roots: one per present plan, in the lister's ascending-slug order.
+      return this.roots.map((node) => ({ kind: 'plan', node }));
     }
-    if (element.kind === 'spec') {
+    if (element.kind === 'plan') {
       const children = element.node.children;
       if (children.kind === 'errors') {
         return children.errors.map((node) => ({ kind: 'error', node }));
       }
-      return children.phases.map((node) => ({ kind: 'todo', node }));
+      return children.phases.map((node) => ({ kind: 'phase', node }));
     }
     // Phase and error nodes are leaves.
     return [];
@@ -201,10 +184,10 @@ export class SpecExplorer
 
   public getTreeItem(element: TreeNode): vscode.TreeItem {
     switch (element.kind) {
-      case 'spec':
-        return this.specItem(element.node);
-      case 'todo':
-        return this.todoItem(element.node);
+      case 'plan':
+        return this.planItem(element.node);
+      case 'phase':
+        return this.phaseItem(element.node);
       case 'error':
         return this.errorItem(element.node);
     }
@@ -224,8 +207,8 @@ export class SpecExplorer
   }
 
   /**
-   * Re-derive the whole tree from disk (Req 6.3): list the specs, read each
-   * spec's approval fact from the store, and build the nodes. A later refresh
+   * Re-derive the whole tree from disk (Req 6.3): list the plan documents, read each
+   * plan's approval fact from the store, and build the nodes. A later refresh
    * that started after this one wins, so a slow earlier scan cannot overwrite a
    * fresher result.
    */
@@ -233,17 +216,17 @@ export class SpecExplorer
     const seq = ++this.refreshSeq;
     const listed = await listPlans(this.baitonDir);
     const inputs = await Promise.all(
-      listed.map(async (spec) => ({
-        slug: spec.slug,
-        raw: spec.raw,
-        readError: spec.readError,
+      listed.map(async (entry) => ({
+        slug: entry.slug,
+        raw: entry.raw,
+        readError: entry.readError,
         // The approval fact comes from the store, never recomputed here (Req 2.4).
-        approved: await this.approvalFor(spec.slug),
-        // Phase ids with a recorded Session_Id, from the spec's own journal
-        // (Req 4.4); a spec with no journals reads back as no entries.
-        sessions: sessionSet(readPlanJournal(this.baitonDir, spec.slug)),
+        approved: await this.approvalFor(entry.slug),
+        // Phase ids with a recorded Session_Id, from the plan's own journal
+        // (Req 4.4); a plan with no journals reads back as no entries.
+        sessions: sessionSet(readPlanJournal(this.baitonDir, entry.slug)),
         // Phase ids whose plan is on file, which gates the View plan action.
-        plans: await listPhasePlans(this.baitonDir, spec.slug),
+        plans: await listPhasePlans(this.baitonDir, entry.slug),
       })),
     );
     if (seq !== this.refreshSeq) {
@@ -254,10 +237,10 @@ export class SpecExplorer
     this.emitter.fire(undefined);
   }
 
-  /** The store's approval fact for a spec, treating a probe failure as unapproved. */
+  /** The store's approval fact for a plan, treating a probe failure as unapproved. */
   private async approvalFor(slug: string): Promise<boolean> {
     try {
-      return await this.specStore.isApproved(slug);
+      return await this.planStore.isApproved(slug);
     } catch {
       return false;
     }
@@ -266,32 +249,32 @@ export class SpecExplorer
   // --- TreeItem mapping ----------------------------------------------------
 
   /**
-   * A spec root item: `<slug>` plus its status (or an unset indication), an
+   * A plan root item: `<slug>` plus its status (or an unset indication), an
    * approved marker, and an invalid marker (Req 2.2, 2.3, 2.4, 2.5, 3.1).
-   * Clicking it opens the spec's `spec.md` and sets it active (Req 2.6).
+   * Clicking it opens the plan's `plan.md` and sets it active (Req 2.6).
    */
-  private specItem(node: PlanNode): vscode.TreeItem {
+  private planItem(node: PlanNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
       node.slug,
       vscode.TreeItemCollapsibleState.Collapsed,
     );
-    item.description = this.specDescription(node);
-    // `baiton.spec` plus one token per legal action; the `view/item/context`
+    item.description = this.planDescription(node);
+    // `baiton.planRoot` plus one token per legal action; the `view/item/context`
     // `when` clauses in `package.json` match those tokens with `\b<action>\b`
     // so the tree and the menu cannot disagree.
     item.contextValue = node.invalid ? CONTEXT_ERROR : planContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.invalid ? 'warning' : 'file');
-    item.tooltip = this.specTooltip(node);
+    item.tooltip = this.planTooltip(node);
     item.command = {
-      command: OPEN_SPEC_COMMAND,
-      title: 'Open Spec',
+      command: OPEN_PLAN_COMMAND,
+      title: 'Open Plan',
       arguments: [node.slug],
     };
     return item;
   }
 
-  /** The `<status> · approved · invalid` description shown beside a spec root. */
-  private specDescription(node: PlanNode): string {
+  /** The `<status> · approved · invalid` description shown beside a plan root. */
+  private planDescription(node: PlanNode): string {
     const parts: string[] = [statusLabel(node.status)];
     if (node.approved) {
       parts.push('approved');
@@ -302,10 +285,10 @@ export class SpecExplorer
     return parts.join(' · ');
   }
 
-  /** A tooltip spelling out the spec's derived facts. */
-  private specTooltip(node: PlanNode): string {
+  /** A tooltip spelling out the plan's derived facts. */
+  private planTooltip(node: PlanNode): string {
     const lines = [
-      `Spec: ${node.slug}`,
+      `Plan: ${node.slug}`,
       `Status: ${statusLabel(node.status)}`,
       `Approved: ${node.approved ? 'yes' : 'no'}`,
       `Valid: ${node.invalid ? 'no' : 'yes'}`,
@@ -317,17 +300,17 @@ export class SpecExplorer
   }
 
   /**
-   * A todo child item: `<id> <title>` with its state and, when derived-blocked,
+   * A phase child item: `<id> <title>` with its state and, when derived-blocked,
    * a blocked marker (Req 4.1, 4.2, 4.3, 4.4, 4.5). Inline actions attach via
-   * the `baiton.todo` context value (design "SpecExplorer inline actions").
+   * the `baiton.phase` context value (inline tree actions).
    */
-  private todoItem(node: PhaseNode): vscode.TreeItem {
+  private phaseItem(node: PhaseNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
       `${node.id} ${node.title}`,
       vscode.TreeItemCollapsibleState.None,
     );
     item.description = node.blocked ? `${node.state} · blocked` : node.state;
-    // `baiton.todo` plus one token per legal action (Req 4.1); the
+    // `baiton.phase` plus one token per legal action (Req 4.1); the
     // `view/item/context` `when` clauses in `package.json` match on those
     // tokens with `\b<action>\b` so the tree and the menu cannot disagree.
     item.contextValue = phaseContextValue(node.actions);
@@ -337,7 +320,7 @@ export class SpecExplorer
   }
 
   /**
-   * An error child item under an invalid or unreadable spec: the reason and the
+   * An error child item under an invalid or unreadable plan: the reason and the
    * 1-based line it applies to (Req 3.2, 3.3, 6.6).
    */
   private errorItem(node: ErrorNode): vscode.TreeItem {
@@ -353,32 +336,32 @@ export class SpecExplorer
   // --- click-to-open -------------------------------------------------------
 
   /**
-   * Open a spec's `spec.md` and set it as the Chat_View active spec (Req 2.6).
-   * When the file cannot be opened, surface an error and leave the active spec
+   * Open the resolved plan document and set it as the Chat_View active plan (Req 2.6).
+   * When the file cannot be opened, surface an error and leave the active plan
    * unchanged (Req 2.7).
    */
-  private async openSpec(slug: string): Promise<void> {
-    const specPath = resolveDocument(this.baitonDir, slug).documentPath;
+  private async openPlan(slug: string): Promise<void> {
+    const documentPath = resolveDocument(this.baitonDir, slug).documentPath;
     try {
-      const doc = await vscode.workspace.openTextDocument(specPath);
+      const doc = await vscode.workspace.openTextDocument(documentPath);
       await vscode.window.showTextDocument(doc, { preview: false });
     } catch (e) {
       this.surface.error(
-        `Baiton: could not open spec "${slug}": ${describe(e)}.`,
+        `Baiton: could not open plan "${slug}": ${describe(e)}.`,
       );
-      return; // Leave the active spec unchanged (Req 2.7).
+      return; // Leave the active plan unchanged (Req 2.7).
     }
-    this.setActiveSpec?.(slug);
+    this.setActivePlan?.(slug);
   }
 }
 
-/** The label for a spec's status: the set value, or an unset indication (Req 2.3). */
+/** The label for a plan's status: the set value, or an unset indication (Req 2.3). */
 function statusLabel(status: PlanStatus): string {
   return status.kind === 'set' ? status.value : 'no status';
 }
 
 /**
- * The set of todo ids a parsed journal records a Session_Id for (Req 4.4). A
+ * The set of phase ids a parsed journal records a Session_Id for (Req 4.4). A
  * missing `runs.jsonl` parses back as an empty entry array, so this naturally
  * yields an empty set.
  */
@@ -386,7 +369,8 @@ function sessionSet(entries: JournalEntry[]): Set<string> {
   const sessions = new Set<string>();
   for (const entry of entries) {
     if (entry.sessionId !== undefined) {
-      sessions.add(entry.todoId);
+      // JournalEntry.todoId is a persisted field name.
+      sessions.add(entry.todoId); // legacy journal field name
     }
   }
   return sessions;

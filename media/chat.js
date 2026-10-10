@@ -23,7 +23,7 @@
  * stays enabled while busy, and posts `setAutoMode`, and — immediately left of
  * that toggle — a Mode select that reflects `state.mode`, posts `setMode`,
  * repaints only on the host's echo, and (in contrast to the Auto toggle) is
- * disabled while `state.busy`, while `state.runActive`, or on a spec
+ * disabled while `state.busy`, while `state.runActive`, or on a plan
  * conversation. The composer also carries
  * the provider-first model selection: a provider select followed by a model
  * select. Only the configured providers the host posts arrive, in host order
@@ -101,7 +101,7 @@
     { id: 'investigate', label: 'Investigate' },
   ];
   // Mirrors WORKSPACE_CONVERSATION_ID in src/activation/chatController.ts; any
-  // other non-empty conversation id is a spec slug.
+  // other non-empty conversation id is a plan slug.
   const WORKSPACE_CONVERSATION_ID = 'workspace';
 
   // ----- State -----------------------------------------------------------
@@ -1335,8 +1335,8 @@
     autoBtn.disabled = false;
   }
 
-  /** Whether the active conversation is a spec conversation (always Plan). */
-  function isSpecConversation() {
+  /** Whether the active conversation is a plan conversation (always Phased Plan). */
+  function isPlanConversation() {
     return state.activeId !== '' && state.activeId !== WORKSPACE_CONVERSATION_ID;
   }
 
@@ -1344,7 +1344,7 @@
    * The Mode select is a pure projection of `state.mode`: the change handler
    * never writes it, it posts `setMode` and the view repaints when the host
    * echoes `setMode` back through the reducer. Unlike the Auto toggle it is
-   * disabled while busy, while a run is in flight, and on a spec conversation
+   * disabled while busy, while a run is in flight, and on a plan conversation
    * (which always runs the Phased Plan pipeline).
    */
   function renderMode() {
@@ -1359,8 +1359,8 @@
         modeSelect.appendChild(opt);
       });
     }
-    // A spec conversation is always Plan: shown pinned, whatever state.mode says.
-    const pinned = isSpecConversation();
+    // A plan conversation is always Phased Plan: shown pinned, whatever state.mode says.
+    const pinned = isPlanConversation();
     modeSelect.value = pinned ? 'plan' : state.mode;
     if (!modeSelect.value) {
       // An unknown mode matches no option and leaves the value empty; fall back

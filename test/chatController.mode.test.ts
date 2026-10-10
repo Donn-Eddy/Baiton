@@ -1,6 +1,6 @@
 /**
  * Unit tests for the Chat controller's conversation mode, run-activity mirror
- * and Investigate promote card (spec "dispatch-modes", todo T14).
+ * and Investigate promote card (plan conversation mode and run activity).
  *
  * Like the Auto-mode suite, this imports {@link ChatController} statically with
  * no `test/fixtures/vscodeLoader.mjs` hook, proving the controller carries no
@@ -12,12 +12,12 @@
  * 3. A `setMode` from the view is echoed and persisted.
  * 4. A repeated `setMode` echoes but does not persist again.
  * 5. An off-union `setMode` is refused, echoing the unchanged mode.
- * 6. A spec conversation is pinned to the literal Spec (even though the default
+ * 6. A plan conversation is pinned to Phased Plan (even though the default
  *    is Default), and Workspace repaints the mode.
  * 7. A `setMode` while the chat is busy is refused.
  * 8. A `setMode` while a run is in flight is refused.
  * 9. The mode decides the phase, the tool surface and the system prompt.
- * 10. A spec conversation ignores a non-spec mode entirely.
+ * 10. A plan conversation ignores a non-spec mode entirely.
  * 11. Run activity is mirrored, without duplicate posts.
  * 12. A completed run appends its completion note; a failed one also logs.
  * 13. The promote card dispatches through the ordinary run confirm card.
@@ -27,7 +27,7 @@
  * 17. `dispose()` unsubscribes and a repeated `start()` leaves one subscription.
  * 18. A fresh workspace opens in Default; a stored concrete mode wins.
  * 19. Default maps to the run phase, run tools and the Default prompt.
- * 20. A spec conversation stays pinned to Plan from a Default workspace.
+ * 20. A plan conversation stays pinned to Phased Plan from a Default workspace.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -138,7 +138,7 @@ class FakeRuns implements RunActivitySource {
   }
 }
 
-describe('ChatController conversation mode (dispatch-modes T14)', () => {
+describe('ChatController conversation mode', () => {
   let webview: FakeWebview;
   let client: FakeModelClient;
   let baitonDir: string;
@@ -367,7 +367,8 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     }
   });
 
-  it('loads a legacy stored spec mode as plan', async () => {
+  it('loads a legacy stored mode as plan', async () => {
+    // Legacy stored mode compatibility: persisted 'spec' maps to plan.
     buildHarness({ storedMode: 'spec' });
     await started();
     assert.strictEqual(webview.all('setMode')[0].mode, 'plan');
@@ -404,14 +405,14 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.ok(caller.sessionKey.startsWith('workspace/'));
   });
 
-  it('a spec conversation stays pinned to Plan from a Default workspace', async () => {
+  it('a plan conversation stays pinned to Phased Plan from a Default workspace', async () => {
     const content = '---\nstatus: draft\n---\n# Alpha\n';
     fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
     await started();
     assert.strictEqual(webview.all('setMode')[0].mode, 'default');
 
-    controller.setActiveSpec('alpha');
+    controller.setActivePlan('alpha');
     await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
     await webview.send({ type: 'setMode', mode: 'bug' });
     assert.strictEqual(webview.last('setMode')!.mode, 'plan');
@@ -425,8 +426,31 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
       buildSystemPrompt({ kind: 'spec', slug: 'alpha' }, content),
     );
 
-    controller.setActiveSpec(undefined);
+    controller.setActivePlan(undefined);
     await waitFor(() => webview.last('setMode')?.mode === 'default', 'Default to come back');
+  });
+
+  it('activates a plan document from plans/ and builds its prompt from that document', async () => {
+    const content = [
+      '# Endstate', 'The updated system is complete.', '',
+      '# What needs changing', 'Update the activation behavior.', '',
+      '# Limitations & constraints', 'None.', '',
+      '# PHASES', '- [pending] P01 Activate the plan', '',
+    ].join('\n');
+    const planPath = path.join(baitonDir, 'plans', 'beta', 'plan.md');
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, content);
+    await started();
+
+    controller.setActivePlan('beta');
+    await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the Phased Plan paint');
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 1, 'the plan completion');
+    assert.deepStrictEqual(phases, ['gather']);
+    assert.strictEqual(
+      client.requests[0][0].content,
+      buildSystemPrompt({ kind: 'spec', slug: 'beta' }, content),
+    );
   });
 
   it('echoes and persists a mode picked in the composer', async () => {
@@ -454,20 +478,20 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.deepStrictEqual(modeSets, []);
   });
 
-  it('pins a spec conversation to Plan and repaints the remembered mode on return', async () => {
+  it('pins a plan conversation to Plan and repaints the remembered mode on return', async () => {
     buildHarness({ storedMode: 'bug' });
     fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), '---\nstatus: draft\n---\n# Alpha\n');
     await started();
 
-    controller.setActiveSpec('alpha');
+    controller.setActivePlan('alpha');
     await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
 
     await webview.send({ type: 'setMode', mode: 'bug' });
     assert.strictEqual(webview.last('setMode')!.mode, 'plan');
     assert.deepStrictEqual(modeSets, []);
 
-    controller.setActiveSpec(undefined);
+    controller.setActivePlan(undefined);
     await waitFor(() => webview.last('setMode')?.mode === 'bug', 'the remembered mode to come back');
   });
 
@@ -519,13 +543,13 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.strictEqual(client.requests[0][0].content, buildSystemPrompt({ kind: 'workspace' }));
   });
 
-  it('ignores a non-spec mode on a spec conversation', async () => {
+  it('ignores a non-plan mode on a plan conversation', async () => {
     buildHarness({ storedMode: 'quick' });
     const content = '---\nstatus: approved\n---\n# Alpha\n';
     fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
     await started();
-    controller.setActiveSpec('alpha');
+    controller.setActivePlan('alpha');
     await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
 
     await webview.send({ type: 'sendText', text: 'go' });

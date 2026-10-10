@@ -8,23 +8,23 @@
  * builder, and the reused {@link ToolRegistry} and its pending-ask seams. It carries
  * no rendering logic of its own — the webview is a pure projection of the
  * protocol state — and no lifecycle state beyond the current conversation and
- * active spec, everything else being re-derived from disk each round.
+ * active plan, everything else being re-derived from disk each round.
  *
  * Responsibilities:
  *  - own the chat sessions of each conversation scope through the host-free
  *    {@link SessionStore}: workspace sessions live at `.baiton/chat/<id>.jsonl`
- *    and each spec's at `.baiton/specs/<slug>/chat/<id>.jsonl` (Req 8.1), with
+ *    and each plan stores sessions under the legacy `.baiton/specs/<slug>/chat/<id>.jsonl` (Req 8.1), with
  *    the pre-sessions `chat.jsonl` migrated into that layout on start;
  *  - load it through {@link readTranscript} on open/reopen/window-reload and
  *    render its records in order (Req 8.6, 8.8);
- *  - own the conversation selector (Workspace first, then spec entries in
- *    ascending slug order) and active-spec tracking that follows explorer
- *    selection and the active editor when it is a `spec.md`, reflecting the
- *    active spec in the selector (Req 7.1–7.7);
- *  - on send, derive the conversation's orchestrator phase from `spec.md` and
+ *  - own the conversation selector (Workspace first, then plan entries in
+ *    ascending slug order) and active-plan tracking that follows explorer
+ *    selection and the active editor when it is a plan document (`plan.md` or legacy `spec.md`), reflecting the
+ *    active plan in the selector (Req 7.1–7.7);
+ *  - on send, derive the conversation's orchestrator phase from the plan document and
  *    advertise only that phase's tools, passing the phase into every registry
  *    call so an out-of-phase tool cannot run (Req 11.1);
- *  - on send, re-read `spec.md` each round and build the fresh system prompt
+ *  - on send, re-read the plan document each round and build the fresh system prompt
  *    (Req 11.6), enforce the non-whitespace / ≤100,000-character send guard
  *    (Req 14.4, 14.5) and send/stop enablement (Req 14.2, 14.3), and run the
  *    tool loop (Req 9, 14.4);
@@ -53,11 +53,11 @@
  *  - show the empty state with the configured endpoint and model (indicating
  *    "not configured" for each unset one) and a Set API Key action (Req 13.5);
  *  - own the conversation's mode: host-authoritative and `workspaceState`-backed,
- *    pinned to Plan while a spec conversation is in view, refused while the chat
+ *    pinned to Phased Plan while a plan conversation is in view, refused while the chat
  *    is busy or a run is in flight, echoed back on every path so the composer's
  *    Mode select is a pure projection, and the source of the phase, the tool
  *    surface and the system prompt of every send;
- *  - mirror spec-less run activity to the view (`setRunActive`), record a
+ *  - mirror plan-less run activity to the view (`setRunActive`), record a
  *    finished run's outcome as a system note on the Workspace_Conversation, and
  *    offer an Investigate run's finding as a promote card whose Bug/Quick choice
  *    raises the ordinary run confirm card before anything is dispatched;
@@ -303,10 +303,10 @@ export interface ChatControllerDeps {
    * The assembled tool definitions to advertise to the model for one
    * orchestrator phase (Req 10.3, 11.1). The controller derives the phase from
    * the conversation on every send, so a conversation gathering requirements
-   * and one driving an approved spec see different tools.
+   * and one driving an approved plan see different tools.
    */
   toolsFor(phase: OrchestratorPhase): ToolSpec[];
-  /** Builds the guard context for a tool call (repo/specs/restricted). */
+  /** Builds the guard context for a tool call (repo, legacy session root, restricted mode). */
   guardContext(): GuardContext;
   /**
    * The pending-ask registry shared with the tool registry's seams. The host
@@ -319,7 +319,7 @@ export interface ChatControllerDeps {
   askRegistry?: PendingAskRegistry;
   /** Absolute `.baiton/` directory: `<baitonDir>/chat/` holds workspace sessions. */
   baitonDir: string;
-  /** Absolute `.baiton/specs/` directory: `<specsDir>/<slug>/chat/` holds a spec's sessions. */
+  /** Legacy chat-session root (.baiton/specs/): SessionStore keeps a plan's chat sessions under <specsDir>/<slug>/chat/. */
   specsDir: string;
   /** Reads the configured Round_Bound; resolved through {@link resolveRoundBound}. */
   roundBound(): unknown;
@@ -358,7 +358,7 @@ export interface ChatControllerDeps {
    * reload reopens the session the user was in. Wired to `workspaceState`.
    */
   sessionMemory?: SessionMemory;
-  /** Overrides the session store; defaults to one over `baitonDir`/`specsDir`. */
+  /** Overrides the session store; defaults to one over `baitonDir` and the legacy chat-session root. */
   sessionStore?: SessionStore;
   /**
    * Persists the Auto-mode toggle across windows. Absent, the toggle still
@@ -373,11 +373,11 @@ export interface ChatControllerDeps {
   /**
    * Persists the composer's Mode select across windows (`baiton.chat.mode`).
    * Absent, the mode still works for the life of the controller but starts at
-   * Spec on every reload.
+   * Phased Plan on every reload.
    */
   modeMemory?: ModeMemory;
   /**
-   * The spec-less run pipeline's activity and events. The controller subscribes
+   * The plan-less run pipeline's activity and events. The controller subscribes
    * in {@link ChatController.start} and unsubscribes in
    * {@link ChatController.dispose}. Absent, `runActive` stays false, no
    * completion note is posted and no promote card appears. A host that also
@@ -402,7 +402,7 @@ export interface ModeMemory {
 }
 
 /**
- * The run-activity seam: whether a spec-less run is in flight and the pipeline's
+ * The run-activity seam: whether a plan-less run is in flight and the pipeline's
  * change events. Structurally satisfied by the `RunPipeline` that
  * `createRunPipeline` returns, so the host passes the pipeline itself.
  */
@@ -447,15 +447,15 @@ export interface SessionMemory {
 
 /**
  * Binds the Chat_View to the tool loop, transcripts, conversation selector,
- * and active-spec tracking. Construct it once per workspace, wire the webview's
- * message handler through {@link start}, and update the active spec from the
- * explorer or the active editor through {@link setActiveSpec}.
+ * and active-plan tracking. Construct it once per workspace, wire the webview's
+ * message handler through {@link start}, and update the active plan from the
+ * explorer or the active editor through {@link setActivePlan}.
  */
 export class ChatController {
   private readonly deps: ChatControllerDeps;
 
-  /** The active spec slug, or `undefined` for the Workspace_Conversation (Req 7.2). */
-  private activeSpec: string | undefined;
+  /** The active plan slug, or `undefined` for the Workspace_Conversation (Req 7.2). */
+  private activePlan: string | undefined;
 
   /** The conversation-selector entries, refreshed from disk (Req 7.1). */
   private conversations: ConversationItem[] = [];
@@ -469,7 +469,7 @@ export class ChatController {
   /** The Workspace conversation's mode; seeded from `modeMemory`, echoed to the view. */
   private mode: RunMode = DEFAULT_MODE;
 
-  /** Whether a spec-less run is in flight; mirrored to the view as `setRunActive`. */
+  /** Whether a plan-less run is in flight; mirrored to the view as `setRunActive`. */
   private runActive = false;
 
   /** The run-pipeline change subscription taken in {@link start}. */
@@ -536,7 +536,7 @@ export class ChatController {
       tools: () => deps.registry as unknown as SubAgentToolSurface,
       guardContext: () => deps.guardContext(),
       roundBound: () => deps.roundBound(),
-      readPlan: (slug) => this.readSpec(slug),
+      readPlan: (slug) => this.readPlanDocument(slug),
       asks: this.asks,
       onEvent: (e) => void this.onSubAgentEvent(e),
       log: (m) => deps.log(`Baiton chat: ${m}`),
@@ -557,7 +557,7 @@ export class ChatController {
     const scopeKey = key.slice(0, i);
     const sessionId = key.slice(i + 1);
     return {
-      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'spec', slug: scopeKey },
+      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'spec', slug: scopeKey } /* legacy persisted scope kind */,
       sessionId,
     };
   }
@@ -674,16 +674,16 @@ export class ChatController {
   }
 
   /**
-   * Set the active spec from the explorer selection or the active editor
+   * Set the active plan from the explorer selection or the active editor
    * (Req 7.4, 7.5). `undefined` selects the Workspace_Conversation (Req 7.2). A
-   * no-op when the spec is already active, so an editor-activation storm does
+   * no-op when the plan is already active, so an editor-activation storm does
    * not reload the transcript repeatedly.
    */
-  public setActiveSpec(slug: string | undefined): void {
-    if (slug === this.activeSpec) {
+  public setActivePlan(slug: string | undefined): void {
+    if (slug === this.activePlan) {
       return;
     }
-    this.activeSpec = slug;
+    this.activePlan = slug;
     void this.refresh();
   }
 
@@ -691,9 +691,9 @@ export class ChatController {
    * Record a system note on the Workspace_Conversation and refresh the view.
    *
    * Used by out-of-band work the user started from the chat but that finishes
-   * after the turn ended — today the spec draft, which reports its outcome here
-   * once the harness has written the spec. The refresh also re-reads the spec
-   * list, so a newly drafted spec appears in the conversation selector.
+   * after the turn ended — today the plan draft, which reports its outcome here
+   * once the harness has written the plan. The refresh also re-reads the plan
+   * list, so a newly drafted plan appears in the conversation selector.
    */
   public async noteSystem(message: string): Promise<void> {
     const scope: SessionScope = { kind: 'workspace' };
@@ -774,7 +774,7 @@ export class ChatController {
   /**
    * Raise one ask through this controller's own registry and card machinery.
    * `scopeId` is deliberately left unset, so `scopeForAsk` keeps the card on the
-   * conversation in view rather than treating `'workspace'` as a spec slug.
+   * conversation in view rather than treating `'workspace'` as a plan slug.
    */
   private async askCard(request: QuestionRequest | ConfirmRequest): Promise<InterventionAnswer> {
     const { intervention, answer } = this.asks.create(request);
@@ -854,15 +854,15 @@ export class ChatController {
 
   /**
    * The user picked a mode in the composer. The mode is a property of the
-   * Workspace_Conversation: a spec conversation is always Plan, so a `setMode`
+   * Workspace_Conversation: a plan conversation is always Phased Plan, so a `setMode`
    * there changes nothing. A change is also refused while the chat is busy or a
-   * spec-less run is in flight, and an off-union value is refused outright.
+   * plan-less run is in flight, and an off-union value is refused outright.
    * Every one of those paths still echoes, so the control can never hold a
    * value the host did not choose. A memory write that fails is logged only:
    * undoing the in-memory change would desync the already-posted echo.
    */
   private async onSetMode(mode: RunMode): Promise<void> {
-    if (this.busy || this.runActive || this.activeSpec !== undefined || !isRunMode(mode)) {
+    if (this.busy || this.runActive || this.activePlan !== undefined || !isRunMode(mode)) {
       this.postMode();
       return;
     }
@@ -880,15 +880,15 @@ export class ChatController {
   }
 
   /**
-   * The mode that actually governs the conversation in view. A spec conversation
-   * is always the literal Plan, deliberately not DEFAULT_MODE: the Workspace
+   * The mode that actually governs the conversation in view. A plan conversation
+   * is always Phased Plan, deliberately not DEFAULT_MODE: the Workspace
    * default no longer means Plan.
    */
   private effectiveMode(): RunMode {
-    return this.activeSpec === undefined ? this.mode : 'plan';
+    return this.activePlan === undefined ? this.mode : 'plan';
   }
 
-  /** Repaint the composer's Mode select from the host's state (a spec conversation always paints Plan). */
+  /** Repaint the composer's Mode select from the host's state (a plan conversation always paints Phased Plan). */
   private postMode(): void {
     this.deps.webview.post({ type: 'setMode', mode: this.effectiveMode() });
   }
@@ -997,10 +997,10 @@ export class ChatController {
   /** Return the conversation an ask belongs on, switching to a scoped run when needed. */
   private async scopeForAsk(ask: Intervention): Promise<SessionScope> {
     const slug = ask.scopeId;
-    if (slug === undefined || slug === this.activeSpec) {
+    if (slug === undefined || slug === this.activePlan) {
       return this.activeScope();
     }
-    this.activeSpec = slug;
+    this.activePlan = slug;
     await this.refresh();
     return this.activeScope();
   }
@@ -1105,13 +1105,13 @@ export class ChatController {
 
   /**
    * The user picked a conversation in the selector (Req 7.2, 7.3): the Workspace
-   * entry clears the active spec, a spec entry sets it. Reloads the shown
+   * entry clears the active plan, a plan entry sets it. Reloads the shown
    * conversation.
    */
   private onSelectConversation(conversationId: string): void {
     const slug =
       conversationId === WORKSPACE_CONVERSATION_ID ? undefined : conversationId;
-    this.setActiveSpec(slug);
+    this.setActivePlan(slug);
   }
 
   /**
@@ -1270,13 +1270,13 @@ export class ChatController {
       return;
     }
 
-    const slug = this.activeSpec;
+    const slug = this.activePlan;
     const scope = this.activeScope();
     // The mode and conversation step are both fixed for this send: the step decides
     // the tools advertised to the model and the tools the registry will
     // actually run (Req 11.1), and the mode decides the prompt. The Mode select
     // is refused while busy, so capturing the mode here only documents that
-    // invariant. The prompt re-reads `spec.md` every round (Req 11.6), so a
+    // invariant. The prompt re-reads the plan document every round (Req 11.6), so a
     // status that changes mid-run is picked up by the next send, not mid-loop.
     const mode = this.effectiveMode();
     const step = await this.stepForConversation(slug);
@@ -1389,18 +1389,18 @@ export class ChatController {
   }
 
   /**
-   * Build the system prompt for the current conversation, re-reading the spec's
-   * `spec.md` each call so a spec conversation never reuses cached content
-   * (Req 11.6). A missing/unreadable `spec.md` builds without it (Req 11.7).
+   * Build the system prompt for the current conversation, re-reading the plan's
+   * document each call so a plan conversation never reuses cached content
+   * (Req 11.6). A missing or unreadable plan document builds without it (Req 11.7).
    */
   private async buildPrompt(slug: string | undefined, mode: RunMode): Promise<string> {
     const kind: ConversationKind =
-      slug === undefined ? { kind: 'workspace' } : { kind: 'spec', slug };
+      slug === undefined ? { kind: 'workspace' } : { kind: 'spec', slug } /* legacy persisted scope kind */;
     if (slug === undefined) {
       return buildSystemPrompt(kind, undefined, mode);
     }
-    const specContent = await this.readSpec(slug);
-    return buildSystemPrompt(kind, specContent);
+    const documentContent = await this.readPlanDocument(slug);
+    return buildSystemPrompt(kind, documentContent);
   }
 
   /**
@@ -1412,24 +1412,24 @@ export class ChatController {
     if (slug === undefined) {
       return conversationStepFor({ kind: 'workspace' }, undefined, this.effectiveMode());
     }
-    return conversationStepFor({ kind: 'spec', slug }, await this.readSpec(slug));
+    return conversationStepFor({ kind: 'spec', slug } /* legacy persisted scope kind */, await this.readPlanDocument(slug));
   }
 
   // --- transcript / rendering ----------------------------------------------
 
   /**
    * Refresh the conversation selector from disk and render the active
-   * conversation. Called on start, on active-spec changes, and on conversation
+   * conversation. Called on start, on active-plan changes, and on conversation
    * selection, so the selector always lists the Workspace entry first then the
-   * present specs in ascending slug order (Req 7.1) and reflects the active
-   * spec (Req 7.7).
+   * present plans in ascending slug order (Req 7.1) and reflects the active
+   * plan (Req 7.7).
    */
   private async refresh(): Promise<void> {
     const scope = this.activeScope();
     await this.migrate(scope);
     this.conversations = await this.buildConversationItems();
     this.deps.webview.post({ type: 'setAutoMode', enabled: this.autoMode });
-    // Selecting a spec repaints the select as Plan and selecting Workspace again
+    // Selecting a plan repaints the select as Plan and selecting Workspace again
     // repaints the remembered mode, because both go through `refresh()`.
     this.postMode();
     this.postRunActive();
@@ -1460,7 +1460,7 @@ export class ChatController {
       // Not measured in this window yet (e.g. after a reload): estimate it.
       try {
         const history = toHistory(await readTranscript(this.sessions.pathFor(scope, active)));
-        await this.seedContextEstimate(viewKey, this.activeSpec, history);
+        await this.seedContextEstimate(viewKey, this.activePlan, history);
       } catch (err) {
         this.deps.log(`Baiton chat: could not estimate context: ${describe(err)}`);
       }
@@ -1655,7 +1655,7 @@ export class ChatController {
       this.deps.webview.post({ type: 'showError', message: 'Wait for the current run to finish before compacting.' });
       return;
     }
-    const slug = this.activeSpec;
+    const slug = this.activePlan;
     const scope = this.activeScope();
     const sessionId = this.activeSessions.get(scopeId(scope));
     if (sessionId !== undefined && parentIdOf(sessionId) !== undefined) {
@@ -1861,38 +1861,38 @@ export class ChatController {
     return new ChatTranscript(this.sessions.pathFor(scope, sessionId));
   }
 
-  /** The active conversation scope: the workspace, or the active spec. */
+  /** The active conversation scope: the workspace, or the active plan. */
   private activeScope(): SessionScope {
-    return this.activeSpec === undefined
+    return this.activePlan === undefined
       ? { kind: 'workspace' }
-      : { kind: 'spec', slug: this.activeSpec };
+      : { kind: 'spec', slug: this.activePlan } /* legacy persisted scope kind */;
   }
 
   /** The selector id for the active conversation (Req 7.7). */
   private activeConversationId(): string {
-    return this.activeSpec ?? WORKSPACE_CONVERSATION_ID;
+    return this.activePlan ?? WORKSPACE_CONVERSATION_ID;
   }
 
   /**
    * The conversation-selector entries: the Workspace entry first, then one per
-   * present `.baiton/specs/<slug>/spec.md` in ascending slug order (Req 7.1).
+   * plan document (`.baiton/plans/<slug>/plan.md`, or a legacy `.baiton/specs/<slug>/spec.md`) in ascending slug order (Req 7.1).
    */
   private async buildConversationItems(): Promise<ConversationItem[]> {
     const listed = await listPlans(this.deps.baitonDir);
     const items: ConversationItem[] = [
       { id: WORKSPACE_CONVERSATION_ID, label: 'Workspace' },
     ];
-    for (const spec of listed) {
-      items.push({ id: spec.slug, label: spec.slug });
+    for (const entry of listed) {
+      items.push({ id: entry.slug, label: entry.slug });
     }
     return items;
   }
 
-  /** Re-read a spec's `spec.md`, or `undefined` when it is missing/unreadable (Req 11.7). */
-  private async readSpec(slug: string): Promise<string | undefined> {
-    const specFile = resolveDocument(this.deps.baitonDir, slug).documentPath;
+  /** Re-read a plan document, or `undefined` when it is missing/unreadable (Req 11.7). */
+  private async readPlanDocument(slug: string): Promise<string | undefined> {
+    const documentPath = resolveDocument(this.deps.baitonDir, slug).documentPath;
     try {
-      return await readFile(specFile, 'utf8');
+      return await readFile(documentPath, 'utf8');
     } catch {
       return undefined;
     }

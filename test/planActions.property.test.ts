@@ -109,7 +109,12 @@ describe('planActions (property)', () => {
           const contextValue = planContextValue(actions);
 
           // Begins with the fixed prefix the menu clauses share.
-          assert.ok(contextValue.startsWith('baiton.spec'));
+          assert.ok(contextValue.startsWith('baiton.planRoot'));
+
+          for (const action of ['plan', 'execute', 'review', 'replan', 'stop', 'view', 'viewPlan']) {
+            const phaseOnly = new RegExp(`\\b${action}\\b`);
+            assert.ok(!phaseOnly.test(contextValue), `plan root must not match phase action "${action}"`);
+          }
 
           for (const action of ALL_PLAN_ACTIONS) {
             // The exact regex shape used by the `when` clauses in package.json.

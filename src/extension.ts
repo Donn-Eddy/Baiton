@@ -66,7 +66,7 @@ import { listDocumentSlugs, resolveDocument } from './storage/documentLocation';
  *   4. Config load — validate `.baiton/config.json` (task 5.1's `loadConfig`),
  *      then resolve one executable per distinct agent id named in
  *      `config.roles` (Req 22.7, 22.8, 14.5).
- *   5. Crash recovery — reconcile every result-less journal entry per spec
+ *   5. Crash recovery — reconcile every result-less journal entry per plan
  *      (task 11.2's `recoverJournal`).
  *
  * Command registration (the `Baiton: Initialize` command, CodeLens, the chat
@@ -122,7 +122,7 @@ export function getActivationState(): ActivationState | undefined {
 /**
  * The window's model catalog store, the single source of truth for refreshed
  * model lists. The config panel reads it through the `getCapabilities` seam
- * wired in {@link activate}; the provider router reads it in a later todo.
+ * wired in {@link activate}; the provider router reads it later.
  */
 export function getModelCatalogStore(): CatalogStore | undefined {
   return modelCatalogStore;
@@ -158,7 +158,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // (Req 1.1). It resolves its own workspace independently of the gate below.
   context.subscriptions.push(registerInitializeCommand(surface));
 
-  // The host-free hot-reload seam for the config panel (T08).
+  // The host-free hot-reload seam for the config panel.
   const applyConfig = createConfigRefresh({
     state: () => activationState,
     resolveExecutables: (agents) => resolveAgentExecutables(agents, pathLookup, settingsOverride),
@@ -328,7 +328,7 @@ async function completeActivation(
     void vscode.window.showWarningMessage(failure.message);
   }
 
-  // 5. Crash recovery (task 11.2, Req 21.3–21.7). Reconcile each spec's
+  // 5. Crash recovery (task 11.2, Req 21.3–21.7). Reconcile each plan's
   //    result-less journal entries. Skipped under Restricted Mode, which
   //    forbids the state writes recovery replays (Req 22.1).
   if (!workspace.restricted) {
@@ -351,7 +351,7 @@ async function completeActivation(
   activationState = state;
 
   // Wire the command surface: per-stage triggers, approve/re-approve, the chat
-  // orchestrator entry, and the spec CodeLens, all against the run queue and
+  // orchestrator entry, and the plan CodeLens, all against the run queue and
   // tool registry built from this activation state (task 15.2). Writes and
   // dispatch stay gated under Restricted Mode and per-role executable
   // resolution (Req 22.1, 22.2, 14.5).
@@ -499,12 +499,12 @@ const resolveUsageCli = (cli: UsageCliName): string | undefined => {
 // --- crash recovery wiring (task 11.2 seam) -------------------------------
 
 /**
- * Run crash recovery over every spec's journals on activation (Req 21.3–
- * 21.7). Each spec folder under `.baiton/specs/` owns a spec-level journal plus
- * per-todo journals (merged by readPlanJournal), so we
- * reconcile them one spec at a time, wiring the git seam, a `process`-backed
- * {@link ProcessControl}, and a serializer-backed spec-write seam. A failure
- * for one spec is contained so the rest still reconcile.
+ * Run crash recovery for every plan found by listDocumentSlugs under
+ * `.baiton/plans/` or the legacy `.baiton/specs/` root. Each plan owns a
+ * plan-level journal plus per-phase journals, merged by readPlanJournal. The
+ * recovery uses the git seam, a `process`-backed {@link ProcessControl}, and a
+ * serializer-backed plan writer. A failure for one plan is contained so the
+ * rest still reconcile.
  */
 async function runCrashRecovery(
   workspace: WorkspaceContext<vscode.Uri>,
@@ -530,7 +530,7 @@ async function runCrashRecovery(
       });
     } catch (e) {
       surface.warn(
-        `Baiton crash recovery for spec "${slug}" did not complete: ${describe(e)}.`,
+        `Baiton crash recovery for plan "${slug}" did not complete: ${describe(e)}.`,
       );
     }
   }
@@ -564,9 +564,9 @@ const hostProcessControl: ProcessControl = {
 
 /**
  * Build the serializer-backed `writeState` seam recovery replays a lost state
- * write through (Req 21.5, 21.7). Re-reads the spec's `spec.md`, applies the
+ * write through (Req 21.5, 21.7). Re-reads the plan document, applies the
  * minimal state-box edit via the pure {@link writePhaseState} serializer, writes
- * the result back, and commits the change on the spec branch (Req 17.1).
+ * the result back, and commits the change on the plan branch (Req 17.1).
  * Resolves `false` when the serializer aborts (the target could not be located)
  * so recovery records a `no-op` rather than claiming a state change (Req 6.5).
  *

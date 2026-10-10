@@ -22,8 +22,8 @@ import { createPlanStore } from '../src/activation/planStore';
 import {
   createRunQueueSeam,
   createStageLock,
-  createTodoQueues,
-  type TodoQueues,
+  createPhaseQueues,
+  type PhaseQueues,
 } from '../src/activation/engineFacade';
 import { parseJournal, phaseJournalPathFor } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
@@ -51,7 +51,7 @@ import type {
  * End-to-end test of sub-agent chats driving todos in parallel worktrees (T13).
  *
  * Everything below the agent boundary is real: a real temporary git repository,
- * the real git service, spec-branch writer, spec store, per-todo run queues,
+ * the real git service, spec-branch writer, plan store, per-phase run queues,
  * run-queue seam, tool registry, sub-agent runner, session store, tool loop,
  * `submitPr` and `landPhaseWorktree`. Only the agent boundary (adapter, terminal
  * host, result watcher) and the model client are stubbed.
@@ -60,8 +60,8 @@ import type {
  * drives its own todo through plan, execute and review via `run`, the two todos
  * in flight at once (a per-stage barrier fails the test when the stages are
  * serialised) in separate worktrees without losing a state write; `submit_pr`
- * refuses while todos are unlanded; `land_phase` lands both; and a spec-less
- * bug run and the spec draft still work while a todo stage is in flight.
+ * refuses while todos are unlanded; `land_phase` lands both; and a plan-less
+ * bug run and the plan draft still work while a phase stage is in flight.
  */
 
 // ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ class BarrierFactory implements ResultWatcherFactory {
     }
     entry.released = true;
     if (entry.stage === 'execute') {
-      // The stage runs in the todo's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
+      // The stage runs in the phase's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
       const root = path.resolve(path.dirname(entry.resultPath), '..', '..', '..');
       writeRepoFile(root, TODO_FILE[entry.todo].file, TODO_FILE[entry.todo].contents);
     }
@@ -449,7 +449,7 @@ interface Harness {
   git: GitWorktreeService;
   writer: PlanBranchWriter;
   store: PlanStore;
-  queues: TodoQueues;
+  queues: PhaseQueues;
   registry: ToolRegistry;
   runner: SubAgentRunner;
   sessions: SessionStore;
@@ -469,7 +469,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: gitService });
   const store = createPlanStore(path.dirname(specsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
-  const queues = createTodoQueues({
+  const queues = createPhaseQueues({
     workspaceRoot: repo,
     baitonDir: path.dirname(specsDir),
     git: gitService,
@@ -601,10 +601,10 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
 }
 
 /**
- * The main checkout holds no change but the tracked per-todo journals. The
+ * The main checkout holds no change but the tracked per-phase journals. The
  * queue appends a stage's completion record after the state commit that ends
  * it, and `specs/*\/runs.jsonl` in the canonical .gitignore does not match
- * `todos/<id>/runs.jsonl`, so the last record of each journal stays uncommitted.
+ * `phases/<id>/runs.jsonl`, so the last record of each journal stays uncommitted.
  * Every other path must be clean.
  */
 async function assertOnlyJournalsDirty(g: GitWorktreeService, what: string): Promise<void> {
@@ -818,7 +818,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     }
   });
 
-  it('runs a spec-less bug run and starts a spec draft while a todo stage is in flight', async function () {
+  it('runs a plan-less bug run and starts a plan draft while a phase stage is in flight', async function () {
     this.timeout(30000);
     const repo = newRepo();
     const factory = new BarrierFactory(1);
@@ -833,7 +833,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let draftRunner!: ReturnType<typeof createPlanDraftRunner>;
     const lock = createStageLock({
-      specDraftRunning: () => draftRunner.isRunning(),
+      planDraftRunning: () => draftRunner.isRunning(),
       runRunning: () => runPipeline.isRunning(),
     });
     runPipeline = createRunPipeline({
@@ -857,11 +857,11 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       services: h.services,
       modelForRole,
       adapterForRole: () => new StubAdapter(),
-      isQueueRunning: () => lock.specDraftBusy(),
+      isQueueRunning: () => lock.planDraftBusy(),
       newRunId: () => 'draft-run-1',
     });
 
-    // A todo stage goes in flight and stays there.
+    // A phase stage goes in flight and stays there.
     const planning = h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T01', stage: 'plan' });
     await waitUntil(() => factory.created.some((c) => c.todo === 'T01' && c.stage === 'plan'), 'the T01 plan watcher');
     assert.strictEqual(h.queues.isRunning(SLUG), true);
@@ -870,7 +870,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     assert.strictEqual(t02.kind, 'dispatched', 'another todo is not blocked by it');
     assert.strictEqual(await h.store.currentState(SLUG, 'T02'), 'planned');
 
-    // A spec-less bug run is not blocked by the in-flight todo stage.
+    // A plan-less bug run is not blocked by the in-flight phase stage.
     const started = await runPipeline.start({
       mode: 'bug',
       composerMode: 'bug',
@@ -904,9 +904,9 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       'the run did not touch the in-flight todo',
     );
 
-    // With the run finished, the draft starts even though a todo stage is in flight.
+    // With the run finished, the draft starts even though a phase stage is in flight.
     const draft = await draftRunner.start({ slug: 'other-spec', requirements: 'Goal: other.' });
-    assert.ok(draft.ok, 'a todo stage does not block the spec draft');
+    assert.ok(draft.ok, 'a phase stage does not block the plan draft');
     if (!draft.ok) {
       return;
     }

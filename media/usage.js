@@ -1,6 +1,6 @@
 // @ts-check
 /*
- * Usage view entry script — spec first-party-usage, todo T09.
+ * Usage view entry script.
  *
  * Consumes the host messages defined in src/usage/protocol.ts
  * ({ type: 'readings', rows, now } and { type: 'state', state }) and posts only

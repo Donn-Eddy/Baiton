@@ -36,6 +36,6 @@ export function legalPlanActions(input: PlanActionInput): PlanAction[] {
 
 /** Build the Plan Explorer root's action context value. */
 export function planContextValue(actions: PlanAction[]): string {
-  // This contextValue is still matched by package.json; the Activation/UI todo renames it.
-  return 'baiton.spec' + actions.map((a) => ' ' + a).join('');
+  // Matched by the view/item/context when clauses in package.json; the prefix itself must never match an action token.
+  return 'baiton.planRoot' + actions.map((a) => ' ' + a).join('');
 }
