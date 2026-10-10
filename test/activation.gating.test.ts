@@ -419,7 +419,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(engines.vscode, '^1.106.0');
   });
 
-  it('contributes the Spec Explorer, the Runs view, the collapsed Usage view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
+  it('contributes the Plan Explorer, the Runs view, the collapsed Usage view and the bottom Configuration section to the activity bar in order and the Chat to the secondary side bar', () => {
     interface ViewContrib {
       id: string;
       name?: string;
@@ -447,7 +447,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.ok(views, 'views must be present');
     assert.deepStrictEqual(
       views.baiton?.map((v) => v.id),
-      ['baiton.specExplorer', 'baiton.runsView', 'baiton.usageView', 'baiton.configPanel'],
+      ['baiton.planExplorer', 'baiton.runsView', 'baiton.usageView', 'baiton.configPanel'],
     );
     const usageView = views.baiton?.find((v) => v.id === 'baiton.usageView');
     assert.strictEqual(usageView?.name, 'Usage');
@@ -457,6 +457,34 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     assert.strictEqual(configView?.type, 'webview');
     assert.strictEqual(configView?.visibility, 'collapsed');
     assert.deepStrictEqual(views['baiton-chat']?.map((v) => v.id), ['baiton.chatView']);
+  });
+
+
+  it('contributes the Plan Explorer metadata and phase command titles without retired wording', () => {
+    const contributes = pkg.contributes as {
+      views?: { baiton?: { id: string; name?: string }[] };
+      commands?: { command: string; title?: string }[];
+      menus?: { 'view/item/context'?: { command: string; when?: string }[] };
+    };
+    const explorer = contributes.views?.baiton?.find((view) => view.id === 'baiton.planExplorer');
+    assert.strictEqual(explorer?.name, 'Plan Explorer');
+
+    const expectedTitles: Record<string, string> = {
+      'baiton.approve': 'Approve Plan',
+      'baiton.plan': 'Plan Phase',
+      'baiton.execute': 'Execute Phase',
+      'baiton.review': 'Review Phase',
+      'baiton.replan': 'Re-plan Phase',
+    };
+    for (const [command, title] of Object.entries(expectedTitles)) {
+      assert.strictEqual(contributes.commands?.find((entry) => entry.command === command)?.title, title);
+    }
+
+    const context = contributes.menus?.['view/item/context'] ?? [];
+    for (const entry of context.filter((item) => !item.command.startsWith('baiton.runs'))) {
+      assert.ok(entry.when?.startsWith('view == baiton.planExplorer'), `${entry.command} is scoped to Plan Explorer`);
+    }
+    assert.ok(!/\b(?:spec|specs|todo|todos)\b/i.test(JSON.stringify(pkg)));
   });
 
   it('declares the MIT license in package.json (Req 23.4)', () => {

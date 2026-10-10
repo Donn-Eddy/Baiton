@@ -38,7 +38,7 @@ import type {
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 
 /**
- * The single offline, deterministic end-to-end test of the spec-less run
+ * The single offline, deterministic end-to-end test of the plan-less run
  * pipeline (dispatch modes, T18).
  *
  * Everything below the agent boundary is real: a real temporary git repository
@@ -54,7 +54,7 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/ada
  * `.baiton/specs/`; a declined confirm creates nothing; a merge removes the
  * worktree and branch and refuses on a moved base or a dirty tree, while a
  * cancel keeps them; an Investigate run commits nothing and yields a finding;
- * and only the spec draft (never a per-todo queue) blocks a spec-less run.
+ * and only the plan draft (never a per-phase queue) blocks a plan-less run.
  */
 
 // ---------------------------------------------------------------------------
@@ -360,7 +360,7 @@ function investigateRequest(): RunPipelineRequest {
   };
 }
 
-describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
+describe('Integration: plan-less run modes over a temp git repo (T18)', () => {
   const repos: string[] = [];
 
   /** A fresh temp repo, registered for automatic cleanup. */
@@ -847,18 +847,18 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
   // -------------------------------------------------------------------------
 
   describe('the repository lock', () => {
-    it('is held against a spec-less run only by the spec draft, and the run holds it against the draft', async () => {
+    it('is held against a plan-less run only by the plan draft, and the run holds it against the draft', async () => {
       const repo = newRepo();
       let drafting = true;
       // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
       let h!: Harness;
       const lock = createStageLock({
-        specDraftRunning: () => drafting,
+        planDraftRunning: () => drafting,
         runRunning: () => h.pipeline.isRunning(),
       });
       h = makeHarness(repo, { isPlanBusy: () => lock.runPipelineBusy() });
 
-      // While the spec draft runs, a spec-less run is refused and creates nothing.
+      // While the plan draft runs, a plan-less run is refused and creates nothing.
       const refused = await h.pipeline.start(bugRequest());
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
@@ -869,20 +869,20 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
 
       // With the draft finished the run starts, and while it runs the draft is locked out.
       drafting = false;
-      assert.strictEqual(lock.specDraftBusy(), false);
+      assert.strictEqual(lock.planDraftBusy(), false);
       const started = await h.pipeline.start(bugRequest());
       assert.ok(started.ok, 'the run starts once the draft is done');
       if (!started.ok) {
         return;
       }
-      assert.strictEqual(lock.specDraftBusy(), true, 'a running spec-less run blocks the spec draft');
+      assert.strictEqual(lock.planDraftBusy(), true, 'a running plan-less run blocks the plan draft');
 
       await h.waitFor(0);
       assert.strictEqual(h.pipeline.cancel(), true);
       await h.close(0, undefined);
       await started.completed;
       await waitUntil(() => !h.pipeline.isRunning(), 'the run settling after cancel');
-      assert.strictEqual(lock.specDraftBusy(), false, 'the lock is released when the run ends');
+      assert.strictEqual(lock.planDraftBusy(), false, 'the lock is released when the run ends');
     });
   });
 

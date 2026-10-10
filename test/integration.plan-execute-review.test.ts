@@ -12,7 +12,7 @@ import type { RunQueue, PlanStore, ResultWatcherFactory } from '../src/engine/ru
 import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
 import { landPhaseWorktree, phaseBranchFor, phaseWorktreeDirFor } from '../src/engine/phaseWorktree';
 import { createPlanStore } from '../src/activation/planStore';
-import { createTodoQueues, type TodoQueues } from '../src/activation/engineFacade';
+import { createPhaseQueues, type PhaseQueues } from '../src/activation/engineFacade';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import type { HostTerminal, TerminalHost, CreateTerminalOptions } from '../src/engine/terminalHost';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
@@ -38,20 +38,20 @@ import {
  * a REAL temporary git repository, using a STUBBED sub-agent (no Claude CLI, no
  * terminal, no network beyond a local mock HTTP server) that writes
  * schema-conformant `result.json` files. The real engine pieces — the run
- * queue, git service, run journal, and the serializer-backed spec store — are
+ * queue, git service, run journal, and the serializer-backed plan store — are
  * wired together; only the agent boundary (adapter probe/launch, terminal, and
  * the result watcher) is stubbed.
  *
  * Coverage (mapped to requirements):
  *   1. Approval branch creation from a resolved base_commit + the
  *      `spec(<slug>): approve` commit (Req 16.3, 16.5, 17.1).
- *   2. Plan → planned, `todos/<id>/plan.md` persisted, metadata commit between stages
+ *   2. Plan → planned, `phases/<id>/plan.md` persisted, metadata commit between stages
  *      (Req 17.1).
  *   3. Execute requires a clean tree (Req 17.2); a dirty tree outside the spec
- *      folder is refused (Req 17.3). On completion: todo executed, `todos/<id>/execute-1.md`
+ *      folder is refused (Req 17.3). On completion: todo executed, `phases/<id>/execute-1.md`
  *      persisted, and one `plan(<slug>): <id> execute attempt 1` commit carrying
  *      a `Run-Id:` trailer (Req 17.4), findable via findCommitByRunId (Req 21.5).
- *   4. Review → done, `todos/<id>/review-1.md` persisted; the non-executor post-run reset
+ *   4. Review → done, `phases/<id>/review-1.md` persisted; the non-executor post-run reset
  *      leaves gitignored files untouched (Req 15.5).
  *   5. Crash replay: a result-less journal entry whose Run-Id commit landed is
  *      reconciled by recoverJournal, replaying the lost state write (Req 21.5).
@@ -280,7 +280,7 @@ class StubSubAgentFactory implements ResultWatcherFactory {
         // The executor changes the working tree before emitting its result so
         // the queue's execute commit captures the change with the Run-Id
         // trailer (Req 17.4).
-        // Stages run in the todo's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
+        // Stages run in the phase's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
         const stageRoot = path.resolve(path.dirname(input.resultPath), '..', '..', '..');
         writeRepoFile(stageRoot, 'src/greeting.ts', 'export const version = 1;\nexport const hello = () => "hi";\n');
       }
@@ -339,21 +339,21 @@ interface Harness {
   git: GitWorktreeService;
   writer: PlanBranchWriter;
   store: PlanStore;
-  queues: TodoQueues;
+  queues: PhaseQueues;
   queue: RunQueue;
   factory: StubSubAgentFactory;
   terminalHost: StubTerminalHost;
   journalPath: string;
 }
 
-/** Wire a harness over `repo` the way commands.ts does: per-todo queues, one shared writer. */
+/** Wire a harness over `repo` the way commands.ts does: per-phase queues, one shared writer. */
 function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const specsDir = path.join(repo, '.baiton', 'specs');
   const gitService = createGitService(repo);
   const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: gitService });
   const store = createPlanStore(path.dirname(specsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
-  const queues = createTodoQueues({
+  const queues = createPhaseQueues({
     workspaceRoot: repo,
     baitonDir: path.dirname(specsDir),
     git: gitService,
@@ -543,7 +543,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     const planArtifact = path.join(
       h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'plan.md',
     );
-    assert.ok(fs.existsSync(planArtifact), "plan.md persisted under the todo's folder");
+    assert.ok(fs.existsSync(planArtifact), "plan.md persisted under the phase's folder");
     // Between plan start and finish the queue wrote the running (`planning`) and
     // terminal (`planned`) metadata commits (Req 17.1).
     const headAfterPlan = await h.git.head();
@@ -558,13 +558,13 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       'a planned metadata commit landed',
     );
 
-    // The stages ran in the todo's worktree, on the todo branch.
+    // The stages ran in the phase's worktree, on the phase branch.
     const wt = phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID);
-    assert.ok(fs.existsSync(wt), 'the todo worktree exists after Plan');
+    assert.ok(fs.existsSync(wt), 'the phase worktree exists after Plan');
     assert.strictEqual(
       git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').trim(),
       phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'),
-      'the worktree is on the todo branch',
+      'the worktree is on the phase branch',
     );
     assert.strictEqual(phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'), 'baiton-todo/demo-spec/T01');
     const wtGit = createGitService(wt);
@@ -604,7 +604,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
     assert.ok(
       fs.existsSync(executeArtifact),
-      "execute-1.md persisted under the todo's folder",
+      "execute-1.md persisted under the phase's folder",
     );
 
     // Exactly one execute commit with the expected message.
@@ -614,7 +614,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.strictEqual(
       todoSubjects.filter((s) => s === executeSubject).length,
       1,
-      'exactly one execute commit landed on the todo branch',
+      'exactly one execute commit landed on the phase branch',
     );
     assert.strictEqual(
       commitSubjects(h.repo).filter((s) => s === executeSubject).length,
@@ -664,13 +664,13 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
     assert.ok(
       fs.existsSync(reviewArtifact),
-      "review-1.md persisted under the todo's folder",
+      "review-1.md persisted under the phase's folder",
     );
     // The non-executor post-run reset ran but left the gitignored file (Req 15.5).
     assert.ok(fs.existsSync(scratchAbs), 'gitignored scratch file survived the post-run reset');
     assert.strictEqual(fs.readFileSync(scratchAbs, 'utf8'), 'keep me\n', 'its contents are intact');
 
-    // -- Land the todo into the spec branch ---------------------------------
+    // -- Land the phase into the spec branch ---------------------------------
     const landed = await h.writer.apply(SLUG, () =>
       landPhaseWorktree({ workspaceRoot: h.repo, git: h.git }, { slug: SLUG, phaseId: PHASE_ID }),
     );
@@ -679,7 +679,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       readRepoFile(h.repo, 'src/greeting.ts').includes('hello'),
       'the main checkout now has the executor change',
     );
-    assert.strictEqual(git(h.repo, 'branch', '--list', todoBranch).trim(), '', 'the todo branch is gone');
+    assert.strictEqual(git(h.repo, 'branch', '--list', todoBranch).trim(), '', 'the phase branch is gone');
     assert.ok(!fs.existsSync(wt), 'the worktree is gone');
     assert.strictEqual(commitSubjects(h.repo)[0], `plan(${SLUG}): land ${PHASE_ID}`);
   });
@@ -725,7 +725,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     await approveSpec(h);
 
     // First Plan dispatch: the terminal closes before a result, so the stage
-    // halts with `closed` and the todo reverts to its From_State (`pending`).
+    // halts with `closed` and the phase reverts to its From_State (`pending`).
     const firstPlan = await h.queue.dispatch({
       slug: SLUG,
       phaseId: PHASE_ID,
@@ -768,7 +768,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     const h = harness();
     await approveSpec(h);
 
-    // Wedge the todo into a running state and land an execute commit carrying
+    // Wedge the phase into a running state and land an execute commit carrying
     // the crash run's Run-Id trailer, but journal ONLY the START record — the
     // shape a crash leaves behind (a result-less entry whose work landed).
     const crashRunId = 'crash-run-replay-01';
@@ -785,7 +785,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       terminalPid: 999999, // a dead pid
     });
 
-    // Sanity: the journal entry is result-less before recovery, and the todo is
+    // Sanity: the journal entry is result-less before recovery, and the phase is
     // wedged in `executing`.
     const beforeEntry = parseJournal(h.journalPath).find((e) => e.runId === crashRunId);
     assert.ok(beforeEntry && beforeEntry.result === undefined, 'the crash entry is result-less');

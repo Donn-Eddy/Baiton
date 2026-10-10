@@ -464,7 +464,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     assert.strictEqual(modes.disabled, false);
   });
 
-  it('pins to Plan on a spec conversation and restores the mode on Workspace', () => {
+  it('pins to Phased Plan on a plan conversation and restores the mode on Workspace', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     view.send({ type: 'setMode', mode: 'quick' });
@@ -472,10 +472,10 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
       type: 'setConversations',
       items: [
         { id: 'workspace', label: 'Workspace' },
-        { id: 'my-spec', label: 'my-spec' },
+        { id: 'my-plan', label: 'my-plan' },
       ],
     });
-    view.send({ type: 'setActive', conversationId: 'my-spec' });
+    view.send({ type: 'setActive', conversationId: 'my-plan' });
     assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.disabled, true);
     modes.fire('change', {});
@@ -501,7 +501,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     assert.strictEqual(modes.value, 'plan', 'snapped back; only the host echo moves it');
   });
 
-  it('a spec conversation pins to Plan even when the host mode is Default', () => {
+  it('a plan conversation pins to Phased Plan even when the host mode is Default', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     view.send({ type: 'setMode', mode: 'default' });
@@ -509,10 +509,10 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
       type: 'setConversations',
       items: [
         { id: 'workspace', label: 'Workspace' },
-        { id: 'my-spec', label: 'my-spec' },
+        { id: 'my-plan', label: 'my-plan' },
       ],
     });
-    view.send({ type: 'setActive', conversationId: 'my-spec' });
+    view.send({ type: 'setActive', conversationId: 'my-plan' });
     assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.disabled, true);
     view.send({ type: 'setActive', conversationId: 'workspace' });

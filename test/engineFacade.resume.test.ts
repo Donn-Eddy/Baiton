@@ -30,7 +30,7 @@ import { ok } from '../src/model/result';
  *
  * For a second `execute` dispatch on a todo, `dispatchTrigger` reads the same
  * parsed journal it uses for the attempt count and, via `latestStart`, finds
- * the todo's most recent execute start. When that start recorded a
+ * the phase's most recent execute start. When that start recorded a
  * Session_Id, the facade carries it as `resumeSessionId` on the `RunRequest`
  * so the launched CLI leads with `--resume <id>` (Requirement 3.2); when the
  * prior start has no Session_Id, the launch falls back to `-c`.
@@ -130,11 +130,11 @@ function makeGit(): GitService {
   };
 }
 
-/** A spec store that keeps every `execute` transition legal, regardless of history. */
+/** A plan store that keeps every `execute` transition legal, regardless of history. */
 const planStore: PlanStore = {
   currentState: async () => 'planned',
   // Every todo has a plan on file, so the Execute brief can be assembled; the
-  // spec itself is not needed for what this test observes.
+  // plan itself is not needed for what this test observes.
   readPlan: async () => undefined,
   readArtifact: async () => '# Plan T01\n',
   latestExecuteCommit: async () => undefined,
@@ -178,7 +178,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     journalPath = path.join(specsDir, 'demo', 'runs.jsonl');
   });
 
-  it('carries --resume <prior id> on the second execute for a todo with a recorded session', async () => {
+  it('carries --resume <prior id> on the second execute for a phase with a recorded session', async () => {
     const terminalHost = makeTerminalHost();
     let sessionCounter = 0;
     const deps: RunQueueDeps = {
@@ -198,7 +198,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     const first = await dispatchTrigger(
       queue,
       path.dirname(specsDir),
-      { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' },
+      { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
     assert.strictEqual(first.ok, true, `first execute dispatch should succeed: ${JSON.stringify(first)}`);
@@ -207,7 +207,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     const second = await dispatchTrigger(
       queue,
       path.dirname(specsDir),
-      { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' },
+      { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
     assert.strictEqual(second.ok, true, `second execute dispatch should succeed: ${JSON.stringify(second)}`);
@@ -252,7 +252,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     const result = await dispatchTrigger(
       queue,
       path.dirname(specsDir),
-      { kind: 'stage', slug: 'demo', todoId: 't2', stage: 'execute' },
+      { kind: 'stage', slug: 'demo', phaseId: 't2', stage: 'execute' },
       deps.adapterForRole,
     );
     assert.strictEqual(result.ok, true, `execute dispatch should succeed: ${JSON.stringify(result)}`);
@@ -276,7 +276,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
  * fresh launch (see the CodexAdapter degrade notes), so resuming with it runs
  * `codex resume <uuid>`, which prints "No saved session found with ID <uuid>"
  * and exits 1 before any session exists — the run is journaled `closed (exit
- * 1)` and the todo reverts. Attempt 2 must therefore launch fresh; the retry
+ * 1)` and the phase reverts. Attempt 2 must therefore launch fresh; the retry
  * brief still carries the latest review. Once a real id has been discovered for
  * a prior run and journaled as `discoveredSessionId`, that id — and only that
  * id — is resumable.
@@ -325,7 +325,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     const { queue, terminalHost, adapterForRole } = makeQueue(
       withStubbedProbe(new CodexAdapter()),
     );
-    const trigger = { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' } as const;
+    const trigger = { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' } as const;
 
     const first = await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     assert.strictEqual(first.ok, true, `first execute should succeed: ${JSON.stringify(first)}`);
@@ -373,7 +373,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     const result = await dispatchTrigger(
       queue,
       path.dirname(specsDir),
-      { kind: 'stage', slug: 'demo', todoId: 't3', stage: 'execute' },
+      { kind: 'stage', slug: 'demo', phaseId: 't3', stage: 'execute' },
       adapterForRole,
     );
     assert.strictEqual(result.ok, true, `execute dispatch should succeed: ${JSON.stringify(result)}`);
@@ -399,7 +399,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
       discoverSessionId: async ({ runId }) => `codex-session-for-${runId}`,
     };
     const { queue, terminalHost, adapterForRole } = makeQueue(adapter);
-    const trigger = { kind: 'stage', slug: 'demo', todoId: 't5', stage: 'execute' } as const;
+    const trigger = { kind: 'stage', slug: 'demo', phaseId: 't5', stage: 'execute' } as const;
 
     await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
@@ -423,7 +423,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     const { queue, terminalHost, adapterForRole } = makeQueue(
       withStubbedProbe(new ClaudeAdapter()),
     );
-    const trigger = { kind: 'stage', slug: 'demo', todoId: 't4', stage: 'execute' } as const;
+    const trigger = { kind: 'stage', slug: 'demo', phaseId: 't4', stage: 'execute' } as const;
 
     await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
@@ -438,7 +438,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
   });
 });
 
-describe('engine facade: per-todo journals (sub-agent chats)', () => {
+describe('engine facade: per-phase journals (sub-agent chats)', () => {
   let tmpDir: string;
   let specsDir: string;
 
@@ -477,9 +477,9 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
     return { queue: createRunQueue(deps), terminalHost, adapterForRole };
   }
 
-  it('journals to todos/<id>/runs.jsonl and resumes on the second execute', async () => {
+  it('journals to phases/<id>/runs.jsonl and resumes on the second execute', async () => {
     const { queue, terminalHost, adapterForRole } = makeQueue();
-    const trigger = { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' } as const;
+    const trigger = { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' } as const;
     assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
     await flush();
     assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
@@ -503,7 +503,7 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
       sessionId: 'legacy-session',
     });
     const { queue, terminalHost, adapterForRole } = makeQueue();
-    const trigger = { kind: 'stage', slug: 'demo', todoId: 't6', stage: 'execute' } as const;
+    const trigger = { kind: 'stage', slug: 'demo', phaseId: 't6', stage: 'execute' } as const;
     assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
     await flush();
 

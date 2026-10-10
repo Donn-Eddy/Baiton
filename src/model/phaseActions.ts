@@ -55,6 +55,6 @@ export function legalActions(
 
 /** Build the Plan Explorer tree item's action context value. */
 export function phaseContextValue(actions: PhaseAction[]): string {
-  // This contextValue is still matched by package.json; the Activation/UI todo renames it.
-  return 'baiton.todo' + actions.map((a) => ' ' + a).join('');
+  // Matched by the view/item/context when clauses in package.json; the prefix itself must never match an action token.
+  return 'baiton.phase' + actions.map((a) => ' ' + a).join('');
 }

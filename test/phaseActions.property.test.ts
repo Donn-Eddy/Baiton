@@ -97,7 +97,12 @@ describe('todoActions (property)', () => {
           const contextValue = phaseContextValue(actions);
 
           // Begins with the fixed prefix.
-          assert.ok(contextValue.startsWith('baiton.todo'));
+          assert.ok(contextValue.startsWith('baiton.phase'));
+
+          for (const action of ['approve', 'submitPr', 'showPr']) {
+            const planOnly = new RegExp(`\\b${action}\\b`);
+            assert.ok(!planOnly.test(contextValue), `phase item must not match plan action "${action}"`);
+          }
 
           for (const action of ALL_ACTIONS) {
             const regex = new RegExp(`\\b${action}\\b`);

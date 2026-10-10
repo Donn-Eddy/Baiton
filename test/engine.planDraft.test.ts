@@ -483,10 +483,10 @@ describe('plan-draft runner (unit)', () => {
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let h!: ReturnType<typeof makeHarness>;
     const lock = createStageLock({
-      specDraftRunning: () => h.runner.isRunning(),
+      planDraftRunning: () => h.runner.isRunning(),
       runRunning: () => runRunning,
     });
-    h = track(makeHarness({ isQueueRunning: () => lock.specDraftBusy() }));
+    h = track(makeHarness({ isQueueRunning: () => lock.planDraftBusy() }));
     assert.strictEqual(phaseStageRunning, true);
 
     const started = await h.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
@@ -503,10 +503,10 @@ describe('plan-draft runner (unit)', () => {
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let blockedHarness!: ReturnType<typeof makeHarness>;
     const blockedLock = createStageLock({
-      specDraftRunning: () => blockedHarness.runner.isRunning(),
+      planDraftRunning: () => blockedHarness.runner.isRunning(),
       runRunning: () => runRunning,
     });
-    blockedHarness = track(makeHarness({ isQueueRunning: () => blockedLock.specDraftBusy() }));
+    blockedHarness = track(makeHarness({ isQueueRunning: () => blockedLock.planDraftBusy() }));
     runRunning = true;
     const blocked = await blockedHarness.runner.start({ slug: 'greeting', requirements: 'Goal: greet.' });
     assert.strictEqual(blocked.ok, false);

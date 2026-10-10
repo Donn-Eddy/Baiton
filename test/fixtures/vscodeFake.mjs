@@ -93,7 +93,7 @@ export class Disposable {
   }
 }
 
-// --- Tree view surface (runsExplorer / specExplorer tests) ------------------
+// --- Tree view surface (runsExplorer / planExplorer tests) ------------------
 // Concrete value classes, like Disposable/ViewColumn above: the tree glue only
 // needs them to behave, not to be observed by a test through `fake()`.
 

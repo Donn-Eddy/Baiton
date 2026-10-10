@@ -139,11 +139,11 @@ export type HostToWebview =
   /**
    * Set the conversation's mode. The host is authoritative: the composer's
    * Mode control repaints only on this echo, so a webview `setMode` that the
-   * host rejects (a spec conversation is always Spec) simply never comes back.
+   * host rejects (a plan conversation is always Phased Plan) simply never comes back.
    */
   | { type: 'setMode'; mode: RunMode }
   /**
-   * Set whether a spec-less run is in flight for this workspace. The Mode
+   * Set whether a plan-less run is in flight for this workspace. The Mode
    * control is disabled while it is true, so a run's mode cannot change under
    * it mid-flight.
    */
@@ -281,7 +281,7 @@ export function normalizeEscalation(value: unknown): InterventionEscalation | un
 
 /** One entry in the conversation selector: `'workspace'` plus one per slug. */
 export interface ConversationItem {
-  /** The conversation id (`'workspace'` or a spec slug). */
+  /** The conversation id (`'workspace'` or a plan slug). */
   id: string;
   /** The human-readable label shown in the selector. */
   label: string;
@@ -295,7 +295,7 @@ export interface SessionItem {
   title: string;
   /** When the session was last appended to (ISO-8601 string or epoch ms). */
   updatedAt: string | number;
-  /** The scope the session belongs to (`'workspace'` or a spec slug). */
+  /** The scope the session belongs to (`'workspace'` or a plan slug). */
   scopeId: string;
   /** The parent session's id for a sub-agent chat; absent for a top-level session. */
   parentId?: string;
@@ -362,7 +362,7 @@ export interface WebviewState {
   autoMode: boolean;
   /** The active conversation's mode; `'plan'` unless the host says otherwise. */
   mode: RunMode;
-  /** Whether a spec-less run is in flight; the Mode control is locked while true. */
+  /** Whether a plan-less run is in flight; the Mode control is locked while true. */
   runActive: boolean;
   /** The provider groups rendered in the Provider & Model dropdown. */
   providers: ProviderGroup[];
@@ -428,7 +428,7 @@ export function initialWebviewState(): WebviewState {
  *   no pending card is a no-op returning the same state.
  * - `setAutoMode` sets the Auto-mode toggle.
  * - `setMode` sets the conversation's mode; the host is authoritative.
- * - `setRunActive` sets whether a spec-less run is in flight.
+ * - `setRunActive` sets whether a plan-less run is in flight.
  * - `setContextUsage` replaces the context meter reading.
  * - `setConversations` sets the selector entries.
  * - `setActive` sets the active conversation id.
