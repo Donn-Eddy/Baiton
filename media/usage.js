@@ -127,6 +127,17 @@
     };
   }
 
+  function windowRow(w) {
+    var v = isObject(w) ? w : {};
+    var reset = str(v.resetText);
+    return {
+      label: str(v.label) + (v.derived === true ? ' · Baiton-derived' : ''),
+      figure: str(v.figure),
+      reset: reset,
+      resetTitle: reset ? str(v.resetAbsolute) : '',
+    };
+  }
+
   function cardView(row, now) {
     var r = isObject(row) ? row : {};
     var reading = isObject(r.reading) ? r.reading : undefined;
@@ -186,6 +197,7 @@
       formatReset: formatReset,
       formatRaw: formatRaw,
       windowView: windowView,
+      windowRow: windowRow,
       cardView: cardView,
     };
   }
@@ -237,8 +249,19 @@
     }
 
     v.windows.forEach(function (w) {
+      var r = windowRow(w);
       var box = el('div', 'window');
-      box.appendChild(el('div', 'window-label', w.label + (w.derived ? ' · Baiton-derived' : '')));
+      var rowEl = el('div', 'window-row');
+      var head = el('div', 'window-head');
+      head.appendChild(el('span', 'window-label', r.label));
+      head.appendChild(el('span', 'window-figure', r.figure));
+      rowEl.appendChild(head);
+      if (r.reset) {
+        var reset = el('span', 'window-reset', r.reset);
+        if (r.resetTitle) reset.title = r.resetTitle;
+        rowEl.appendChild(reset);
+      }
+      box.appendChild(rowEl);
       if (w.scopeText) box.appendChild(el('div', 'window-scope', w.scopeText));
       if (w.hasBar) {
         var track = el('div', 'bar');
@@ -251,12 +274,6 @@
         fill.style.width = w.remainingPercent + '%';
         track.appendChild(fill);
         box.appendChild(track);
-      }
-      box.appendChild(el('div', 'window-figure', w.figure));
-      if (w.resetText) {
-        var reset = el('div', 'window-reset', w.resetText);
-        if (w.resetAbsolute) reset.title = w.resetAbsolute;
-        box.appendChild(reset);
       }
       card.appendChild(box);
     });
