@@ -3,3 +3,4 @@
 {"type":"start","runId":"phased-plan-T05-execute-1-1791654146618","todoId":"T05","stage":"execute","attempt":1,"startHead":"66a7886b82dab99749600f1d4eb9a51ba688c94d","inputRev":"bb2a21508d639d7dde272a8ae16794af0c0dc3e9e0fe9e1660736398b113f696","terminalPid":147623,"fromState":"planned","sessionId":"349d9633-718a-4cae-af57-81a5560a5005"}
 {"type":"completion","runId":"phased-plan-T05-execute-1-1791654146618","result":"completed","commit":"554faf0ece9ecc018726a2ab2edac203e9c63bf3","discoveredSessionId":"01a126e8-b5aa-7a02-9d1b-5431195a0bb3"}
 {"type":"start","runId":"phased-plan-T05-review-1-1791654616804","todoId":"T05","stage":"review","attempt":1,"startHead":"554faf0ece9ecc018726a2ab2edac203e9c63bf3","inputRev":"bb2a21508d639d7dde272a8ae16794af0c0dc3e9e0fe9e1660736398b113f696","terminalPid":159034,"fromState":"executed","sessionId":"9416000f-ed49-4003-8302-5bae6eda77b1"}
+{"type":"completion","runId":"phased-plan-T05-review-1-1791654616804","result":"completed"}
