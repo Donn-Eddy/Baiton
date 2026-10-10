@@ -27,7 +27,7 @@
  * 17. `dispose()` unsubscribes and a repeated `start()` leaves one subscription.
  * 18. A fresh workspace opens in Default; a stored concrete mode wins.
  * 19. Default maps to the run phase, run tools and the Default prompt.
- * 20. A spec conversation stays pinned to Spec from a Default workspace.
+ * 20. A spec conversation stays pinned to Plan from a Default workspace.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -359,12 +359,23 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
   });
 
   it('a stored concrete mode wins over Default', async () => {
-    for (const m of ['spec', 'bug', 'quick', 'refactor', 'investigate']) {
+    for (const m of ['plan', 'bug', 'quick', 'refactor', 'investigate']) {
       cleanup?.();
       buildHarness({ storedMode: m });
       await started();
       assert.strictEqual(webview.all('setMode')[0].mode, m);
     }
+  });
+
+  it('loads a legacy stored spec mode as plan', async () => {
+    buildHarness({ storedMode: 'spec' });
+    await started();
+    assert.strictEqual(webview.all('setMode')[0].mode, 'plan');
+
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 1, 'the completion');
+    assert.deepStrictEqual(phases, ['gather']);
+    assert.strictEqual(client.requests[0][0].content, buildSystemPrompt({ kind: 'workspace' }));
   });
 
   it('Default maps to the run phase, run tools and the Default prompt', async () => {
@@ -393,7 +404,7 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.ok(caller.sessionKey.startsWith('workspace/'));
   });
 
-  it('a spec conversation stays pinned to Spec from a Default workspace', async () => {
+  it('a spec conversation stays pinned to Plan from a Default workspace', async () => {
     const content = '---\nstatus: draft\n---\n# Alpha\n';
     fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
@@ -401,9 +412,9 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.strictEqual(webview.all('setMode')[0].mode, 'default');
 
     controller.setActiveSpec('alpha');
-    await waitFor(() => webview.last('setMode')?.mode === 'spec', 'the pinned Spec paint');
+    await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
     await webview.send({ type: 'setMode', mode: 'bug' });
-    assert.strictEqual(webview.last('setMode')!.mode, 'spec');
+    assert.strictEqual(webview.last('setMode')!.mode, 'plan');
     assert.deepStrictEqual(modeSets, []);
 
     await webview.send({ type: 'sendText', text: 'go' });
@@ -443,17 +454,17 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     assert.deepStrictEqual(modeSets, []);
   });
 
-  it('pins a spec conversation to Spec and repaints the remembered mode on return', async () => {
+  it('pins a spec conversation to Plan and repaints the remembered mode on return', async () => {
     buildHarness({ storedMode: 'bug' });
     fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), '---\nstatus: draft\n---\n# Alpha\n');
     await started();
 
     controller.setActiveSpec('alpha');
-    await waitFor(() => webview.last('setMode')?.mode === 'spec', 'the pinned Spec paint');
+    await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
 
     await webview.send({ type: 'setMode', mode: 'bug' });
-    assert.strictEqual(webview.last('setMode')!.mode, 'spec');
+    assert.strictEqual(webview.last('setMode')!.mode, 'plan');
     assert.deepStrictEqual(modeSets, []);
 
     controller.setActiveSpec(undefined);
@@ -500,7 +511,7 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
       buildSystemPrompt({ kind: 'workspace' }, undefined, 'bug'),
     );
 
-    buildHarness({ storedMode: 'spec' });
+    buildHarness({ storedMode: 'plan' });
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
@@ -515,7 +526,7 @@ describe('ChatController conversation mode (dispatch-modes T14)', () => {
     fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
     await started();
     controller.setActiveSpec('alpha');
-    await waitFor(() => webview.last('setMode')?.mode === 'spec', 'the pinned Spec paint');
+    await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
 
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');

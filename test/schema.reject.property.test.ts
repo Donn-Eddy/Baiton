@@ -25,7 +25,7 @@ import { STAGES, type Stage } from '../src/model/stage';
 /** A valid result for each stage; mutations below start from a copy of these. */
 function baseResult(stage: Stage): Record<string, unknown> {
   switch (stage) {
-    case 'spec-draft':
+    case 'plan-draft':
       return {
         overview: 'Build the thing.',
         todos: [{ title: 'Do the first part', after: [], files: ['a.ts'] }],

@@ -138,7 +138,7 @@ export interface DraftSpecRequest {
 }
 
 /**
- * The answer the spec-draft runner gives the `draft_spec` tool. `started`
+ * The answer the plan-draft runner gives the `draft_spec` tool. `started`
  * carries the run id so the model can tell the user where to watch; `busy`
  * means a spec-less run (or another draft) is in flight; `refused` carries the
  * reason the draft never launched (a duplicate slug, a failed adapter probe, a
@@ -150,7 +150,7 @@ export type DraftSpecOutcome =
   | { kind: 'refused'; reason: string };
 
 /**
- * The spec-draft runner seam the `draft_spec` tool dispatches into. The stage
+ * The plan-draft runner seam the `draft_spec` tool dispatches into. The stage
  * engine implements it (`createSpecDraftRunner`); the tool only asks it to
  * start a draft and reports what it answers. It resolves as soon as the
  * sub-agent is running, so the chat turn is never blocked on the draft.
@@ -161,7 +161,7 @@ export interface DraftSpecSeam {
 
 /** One confirmed spec-less dispatch from a run-mode conversation. */
 export interface StartRunRequest {
-  /** The mode the run executes as; never 'spec'. */
+  /** The mode the run executes as; never 'plan'. */
   mode: RunMode;
   /** The one-line statement of the work (or the question, for investigate). */
   statement: string;

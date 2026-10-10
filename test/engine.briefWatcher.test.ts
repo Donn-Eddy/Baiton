@@ -193,11 +193,11 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     });
   });
 
-  describe('spec-writer brief', () => {
+  describe('plan-writer brief', () => {
     const brief = (): string =>
       buildBrief({
-        stage: 'spec-draft',
-        role: 'spec-writer',
+        stage: 'plan-draft',
+        role: 'plan-writer',
         resultPath: '/repo/.baiton/runs/draft-1/result.json',
         context: '## Requirements\n\nBuild a greeting module.',
       });
@@ -230,7 +230,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.ok(brief().includes('Build a greeting module.'));
     });
 
-    it('embeds the spec-draft result schema, not another stage schema', () => {
+    it('embeds the plan-draft result schema, not another stage schema', () => {
       const text = brief();
       assert.ok(text.includes('"overview"'), 'schema section carries the overview property');
       assert.ok(text.includes('"todos"'), 'schema section carries the todos property');

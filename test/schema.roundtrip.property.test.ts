@@ -7,7 +7,7 @@ import type {
   ExecuteResult,
   InvestigateResult,
   PrResult,
-  SpecDraftResult,
+  PlanDraftResult,
   ReviewResult,
   StageResult,
 } from '../src/schema';
@@ -123,7 +123,7 @@ const prArb: fc.Arbitrary<PrResult> = fc.record({
 });
 
 /** A spec draft: an overview plus a dependency-ordered todo list. */
-const specDraftArb: fc.Arbitrary<SpecDraftResult> = fc.record({
+const specDraftArb: fc.Arbitrary<PlanDraftResult> = fc.record({
   overview: textArb,
   todos: fc.array(
     fc.record({
@@ -143,7 +143,7 @@ const investigateArb: fc.Arbitrary<InvestigateResult> = fc.record({
 });
 
 const RESULT_ARBS: Record<Stage, fc.Arbitrary<StageResult>> = {
-  'spec-draft': specDraftArb as fc.Arbitrary<StageResult>,
+  'plan-draft': specDraftArb as fc.Arbitrary<StageResult>,
   plan: planArb as fc.Arbitrary<StageResult>,
   'plan-review': planReviewArb as fc.Arbitrary<StageResult>,
   execute: executeArb as fc.Arbitrary<StageResult>,

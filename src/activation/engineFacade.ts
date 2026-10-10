@@ -94,10 +94,10 @@ export type EngineTrigger =
  * the stage recorded on a journal entry without duplicating this table.
  */
 export const STAGE_ROLE: Record<Stage, Role> = {
-  // `spec-draft` is spec-scoped and runs through its own runner
+  // `plan-draft` is plan-scoped and runs through its own runner
   // (`src/engine/specDraft.ts`), never through the todo-scoped queue; the entry
   // is here so the stage → role table stays total.
-  'spec-draft': 'spec-writer',
+  'plan-draft': 'plan-writer',
   plan: 'planner',
   'plan-review': 'plan-reviewer',
   execute: 'executor',

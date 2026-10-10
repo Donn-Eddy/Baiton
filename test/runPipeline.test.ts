@@ -1020,7 +1020,7 @@ describe('spec-less run pipeline (T07)', () => {
 
     it('refuses mode "spec"', async () => {
       const h = track(makeHarness());
-      const refused = await h.pipeline.start(bugRequest({ mode: 'spec' }));
+      const refused = await h.pipeline.start(bugRequest({ mode: 'plan' }));
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
         assert.strictEqual(refused.error.kind, 'invalid-mode');

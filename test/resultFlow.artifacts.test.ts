@@ -89,7 +89,7 @@ describe('artifactPathFor (per-todo isolation, Req 24.3)', () => {
   it('keeps the spec-scoped stages at the spec root, ignoring the todo id', () => {
     const specDir = path.join('/repo', '.baiton', 'specs', 'demo');
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'spec-draft', 'T06'),
+      artifactPathFor('/repo', 'demo', 'plan-draft', 'T06'),
       path.join(specDir, 'spec.md'),
     );
     assert.strictEqual(

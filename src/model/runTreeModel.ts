@@ -52,7 +52,7 @@ export interface LiveRunStageFact {
 export interface RunNode {
   /** The run id, which is also its directory name under `.baiton/runs/`. */
   runId: string;
-  /** The mode the run runs as; never 'spec'. */
+  /** The mode the run runs as; never 'plan'. */
   mode: RunMode;
   /** The confirmed work statement, whitespace-collapsed (NOT truncated). */
   statement: string;

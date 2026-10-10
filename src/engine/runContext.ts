@@ -40,7 +40,7 @@ import type { RunStage } from './runStore';
 export interface RunContextInput {
   /** The stage whose context is being assembled; selects the sections. */
   stage: RunStage;
-  /** The run's mode; never 'spec'. Selects the mode framing sections. */
+  /** The run's mode; never 'plan'. Selects the mode framing sections. */
   mode: RunMode;
   /** The one-line statement of the work (for investigate: the question). */
   statement: string;
@@ -130,7 +130,7 @@ function modeSections(input: RunContextInput): string[] {
     case 'refactor':
       return [behaviourPreservationSection(input)];
     default:
-      // 'quick', 'investigate', 'spec' — and any mode added later, which emits
+      // 'quick', 'investigate', 'plan' — and any mode added later, which emits
       // no framing rather than breaking the build here.
       return [];
   }

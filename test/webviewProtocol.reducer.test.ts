@@ -886,8 +886,8 @@ describe('conversation mode and run activity', () => {
     { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }] },
   ];
 
-  it('a fresh state starts in Spec (not DEFAULT_MODE) with no run in flight', () => {
-    assert.strictEqual(initialWebviewState().mode, 'spec');
+  it('a fresh state starts in Plan (not DEFAULT_MODE) with no run in flight', () => {
+    assert.strictEqual(initialWebviewState().mode, 'plan');
     assert.notStrictEqual(initialWebviewState().mode, DEFAULT_MODE, 'the seed is deliberately decoupled from DEFAULT_MODE');
     assert.strictEqual(initialWebviewState().runActive, false);
   });
@@ -906,8 +906,8 @@ describe('conversation mode and run activity', () => {
   it('setMode replaces a previous mode', () => {
     const one = reduce(initialWebviewState(), { type: 'setMode', mode: 'bug' });
     assert.strictEqual(one.mode, 'bug');
-    const two = reduce(one, { type: 'setMode', mode: 'spec' });
-    assert.strictEqual(two.mode, 'spec');
+    const two = reduce(one, { type: 'setMode', mode: 'plan' });
+    assert.strictEqual(two.mode, 'plan');
   });
 
   it('setMode leaves the rest of the state alone', () => {

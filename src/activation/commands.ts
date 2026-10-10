@@ -66,7 +66,7 @@ import * as vscode from 'vscode';
 import { isErr } from '../model/result';
 import { parsePlan, type ParsedPlan } from '../model/parser';
 import { legalActions, type PhaseAction } from '../model/phaseActions';
-import { DEFAULT_MODE, isRunMode } from '../model/mode';
+import { DEFAULT_MODE, toRunMode } from '../model/mode';
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -400,7 +400,7 @@ export function registerCommands(
    */
   const composerMode = (): RunMode => {
     const stored = context.workspaceState.get<string>(CHAT_MODE_KEY);
-    return stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
+    return (stored !== undefined ? toRunMode(stored) : undefined) ?? DEFAULT_MODE;
   };
 
   // --- shared seams -------------------------------------------------------
@@ -416,7 +416,7 @@ export function registerCommands(
   let presentRelayAsk: (ask: Intervention, context: AutoModeRunContext) => void | Promise<void> =
     (ask) => presentAsk(ask);
   let declineAsk: (id: string, reason: string) => void = () => {};
-  // The spec-draft runner launches outside the queue and deliberately has no relay.
+  // The plan-draft runner launches outside the queue and deliberately has no relay.
   const askWatcherFactory = createVscodeAskWatcherFactory({
     registry: askRegistry,
     present: (ask, context) => presentRelayAsk(ask, context),
@@ -434,7 +434,7 @@ export function registerCommands(
   const adapters = createAdapterRegistry();
   // One live role → adapter resolver, shared by the queue, the facade (which
   // needs each role's `acceptsSessionId` to decide whether a journaled session
-  // is resumable), the View command and the spec-draft runner.
+  // is resumable), the View command and the plan-draft runner.
   const adapterFor = (role: Role): Adapter | undefined => adapterForRole(cfg(), adapters, role);
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
@@ -588,7 +588,7 @@ export function registerCommands(
     },
   };
 
-  // The spec-draft runner (design "the harness writes the spec"): the
+  // The plan-draft runner (design "the harness writes the spec"): the
   // orchestrator gathers requirements and calls `draft_spec`, which dispatches
   // here. It is spec-scoped, so it runs beside the todo-scoped queues rather
   // than through one; it excludes only a spec-less run. Its completion sink is bound after the ChatController exists.
@@ -964,7 +964,7 @@ export function registerCommands(
   // Re-start the controller on every fresh webview resolve so a reopen or a
   // window reload reloads the current conversation into the new webview
   // (Req 8.8).
-  // Bind the spec-draft completion sink now that the controller exists: a
+  // Bind the plan-draft completion sink now that the controller exists: a
   // finished draft records a system note on the Workspace_Conversation and
   // refreshes the view so the new spec appears in the selector.
   reportDraftOutcome = (outcome) => {

@@ -9,7 +9,7 @@
  * `.baiton/specs/` (Req 8.1, 8.2).
  *
  * The spec file itself is no longer written here: the `draft_spec` control tool
- * hands the requirements to the spec-writer harness, which drafts the OVERVIEW
+ * hands the requirements to the plan-writer harness, which drafts the OVERVIEW
  * and todo list, and {@link renderSpec}/{@link writeAndCommit} (exported for
  * that runner) render and commit the result. These tools refine the spec after
  * the draft lands.
@@ -293,7 +293,7 @@ async function loadSpecForWrite(
  * the new commit sha on success, or a {@link ToolResult} error preserving the
  * failure. The parent directory is created for a fresh spec.
  *
- * Exported so the spec-draft runner commits the spec it renders through the
+ * Exported so the plan-draft runner commits the spec it renders through the
  * same path, with the same message shape, as every other spec-folder write.
  */
 export async function writeAndCommit(

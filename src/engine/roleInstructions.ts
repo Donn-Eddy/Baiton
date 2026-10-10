@@ -77,8 +77,8 @@ export const EXECUTOR_NO_GIT_INSTRUCTION =
  * because the writer supplies titles and positional dependencies while the
  * extension assigns the `T##` ids. Exported so tests can assert the wording.
  */
-export const SPEC_WRITER_INSTRUCTION = [
-  'You are the spec writer. Read the requirements in the context below, study ' +
+export const PLAN_WRITER_INSTRUCTION = [
+  'You are the plan writer. Read the requirements in the context below, study ' +
     'the repository read-only to understand how the work fits the existing ' +
     'code, and turn the requirements into a spec: one OVERVIEW and a ' +
     'dependency-ordered list of todos.',
@@ -128,7 +128,7 @@ export const INVESTIGATE_INSTRUCTION = [
 
 /** The role-specific instruction body that opens the Brief. */
 const ROLE_INSTRUCTIONS: Record<Role, string> = {
-  'spec-writer': SPEC_WRITER_INSTRUCTION,
+  'plan-writer': PLAN_WRITER_INSTRUCTION,
   planner: [
     'You are the planner. The Context section gives you the spec OVERVIEW, the ' +
       'one todo you are planning, and the execution summaries of the todos it ' +

@@ -5,7 +5,7 @@ import {
   validateExecuteResult,
   validateInvestigateResult,
   validateReviewResult,
-  validateSpecDraftResult,
+  validatePlanDraftResult,
   validateStageResult,
 } from '../src/schema';
 import { isOk, isErr } from '../src/model/result';
@@ -20,7 +20,7 @@ import { isOk, isErr } from '../src/model/result';
  * Validates: Requirements 12.9, 25.1
  */
 describe('stage result schema examples (unit)', () => {
-  describe('spec-draft stage', () => {
+  describe('plan-draft stage', () => {
     it('accepts a well-formed spec draft', () => {
       const value = {
         overview: 'Add a greeting module and cover it with tests.',
@@ -29,12 +29,12 @@ describe('stage result schema examples (unit)', () => {
           { title: 'Test the greeting function', after: ['1'], files: ['test/greeting.test.ts'] },
         ],
       };
-      const result = validateSpecDraftResult(value);
+      const result = validatePlanDraftResult(value);
       assert.ok(isOk(result), 'a well-formed spec draft should validate');
     });
 
     it('accepts a draft whose todos carry a title only', () => {
-      const result = validateSpecDraftResult({
+      const result = validatePlanDraftResult({
         overview: 'Do the thing.',
         todos: [{ title: 'Do it' }],
       });
@@ -42,24 +42,24 @@ describe('stage result schema examples (unit)', () => {
     });
 
     it('accepts a draft with an empty todo list', () => {
-      assert.ok(isOk(validateSpecDraftResult({ overview: 'Nothing yet.', todos: [] })));
+      assert.ok(isOk(validatePlanDraftResult({ overview: 'Nothing yet.', todos: [] })));
     });
 
     it('rejects a draft missing the required `overview` field', () => {
-      const result = validateSpecDraftResult({ todos: [{ title: 'Do it' }] });
+      const result = validatePlanDraftResult({ todos: [{ title: 'Do it' }] });
       assert.ok(isErr(result));
     });
 
     it('rejects a draft missing the required `todos` field', () => {
-      assert.ok(isErr(validateSpecDraftResult({ overview: 'Only prose.' })));
+      assert.ok(isErr(validatePlanDraftResult({ overview: 'Only prose.' })));
     });
 
     it('rejects a todo with an empty title', () => {
-      assert.ok(isErr(validateSpecDraftResult({ overview: 'x', todos: [{ title: '' }] })));
+      assert.ok(isErr(validatePlanDraftResult({ overview: 'x', todos: [{ title: '' }] })));
     });
 
     it('rejects a todo carrying a lifecycle state (an unexpected extra property)', () => {
-      const result = validateSpecDraftResult({
+      const result = validatePlanDraftResult({
         overview: 'x',
         todos: [{ title: 'Do it', state: 'pending' }],
       });
@@ -68,12 +68,12 @@ describe('stage result schema examples (unit)', () => {
 
     it('rejects a draft carrying an unexpected extra property', () => {
       assert.ok(
-        isErr(validateSpecDraftResult({ overview: 'x', todos: [], slug: 'mine' })),
+        isErr(validatePlanDraftResult({ overview: 'x', todos: [], slug: 'mine' })),
       );
     });
 
     it('rejects `after` positions that are not strings', () => {
-      const result = validateSpecDraftResult({
+      const result = validatePlanDraftResult({
         overview: 'x',
         todos: [{ title: 'Do it', after: [1] }],
       });
@@ -81,8 +81,8 @@ describe('stage result schema examples (unit)', () => {
     });
 
     it('reaches the same validator through validateStageResult', () => {
-      assert.ok(isOk(validateStageResult('spec-draft', { overview: 'x', todos: [] })));
-      assert.ok(isErr(validateStageResult('spec-draft', { overview: 'x' })));
+      assert.ok(isOk(validateStageResult('plan-draft', { overview: 'x', todos: [] })));
+      assert.ok(isErr(validateStageResult('plan-draft', { overview: 'x' })));
     });
   });
 

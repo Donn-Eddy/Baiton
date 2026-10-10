@@ -3,8 +3,8 @@
  * gathers the requirements.
  *
  * The orchestrator's `draft_spec(slug, requirements)` tool hands a requirements
- * document to this runner. It launches the `spec-writer` role on the
- * `spec-draft` stage under a fresh run id — the same Brief → terminal →
+ * document to this runner. It launches the `plan-writer` role on the
+ * `plan-draft` stage under a fresh run id — the same Brief → terminal →
  * `result.json` handoff every other stage uses — and, when a schema-valid
  * result lands, renders it into `.baiton/specs/<slug>/spec.md` and commits it.
  *
@@ -28,7 +28,7 @@ import { existsSync, mkdirSync } from 'fs';
 import * as path from 'path';
 import type { Adapter } from '../adapter';
 import type { Role } from '../model/role';
-import type { SpecDraftResult } from '../schema';
+import type { PlanDraftResult } from '../schema';
 import { appendCompletion, appendStart } from '../journal';
 import { renderSpec, writeAndCommit, type RenderSpecTodo } from '../orchestrator/specWriteTools';
 import type { ToolServices } from '../orchestrator/toolServices';
@@ -38,8 +38,8 @@ import type { ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
 /** The stage and role a spec draft always runs as. */
-const SPEC_DRAFT_STAGE = 'spec-draft' as const;
-const SPEC_WRITER_ROLE: Role = 'spec-writer';
+const PLAN_DRAFT_STAGE = 'plan-draft' as const;
+const PLAN_WRITER_ROLE: Role = 'plan-writer';
 
 /** One request to draft a spec from a requirements document. */
 export interface SpecDraftRequest {
@@ -164,12 +164,12 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
       });
     }
 
-    // Resolve the spec-writer's configured adapter before probing (Req 14.1).
-    const adapter = this.deps.adapterForRole(SPEC_WRITER_ROLE);
+    // Resolve the plan-writer's configured adapter before probing (Req 14.1).
+    const adapter = this.deps.adapterForRole(PLAN_WRITER_ROLE);
     if (adapter === undefined) {
       return refuse({
         kind: 'unknown-agent',
-        message: 'role "spec-writer" is configured with an unsupported agent; update "roles.spec-writer.agent" in .baiton/config.json',
+        message: 'role "plan-writer" is configured with an unsupported agent; update "roles.plan-writer.agent" in .baiton/config.json',
       });
     }
 
@@ -184,14 +184,14 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
 
     const runId = (this.deps.newRunId ?? defaultRunId)(req.slug);
     const sessionId = (this.deps.newSessionId ?? defaultSessionId)();
-    const { model, effort } = this.deps.modelForRole(SPEC_WRITER_ROLE);
+    const { model, effort } = this.deps.modelForRole(PLAN_WRITER_ROLE);
 
     const launched = launchStage(
       {
         workspaceRoot: this.deps.workspaceRoot,
         runId,
-        stage: SPEC_DRAFT_STAGE,
-        role: SPEC_WRITER_ROLE,
+        stage: PLAN_DRAFT_STAGE,
+        role: PLAN_WRITER_ROLE,
         model,
         ...(effort !== undefined ? { effort } : {}),
         resume: false,
@@ -237,7 +237,7 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
         // A spec draft is spec-scoped: it has no todo, so the slug stands in as
         // the journal's subject id.
         todoId: req.slug,
-        stage: SPEC_DRAFT_STAGE,
+        stage: PLAN_DRAFT_STAGE,
         attempt: 1,
         startHead: '',
         inputRev: '',
@@ -248,7 +248,7 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
         {
           workspaceRoot: this.deps.workspaceRoot,
           slug: req.slug,
-          stage: SPEC_DRAFT_STAGE,
+          stage: PLAN_DRAFT_STAGE,
           terminal,
           watcher: this.deps.watcherFactory.create({
             slug: req.slug,
@@ -273,7 +273,7 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
           message: `the spec writer did not produce a result (${result.kind})`,
         };
       } else {
-        outcome = await this.writeSpec(req.slug, runId, result.structured as SpecDraftResult);
+        outcome = await this.writeSpec(req.slug, runId, result.structured as PlanDraftResult);
       }
     } catch (e) {
       outcome = {
@@ -299,7 +299,7 @@ class DefaultSpecDraftRunner implements SpecDraftRunner {
   private async writeSpec(
     slug: string,
     runId: string,
-    structured: SpecDraftResult,
+    structured: PlanDraftResult,
   ): Promise<SpecDraftOutcome> {
     const todos: RenderSpecTodo[] = structured.todos.map((t) => ({
       title: t.title,
@@ -345,7 +345,7 @@ function refuse(error: SpecDraftRefusal): SpecDraftStart {
 
 /** The default run id: the slug, the stage, and the wall clock. */
 function defaultRunId(slug: string): string {
-  return `${slug}-spec-draft-${Date.now().toString(36)}`;
+  return `${slug}-plan-draft-${Date.now().toString(36)}`;
 }
 
 /** The default session id. */

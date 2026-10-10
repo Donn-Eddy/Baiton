@@ -17,7 +17,7 @@
  *   carries an `approved_rev`) recomputes the Approval_Hash into `approved_rev`
  *   and leaves every todo's state unchanged (Req 5.5).
  * - `draft_spec(slug, requirements)` (dispatch) — hand an agreed requirements
- *   document to the spec-writer harness, which drafts the spec's OVERVIEW and
+ *   document to the plan-writer harness, which drafts the spec's OVERVIEW and
  *   todo list and writes `.baiton/specs/<slug>/spec.md`. Confirms a summary of
  *   the requirements through the confirm seam first; a decline drafts nothing.
  *   Returns as soon as the sub-agent is running, carrying its run id.
@@ -191,11 +191,11 @@ function askUserTool(services: ToolServices): Tool {
 }
 
 /**
- * `draft_spec(slug, requirements)` — dispatch the spec-writer harness to turn an
+ * `draft_spec(slug, requirements)` — dispatch the plan-writer harness to turn an
  * agreed requirements document into a spec.
  *
  * The orchestrator gathers the requirements with the user and never proposes
- * the todos itself; the configured spec-writer agent studies the repository and
+ * the todos itself; the configured plan-writer agent studies the repository and
  * drafts them. Like every dispatch tool it is disabled under Restricted Mode.
  * The user confirms a summary of the requirements before anything launches; a
  * decline leaves the repository untouched.
@@ -204,7 +204,7 @@ function draftSpecTool(services: ToolServices): Tool {
   return {
     name: 'draft_spec',
     description:
-      'Hand an agreed requirements document to the spec-writer agent, which studies the repository and drafts the spec (overview and todos) for a new slug.',
+      'Hand an agreed requirements document to the plan-writer agent, which studies the repository and drafts the spec (overview and todos) for a new slug.',
     mutating: false,
     phases: ['gather'],
     dispatch: true,
@@ -286,7 +286,7 @@ function draftConfirmation(slug: string, requirements: string): string {
     trimmed.length > 1200 ? `${trimmed.slice(0, 1200)}\n…` : trimmed;
   return (
     `Draft spec "${slug}" from these requirements? ` +
-    'The configured spec-writer agent will study the repository and write the ' +
+    'The configured plan-writer agent will study the repository and write the ' +
     `overview and todos.\n\n${summary}`
   );
 }
@@ -719,7 +719,7 @@ function runTool(services: ToolServices): Tool {
       if (!isRunnableStage(stage)) {
         // `plan-review` runs inside the Plan action's review rounds and is not
         // a standalone trigger; `pr` is per spec, not per todo (`submit_pr`
-        // runs it); `spec-draft` belongs to `draft_spec`. None of them reach
+        // runs it); `plan-draft` belongs to `draft_spec`. None of them reach
         // the queue from here.
         return {
           ok: false,
@@ -916,7 +916,7 @@ function specPath(services: ToolServices, slug: string): string {
 
 /**
  * The three todo-scoped stages the `run` tool dispatches (Req 11.1). Every
- * other {@link Stage} — `plan-review`, `pr`, `spec-draft` — is owned by some
+ * other {@link Stage} — `plan-review`, `pr`, `plan-draft` — is owned by some
  * other trigger, so `run` rejects it before the queue seam.
  */
 const RUNNABLE_STAGES: readonly Stage[] = ['plan', 'execute', 'review'] as const;
@@ -1096,7 +1096,7 @@ function readBoolean(args: unknown, key: string): { ok: true; value: boolean | u
 
 /**
  * The three build modes `start_run` accepts. `investigate` is dispatched by its
- * own tool, `spec` is the spec pipeline, and `default` only recommends one of
+ * own tool, `plan` is the plan pipeline, and `default` only recommends one of
  * these modes, so none of them is accepted here.
  */
 const RUN_TOOL_MODES: readonly RunMode[] = ['bug', 'quick', 'refactor'] as const;

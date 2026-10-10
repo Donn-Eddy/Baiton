@@ -37,7 +37,7 @@ export function seed(over: Partial<WebviewState> = {}): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
-    mode: 'spec',
+    mode: 'plan',
     runActive: false,
     providers: [],
     selection: null,

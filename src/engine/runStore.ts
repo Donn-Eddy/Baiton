@@ -40,7 +40,7 @@ import {
 import * as path from 'path';
 
 import { type Stage, isStage } from '../model/stage';
-import { type RunMode, isRunMode } from '../model/mode';
+import { type RunMode, toRunMode } from '../model/mode';
 import { Result, ok, err } from '../model/result';
 import { persistencePathForStage } from '../schema';
 import type { ArtifactWriter } from './resultFlow';
@@ -145,7 +145,7 @@ export interface RunManifest {
   version: number;
   /** The run id, which is also its directory's name. Never contains a dot. */
   id: string;
-  /** The mode the run actually runs as; never `spec` or `default`. */
+  /** The mode the run actually runs as; never `plan` or `default`. */
   mode: RunMode;
   /** What the composer's Mode select said when the run was confirmed (may be `default`). */
   composerMode: RunMode;
@@ -394,16 +394,19 @@ export function parseRunManifest(text: string): Result<RunManifest, string> {
   if (typeof raw.id !== 'string' || !isRunId(raw.id)) {
     return err(`id ${JSON.stringify(raw.id)} is not a valid run id`);
   }
-  if (typeof raw.mode !== 'string' || !isRunMode(raw.mode)) {
+  const mode = typeof raw.mode === 'string' ? toRunMode(raw.mode) : undefined;
+  if (mode === undefined) {
     return err(`mode ${JSON.stringify(raw.mode)} is not a known mode`);
   }
-  if (raw.mode === 'spec') {
-    return err('mode "spec" has no run manifest');
+  if (mode === 'plan') {
+    return err('mode "plan" has no run manifest');
   }
-  if (raw.mode === 'default') {
+  if (mode === 'default') {
     return err('mode "default" has no run manifest');
   }
-  if (typeof raw.composerMode !== 'string' || !isRunMode(raw.composerMode)) {
+  const composerMode =
+    typeof raw.composerMode === 'string' ? toRunMode(raw.composerMode) : undefined;
+  if (composerMode === undefined) {
     return err(`composerMode ${JSON.stringify(raw.composerMode)} is not a known mode`);
   }
   if (typeof raw.explicitMode !== 'boolean') {
@@ -446,8 +449,8 @@ export function parseRunManifest(text: string): Result<RunManifest, string> {
   return ok({
     version: RUN_MANIFEST_VERSION,
     id: raw.id,
-    mode: raw.mode,
-    composerMode: raw.composerMode,
+    mode,
+    composerMode,
     explicitMode: raw.explicitMode,
     statement: raw.statement as string,
     files: raw.files as string[],
@@ -557,12 +560,12 @@ export class RunStore {
           'hyphens only (a dot would collide with a launch directory name).',
       });
     }
-    if (input.mode === 'spec') {
+    if (input.mode === 'plan') {
       return err({
         kind: 'invalid-id',
         runId: input.id,
         message:
-          'mode "spec" has no run manifest: a spec conversation dispatches draft_spec, not a run.',
+          'mode "plan" has no run manifest: a plan conversation dispatches draft_spec, not a run.',
       });
     }
     if (input.mode === 'default') {
@@ -570,7 +573,7 @@ export class RunStore {
         kind: 'invalid-id',
         runId: input.id,
         message:
-          'mode "default" has no run manifest: Default dispatches the picked mode (start_run or investigate), and a spec conversation dispatches draft_spec, not a run.',
+          'mode "default" has no run manifest: Default dispatches the picked mode (start_run or investigate), and a plan conversation dispatches draft_spec, not a run.',
       });
     }
     if (this.exists(input.id)) {

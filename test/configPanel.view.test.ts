@@ -599,7 +599,7 @@ type ViewHostMessage = import('../src/config/configPanel').ConfigPanelHostToWebv
 
 /** ROLES, duplicated so this suite needs no `vscode`-tainted import. */
 const VIEW_ROLES = [
-  'spec-writer',
+  'plan-writer',
   'planner',
   'plan-reviewer',
   'executor',

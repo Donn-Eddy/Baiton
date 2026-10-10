@@ -44,7 +44,7 @@ export interface ToolGitSettings {
  * - `intervention` — the richer human-in-the-loop seam `ask_user` asks its
  *                 questions through (question / confirm / permission).
  * - `runQueue`  — the serialized run-queue seam `run` dispatches into (Req 10.3).
- * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
+ * - `draftSpec` — the plan-draft runner seam `draft_spec` dispatches into.
  * - `runPipeline` — the spec-less run pipeline seam `start_run` and
  *                 `investigate` dispatch into.
  * - `landTodo`  — the seam `land_todo` merges a done todo's branch through.
@@ -70,7 +70,7 @@ export interface ToolServices {
   intervention?: InterventionSeam;
   runQueue: RunQueueSeam;
   /**
-   * The spec-draft runner the `draft_spec` tool hands an agreed requirements
+   * The plan-draft runner the `draft_spec` tool hands an agreed requirements
    * document to. Optional so a host that has not wired the stage engine still
    * builds a registry; `draft_spec` then reports it as unavailable.
    */

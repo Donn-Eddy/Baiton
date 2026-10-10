@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { DEFAULT_MODE, RUN_MODES, RunMode, isSpecless } from '../src/model/mode';
+import { DEFAULT_MODE, RUN_MODES, RunMode, isPlanless } from '../src/model/mode';
 import {
   ASK_USER_TEXT,
   ConversationKind,
@@ -17,13 +17,13 @@ import {
  * Unit tests for the mode-scoped system prompt (T10).
  *
  * Coverage:
- * - Spec output is byte-for-byte unchanged when `mode` is absent or `'spec'`
+ * - Plan output is byte-for-byte unchanged when `mode` is absent or `'plan'`
  *   (and `DEFAULT_MODE` for spec conversations), for a workspace conversation
  *   and for a draft, approved and contentless spec conversation.
  * - `DEFAULT_MODE` on a workspace conversation is the Default run prompt.
  * - Default's recommend-and-confirm flow text.
- * - `phaseFor` maps every spec-less mode on a workspace conversation to the
- *   single `run` phase, and Spec mode to today's `gather`.
+ * - `phaseFor` maps every plan-less mode on a workspace conversation to the
+ *   single `run` phase, and Plan mode to today's `gather`.
  * - A spec conversation ignores the mode entirely: its gather/drive split and
  *   its prompt are unchanged by any mode value.
  * - The run prompt's content per mode: run role and scope text, the unchanged
@@ -32,7 +32,7 @@ import {
  *   the spec flow, drive table, todo grammar, frontmatter rules or spec
  *   content.
  * - Each mode names its own dispatch tool and framing.
- * - Every spec-less mode has non-empty flow text, and only those.
+ * - Every plan-less mode has non-empty flow text, and only those.
  * - The builder stays pure: two calls return strictly equal strings.
  */
 
@@ -64,15 +64,15 @@ const APPROVED_SPEC = specWithStatus('approved');
 
 /** Every mode whose conversation is in the `run` phase. */
 const SPECLESS_MODES = RUN_MODES.filter(
-  (mode): mode is Exclude<RunMode, 'spec'> => mode !== 'spec',
+  (mode): mode is Exclude<RunMode, 'plan'> => mode !== 'plan',
 );
 
-describe('mode-scoped system prompt: Spec output is unchanged', () => {
-  it('builds an identical workspace prompt with no mode and "spec"', () => {
-    assert.strictEqual(buildSystemPrompt(WORKSPACE), buildSystemPrompt(WORKSPACE, undefined, 'spec'));
+describe('mode-scoped system prompt: Plan output is unchanged', () => {
+  it('builds an identical workspace prompt with no mode and "plan"', () => {
+    assert.strictEqual(buildSystemPrompt(WORKSPACE), buildSystemPrompt(WORKSPACE, undefined, 'plan'));
   });
 
-  it('builds the Default run prompt, not the Spec prompt, for DEFAULT_MODE on a workspace conversation', () => {
+  it('builds the Default run prompt, not the Plan prompt, for DEFAULT_MODE on a workspace conversation', () => {
     assert.strictEqual(DEFAULT_MODE, 'default');
     assert.strictEqual(
       buildSystemPrompt(WORKSPACE, undefined, DEFAULT_MODE),
@@ -81,10 +81,10 @@ describe('mode-scoped system prompt: Spec output is unchanged', () => {
     assert.notStrictEqual(buildSystemPrompt(WORKSPACE, undefined, DEFAULT_MODE), buildSystemPrompt(WORKSPACE));
   });
 
-  it('builds an identical draft-spec prompt with no mode, "spec" and DEFAULT_MODE', () => {
+  it('builds an identical draft-spec prompt with no mode, "plan" and DEFAULT_MODE', () => {
     assert.strictEqual(
       buildSystemPrompt(SPEC, DRAFT_SPEC),
-      buildSystemPrompt(SPEC, DRAFT_SPEC, 'spec'),
+      buildSystemPrompt(SPEC, DRAFT_SPEC, 'plan'),
     );
     assert.strictEqual(
       buildSystemPrompt(SPEC, DRAFT_SPEC),
@@ -92,10 +92,10 @@ describe('mode-scoped system prompt: Spec output is unchanged', () => {
     );
   });
 
-  it('builds an identical approved-spec prompt with no mode, "spec" and DEFAULT_MODE', () => {
+  it('builds an identical approved-spec prompt with no mode, "plan" and DEFAULT_MODE', () => {
     assert.strictEqual(
       buildSystemPrompt(SPEC, APPROVED_SPEC),
-      buildSystemPrompt(SPEC, APPROVED_SPEC, 'spec'),
+      buildSystemPrompt(SPEC, APPROVED_SPEC, 'plan'),
     );
     assert.strictEqual(
       buildSystemPrompt(SPEC, APPROVED_SPEC),
@@ -103,16 +103,16 @@ describe('mode-scoped system prompt: Spec output is unchanged', () => {
     );
   });
 
-  it('builds an identical contentless-spec prompt with no mode, "spec" and DEFAULT_MODE', () => {
-    assert.strictEqual(buildSystemPrompt(SPEC), buildSystemPrompt(SPEC, undefined, 'spec'));
+  it('builds an identical contentless-spec prompt with no mode, "plan" and DEFAULT_MODE', () => {
+    assert.strictEqual(buildSystemPrompt(SPEC), buildSystemPrompt(SPEC, undefined, 'plan'));
     assert.strictEqual(buildSystemPrompt(SPEC), buildSystemPrompt(SPEC, undefined, DEFAULT_MODE));
   });
 });
 
 describe('mode-scoped system prompt: phaseFor mapping', () => {
-  it('keeps a Spec-mode workspace conversation in gather', () => {
+  it('keeps a Plan-mode workspace conversation in gather', () => {
     assert.strictEqual(phaseFor(WORKSPACE), 'gather');
-    assert.strictEqual(phaseFor(WORKSPACE, undefined, 'spec'), 'gather');
+    assert.strictEqual(phaseFor(WORKSPACE, undefined, 'plan'), 'gather');
   });
 
   it('maps DEFAULT_MODE on a workspace conversation to the run phase', () => {
@@ -131,7 +131,7 @@ describe('mode-scoped system prompt: phaseFor mapping', () => {
     for (const mode of RUN_MODES) {
       assert.strictEqual(
         phaseFor(WORKSPACE, undefined, mode),
-        isSpecless(mode) ? 'run' : 'gather',
+        isPlanless(mode) ? 'run' : 'gather',
         `mode ${mode}`,
       );
     }
@@ -241,10 +241,10 @@ describe('mode-scoped system prompt: Default recommends and confirms', () => {
     assert.match(flow, /`ask_user` once/);
     assert.match(flow, /recommendation first/);
     assert.match(flow, /allow_free_text/);
-    for (const name of ['Spec', 'Bug', 'Quick', 'Refactor', 'Investigate']) {
+    for (const name of ['Phased Plan', 'Bug', 'Quick Fix', 'Refactor', 'Investigate']) {
       assert.ok(flow.includes(name), `names ${name}`);
     }
-    for (const id of ['spec', 'bug', 'quick', 'refactor', 'investigate']) {
+    for (const id of ['plan', 'bug', 'quick', 'refactor', 'investigate']) {
       assert.ok(flow.includes('`' + id + '`'), `option id ${id}`);
     }
     assert.ok(!/`default`/.test(flow), 'Default is not offered as an option');
@@ -256,7 +256,7 @@ describe('mode-scoped system prompt: Default recommends and confirms', () => {
     }
     assert.match(flow, /call `investigate`/);
     assert.ok(!/mode: "default"/.test(flow), 'never dispatches default');
-    assert.ok(!/mode: "spec"/.test(flow), 'never dispatches spec');
+    assert.ok(!/mode: "plan"/.test(flow), 'never dispatches plan');
   });
 
   it('asks for the ask_user pick before any dispatch', () => {
@@ -265,9 +265,9 @@ describe('mode-scoped system prompt: Default recommends and confirms', () => {
     assert.ok(ask < flow.indexOf('call `investigate`'), 'ask before investigate');
   });
 
-  it('dispatches nothing for a Spec pick and points at the Mode control', () => {
-    assert.match(flow, /Spec -> dispatch nothing/);
-    assert.match(flow, /change the Mode control in the composer to Spec/);
+  it('dispatches nothing for a Phased Plan pick and points at the Mode control', () => {
+    assert.match(flow, /Phased Plan -> dispatch nothing/);
+    assert.match(flow, /change the Mode control in the composer to Phased Plan/);
     assert.match(flow, /again/);
   });
 
@@ -299,17 +299,17 @@ describe('mode-scoped system prompt: mode proposal', () => {
   }
 
   it('names all five modes', () => {
-    for (const name of ['Spec', 'Bug', 'Quick', 'Refactor', 'Investigate']) {
+    for (const name of ['Phased Plan', 'Bug', 'Quick Fix', 'Refactor', 'Investigate']) {
       assert.ok(MODE_PROPOSAL_TEXT.includes(name), `names ${name}`);
     }
   });
 });
 
-describe('mode-scoped system prompt: every spec-less mode has flow text', () => {
-  it('has non-empty flow text for each spec-less mode and for no other', () => {
+describe('mode-scoped system prompt: every plan-less mode has flow text', () => {
+  it('has non-empty flow text for each plan-less mode and for no other', () => {
     for (const mode of RUN_MODES) {
-      if (mode === 'spec') {
-        assert.ok(!isSpecless(mode), 'spec is the only non-spec-less mode');
+      if (mode === 'plan') {
+        assert.ok(!isPlanless(mode), 'plan is the only non-plan-less mode');
         continue;
       }
       const text = RUN_FLOW_TEXT[mode];

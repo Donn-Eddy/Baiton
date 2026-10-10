@@ -552,7 +552,7 @@ function defaultRunAntigravityModelsCli(options: { cwd?: string; timeoutMs: numb
  *    `agy --help` (v1.2.2) offers only `--mode accept-edits|plan`, no
  *    permission/allow-list flag, and no config-content environment layer to
  *    define a custom agent with one (`agy agent`/`agents` only lists agents).
- *    So a spec-writer, planner, plan-reviewer or pr-writer run on agy is
+ *    So a plan-writer, planner, plan-reviewer or pr-writer run on agy is
  *    expected to REFUSE to write its own `.baiton/runs/<run-id>/result.json`,
  *    exit 0, and be recorded by the queue as `closed (exit 0)` with the todo
  *    reverted. `--add-dir` widens the visible workspace; it does not lift plan

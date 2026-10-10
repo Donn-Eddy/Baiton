@@ -93,7 +93,7 @@ export interface AwaitStageResultInput {
   stage: Stage;
   /**
    * The todo whose artifact folder receives the result (`todos/<todoId>/`);
-   * required for the four todo-level stages, ignored by `spec-draft` and `pr`
+   * required for the four todo-level stages, ignored by `plan-draft` and `pr`
    * (Req 24.3).
    */
   todoId?: string;
@@ -263,7 +263,7 @@ export function renderInvestigateArtifact(
 /**
  * Render a validated stage result as the Markdown artifact persisted under the
  * spec. The four todo-level stages get the per-stage renderers above; the two
- * spec-scoped stages (`spec-draft`, `pr`) keep the structured JSON, because
+ * spec-scoped stages (`plan-draft`, `pr`) keep the structured JSON, because
  * their callers render their own file from the structured result and only ever
  * consume this as a record of what the sub-agent returned.
  */
