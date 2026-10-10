@@ -7,7 +7,7 @@ import {
   PROHIBITION_LINES,
   REFUSAL_TEXT,
   SCOPE_TEXT,
-  phaseFor,
+  conversationStepFor,
 } from '../src/orchestrator/systemPrompt';
 
 /**
@@ -15,39 +15,67 @@ import {
  *
  * `buildSystemPrompt` is a host-free pure core (no `vscode` import), so these
  * tests exercise it directly. They assert the section-7 role text and
- * new-spec flow, the section-5 todo grammar (the eight states, the `T`+digits
- * id form, and the `after`/`files` hint groups), the section-5 frontmatter
- * rules (the `status`/`mode` enums and the extension-written keys), and that a
- * spec conversation includes supplied `spec.md` content while building without
- * it and without error when absent.
+ * Phased Plan flow, the section-5 phase grammar (the eight states, P ids and
+ * legacy T ids, and the `after`/`files` hint groups), the section-5 frontmatter
+ * rules (the `status`/`mode` enums and extension-written keys), and that a
+ * plan conversation includes supplied document content when present.
  *
  * Coverage:
- * - Role text: never edits source, writes only through spec-writing tools,
+ * - Role text: never edits source, writes only through plan-writing tools,
  *   reads only through read tools — Req 11.1.
  * - Scope: the two jobs and the work that is not the orchestrator's, present
- *   in both phases; the refusal rule — Req 11.1.
- * - Phase split: `phaseFor` over the frontmatter `status`, the drive-phase
- *   stage table in a driven spec only, the new-spec flow while gathering
+ *   in both conversation steps; the refusal rule — Req 11.1.
+ * - Conversation-step split: `conversationStepFor` over the frontmatter `status`, the drive-step
+ *   stage table in a driven plan only, the Phased Plan flow while gathering
  *   only — Req 11.1.
- * - Ask / propose / `create_spec`-after-agreement flow — Req 11.2.
+ * - Ask / propose / `draft_plan`-after-agreement flow — Req 11.2.
  * - Phase grammar, eight states, id form, hint groups — Req 11.3.
  * - Frontmatter rules, status/mode enums, extension-written keys — Req 11.4.
- * - Spec content included when supplied — Req 11.5.
- * - Spec content omitted without error when absent — Req 11.7.
+ * - Plan document content included when supplied — Req 11.5.
+ * - Plan document content omitted without error when absent — Req 11.7.
  * - `ask_user` guidance: present verbatim in every phase, naming the tool,
  *   its options/allow_free_text knobs, the blocking call and the
  *   decline-is-a-refusal rule; the style bullet points at the tool.
  */
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
-const SPEC: ConversationKind = { kind: 'spec', slug: 'my-spec' };
+// 'spec' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'spec', slug: 'my-plan' };
 
-/** A spec file with the given frontmatter `status`. */
-function specWithStatus(status: string): string {
+/** A plan document with the given frontmatter `status`. */
+function planWithStatus(status: string): string {
   return [
     '---',
     'version: 1',
-    'name: my-spec',
+    'name: my-plan',
+    `status: ${status}`,
+    '---',
+    '',
+    '# Endstate',
+    '',
+    'The desired result exists.',
+    '',
+    '# What needs changing',
+    '',
+    'Update the implementation.',
+    '',
+    '# Limitations & constraints',
+    '',
+    'Preserve compatibility.',
+    '',
+    '# PHASES',
+    '',
+    '- [pending] P01 Do the first thing',
+    '',
+  ].join('\n');
+}
+
+/** A legacy spec document with the given frontmatter `status`. */
+function legacySpecWithStatus(status: string): string {
+  return [
+    '---',
+    'version: 1',
+    'name: my-plan',
     `status: ${status}`,
     '---',
     '',
@@ -62,8 +90,9 @@ function specWithStatus(status: string): string {
   ].join('\n');
 }
 
-const DRAFT_SPEC = specWithStatus('draft');
-const APPROVED_SPEC = specWithStatus('approved');
+const DRAFT_PLAN = planWithStatus('draft');
+const APPROVED_PLAN = planWithStatus('approved');
+const APPROVED_LEGACY_SPEC = legacySpecWithStatus('approved');
 
 const PHASE_STATES = [
   'pending',
@@ -86,9 +115,10 @@ describe('buildSystemPrompt', () => {
       assert.match(prompt, /never edits? source/i);
     });
 
-    it('states writes go only through the spec-writing tools', () => {
+    it('states writes go only through the plan-writing tools', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
-      assert.match(prompt, /spec-writing tools/i);
+      assert.match(prompt, /plan-writing tools/i);
+      assert.ok(prompt.includes('`.baiton/plans/**`'));
     });
 
     it('states the repository is inspected only through the read tools', () => {
@@ -97,36 +127,38 @@ describe('buildSystemPrompt', () => {
     });
   });
 
-  describe('new-spec flow (Req 11.2)', () => {
-    it('states the ask / requirements-document / agreement / draft_plan flow', () => {
+  describe('Phased Plan flow (Req 11.2)', () => {
+    it('states the ask / restatement / agreement / draft_plan flow', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.match(prompt, /clarifying questions/i);
-      assert.match(prompt, /requirements document/i);
       assert.match(prompt, /draft_plan/);
       assert.match(prompt, /agree/i);
-    });
-
-    it('names the parts a requirements document must cover', () => {
-      const prompt = buildSystemPrompt(WORKSPACE);
-      for (const part of ['goal', 'constraints', 'acceptance criteria', 'files of interest']) {
+      for (const part of ['Endstate', 'What needs changing', 'Limitations & constraints']) {
         assert.ok(prompt.includes(part), `prompt should mention "${part}"`);
       }
+      assert.match(prompt, /revise it until they agree/i);
+      assert.ok(
+        prompt.indexOf('Restate the change') < prompt.indexOf('call `draft_plan`'),
+        'the restatement comes before draft_plan',
+      );
     });
 
-    it('forbids the orchestrator from proposing the todo list itself', () => {
+    it('forbids the orchestrator from proposing the phases itself', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
-      assert.match(prompt, /never propose the todo list yourself/i);
+      assert.match(prompt, /never propose the phases yourself/i);
     });
 
     it('tells the user where the draft is written and where to watch it', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.match(prompt, /harness|plan-writer agent/i);
       assert.match(prompt, /watch/i);
+      assert.match(prompt, /Plan Explorer/);
     });
 
     it('no longer mentions the removed create_spec tool', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.ok(!prompt.includes('create_spec'), 'prompt must not advertise create_spec');
+      assert.ok(!prompt.includes('requirements document'));
     });
   });
 
@@ -147,10 +179,10 @@ describe('buildSystemPrompt', () => {
       assert.match(prompt, /expand/i);
     });
 
-    it('bounds replies to a few sentences, excepting a requirements document', () => {
+    it('bounds replies to a few sentences, excepting the restatement', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.match(prompt, /few sentences/i);
-      assert.match(prompt, /requirements document/i);
+      assert.match(prompt, /restatement, which you present in full/i);
     });
 
     it('asks for one clarifying question at a time', () => {
@@ -158,18 +190,18 @@ describe('buildSystemPrompt', () => {
       assert.match(prompt, /one clarifying question at a time/i);
     });
 
-    it('carries the style guidance in a spec conversation too', () => {
-      const prompt = buildSystemPrompt(SPEC, '# OVERVIEW');
+    it('carries the style guidance in a plan conversation too', () => {
+      const prompt = buildSystemPrompt(PLAN, '# PHASES');
       assert.match(prompt, /answer first/i);
     });
   });
 
-  describe('todo grammar (Req 11.3)', () => {
+  describe('phase grammar (Req 11.3)', () => {
     it('includes the `- [<state>] <id> <title>` line shape', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.ok(
         prompt.includes('- [<state>] <id> <title>'),
-        'prompt should include the todo line shape',
+        'prompt should include the phase line shape',
       );
     });
 
@@ -180,9 +212,10 @@ describe('buildSystemPrompt', () => {
       }
     });
 
-    it('describes the `T`-plus-two-or-more-digits id form', () => {
+    it('describes plan P ids and legacy spec T ids', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
-      assert.match(prompt, /`T`.*two or more digits/i);
+      assert.match(prompt, /`P`.*two or more digits/i);
+      assert.match(prompt, /legacy spec[^\n]*`T` ids/i);
     });
 
     it('describes the `after` and `files:` hint groups separated by `;`', () => {
@@ -225,34 +258,34 @@ describe('buildSystemPrompt', () => {
     });
   });
 
-  describe('spec content inclusion (Req 11.5, 11.7)', () => {
-    it('includes supplied spec content in a spec conversation', () => {
-      const content = '---\nstatus: draft\n---\n\n# OVERVIEW\n\n- [pending] T01 Do the thing';
-      const prompt = buildSystemPrompt(SPEC, content);
-      assert.ok(prompt.includes(content), 'prompt should embed the supplied spec content');
+  describe('plan document content inclusion (Req 11.5, 11.7)', () => {
+    it('includes supplied plan content in a plan conversation', () => {
+      const content = planWithStatus('draft');
+      const prompt = buildSystemPrompt(PLAN, content);
+      assert.ok(prompt.includes(content), 'prompt should embed the supplied plan content');
     });
 
-    it('builds without error and omits content when absent for a spec conversation', () => {
-      const prompt = buildSystemPrompt(SPEC);
+    it('builds without error and omits content when absent for a plan conversation', () => {
+      const prompt = buildSystemPrompt(PLAN);
       assert.ok(typeof prompt === 'string' && prompt.length > 0);
-      // The role text and grammar are still present even without spec content.
+      // The role text and grammar are still present even without plan content.
       assert.match(prompt, /never edits? source/i);
       assert.ok(prompt.includes('- [<state>] <id> <title>'));
     });
 
-    it('ignores spec content for a workspace conversation', () => {
+    it('ignores document content for a workspace conversation', () => {
       const marker = 'WORKSPACE_SHOULD_NOT_EMBED_THIS';
       const prompt = buildSystemPrompt(WORKSPACE, marker);
-      assert.ok(!prompt.includes(marker), 'workspace prompt should not embed spec content');
+      assert.ok(!prompt.includes(marker), 'workspace prompt should not embed document content');
     });
   });
 
   describe('scope (Req 11.1)', () => {
     const PROMPTS: Array<[string, string]> = [
       ['workspace', buildSystemPrompt(WORKSPACE)],
-      ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
-      ['an approved spec', buildSystemPrompt(SPEC, APPROVED_SPEC)],
-      ['a spec with no content', buildSystemPrompt(SPEC)],
+      ['a draft plan', buildSystemPrompt(PLAN, DRAFT_PLAN)],
+      ['an approved plan', buildSystemPrompt(PLAN, APPROVED_PLAN)],
+      ['a plan with no content', buildSystemPrompt(PLAN)],
     ];
 
     for (const [label, prompt] of PROMPTS) {
@@ -275,7 +308,8 @@ describe('buildSystemPrompt', () => {
       assert.ok(SCOPE_TEXT.includes('`draft_plan`'), 'job one ends at draft_plan');
       assert.ok(SCOPE_TEXT.includes('`run`'), 'job two dispatches with run');
       assert.ok(SCOPE_TEXT.includes('`submit_pr`'), 'job two ends at submit_pr');
-      assert.ok(SCOPE_TEXT.includes('`land_phase`'), 'job two lands each done todo');
+      assert.ok(SCOPE_TEXT.includes('`land_phase`'), 'job two lands each done phase');
+      assert.match(SCOPE_TEXT, /phased plan/i);
     });
 
     it('says a configured coding agent does the work it refuses', () => {
@@ -297,9 +331,9 @@ describe('buildSystemPrompt', () => {
   describe('ask_user guidance', () => {
     for (const [label, prompt] of [
       ['workspace', buildSystemPrompt(WORKSPACE)],
-      ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
-      ['an approved spec', buildSystemPrompt(SPEC, APPROVED_SPEC)],
-      ['a spec with no content', buildSystemPrompt(SPEC)],
+      ['a draft plan', buildSystemPrompt(PLAN, DRAFT_PLAN)],
+      ['an approved plan', buildSystemPrompt(PLAN, APPROVED_PLAN)],
+      ['a plan with no content', buildSystemPrompt(PLAN)],
     ] as Array<[string, string]>) {
       it(`carries the ask_user guidance verbatim in ${label}`, () => {
         assert.ok(prompt.includes(ASK_USER_TEXT), 'the ask_user text is present verbatim');
@@ -327,77 +361,82 @@ describe('buildSystemPrompt', () => {
     });
   });
 
-  describe('phase split (Req 11.1)', () => {
-    it('phaseFor is gather for a workspace conversation', () => {
-      assert.strictEqual(phaseFor(WORKSPACE), 'gather');
-      assert.strictEqual(phaseFor(WORKSPACE, APPROVED_SPEC), 'gather');
+  describe('conversation-step split (Req 11.1)', () => {
+    it('conversationStepFor is gather for a workspace conversation', () => {
+      assert.strictEqual(conversationStepFor(WORKSPACE), 'gather');
+      assert.strictEqual(conversationStepFor(WORKSPACE, APPROVED_PLAN), 'gather');
     });
 
-    it('phaseFor is gather for a draft spec and for missing content', () => {
-      assert.strictEqual(phaseFor(SPEC, DRAFT_SPEC), 'gather');
-      assert.strictEqual(phaseFor(SPEC), 'gather');
-      assert.strictEqual(phaseFor(SPEC, ''), 'gather');
-      assert.strictEqual(phaseFor(SPEC, 'not a spec at all'), 'gather');
-      assert.strictEqual(phaseFor(SPEC, '---\nstatus: nonsense\n---\n'), 'gather');
+    it('conversationStepFor is gather for a draft plan and for missing content', () => {
+      assert.strictEqual(conversationStepFor(PLAN, DRAFT_PLAN), 'gather');
+      assert.strictEqual(conversationStepFor(PLAN), 'gather');
+      assert.strictEqual(conversationStepFor(PLAN, ''), 'gather');
+      assert.strictEqual(conversationStepFor(PLAN, 'not a plan at all'), 'gather');
+      assert.strictEqual(conversationStepFor(PLAN, '---\nstatus: nonsense\n---\n'), 'gather');
     });
 
-    it('phaseFor is drive for every status past draft', () => {
+    it('conversationStepFor is drive for every status past draft', () => {
       for (const status of ['approved', 'in-progress', 'review', 'pr', 'done']) {
         assert.strictEqual(
-          phaseFor(SPEC, specWithStatus(status)),
+          conversationStepFor(PLAN, planWithStatus(status)),
           'drive',
           `status "${status}" is driven`,
         );
       }
     });
 
-    it('includes the drive text only for a spec past draft', () => {
-      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
-      assert.ok(driving.includes(DRIVE_TEXT), 'an approved spec carries the drive text');
+    it('conversationStepFor is drive for an approved legacy spec document too', () => {
+      assert.strictEqual(conversationStepFor(PLAN, APPROVED_LEGACY_SPEC), 'drive');
+      assert.ok(buildSystemPrompt(PLAN, APPROVED_LEGACY_SPEC).includes(DRIVE_TEXT));
+    });
+
+    it('includes the drive text only for a plan past draft', () => {
+      const driving = buildSystemPrompt(PLAN, APPROVED_PLAN);
+      assert.ok(driving.includes(DRIVE_TEXT), 'an approved plan carries the drive text');
       for (const [label, prompt] of [
         ['workspace', buildSystemPrompt(WORKSPACE)],
-        ['a draft spec', buildSystemPrompt(SPEC, DRAFT_SPEC)],
-        ['a spec with no content', buildSystemPrompt(SPEC)],
+        ['a draft plan', buildSystemPrompt(PLAN, DRAFT_PLAN)],
+        ['a plan with no content', buildSystemPrompt(PLAN)],
       ] as Array<[string, string]>) {
         assert.ok(!prompt.includes(DRIVE_TEXT), `${label} carries no drive text`);
       }
     });
 
-    it('includes the new-spec flow only while gathering', () => {
-      const gathering = buildSystemPrompt(SPEC, DRAFT_SPEC);
-      assert.match(gathering, /New spec flow:/);
-      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
-      assert.ok(!driving.includes('New spec flow:'), 'a driven spec is past the new-spec flow');
+    it('includes the Phased Plan flow only while gathering', () => {
+      const gathering = buildSystemPrompt(PLAN, DRAFT_PLAN);
+      assert.match(gathering, /Phased Plan flow:/);
+      const driving = buildSystemPrompt(PLAN, APPROVED_PLAN);
+      assert.ok(!driving.includes('Phased Plan flow:'), 'a driven plan is past the gather flow');
     });
 
-    it('gives the next legal stage for each todo state while driving', () => {
+    it('gives the next legal stage for each phase state while driving', () => {
       assert.ok(DRIVE_TEXT.includes('`pending` -> `run` the `plan` stage.'));
       assert.ok(DRIVE_TEXT.includes('`planned` -> `run` the `execute` stage.'));
       assert.ok(DRIVE_TEXT.includes('`executed` -> `run` the `review` stage.'));
-      assert.match(DRIVE_TEXT, /review that sends the todo back.*`execute`/);
+      assert.match(DRIVE_TEXT, /review that sends the phase back.*`execute`/);
       assert.match(DRIVE_TEXT, /`done` \(unlanded\) -> `land_phase`/);
     });
 
-    it('offers submit_pr only once every todo is done and landed', () => {
-      assert.match(DRIVE_TEXT, /every todo is `done` and landed/);
-      assert.match(DRIVE_TEXT, /`submit_pr` refuses while any todo is unlanded/);
+    it('offers submit_pr only once every phase is done and landed', () => {
+      assert.match(DRIVE_TEXT, /every phase is `done` and landed/);
+      assert.match(DRIVE_TEXT, /`submit_pr` refuses while any phase is unlanded/);
       assert.match(DRIVE_TEXT, /after.*done and landed/);
     });
 
     it('mentions land_phase only in the drive prompt, never the run prompt', () => {
-      assert.ok(buildSystemPrompt(SPEC, APPROVED_SPEC).includes('`land_phase`'));
+      assert.ok(buildSystemPrompt(PLAN, APPROVED_PLAN).includes('`land_phase`'));
       assert.ok(!buildSystemPrompt(WORKSPACE, undefined, 'bug').includes('land_phase'));
     });
 
     it('states that run blocks and leaves nothing to poll or read', () => {
       assert.match(DRIVE_TEXT, /`run` blocks until the stage finishes/);
       assert.match(DRIVE_TEXT, /nothing to poll/i);
-      assert.match(DRIVE_TEXT, /one todo at a time/i);
+      assert.match(DRIVE_TEXT, /one phase at a time/i);
       assert.match(DRIVE_TEXT, /`submit_pr`/);
     });
 
     it('does not advertise plan-review as a stage to run', () => {
-      const driving = buildSystemPrompt(SPEC, APPROVED_SPEC);
+      const driving = buildSystemPrompt(PLAN, APPROVED_PLAN);
       assert.ok(!driving.includes('plan-review'), 'plan-review is not a stage the orchestrator runs');
     });
   });

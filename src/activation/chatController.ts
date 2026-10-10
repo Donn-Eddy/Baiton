@@ -95,7 +95,7 @@ import {
   escalatedInterventionView,
   interventionTranscriptRecord,
   interventionUpdate,
-  phaseFor,
+  conversationStepFor,
   providerInfo,
   readTranscript,
   pendingToolRecord,
@@ -1272,14 +1272,14 @@ export class ChatController {
 
     const slug = this.activeSpec;
     const scope = this.activeScope();
-    // The mode and the phase are both fixed for this send: the phase decides
+    // The mode and conversation step are both fixed for this send: the step decides
     // the tools advertised to the model and the tools the registry will
     // actually run (Req 11.1), and the mode decides the prompt. The Mode select
     // is refused while busy, so capturing the mode here only documents that
     // invariant. The prompt re-reads `spec.md` every round (Req 11.6), so a
     // status that changes mid-run is picked up by the next send, not mid-loop.
     const mode = this.effectiveMode();
-    const phase = await this.phaseForConversation(slug);
+    const step = await this.stepForConversation(slug);
     // A fresh chat has no id until its first message: allocate one now so the
     // transcript file is created by this very append (Req 9.9).
     const sessionId =
@@ -1304,7 +1304,7 @@ export class ChatController {
     const key = `${scopeId(scope)}/${sessionId}`;
     this.runningKey = key;
     this.runningSession = { scope, sessionId };
-    const tools = this.deps.toolsFor(phase);
+    const tools = this.deps.toolsFor(step);
     this.abort = new AbortController();
     try {
       if (this.shouldSummarize(history, tools, await this.buildPrompt(slug, mode), autoApprovedLines)) {
@@ -1319,7 +1319,7 @@ export class ChatController {
         client: this.deps.client,
         tools,
         call: (name, args, callId, signal) =>
-          this.callTool(name, args, callId, signal, phase, scope, key),
+          this.callTool(name, args, callId, signal, step, scope, key),
         isConcurrent: (name) => (this.deps.registry.definitions?.() ?? []).some((t) => t.name === name && t.concurrent === true),
         systemPrompt: () => this.buildPrompt(slug, mode),
         append: async (m) => {
@@ -1404,18 +1404,15 @@ export class ChatController {
   }
 
   /**
-   * The orchestrator phase of the conversation being sent to (Req 11.1),
-   * derived from the same `spec.md` the prompt is built from: a workspace
-   * conversation in Plan mode, or a spec that is missing, unreadable or still
-   * `draft`, is `gather`; an approved spec is `drive`; a spec-less mode on the
-   * Workspace conversation is `run`. The spec branch deliberately passes no
-   * mode, so a spec conversation maps exactly as it does today.
+   * The conversation step of the conversation being sent to (Req 11.1), derived
+   * from the same plan document the prompt is built from. A plan-less workspace
+   * conversation is `run`; the plan branch deliberately passes no mode.
    */
-  private async phaseForConversation(slug: string | undefined): Promise<OrchestratorPhase> {
+  private async stepForConversation(slug: string | undefined): Promise<OrchestratorPhase> {
     if (slug === undefined) {
-      return phaseFor({ kind: 'workspace' }, undefined, this.effectiveMode());
+      return conversationStepFor({ kind: 'workspace' }, undefined, this.effectiveMode());
     }
-    return phaseFor({ kind: 'spec', slug }, await this.readSpec(slug));
+    return conversationStepFor({ kind: 'spec', slug }, await this.readSpec(slug));
   }
 
   // --- transcript / rendering ----------------------------------------------
@@ -1639,7 +1636,7 @@ export class ChatController {
     slug: string | undefined,
     history: readonly ChatMessage[],
   ): Promise<void> {
-    const tools = this.deps.toolsFor(await this.phaseForConversation(slug));
+    const tools = this.deps.toolsFor(await this.stepForConversation(slug));
     const prompt = await this.buildPrompt(slug, this.effectiveMode());
     this.trackerFor(key).record({ messages: [{ role: 'system', content: prompt }, ...history], tools }, {});
   }

@@ -1,65 +1,69 @@
 /**
  * System-prompt builder (host-free core, Requirement 11).
  *
- * A pure function of the conversation kind and the current spec content. It
+ * A pure function of the conversation kind and the current plan document content. It
  * produces the instruction text prepended to a conversation's messages,
- * derived from tech-sheet sections 5 (the spec file) and 7 (the chat
+ * derived from tech-sheet sections 5 (the plan document) and 7 (the chat
  * orchestrator). It carries no `vscode` import so it is directly unit-testable
  * without a host.
  *
  * The prompt always states the orchestrator's role and scope — its two jobs,
  * what it never does itself, and how to treat a tool refusal (Req 11.1) — when
- * to ask through `ask_user` rather than ending the turn, the section-5 todo
+ * to ask through `ask_user` rather than ending the turn, the section-5 phase
  * grammar (Req 11.3) and the section-5 frontmatter rules
  * (Req 11.4). The rest depends on the conversation's {@link OrchestratorPhase}
  * (Req 11.1):
  *
- * - **gather** — a Workspace conversation, or a spec still in `draft`: the
+ * - **gather** — a Workspace conversation, or a plan still in `draft`: the
  *   ask-then-agree-then-`draft_plan` flow (Req 11.2).
- * - **drive** — a spec whose `status` has moved past `draft`: the
- *   next-legal-step table (plan, execute, review, land_phase), one todo at a time,
- *   and `submit_pr` when every todo is done and landed.
+ * - **drive** — a plan whose `status` has moved past `draft`: the
+ *   next-legal-step table (plan, execute, review, land_phase), one phase at a time,
+ *   and `submit_pr` when every phase is done and landed.
  * - **run** — a non-Plan Workspace conversation (Default/Bug/Quick/Refactor/
  *   Investigate): inspect with the read tools, state the work and the guessed
- *   files, then dispatch one spec-less run with `start_run` or `investigate`.
+ *   files, then dispatch one plan-less run with `start_run` or `investigate`.
  *   Default first recommends one concrete mode and confirms it with `ask_user`
  *   before dispatching.
  *
- * The phase is derived from the spec content itself through {@link phaseFor},
+ * The step is derived from the document content through {@link conversationStepFor},
  * which the activation layer also calls to pick the tool surface it advertises,
  * so the prompt and the tools it may use always describe the same job.
  *
- * Beware: the PHASE `run` is not the TOOL `run` — the tool belongs to the
- * `drive` phase and dispatches one stage of an approved spec, while the phase
- * named `run` has no spec tools at all (the same warning `guard.ts` carries).
+ * Beware: the STEP `run` is not the TOOL `run` — the tool belongs to the
+ * `drive` step and dispatches one stage of an approved plan, while the step
+ * named `run` has no plan tools at all (the same warning `guard.ts` carries).
  *
  * The conversation's {@link RunMode} is a property of the Workspace
  * conversation only: a plan conversation is always Plan, so it ignores the
  * mode and keeps its gather/drive split. The `mode` argument is optional and
- * trailing on both {@link phaseFor} and {@link buildSystemPrompt}, and an
- * absent mode or `'plan'` reproduces today's phase and today's prompt text byte
+ * trailing on both {@link conversationStepFor} and {@link buildSystemPrompt}, and an
+ * absent mode or `'plan'` reproduces today's step and today's prompt text byte
  * for byte, so every existing Plan-mode test keeps passing unmodified.
  *
  * {@link buildSubAgentPrompt} builds the prompt for a sub-agent chat instead:
- * its role (do one task, report back, never finish a spec), the shared
- * prohibitions, refusal and `ask_user` text, the run table only in `drive`,
+ * its role (do one task, report back, never finish a plan), the shared
+ * prohibitions, refusal and `ask_user` text, the run table only in the `drive` step,
  * and whether it may spawn its own sub-agents at its depth.
  *
- * For a spec conversation the prompt appends the current `spec.md` content when
+ * For a plan conversation the prompt appends the current plan document content when
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
  */
 import { isPlanless, RunMode } from '../model/mode';
 import { parsePlan } from '../model/parser';
-import { OrchestratorPhase } from './guard';
+import type { OrchestratorPhase } from './guard';
 import { MAX_SUBAGENT_DEPTH } from './seams';
+
+/** The conversation step a chat is in: `gather`, `drive` or `run`. This is not a plan phase. The tool surface in guard.ts still names the same union `OrchestratorPhase` and its `phases` field. */
+export type ConversationStep = OrchestratorPhase;
 
 /** Which conversation the prompt is being built for. */
 export type ConversationKind =
   | { kind: 'workspace' }
+  /** `'spec'` is the legacy persisted name for a plan conversation; kept so saved sessions and callers still match. */
   | { kind: 'spec'; slug: string };
 
-/** The eight allowed todo lifecycle states, per tech-sheet section 5. */
+/** The eight allowed phase lifecycle states, per tech-sheet section 5. */
 const PHASE_STATES = [
   'pending',
   'planning',
@@ -81,9 +85,9 @@ const MODE_VALUES = ['manual', 'auto'] as const;
 const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr'] as const;
 
 /**
- * The frontmatter `status` values that mean the spec is being driven rather
- * than still being written (Req 11.1). A spec with any of these is in the
- * `drive` phase; `draft`, an unknown value, or no status at all is `gather`.
+ * The frontmatter `status` values that mean the plan is being driven rather
+ * than still being written (Req 11.1). A plan with any of these is in the
+ * `drive` conversation step; `draft`, an unknown value, or no status at all is `gather`.
  */
 const DRIVE_STATUSES: readonly string[] = [
   'approved',
@@ -94,37 +98,37 @@ const DRIVE_STATUSES: readonly string[] = [
 ] as const;
 
 /**
- * The phase a conversation is in (Req 11.1). A workspace conversation in a
- * plan-less mode is `run`; in Plan mode it is always `gather`. A spec
+ * The conversation step a chat is in (Req 11.1). A workspace conversation in a
+ * plan-less mode is `run`; in Plan mode it is always `gather`. A plan
  * conversation is `drive` only when its frontmatter `status` parses to one of
  * {@link DRIVE_STATUSES}; missing, unparseable or `draft` content is `gather`,
- * so the orchestrator falls back to the phase that can still write the spec
+ * so the orchestrator falls back to the step that can still write the plan
  * rather than to the one that dispatches stages.
  *
- * Every non-Plan mode maps to the single `run` phase: the pipeline, not the
- * phase, distinguishes `investigate` from bug/quick/refactor, and
+ * Every non-Plan mode maps to the single `run` step: the pipeline, not the
+ * step, distinguishes `investigate` from bug/quick/refactor, and
  * `controlTools.ts` advertises both `start_run` and `investigate` on
  * `phases: ['run']`.
  *
  * @param mode The conversation's mode. Absent means Plan (the literal `'plan'`,
- *   not DEFAULT_MODE, which is now Default), so the phase is computed exactly
- *   as before. The spec-less branch is guarded on
- *   `kind.kind === 'workspace'`, so a spec conversation ignores the argument
+ *   not DEFAULT_MODE, which is now Default), so the step is computed exactly
+ *   as before. The plan-less branch is guarded on
+ *   `kind.kind === 'workspace'`, so a plan conversation ignores the argument
  *   entirely and keeps its gather/drive split even if a caller passes `'bug'`:
- *   that is the deliberate encoding of "a spec conversation is always Plan".
+ *   that is the deliberate encoding of "a plan conversation is always Plan".
  */
-export function phaseFor(
+export function conversationStepFor(
   kind: ConversationKind,
-  specContent?: string,
+  documentContent?: string,
   mode: RunMode = 'plan',
-): OrchestratorPhase {
+): ConversationStep {
   if (kind.kind === 'workspace' && isPlanless(mode)) {
     return 'run';
   }
-  if (kind.kind !== 'spec' || specContent === undefined) {
+  if (kind.kind !== 'spec' || documentContent === undefined) {
     return 'gather';
   }
-  const status = (parsePlan(specContent).frontmatter.get('status') ?? '').trim();
+  const status = (parsePlan(documentContent).frontmatter.get('status') ?? '').trim();
   return DRIVE_STATUSES.includes(status) ? 'drive' : 'gather';
 }
 
@@ -135,22 +139,22 @@ export function phaseFor(
  * particular job ("just this once, review the plan myself") is its own.
  */
 export const PROHIBITION_LINES: readonly string[] = [
-  'You do not write specs.',
-  'You do not write plans.',
-  'You do not review plans.',
-  'You do not execute plans.',
+  'You do not write plan documents.',
+  'You do not write phase plans.',
+  'You do not review phase plans.',
+  'You do not execute phase plans.',
   'You do not review executions.',
   'A configured coding agent does each of those when you dispatch it.',
 ] as const;
 
 /**
  * The scope text: the orchestrator's two jobs, in plain words, followed by the
- * work that is not its own (Req 11.1). Present in every phase.
+ * work that is not its own (Req 11.1). Present in every conversation step.
  */
 export const SCOPE_TEXT = [
   'You have exactly two jobs.',
-  '1. Help the user create a spec. Ask clarifying questions until you and the user agree on what the work is, then hand the agreed requirements to the spec writer with `draft_plan`.',
-  '2. Drive an approved spec to completion. Dispatch each stage with `run`, land each done todo with `land_phase`, and when every todo is done and landed finish with `submit_pr`.',
+  '1. Help the user create a phased plan. Ask clarifying questions, restate the change as endstate, what needs changing, and limitations & constraints, and once you and the user agree on it hand it to the plan writer with `draft_plan`.',
+  '2. Drive an approved plan to completion. Dispatch each stage with `run`, land each done phase with `land_phase`, and when every phase is done and landed finish with `submit_pr`.',
   'That is the whole job. Everything else belongs to someone else:',
   ...PROHIBITION_LINES,
 ].join('\n');
@@ -184,58 +188,58 @@ export const ASK_USER_TEXT = [
 ].join('\n');
 
 /**
- * The drive-phase text: the next legal stage for each todo state, that `run`
- * blocks until its stage finishes, that only one todo is driven at a time, and
- * that a done todo is landed with `land_phase`, and what to offer once every
- * todo is done and landed (Req 11.1).
+ * The drive-step text: the next legal stage for each phase state, that `run`
+ * blocks until its stage finishes, that only one phase is driven at a time, and
+ * that a done phase is landed with `land_phase`, and what to offer once every
+ * phase is done and landed (Req 11.1).
  */
 export const DRIVE_TEXT = [
-  'This spec is approved. Your job here is to drive it to completion, one todo at a time.',
-  'The next legal stage follows the todo\'s current state:',
+  'This plan is approved. Your job here is to drive it to completion, one phase at a time.',
+  'The next legal stage follows the phase\'s current state:',
   '- `pending` -> `run` the `plan` stage.',
   '- `planned` -> `run` the `execute` stage.',
   '- `executed` -> `run` the `review` stage.',
-  '- A review that sends the todo back -> `run` the `execute` stage again.',
-  '- `done` (unlanded) -> `land_phase` it, which merges its branch into the spec branch.',
-  'A todo can be planned only once every todo it comes `after` is done and landed.',
-  '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the spec file already reflects it.',
-  'Drive one todo at a time. Take the next todo only when the one before it is `done`; land a done todo whenever you choose, but before any todo that comes `after` it is planned.',
-  'You do not read the plan, the diff, or any source file to check the work. The plan reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
-  'When every todo is `done` and landed, tell the user and offer to `submit_pr`. `submit_pr` refuses while any todo is unlanded.',
+  '- A review that sends the phase back -> `run` the `execute` stage again.',
+  '- `done` (unlanded) -> `land_phase` it, which merges its branch into the plan branch.',
+  'A phase can be planned only once every phase it comes `after` is done and landed.',
+  '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the plan document already reflects it.',
+  'Drive one phase at a time. Take the next phase only when the one before it is `done`; land a done phase whenever you choose, but before any phase that comes `after` it is planned.',
+  'You do not read the phase plan, the diff, or any source file to check the work. The plan reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
+  'When every phase is `done` and landed, tell the user and offer to `submit_pr`. `submit_pr` refuses while any phase is unlanded.',
 ].join('\n');
 
 /** The section-7 role text: what the orchestrator is and is not allowed to do (Req 11.1). */
 const ROLE_TEXT = [
-  'You are the Baiton chat orchestrator. You help the user create spec files and you drive approved specs to completion.',
-  'You never edit source code. Your only writes go through the spec-writing tools, which touch `.baiton/specs/**` and nothing else.',
+  'You are the Baiton chat orchestrator. You help the user create phased plans and you drive approved plans to completion.',
+  'You never edit source code. Your only writes go through the plan-writing tools, which touch `.baiton/plans/**` (and legacy `.baiton/specs/**` documents) and nothing else.',
   'You inspect the repository only through the read tools you have been given for this conversation, and never through any other means; you never modify files directly.',
 ].join('\n');
 
-/** The run-phase role text: same prohibitions, no spec tools at all. */
+/** The run-step role text: same prohibitions, no plan tools at all. */
 export const RUN_ROLE_TEXT = [
-  'You are the Baiton chat orchestrator. This conversation is not a spec conversation: you agree one piece of work with the user and dispatch it as a single run.',
+  'You are the Baiton chat orchestrator. This conversation is not a plan conversation: you agree one piece of work with the user and dispatch it as a single run.',
   'You never edit source code. You write nothing at all yourself; the only writes in this conversation are made by the agents a run dispatches, under `.baiton/runs/` and the run\'s own worktree.',
   'You inspect the repository only through the read tools you have been given for this conversation, and never through any other means.',
 ].join('\n');
 
-/** The run-phase scope text: one job, plus the work that is not the orchestrator's. */
+/** The run-step scope text: one job, plus the work that is not the orchestrator's. */
 export const RUN_SCOPE_TEXT = [
   'You have exactly one job here: agree what the work is, then dispatch one run.',
   'That is the whole job. Everything else belongs to someone else:',
   ...PROHIBITION_LINES,
 ].join('\n');
 
-/** A mode whose conversation is in the `run` phase: every mode except `plan`. */
+/** A mode whose conversation is in the `run` step: every mode except `plan`. */
 export type PlanlessMode = Exclude<RunMode, 'plan'>;
 
 /**
  * The per-mode run flow text. An exhaustive `Record`, so adding a mode to
  * {@link RunMode} later fails to compile until its flow text exists. Each entry
- * follows the same beats the OVERVIEW names — inspect with the read tools, state
+ * follows the same beats — inspect with the read tools, state
  * the work in one line, name the guessed files, call the run tool — and names
  * the tool call exactly as `controlTools.ts` declares it. The `default` entry
  * adds a recommend-and-confirm step before those beats: recommend one mode, one
- * `ask_user` card, dispatch the pick with `start_run`/`investigate`; a Spec
+ * `ask_user` card, dispatch the pick with `start_run`/`investigate`; a Phased Plan
  * pick and a decline dispatch nothing.
  */
 export const RUN_FLOW_TEXT: Readonly<Record<PlanlessMode, string>> = {
@@ -247,7 +251,7 @@ export const RUN_FLOW_TEXT: Readonly<Record<PlanlessMode, string>> = {
     '4. Call `ask_user` once, with the five modes as `options` (ids `plan`, `bug`, `quick`, `refactor`, `investigate`), your recommendation first, and `allow_free_text` set.',
     '5. Dispatch only the mode the user picks, from this conversation:',
     '- Bug -> call `start_run` with `mode: "bug"`, the one-line defect as `statement`, the guessed `files`, and the reproduction as `reproduction`. Ask for the reproduction with `ask_user` first if the user has not said.',
-    '- Quick -> call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
+    '- Quick Fix -> call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
     '- Refactor -> call `start_run` with `mode: "refactor"`, the one-line statement of the restructure, and the guessed `files`.',
     '- Investigate -> call `investigate` with the one-line `question` and the guessed `files`.',
     '- Phased Plan -> dispatch nothing. Tell the user to change the Mode control in the composer to Phased Plan and send the request again.',
@@ -265,12 +269,12 @@ export const RUN_FLOW_TEXT: Readonly<Record<PlanlessMode, string>> = {
     '5. Then tell the user the run has started on its own branch and worktree, and that they can watch it in the Runs view and merge it when it passes.',
   ].join('\n'),
   quick: [
-    'Quick flow:',
+    'Quick Fix flow:',
     '1. When the user describes a change, inspect the repository with the read tools until you can state the change in one line.',
     '2. Name the files the change most likely touches. A short, honest guess is better than a long one.',
     '3. Call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
     '4. Then tell the user the run has started on its own branch and worktree, and that they can watch it in the Runs view and merge it when it passes.',
-    'Quick is for one small, self-contained change. If the work needs several coordinated changes, say so and offer to switch mode rather than dispatching it anyway.',
+    'Quick Fix is for one small, self-contained change. If the work needs several coordinated changes, say so and offer to switch to Phased Plan rather than dispatching it anyway.',
   ].join('\n'),
   refactor: [
     'Refactor flow:',
@@ -291,7 +295,7 @@ export const RUN_FLOW_TEXT: Readonly<Record<PlanlessMode, string>> = {
   ].join('\n'),
 };
 
-/** The flow text for one spec-less mode, without an index-signature dance. */
+/** The flow text for one plan-less mode, without an index-signature dance. */
 export function runFlowText(mode: PlanlessMode): string {
   return RUN_FLOW_TEXT[mode];
 }
@@ -300,7 +304,7 @@ export function runFlowText(mode: PlanlessMode): string {
 export const MODE_PROPOSAL_TEXT = [
   'The mode is the user\'s choice, not yours, and you cannot change it yourself.',
   'When the work does not fit this mode, propose the mode that does with `ask_user` and wait for the answer:',
-  '- Work that needs an agreed requirements document and several todos -> Phased Plan.',
+  '- Work that needs an agreed endstate and several dependency-ordered phases -> Phased Plan.',
   '- A defect with a reproduction -> Bug.',
   '- One small, self-contained change -> Quick Fix.',
   '- A behaviour-preserving restructure -> Refactor.',
@@ -309,18 +313,18 @@ export const MODE_PROPOSAL_TEXT = [
 ].join('\n');
 
 /**
- * The new-spec flow: gather requirements, get agreement, then hand them to the
+ * The Phased Plan flow: gather requirements, get agreement, then hand them to the
  * plan-writer harness through `draft_plan`. The orchestrator never proposes the
- * todos itself — a configured sub-agent studies the repository and drafts them.
+ * phases itself — a configured sub-agent studies the repository and drafts them.
  */
 const FLOW_TEXT = [
-  'New spec flow:',
+  'Phased Plan flow:',
   '1. When the user describes work, inspect the repository with the read tools and ask clarifying questions until you understand what is wanted.',
-  '2. Write a short requirements document covering the goal, the constraints, the acceptance criteria, and the files of interest.',
-  '3. Get the user to agree to that document. Revise it until they do.',
-  '4. Once they agree, call `draft_plan` with a slug and the agreed request.',
-  '5. Then tell the user the draft is being written by the configured harness, and that they can watch it in the plan-writer terminal and see the spec appear in the Spec Explorer once it lands.',
-  'You never propose the todo list yourself. `draft_plan` hands the requirements to the plan-writer agent, which studies the repository and drafts the OVERVIEW and todos.',
+  '2. Restate the change in three sections: Endstate (what is true once the work is done), What needs changing (the areas, files and behaviours that must change), and Limitations & constraints (what must not change, compatibility requirements and other limits).',
+  '3. Present that restatement to the user and revise it until they agree.',
+  '4. Once they agree, call `draft_plan` with a slug and the agreed restatement as the request.',
+  '5. Then tell the user the plan is being written by the configured harness, that they can watch it in the plan-writer terminal, and that the plan appears in the Plan Explorer once it lands.',
+  'You never propose the phases yourself. `draft_plan` hands the agreed restatement to the plan-writer agent, which studies the repository and drafts the preamble and the dependency-ordered phases.',
   'After a draft lands you may refine it with `update_overview`, `add_phase`, `edit_phase` and `remove_phase`.',
 ].join('\n');
 
@@ -333,23 +337,24 @@ const STYLE_TEXT = [
   '- Answer first. Lead with the answer or the action taken, then add only the detail that changes what the user does next.',
   "- Do not restate the user's request back to them, and do not open with a preamble about what you are about to do.",
   '- Do not summarize tool output. Each tool call is shown in the chat as a row the user can expand, so describe a result only when it changes your answer.',
-  '- Keep replies to a few sentences. The one exception is a requirements document, which you present in full.',
+  '- Keep replies to a few sentences. The one exception is the endstate / what needs changing / limitations & constraints restatement, which you present in full.',
   '- Ask one clarifying question at a time with `ask_user`, and wait for the answer before asking the next.',
 ].join('\n');
 
-/** The section-5 todo line grammar (Req 11.3). */
-const TODO_GRAMMAR_TEXT = [
+/** The section-5 phase-line grammar (Req 11.3). */
+const PHASE_GRAMMAR_TEXT = [
   'Phase line grammar (tech-sheet section 5):',
-  '- Each todo line has the shape `- [<state>] <id> <title>`, optionally followed by ` (<hints>)` as the last thing on the line.',
+  '- Each phase line has the shape `- [<state>] <id> <title>`, optionally followed by ` (<hints>)` as the last thing on the line.',
   `- \`state\` is one of: ${PHASE_STATES.join(', ')}.`,
-  '- `id` is `T` followed by two or more digits (for example `T01`), unique in the file, and never renumbered.',
-  '- `hints` are groups separated by `;`. `after T01, T02` lists dependency ids. `files: a, b` lists starting files.',
+  '- In a plan (phases under `# PHASES`), `id` is `P` followed by two or more digits (for example `P01`), unique in the file, and never renumbered.',
+  '- A legacy spec document (lines under `# TODOS`) uses `T` ids instead (for example `T01`). A line whose id prefix does not match its document is malformed.',
+  '- `hints` are groups separated by `;`. `after P01, P02` lists dependency ids. `files: a, b` lists starting files.',
   '- A trailing parenthesis that does not parse as hints is part of the title.',
 ].join('\n');
 
 /** The section-5 frontmatter rules (Req 11.4). */
 const FRONTMATTER_TEXT = [
-  'Spec frontmatter rules (tech-sheet section 5):',
+  'Plan frontmatter rules (tech-sheet section 5):',
   '- Frontmatter is a flat `key: value` block, one key per line, with no nesting.',
   `- \`status\` is one of: ${STATUS_VALUES.join(', ')}.`,
   `- \`mode\` is one of: ${MODE_VALUES.join(', ')}.`,
@@ -359,29 +364,29 @@ const FRONTMATTER_TEXT = [
 /**
  * Build the system prompt for a conversation.
  *
- * @param kind The conversation this prompt is for (workspace or a spec).
- * @param specContent The current `spec.md` content for a spec conversation, when
- *   available. Ignored for a workspace conversation. It also decides the phase
- *   (Req 11.1). When absent for a spec conversation the prompt is built without
- *   it, in the `gather` phase, and no error is raised (Req 11.7).
+ * @param kind The conversation this prompt is for (workspace or a plan).
+ * @param documentContent The current plan document content for a plan conversation,
+ *   when available. Ignored for a workspace conversation. It also decides the step
+ *   (Req 11.1). When absent for a plan conversation the prompt is built without
+ *   it, in the `gather` step, and no error is raised (Req 11.7).
  * @param mode The conversation's mode. Absent or `plan` builds the prompt
- *   exactly as before; any other mode builds the run-phase prompt for that
+ *   exactly as before; any other mode builds the run-step prompt for that
  *   mode. Ignored for a plan conversation, which is always Plan.
  * @returns The assembled system-prompt text.
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
-  specContent?: string,
+  documentContent?: string,
   mode: RunMode = 'plan',
 ): string {
-  // The `run` phase — every spec-less mode on a workspace conversation. The
+  // The `run` step — every plan-less mode on a workspace conversation. The
   // guard is written as `mode !== 'plan'` rather than `isPlanless(mode)` so
   // control flow narrows `mode` to `PlanlessMode` with no cast. The run prompt
-  // deliberately omits TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT and the
-  // `Current spec file content:` block: a run-phase conversation has no
-  // spec-writing tool at all (`controlTools.ts` keeps `draft_plan`, `add_phase`,
+  // deliberately omits PHASE_GRAMMAR_TEXT, FRONTMATTER_TEXT and the
+  // `Current plan document content:` block: a run-step conversation has no
+  // plan-writing tool at all (`controlTools.ts` keeps `draft_plan`, `add_phase`,
   // `edit_phase`, `remove_phase`, `update_overview`, `approve_plan`, `run` and
-  // `submit_pr` off the `run` phase), so spec grammar would describe files it
+  // `submit_pr` off the `run` step), so plan grammar would describe files it
   // cannot touch.
   if (kind.kind === 'workspace' && mode !== 'plan') {
     return [
@@ -395,36 +400,36 @@ export function buildSystemPrompt(
     ].join('\n\n');
   }
 
-  const phase = phaseFor(kind, specContent, mode);
+  const step = conversationStepFor(kind, documentContent, mode);
   const sections: string[] = [ROLE_TEXT, SCOPE_TEXT, REFUSAL_TEXT, ASK_USER_TEXT];
 
-  // The phase decides which job the prompt describes: gathering requirements
-  // for a new (or still draft) spec, or driving an approved one (Req 11.1).
-  sections.push(phase === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
-  sections.push(STYLE_TEXT, TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT);
+  // The step decides which job the prompt describes: gathering requirements
+  // for a new (or still draft) plan, or driving an approved one (Req 11.1).
+  sections.push(step === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
+  sections.push(STYLE_TEXT, PHASE_GRAMMAR_TEXT, FRONTMATTER_TEXT);
 
-  if (kind.kind === 'spec' && specContent !== undefined) {
-    sections.push(['Current spec file content:', '', specContent].join('\n'));
+  if (kind.kind === 'spec' && documentContent !== undefined) {
+    sections.push(['Current plan document content:', '', documentContent].join('\n'));
   }
 
   return sections.join('\n\n');
 }
 
-/** The sub-agent's role: one task, a concise report back, and no spec finishing. */
+/** The sub-agent's role: one task, a concise report back, and no plan finishing. */
 export const SUBAGENT_ROLE_TEXT = [
   'You are a Baiton sub-agent: a chat another Baiton chat started to do one task for it.',
   'Do the task you were given, then report back concisely: lead with the result, then only the detail your parent needs to act on it.',
-  'You never finish a spec. You do not draft, approve, land or submit; only the top-level chat does that, and those tools are not yours.',
+  'You never finish a plan. You do not draft, approve, land or submit; only the top-level chat does that, and those tools are not yours.',
   'You never edit source code and you write nothing yourself. You inspect the repository only through the read tools you have been given.',
 ].join('\n');
 
-/** The run table a sub-agent sees only while its parent is driving an approved spec. */
+/** The run table a sub-agent sees only while its parent is driving an approved plan. */
 export const SUBAGENT_DRIVE_TEXT = [
-  'Your parent is driving an approved spec. When your task is to move a todo forward, dispatch the next legal stage with `run`:',
+  'Your parent is driving an approved plan. When your task is to move a phase forward, dispatch the next legal stage with `run`:',
   '- `pending` -> `run` the `plan` stage.',
   '- `planned` -> `run` the `execute` stage.',
   '- `executed` -> `run` the `review` stage.',
-  '- A review that sends the todo back -> `run` the `execute` stage again.',
+  '- A review that sends the phase back -> `run` the `execute` stage again.',
   "- `done` -> stop and report; landing it with `land_phase` is your parent's job.",
   '`run` blocks until the stage finishes and returns its outcome; there is nothing to poll afterwards.',
 ].join('\n');
@@ -438,23 +443,23 @@ export function subAgentSpawnText(depth: number): string {
 }
 
 /**
- * The system prompt for a sub-agent chat. `phase` is the parent's phase (passed
- * in, not derived) so a sub-agent of a run-phase conversation never sees the
+ * The system prompt for a sub-agent chat. `step` is the parent's conversation step (passed
+ * in, not derived) so a sub-agent of a run-step conversation never sees the
  * drive table.
  */
 export function buildSubAgentPrompt(
   kind: ConversationKind,
-  phase: OrchestratorPhase,
+  step: ConversationStep,
   depth: number,
-  specContent?: string,
+  documentContent?: string,
 ): string {
   const sections = [SUBAGENT_ROLE_TEXT, PROHIBITION_LINES.join('\n'), REFUSAL_TEXT, ASK_USER_TEXT];
-  if (phase === 'drive') {
+  if (step === 'drive') {
     sections.push(SUBAGENT_DRIVE_TEXT);
   }
   sections.push(subAgentSpawnText(depth), STYLE_TEXT);
-  if (kind.kind === 'spec' && specContent !== undefined) {
-    sections.push(['Current spec file content:', '', specContent].join('\n'));
+  if (kind.kind === 'spec' && documentContent !== undefined) {
+    sections.push(['Current plan document content:', '', documentContent].join('\n'));
   }
   return sections.join('\n\n');
 }
