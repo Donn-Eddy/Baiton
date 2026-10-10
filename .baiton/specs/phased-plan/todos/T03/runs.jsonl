@@ -2,3 +2,4 @@
 {"type":"completion","runId":"phased-plan-T03-plan-1-1791651306904","result":"completed"}
 {"type":"start","runId":"phased-plan-T03-execute-1-1791651560419","todoId":"T03","stage":"execute","attempt":1,"startHead":"ac88f1015236a199c9ae5920cd288b76fe18762d","inputRev":"987691647a68fda9850b50ef69e33c72106f2b6b356af88ef53dfb56f8dd09b4","terminalPid":87228,"fromState":"planned","sessionId":"7d920fa1-57c1-43b0-b439-6622073709d6"}
 {"type":"completion","runId":"phased-plan-T03-execute-1-1791651560419","result":"completed","commit":"20b830e28d5e18ea3fdcded5b0cdeeb9ea7cf61e","discoveredSessionId":"01a126c1-4078-7091-bd6c-eba988d77875"}
+{"type":"start","runId":"phased-plan-T03-review-1-1791652722104","todoId":"T03","stage":"review","attempt":1,"startHead":"20b830e28d5e18ea3fdcded5b0cdeeb9ea7cf61e","inputRev":"987691647a68fda9850b50ef69e33c72106f2b6b356af88ef53dfb56f8dd09b4","terminalPid":114738,"fromState":"executed","sessionId":"d0a2af6a-0f3a-4eae-bcec-264344bace32"}
