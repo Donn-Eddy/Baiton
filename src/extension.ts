@@ -9,6 +9,7 @@ import {
   resolveWorkspace,
   canonicalizeRoot,
   resolveAgentExecutables,
+  resolveExecutable,
   type WorkspaceContext,
   type WorkspaceFolder,
   type ExecutableLookup,
@@ -36,7 +37,10 @@ import {
   type FolderScopedApplyConfig,
 } from './activation/commands';
 import { registerConfigPanel } from './activation/configPanel';
-import { agentCapabilities, createAdapterRegistry } from './adapter';
+import { AGENT_BINARY, agentCapabilities, createAdapterRegistry } from './adapter';
+import { registerUsageView } from './activation/usageView';
+import { USAGE_CLI_AGENT } from './activation/usageViewSeams';
+import type { UsageCliName } from './usage';
 import { CatalogStore } from './orchestrator/modelCatalog';
 import { ModelDiscoveryService, builtinCatalogFetches } from './activation/modelDiscovery';
 import {
@@ -235,6 +239,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
   context.subscriptions.push(registerConfigPanelCommand());
+  // The Usage view is registered ahead of the activation gate so it works in an
+  // uninitialised folder and in Restricted Mode; nothing is read until it is expanded.
+  context.subscriptions.push(
+    registerUsageView({
+      extensionUri: context.extensionUri,
+      log: (m) => surface.log(m),
+      resolveExecutable: resolveUsageCli,
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMANDS.refreshModels, () =>
@@ -473,6 +486,13 @@ const settingsOverride: OverrideGetter = (agent: string): string | undefined => 
   const cfg = vscode.workspace.getConfiguration(SETTINGS_NS);
   const value = cfg.get<string>(`agents.${agent}.path`);
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+};
+
+/** Resolves a usage CLI honouring `baiton.agents.<agent>.path` (agy is the antigravity agent). */
+const resolveUsageCli = (cli: UsageCliName): string | undefined => {
+  const agent = USAGE_CLI_AGENT[cli];
+  const r = resolveExecutable(agent, AGENT_BINARY[agent], pathLookup, settingsOverride);
+  return isErr(r) ? undefined : r.value.path;
 };
 
 // --- crash recovery wiring (task 11.2 seam) -------------------------------

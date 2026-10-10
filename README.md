@@ -13,8 +13,8 @@ branch and worktree.
 Baiton contributes two view containers, one on each side of the window:
 
 - the **activity bar** container (the `$(rocket)` icon, titled **Baiton**),
-  holding the **Spec Explorer**, the **Runs** view and the collapsed
-  **Configuration** section;
+  holding the **Spec Explorer**, the **Runs** view, the collapsed **Usage**
+  section and the collapsed **Configuration** section;
 - the **secondary side bar** container (the `$(comment-discussion)` icon,
   titled **Baiton Chat**), holding the **Chat** view. If the secondary side bar
   is hidden, run **View: Toggle Secondary Side Bar** to reveal it.
@@ -51,6 +51,18 @@ The views:
 - **Runs** — a tree of the spec-less runs a non-Spec conversation dispatched,
   split into **Active** and **Complete**, with **Cancel**, **View diff** and
   **Merge** as its item actions. See **The Runs view** below.
+
+- **Usage** — a collapsed webview showing remaining usage for Claude Code,
+  Codex, Antigravity and OpenCode Go, in that order. Each row shows its windows
+  (a bar only when the source gives a percentage), the reset time, the
+  scope/tier, a source line with provenance (provider-reported or
+  Baiton-derived, labelled) and the read time, and a status of ok, stale or
+  unavailable with a reason. Nothing is probed or spawned before the section is
+  first expanded; it re-reads when it becomes visible and every
+  `baiton.usage.refreshIntervalSeconds` while visible, and polling stops when it
+  is hidden or closed. A read that overruns 15 s settles as stale or
+  unavailable. In Restricted Mode no stored credential is read and the row says
+  why. Nothing is written. See [Usage view (per-tool probe findings)](#usage-view-per-tool-probe-findings).
 
 - **Chat** — a webview hosting the orchestrator conversations: one Workspace
   conversation for creating new specs, plus one conversation per spec. Selecting
@@ -1033,12 +1045,52 @@ A launched stage's `.baiton/runs/<launch-id>/asks/<ask-id>.json` is a harness as
 
 The state table above is the thing that decides which relay each adapter uses: the selection it records is the selection encoded in `ASK_RELAY_KIND` / `askRelayKind()` in `src/adapter/index.ts`, so the documented findings and the shipped behaviour have one source.
 
+### Usage view (per-tool probe findings)
+
+The Usage view reads each first-party tool's remaining usage through the real mechanism recorded below; nothing is shown that the source did not give (no source percentage means no bar, and a figure from a stale snapshot is dropped rather than zeroed). Rows appear in the fixed order Claude Code, Codex, Antigravity, OpenCode Go; each tool's read is coalesced and timeboxed (15 s); a failed read keeps the last good reading as stale with its age and the failure reason, or reports unavailable with a reason when there was none; a stored credential is a fallback only, read only in a trusted workspace, for one request, and never logged, stored, put in a reading or sent to the webview.
+
+- **claude (Claude Code) findings** (probed `claude --version` → 2.1.295 (Claude Code), 2026-10-08):
+  - **Established route (primary): `claude -p /usage --output-format json`.** The built-in `/usage` command runs locally in print mode: `local_command: "usage"`, `num_turns: 0`, `total_cost_usd: 0`, so no model turn is spent and nothing was written under `~/.claude`. Baiton runs it from a neutral directory with no shell (mechanism `cli-command`).
+  - **Returned:** a `result` text such as `Current session: 13% used · resets Oct 9, 12:39am (America/Los_Angeles)` and `Current week (all models): 2% used · resets Oct 15, 7pm (America/Los_Angeles)`; per-model lines (`Current week (Opus)` / `(Sonnet only)`) are mapped by name. The percent is the provider's own figure. The reset has no year and is in the named zone, so Baiton converts it with `Intl` (a date long past is read as next year); an unreadable reset leaves the percent without a reset. The text has no plan tier, so none is shown on this route.
+  - **Probed, unusable:** no usage or limits subcommand (`claude --help`; `claude doctor` only reports installation health). The session logs under `~/.claude/projects` hold per-message token counts and no rate-limit percent or reset, and summing tokens would invent a figure, so they are not read. `~/.claude.json` has a `cachedUsageUtilization` entry, but it is an internal cache and not a documented file, so it is not used. A statusline's `rate_limits` reach only a configured statusline command, which would mean writing the user's settings.
+  - **Probed, fallback only:** `GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer <stored access token>` and `anthropic-beta: oauth-2025-04-20` returned HTTP 200: `five_hour` and `seven_day` as `{utilization, resets_at}` (`utilization` is 0..100 and matched `/usage`), `seven_day_opus`, `seven_day_sonnet` and `seven_day_oauth_apps` (null on the probed plan), `extra_usage` `{is_enabled, monthly_limit, used_credits, utilization}`, and further experimental buckets (shown only if they carry a numeric `utilization`); `extra_usage` is shown as an "Extra usage" window only when `is_enabled` is true, with the raw used/limit credits. A bad token gave HTTP 401. The endpoint is undocumented and may change, so it is tried second (mechanism `provider-endpoint`, trusted workspaces only).
+  - **Fallback handling:** the stored login (`$CLAUDE_CONFIG_DIR`/`~/.claude/.credentials.json`, key `claudeAiOauth.accessToken`) is read only in a trusted workspace, held in a local variable for one request, and never put in a reading, reason or log line (all messages pass through `redactSecrets`). An expired token is not refreshed (that would rewrite the CLI's credential store); the reason says to run `claude` once. The plan tier shown is `subscriptionType`, or `rateLimitTier` when that is missing. A login with only `primaryApiKey`/`apiKey` (an API-key account) reports unavailable with "API-key accounts have no plan usage windows".
+  - **Restricted Mode:** the `/usage` command is unchanged; only the stored-login read and the HTTP request are skipped, and the reason reads "Restricted Mode: Baiton does not read the stored Claude Code login."
+  - **Unverified:** other claude versions; the API-key login case (the credential field name is a guess) and the exact signed-out output of `/usage` (matched by wording only); per-model lines of `/usage`; macOS, where the login is the keychain item `Claude Code-credentials` and is not wired in this reader.
+- **codex findings** (probed `codex --version` → 0.157.0, 2026-10-08):
+  - **Established route (primary): `codex app-server` over stdio JSON-RPC.** Framing is JSONL: `initialize` (id 1, `clientInfo` `{name:"baiton",version:"1.0.0"}`), the `initialized` notification, then `{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}`. The stdin must stay open until the reply arrives (the reply came a moment after the request; closing stdin early gave no id 2 reply).
+  - **Returned:** `result.rateLimits = {limitId, limitName, primary:{usedPercent, windowDurationMins:300, resetsAt}, secondary:{usedPercent, windowDurationMins:10080, resetsAt}, credits, planType:"plus", …}` plus the same bucket under `result.rateLimitsByLimitId.codex`. `resetsAt` is unix seconds; `usedPercent` is the provider's own figure (example: `{"usedPercent":0,"windowDurationMins":300,"resetsAt":1791535100}`). The reply also carries `accountId` and reset-credit details, which Baiton ignores and never displays.
+  - **Probed, unusable as the route:** a CLI subcommand. `codex --help` (and `codex doctor`, `codex debug`, `codex app-server --help`) list no non-interactive usage or limits command; `/status` exists only as a TUI slash command.
+  - **Probed, kept as second route:** the newest `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Its `event_msg` lines with `payload.type == "token_count"` carry `rate_limits.{primary,secondary}.{used_percent, window_minutes, resets_at}` and `plan_type`. It is only as recent as the last Codex session (the newest file on the probe machine was days old), so Baiton reports it with the snapshot time as `readAt` and drops any window whose `resets_at` has passed.
+  - **Probed, fallback only:** `GET https://chatgpt.com/backend-api/wham/usage` with `Authorization: Bearer <stored access token>` and `ChatGPT-Account-Id` returned HTTP 200 with `plan_type` and `rate_limit.{primary_window,secondary_window}.{used_percent, limit_window_seconds, reset_at, reset_after_seconds}`. The endpoint is undocumented and may change, so it is tried last. API-key logins (`OPENAI_API_KEY` only, no `tokens`) have no plan windows, so the reason says so. The API-key case was not run against a real API-key login (**unverified**).
+  - **Fallback handling:** the stored login (`$CODEX_HOME/auth.json`, default `~/.codex/auth.json`) is read only in a trusted workspace, held in a local variable for one request, and never put in a reading, reason or log line (all messages pass through `redactSecrets`).
+  - **Restricted Mode:** the app-server and rollout reads are unchanged; only the stored-login read and the HTTP request are skipped, and the reason reads "Restricted Mode: Baiton does not read the stored Codex login."
+  - **Unverified:** how the app-server behaves under an API-key login, and the exact behaviour on other codex versions.
+- **antigravity (agy) findings** (probed `agy --version` → 1.3.2, 2026-10-09):
+  - **Established route (primary): `agy -p /usage --output-format json`** (mechanism `cli-command`). `/usage` is a local command: `num_turns: 0`, every token count 0, no model turn, nothing written under `~/.gemini`. Without the flag it prints the same figures as tab-separated lines (`/quota` is an alias). agy exits 0 even on error, so stdout is judged, not the exit code.
+  - **Returned:** `command.data.groups[] = {name, description, buckets:[{id, name, window:"weekly"|"5h", remaining_fraction, reset_time}]}` (example: `{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.9929834604263306,"reset_time":"2026-10-15T00:53:08Z"}`). Two groups were present, "Gemini Models" and "Claude and GPT models", each with a weekly and a 5-hour bucket: quota is per group of models, not per model. `usedPercent = (1 - remaining_fraction) * 100`, the provider's own figure; `reset_time` is ISO UTC when piped. A full 5-hour bucket's reset rolls forward on every call. No plan tier is reported. A bucket without a fraction gets no window.
+  - **Probed, unusable as the route:** a usage subcommand or flag (`agy --help`, `agy models --help`; `agy models` prints `id<TAB>label` only); a server mode (`agy remote-control` is a tunnel to another device); a quota/state file (`~/.gemini/antigravity-cli/settings.json` holds model, permissions and trusted workspaces only, and no file there carries a quota key).
+  - **Probed, fallback only — not wired:** the Google Cloud Code endpoints (`cloudcode-pa.googleapis.com` `loadCodeAssist` / `fetchAvailableModels`) need the stored login, but no credential file exists under `~/.gemini` or `~/.config/Antigravity` (it is probably in the OS secret service), so they could not be exercised and no code calls them.
+  - **Restricted Mode:** unaffected. The route reads no stored login and makes no HTTP request, so there is nothing to skip.
+  - **Unverified:** other agy versions; whether an exhausted bucket reports `remaining_fraction: 0` or omits it (an omitted fraction yields no window); API-key (`GEMINI_API_KEY`) and enterprise logins; per-model quotas; macOS and Windows.
+- **opencode (OpenCode Go) findings** (probed `opencode --version` → 1.18.30, 2026-10-09):
+  - **Established route (only route; mechanism `provider-endpoint`, trusted workspaces only): `GET https://opencode.ai/zen/go/v1/usage`** with `Authorization: Bearer <stored OpenCode Go key>`. Read-only, no model turn, no quota spent. It is undocumented (https://opencode.ai/docs/go only points at the web console), so the parser is total and a shape change yields `unavailable`. HTTP 200, `application/json`, no `x-ratelimit-*` headers.
+  - **Returned:** `{"usage":{"rolling":{"status","percent","resetsAt"},"weekly":{…},"monthly":{…}}}` (example: `{"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-10-09T22:28:06.000Z"},"weekly":{"status":"ok","percent":1,…},"monthly":{"status":"ok","percent":11,…}}}`). `rolling` → window `five-hour` (5-hour), `weekly` → Weekly, `monthly` → Monthly; `percent` is the provider's own used percent → `usedPercent`; `resetsAt` (ISO) → `resetsAt`; no `raw` numbers and no plan tier are returned, so none are reported. A limit without a `percent` gets no window.
+  - **Probed, unusable as the route:** CLI subcommands — no usage/quota/limit/account command (`opencode --help`, `providers`/`auth`, `models --verbose`, `debug`); `opencode stats` prints LOCAL session tokens and cost for this machine only (not remaining usage, blind to other machines; turning it into "remaining" against the documented dollar limits would be extrapolation). `opencode serve --hostname 127.0.0.1 --port 0`: `/doc` lists no usage/quota/subscription/billing route; `GET /provider`, `/config/providers`, `/api/provider/opencode-go`, `/api/integration`, `/experimental/console` return catalogue data and model context/output `limit`s (not account usage). Local files — `~/.local/share/opencode` (`auth.json`, `opencode.db`), `~/.local/state/opencode`, `~/.cache/opencode` (`models.json`) — hold no quota/remaining/reset figures outside per-message session content. `GET https://opencode.ai/zen/go/v1/models` returns the catalogue and no usage headers.
+  - **Probed, fallback only:** the endpoint above is the fallback and the route at once; the reader wires nothing else.
+  - **Fallback handling:** the key is read from `~/.local/share/opencode/auth.json` (`{"opencode-go":{"type":"api","key":…}}`, then `opencode`; `oauth` entries use `access`), only in a trusted workspace, for one request; it is held in a local `Authorization` header, never logged, stored or put in a reading.
+  - **Restricted Mode:** the stored login is not read and no request is made; the reason is `Restricted Mode: Baiton does not read the stored OpenCode login.`
+  - **Unverified:** other opencode versions; OAuth-type logins; an exhausted limit (`status` is not read, only `percent`); the Zen pay-as-you-go provider; endpoint stability; macOS and Windows.
+
 ## Commands
 
 - **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and
   moves keyboard focus to the Chat view.
 - **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
   container and moves keyboard focus to the Configuration view.
+- **Baiton: Refresh Usage** (`baiton.usage.refresh`) — re-reads every tool now;
+  also the refresh button in the Usage view title. If the view has never been
+  expanded it reveals it (which performs the first read).
 - **Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) — picks one of
   the keyed providers, then sets or clears its API key with a masked input,
   stored in VS Code SecretStorage under `baiton.orchestrator.key.<provider>`.
@@ -1061,6 +1113,8 @@ merge additionally require `!baiton.restricted`.
 
 ## Settings
 
+- `baiton.usage.refreshIntervalSeconds` — seconds between Usage view re-reads
+  while it is visible; default 300, clamped to 30–86400.
 - `baiton.orchestrator.endpoint` — base URL of the OpenAI-compatible
   chat-completions endpoint used by the **OpenAI / Custom** provider. No other
   provider reads it: the builtins and models.dev providers take their base URL

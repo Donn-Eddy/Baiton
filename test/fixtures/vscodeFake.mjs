@@ -35,12 +35,18 @@ export const window = {
 
 export const commands = {
   executeCommand: (command, ...args) => fake().commands.executeCommand(command, ...args),
+  registerCommand: (id, cb) => fake().commands.registerCommand(id, cb),
 };
 
 export const workspace = {
   createFileSystemWatcher: (pattern, ...args) =>
     fake().workspace.createFileSystemWatcher(pattern, ...args),
   getConfiguration: (section, scope) => fake().workspace.getConfiguration(section, scope),
+  get isTrusted() {
+    return fake().workspace.isTrusted;
+  },
+  onDidGrantWorkspaceTrust: (l) => fake().workspace.onDidGrantWorkspaceTrust(l),
+  onDidChangeConfiguration: (l) => fake().workspace.onDidChangeConfiguration(l),
 };
 
 /** Where a configuration update is written; the values match the host enum. */
