@@ -335,9 +335,10 @@ describe('config service and Initialize command (Task 5.5)', () => {
       // .gitignore is ensured with the required exclusions.
       const gitignore = fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8');
       assert.strictEqual(gitignore, GITIGNORE_CONTENTS);
-      // The runs/ and specs/ directories exist.
+      // The runs/ and plans/ directories exist; new layouts do not create specs/.
       assert.ok(fs.existsSync(path.join(baitonDir, 'runs')), 'runs/ should exist');
-      assert.ok(fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should exist');
+      assert.ok(fs.existsSync(path.join(baitonDir, 'plans')), 'plans/ should exist');
+      assert.ok(!fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should not be created');
     });
 
     it('writes a default config.json on a fresh directory', async () => {

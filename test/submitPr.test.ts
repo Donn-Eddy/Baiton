@@ -76,10 +76,39 @@ function specText(opts: { states: string[]; baseCommit: string; approvedRev?: st
   ].join('\n');
 }
 
+function planText(baseCommit: string, approvedRev = ''): string {
+  return [
+    '---',
+    `name: ${SLUG}`,
+    'status: approved',
+    'mode: manual',
+    'base: main',
+    `base_commit: ${baseCommit}`,
+    `branch: ${BRANCH}`,
+    `approved_rev: ${approvedRev}`,
+    'pr:',
+    '---',
+    '',
+    '# Endstate',
+    'The greeting is complete.',
+    '',
+    '# What needs changing',
+    'Ship the greeting.',
+    '',
+    '# Limitations & constraints',
+    'Keep the change small.',
+    '',
+    '# PHASES',
+    '- [done] P01 Add the greeting',
+    '',
+  ].join('\n');
+}
+
 interface Repo {
   root: string;
   remote: string;
   specsDir: string;
+  baitonDir: string;
 }
 
 /**
@@ -115,7 +144,7 @@ function makeRepo(states: string[], withRemote = true): Repo {
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', `spec(${SLUG}): T01 execute attempt 1`);
 
-  return { root, remote, specsDir: path.join(root, '.baiton', 'specs') };
+  return { root, remote, specsDir: path.join(root, '.baiton', 'specs'), baitonDir: path.join(root, '.baiton') };
 }
 
 class StubAdapter implements Adapter {
@@ -214,7 +243,7 @@ function harness(repo: Repo, overrides: Partial<SubmitPrDeps> = {}): Harness {
   const pr = new FakePrTool();
   const deps: SubmitPrDeps = {
     workspaceRoot: repo.root,
-    specsDir: repo.specsDir,
+    baitonDir: repo.baitonDir,
     terminalHost: terminals,
     watcherFactory: watchers,
     git: createGitService(repo.root),
@@ -270,7 +299,7 @@ describe('submitPr (design section 8 "PR")', () => {
     if (!result.ok) {
       assert.strictEqual(result.error.kind, 'not-ready');
       assert.match(result.error.message, /T01, T02/);
-      assert.match(result.error.message, /land_todo/);
+      assert.match(result.error.message, /every phase must be landed/);
     }
     assert.strictEqual(h.terminals.created.length, 0);
     assert.strictEqual(h.pr.created.length, 0);
@@ -399,7 +428,7 @@ describe('submitPr (design section 8 "PR")', () => {
     const spec = readSpec(h.repo);
     assert.strictEqual(spec.frontmatter.get('pr'), 'https://example.test/pull/42');
     assert.strictEqual(spec.frontmatter.get('status'), 'pr');
-    assert.strictEqual(git(h.repo.root, 'log', '-1', '--format=%s').trim(), `spec(${SLUG}): pr`);
+    assert.strictEqual(git(h.repo.root, 'log', '-1', '--format=%s').trim(), `plan(${SLUG}): pr`);
     assert.strictEqual(git(h.repo.root, 'status', '--porcelain').trim(), '', 'tree is clean after recording');
     assert.ok(fs.existsSync(path.join(h.repo.specsDir, SLUG, 'pr.md')));
 
@@ -410,6 +439,33 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(entries[0].todoId, PR_TODO_ID);
     assert.strictEqual(entries[0].result, 'completed');
     assert.deepStrictEqual(entries[0].pr, { push: true, create: true, record: true });
+  });
+
+  it('submits a plan document, writes plan-scoped PR artifacts, and describes phases', async () => {
+    const repo = makeRepo(['done']);
+    const legacyFile = path.join(repo.specsDir, SLUG, 'spec.md');
+    const legacyBefore = fs.readFileSync(legacyFile, 'utf8');
+    const baseCommit = git(repo.root, 'rev-parse', 'main').trim();
+    const draft = planText(baseCommit);
+    const approved = planText(baseCommit, approvalHash(parsePlan(draft)));
+    write(repo.root, `.baiton/plans/${SLUG}/plan.md`, approved);
+    git(repo.root, 'add', `.baiton/plans/${SLUG}/plan.md`);
+    git(repo.root, 'commit', '-q', '-m', `plan(${SLUG}): P01 done`);
+
+    const h = harness(repo);
+    const pending = submitPr(SLUG, h.deps);
+    await deliverDraft(h, DRAFT);
+    const result = await pending;
+    assert.strictEqual(result.ok, true, JSON.stringify(result));
+    if (!result.ok) return;
+
+    const brief = fs.readFileSync(path.join(path.dirname(h.watchers.created[0].resultPath), 'brief.md'), 'utf8');
+    assert.ok(brief.includes(path.join(repo.baitonDir, 'plans', SLUG, 'phases')));
+    assert.ok(brief.includes('<phase-id>'));
+    assert.ok(fs.existsSync(path.join(repo.baitonDir, 'plans', SLUG, 'pr.md')));
+    assert.ok(fs.existsSync(path.join(repo.baitonDir, 'plans', SLUG, 'runs.jsonl')));
+    assert.strictEqual(fs.readFileSync(legacyFile, 'utf8'), legacyBefore);
+    assert.strictEqual(git(repo.root, 'log', '-1', '--format=%s').trim(), `plan(${SLUG}): pr`);
   });
 
   it('reuses an open PR for the head branch instead of creating another', async () => {

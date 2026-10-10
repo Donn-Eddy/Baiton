@@ -77,7 +77,7 @@ import {
   createPrTool,
   createRunPipeline,
   createRunStore,
-  createSpecBranchWriter,
+  createPlanBranchWriter,
   createSpecDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
@@ -100,7 +100,7 @@ import type {
 } from '../engine';
 import {
   latestStart,
-  readSpecJournal,
+  readPlanJournal,
   resumableSessionId,
   type JournalEntry,
 } from '../journal';
@@ -144,7 +144,7 @@ import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
-import { createSpecStore } from './specStore';
+import { createPlanStore } from './planStore';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
 import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
@@ -160,6 +160,7 @@ import {
   type TodoQueues,
 } from './engineFacade';
 import { ChatController } from './chatController';
+import { listDocumentSlugs, resolveDocument } from '../storage/documentLocation';
 import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
@@ -174,7 +175,7 @@ import {
   type RunTreeNode,
 } from './runsExplorer';
 import { openChat } from './openChat';
-import { planPath } from './specLister';
+import { phasePlanPath } from './planLister';
 import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
 import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEndpoint';
 import { ProviderRouter } from './providerRouter';
@@ -427,8 +428,8 @@ export function registerCommands(
   // One writer shared by the store, the queues and the worktree seam so state
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
-  const specWriter = createSpecBranchWriter({ specsDir, git });
-  const specStore = createSpecStore(specsDir, git, specWriter);
+  const specWriter = createPlanBranchWriter({ baitonDir, git });
+  const specStore = createPlanStore(baitonDir, git, specWriter);
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
   const adapters = createAdapterRegistry();
@@ -450,7 +451,7 @@ export function registerCommands(
   // repository lock.
   const todoQueues: TodoQueues = createTodoQueues({
     workspaceRoot: repoRoot,
-    specsDir,
+    baitonDir,
     git,
     specWriter,
     terminalHost,
@@ -535,7 +536,7 @@ export function registerCommands(
     try {
       const result = await submitPr(slug, {
         workspaceRoot: repoRoot,
-        specsDir,
+        baitonDir,
         terminalHost,
         watcherFactory,
         git,
@@ -620,7 +621,6 @@ export function registerCommands(
     baitonDir,
     git,
     queueFor,
-    specsDir,
     adapterFor,
     submitPrForSlug,
     confirm,
@@ -645,7 +645,7 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
     draftSpec: {
       draft: async (req) => {
         const started = await specDraftRunner.start(req);
@@ -811,14 +811,14 @@ export function registerCommands(
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, baitonDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, baitonDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, baitonDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, baitonDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, baitonDir, queueFor, adapterFor, surface),
     registerViewCommand(
       activation,
-      specsDir,
+      baitonDir,
       repoRoot,
       (slug, todoId) => todoQueues.find(slug, todoId),
       adapterFor,
@@ -843,7 +843,7 @@ export function registerCommands(
     vscode.commands.registerCommand(
       COMMANDS.submitPr,
       (arg?: TreeNode | string) =>
-        runSubmitPr(activation, specsDir, surface, submitPrForSlug, slugArg(arg)),
+        runSubmitPr(activation, baitonDir, surface, submitPrForSlug, slugArg(arg)),
     ),
   );
 
@@ -854,7 +854,7 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.showPr,
-      (arg?: TreeNode | string) => runShowPr(specsDir, surface, slugArg(arg)),
+      (arg?: TreeNode | string) => runShowPr(baitonDir, surface, slugArg(arg)),
     ),
   );
 
@@ -867,7 +867,7 @@ export function registerCommands(
       COMMANDS.viewPlan,
       async (a?: TreeNode | string, b?: string) => {
         const { slug, todoId } = todoArgs(a, b);
-        await runViewPlan(specsDir, surface, slug, todoId);
+        await runViewPlan(baitonDir, surface, slug, todoId);
       },
     ),
   );
@@ -1035,7 +1035,7 @@ export function registerCommands(
   // controller's sink; the controller also follows the active editor when it is
   // a `spec.md` (Req 7.4, 7.5).
   const explorer = new SpecExplorer(
-    specsDir,
+    baitonDir,
     specStore,
     surface,
     workspace.restricted,
@@ -1108,8 +1108,8 @@ export function registerCommands(
   // --- CodeLens over spec todos ------------------------------------------
   disposables.push(
     vscode.languages.registerCodeLensProvider(
-      { pattern: '**/.baiton/specs/*/spec.md' },
-      new SpecCodeLensProvider(specsDir),
+      { pattern: '**/.baiton/{plans/*/plan.md,specs/*/spec.md}' },
+      new SpecCodeLensProvider(baitonDir),
     ),
   );
 
@@ -1261,7 +1261,7 @@ function registerStageCommand(
   commandId: string,
   stage: Stage,
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
@@ -1270,7 +1270,7 @@ function registerStageCommand(
     commandId,
     (a?: TreeNode | string, b?: string) => {
       const { slug, todoId } = todoArgs(a, b);
-      return runStage(activation, specsDir, queueFor, adapterForRole, surface, stage, slug, todoId);
+      return runStage(activation, baitonDir, queueFor, adapterForRole, surface, stage, slug, todoId);
     },
   );
 }
@@ -1280,7 +1280,7 @@ function registerActionCommand(
   commandId: string,
   action: 'replan' | 'stop',
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
@@ -1296,7 +1296,7 @@ function registerActionCommand(
         return;
       }
       const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
-      const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+      const target = await resolveTarget(baitonDir, slugArg, todoArg, surface);
       if (target === undefined) {
         return;
       }
@@ -1319,7 +1319,7 @@ function registerActionCommand(
           todoId: target.todoId,
           action: 'stop',
         };
-        const result = await dispatchAndReport(queue, specsDir, trigger, adapterForRole, surface);
+        const result = await dispatchAndReport(queue, baitonDir, trigger, adapterForRole, surface);
         if (!result.ok && result.error.kind === 'illegal-transition') {
           // The queue's reporter already surfaced the generic transition-table
           // message; this friendlier wording is the one Req 2.3 asks for.
@@ -1333,7 +1333,7 @@ function registerActionCommand(
         todoId: target.todoId,
         action,
       };
-      await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
+      await dispatchAndReport(queueFor(target.slug, target.todoId), baitonDir, trigger, adapterForRole, surface);
     },
   );
 }
@@ -1346,7 +1346,7 @@ function registerActionCommand(
  */
 function registerViewCommand(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   repoRoot: string,
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
@@ -1357,11 +1357,11 @@ function registerViewCommand(
     COMMANDS.view,
     async (a?: TreeNode | string, b?: string) => {
       const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
-      const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+      const target = await resolveTarget(baitonDir, slugArg, todoArg, surface);
       if (target === undefined) {
         return;
       }
-      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
+      await runView(activation, target.slug, target.todoId, baitonDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -1385,7 +1385,7 @@ async function runView(
   activation: CommandActivation,
   slug: string,
   todoId: string,
-  specsDir: string,
+  baitonDir: string,
   repoRoot: string,
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
@@ -1398,7 +1398,7 @@ async function runView(
     return;
   }
 
-  const entry = latestStart(readSpecJournal(specsDir, slug), todoId);
+  const entry = latestStart(readPlanJournal(baitonDir, slug), todoId);
   if (entry === undefined) {
     surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
     return;
@@ -1456,7 +1456,7 @@ async function runView(
 /** Dispatch a stage trigger, gated under Restricted Mode and the stage's role executable. */
 async function runStage(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
@@ -1467,7 +1467,7 @@ async function runStage(
   if (!ensureCanDispatch(activation, surface, STAGE_ROLE[stage])) {
     return;
   }
-  const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+  const target = await resolveTarget(baitonDir, slugArg, todoArg, surface);
   if (target === undefined) {
     return;
   }
@@ -1477,7 +1477,7 @@ async function runStage(
     todoId: target.todoId,
     stage,
   };
-  await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
+  await dispatchAndReport(queueFor(target.slug, target.todoId), baitonDir, trigger, adapterForRole, surface);
 }
 
 /**
@@ -1532,12 +1532,12 @@ function ensureExecutable(activation: CommandActivation, surface: Surface, role:
  */
 async function dispatchAndReport(
   queue: RunQueue,
-  specsDir: string,
+  baitonDir: string,
   trigger: EngineTrigger,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): Promise<DispatchResult> {
-  const result = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+  const result = await dispatchTrigger(queue, baitonDir, trigger, adapterForRole);
   if (result.ok) {
     surface.log(
       `Baiton: ${describeTrigger(trigger)} → ${result.outcome.kind}`,
@@ -1612,7 +1612,7 @@ function specsForPhase(
  */
 async function runSubmitPr(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   submit: (slug: string) => Promise<SubmitPrOutcome>,
   slugArg: string | undefined,
@@ -1620,7 +1620,7 @@ async function runSubmitPr(
   if (!ensureCanDispatch(activation, surface, 'pr-writer')) {
     return;
   }
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickSpecSlug(baitonDir));
   if (slug === undefined) {
     return;
   }
@@ -1659,17 +1659,17 @@ async function runSubmitPr(
  * warning, not an error: the user has simply not submitted one yet.
  */
 async function runShowPr(
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   slugArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickSpecSlug(baitonDir));
   if (slug === undefined) {
     return;
   }
   let raw: string;
   try {
-    raw = fs.readFileSync(path.join(specsDir, slug, 'spec.md'), 'utf8');
+    raw = fs.readFileSync(resolveDocument(baitonDir, slug).documentPath, 'utf8');
   } catch (e) {
     surface.error(
       `Baiton: could not read spec "${slug}": ${e instanceof Error ? e.message : String(e)}.`,
@@ -1699,22 +1699,22 @@ async function runShowPr(
  * the `executing` state commit (which stages the whole spec folder).
  */
 async function runViewPlan(
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   slugArg: string | undefined,
   todoArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickSpecSlug(baitonDir));
   if (slug === undefined) {
     surface.warn('Baiton: no spec selected.');
     return;
   }
-  const todoId = todoArg ?? (await pickPlannedTodoId(specsDir, slug, surface));
+  const todoId = todoArg ?? (await pickPlannedTodoId(baitonDir, slug, surface));
   if (todoId === undefined || todoId.trim().length === 0) {
     surface.warn('Baiton: no todo selected.');
     return;
   }
-  const file = planPath(specsDir, slug, todoId);
+  const file = phasePlanPath(baitonDir, slug, todoId);
   if (!fs.existsSync(file)) {
     surface.warn(
       `Baiton: no plan on file for "${todoId}" in spec "${slug}"; run Plan first.`,
@@ -1736,11 +1736,11 @@ async function runViewPlan(
  * View plan. A spec with no planned todo warns and selects nothing.
  */
 async function pickPlannedTodoId(
-  specsDir: string,
+  baitonDir: string,
   slug: string,
   surface: Surface,
 ): Promise<string | undefined> {
-  const ids = plannedTodoIds(specsDir, slug);
+  const ids = plannedTodoIds(baitonDir, slug);
   if (ids.length === 0) {
     surface.warn(`Baiton: spec "${slug}" has no plan on file; run Plan first.`);
     return undefined;
@@ -1749,17 +1749,17 @@ async function pickPlannedTodoId(
 }
 
 /** The ids, in directory order, of a spec's todos that have a `plan.md`. */
-function plannedTodoIds(specsDir: string, slug: string): string[] {
+function plannedTodoIds(baitonDir: string, slug: string): string[] {
   let entries: string[];
   try {
     entries = fs
-      .readdirSync(path.join(specsDir, slug, 'todos'), { withFileTypes: true })
+      .readdirSync(resolveDocument(baitonDir, slug).artifactsDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
   } catch {
     return [];
   }
-  return entries.filter((id) => fs.existsSync(planPath(specsDir, slug, id))).sort();
+  return entries.filter((id) => fs.existsSync(phasePlanPath(baitonDir, slug, id))).sort();
 }
 
 /** Render a Submit PR halt for the user, including verify output. */
@@ -1793,7 +1793,7 @@ const ACTION_LENS: Record<PhaseAction, { title: string; command: string }> = {
  * todo id, wiring the editor surface to the run queue and tools (Req 10.3).
  */
 class SpecCodeLensProvider implements vscode.CodeLensProvider {
-  constructor(private readonly specsDir: string) {}
+  constructor(private readonly baitonDir: string) {}
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     const slug = slugFromSpecUri(document.uri);
@@ -1801,12 +1801,12 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
       return [];
     }
     const spec = parsePlan(document.getText());
-    const sessions = sessionSet(readSpecJournal(this.specsDir, slug));
+    const sessions = sessionSet(readPlanJournal(this.baitonDir, slug));
     const lenses: vscode.CodeLens[] = [];
     for (const todo of spec.phases) {
       const line = document.lineAt(todo.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
-      const hasPlan = fs.existsSync(planPath(this.specsDir, slug, todo.id));
+      const hasPlan = fs.existsSync(phasePlanPath(this.baitonDir, slug, todo.id));
       for (const action of legalActions(todo.state, sessions.has(todo.id), hasPlan)) {
         const { title, command } = ACTION_LENS[action];
         lenses.push(lens(range, title, command, slug, todo.id));
@@ -1840,8 +1840,8 @@ function lens(
 
 /** The spec slug from a `.baiton/specs/<slug>/spec.md` URI, or `undefined`. */
 function slugFromSpecUri(uri: vscode.Uri): string | undefined {
-  const match = /[/\\]\.baiton[/\\]specs[/\\]([^/\\]+)[/\\]spec\.md$/.exec(uri.fsPath);
-  return match ? match[1] : undefined;
+  const match = /[/\\]\.baiton[/\\](?:plans[/\\]([^/\\]+)[/\\]plan\.md|specs[/\\]([^/\\]+)[/\\]spec\.md)$/.exec(uri.fsPath);
+  return match ? (match[1] ?? match[2]) : undefined;
 }
 
 // --- shared helpers --------------------------------------------------------
@@ -1860,12 +1860,12 @@ function guardContextFor(workspace: WorkspaceContext<vscode.Uri>): GuardContext 
  * prompting the user for anything a CodeLens/palette invocation did not supply.
  */
 async function resolveTarget(
-  specsDir: string,
+  baitonDir: string,
   slugArg: string | undefined,
   todoArg: string | undefined,
   surface: Surface,
 ): Promise<{ slug: string; todoId: string } | undefined> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickSpecSlug(baitonDir));
   if (slug === undefined) {
     surface.warn('Baiton: no spec selected.');
     return undefined;
@@ -1880,16 +1880,10 @@ async function resolveTarget(
 }
 
 /** Present the spec slugs under `.baiton/specs/` for the user to choose from. */
-async function pickSpecSlug(specsDir: string): Promise<string | undefined> {
-  let slugs: string[] = [];
-  try {
-    slugs = fs
-      .readdirSync(specsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch {
-    slugs = [];
-  }
+async function pickSpecSlug(baitonDir: string): Promise<string | undefined> {
+  const slugs = listDocumentSlugs(baitonDir).filter((slug) =>
+    fs.existsSync(resolveDocument(baitonDir, slug).documentPath),
+  );
   if (slugs.length === 0) {
     return vscode.window.showInputBox({ prompt: 'Spec slug' });
   }
@@ -1901,8 +1895,7 @@ async function promptForSlug(
   workspace: WorkspaceContext<vscode.Uri>,
   _prompt: string,
 ): Promise<string | undefined> {
-  const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
-  return pickSpecSlug(specsDir);
+  return pickSpecSlug(workspace.baitonDir.fsPath);
 }
 
 /**
@@ -1919,7 +1912,6 @@ function buildToolServices(
   baitonDir: string,
   git: ReturnType<typeof createGitService>,
   queueFor: QueueFor,
-  specsDir: string,
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
   confirm: ConfirmSeam,
@@ -1934,7 +1926,7 @@ function buildToolServices(
     git,
     confirm,
     intervention,
-    runQueue: createRunQueueSeam(queueFor, specsDir, adapterForRole),
+    runQueue: createRunQueueSeam(queueFor, baitonDir, adapterForRole),
     runPipeline,
     landTodo,
     clock: systemClock,

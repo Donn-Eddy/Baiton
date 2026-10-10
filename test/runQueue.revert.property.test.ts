@@ -11,7 +11,7 @@ import {
   type RunQueue,
   type RunQueueDeps,
   type RunRequest,
-  type SpecStore,
+  type PlanStore,
   type ResultWatcherFactory,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
@@ -274,7 +274,7 @@ function makeRig(
     ...gitOverrides,
   };
 
-  const specStore: SpecStore = {
+  const specStore: PlanStore = {
     currentState: async () => scenario.from,
     readSpec: async () => undefined,
     readArtifact: async () => '# Plan T01\n',

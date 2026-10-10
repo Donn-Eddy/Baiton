@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   artifactPathFor,
@@ -58,44 +60,52 @@ const PLAN_REVIEW: PlanReviewResult = {
   findings: [{ severity: 'should', text: 'Name the test file.' }],
 };
 
-describe('artifactPathFor (per-todo isolation, Req 24.3)', () => {
-  it('puts each todo-level artifact under its own todo folder', () => {
-    const base = path.join('/repo', '.baiton', 'specs', 'demo', 'todos');
+describe('artifactPathFor (per-phase isolation, Req 24.3)', () => {
+  let workspaceRoot: string;
+  beforeEach(() => { workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-artifact-path-')); });
+  afterEach(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+
+  it('defaults to the plans phases folder when no document exists', () => {
+    const base = path.join(workspaceRoot, '.baiton', 'plans', 'demo', 'phases');
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'plan', 'T06'),
-      path.join(base, 'T06', 'plan.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan', 'P06'),
+      path.join(base, 'P06', 'plan.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'execute', 'T06', 2),
-      path.join(base, 'T06', 'execute-2.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P06', 2),
+      path.join(base, 'P06', 'execute-2.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'review', 'T06', 1),
-      path.join(base, 'T06', 'review-1.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'review', 'P06', 1),
+      path.join(base, 'P06', 'review-1.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'plan-review', 'T06', 1),
-      path.join(base, 'T06', 'plan-review-1.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan-review', 'P06', 1),
+      path.join(base, 'P06', 'plan-review-1.md'),
     );
+    assert.strictEqual(artifactPathFor(workspaceRoot, 'demo', 'plan-draft'), path.join(workspaceRoot, '.baiton', 'plans', 'demo', 'plan.md'));
   });
 
-  it('never lets one todo overwrite another at the same attempt', () => {
+  it('never lets one phase overwrite another at the same attempt', () => {
     assert.notStrictEqual(
-      artifactPathFor('/repo', 'demo', 'execute', 'T05', 1),
-      artifactPathFor('/repo', 'demo', 'execute', 'T06', 1),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P05', 1),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P06', 1),
     );
   });
 
-  it('keeps the spec-scoped stages at the spec root, ignoring the todo id', () => {
-    const specDir = path.join('/repo', '.baiton', 'specs', 'demo');
+  it('resolves legacy specs to their todos layout', () => {
+    const specDir = path.join(workspaceRoot, '.baiton', 'specs', 'demo');
+    fs.mkdirSync(specDir, { recursive: true });
+    fs.writeFileSync(path.join(specDir, 'spec.md'), '# OVERVIEW\nLegacy.\n');
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'plan-draft', 'T06'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan-draft', 'T06'),
       path.join(specDir, 'spec.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'pr'),
+      artifactPathFor(workspaceRoot, 'demo', 'pr'),
       path.join(specDir, 'pr.md'),
     );
+    assert.strictEqual(artifactPathFor(workspaceRoot, 'demo', 'plan', 'T06'), path.join(specDir, 'todos', 'T06', 'plan.md'));
   });
 });
 

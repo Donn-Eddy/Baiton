@@ -12,10 +12,10 @@ import {
   type DispatchResult,
   type RunQueue,
   type RunRequest,
-  type SpecStore,
+  type PlanStore,
 } from '../src/engine/runQueue';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
-import { createSpecBranchWriter } from '../src/engine/specBranchWriter';
+import { createPlanBranchWriter } from '../src/engine/planBranchWriter';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import {
   createTodoWorktree,
@@ -24,7 +24,7 @@ import {
   todoWorktreeDirFor,
 } from '../src/engine/todoWorktree';
 import { createGitService } from '../src/git/gitService';
-import { readSpecJournal, todoJournalPathFor } from '../src/journal';
+import { readPlanJournal, phaseJournalPathFor } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
 import type { Role } from '../src/model/role';
 import type { Stage } from '../src/model/stage';
@@ -118,7 +118,7 @@ interface Rig {
 function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
   const specsDir = path.join(repo, '.baiton', 'specs');
   const mainGit = createGitService(repo);
-  const writer = createSpecBranchWriter({ specsDir, git: mainGit });
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: mainGit });
   const states = new Map<string, PhaseState>(Object.entries(initial));
   const stages: DrivenStage[] = [];
   const created: Array<string | undefined> = [];
@@ -136,7 +136,7 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
     return last === undefined ? undefined : fs.readFileSync(path.join(artifactDir(todoId), last), 'utf8');
   };
 
-  const specStore: SpecStore = {
+  const specStore: PlanStore = {
     currentState: async (_slug, todoId) => states.get(todoId),
     readSpec: async () => parsePlan(SPEC_TEXT),
     readArtifact: async (_slug, todoId, stage) => (stage === 'plan' ? '# Plan\n' : latest(todoId, stage)),
@@ -251,8 +251,8 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
         watcherFactory,
         specStore,
         journalPath: path.join(specsDir, SLUG, 'runs.jsonl'),
-        journalPathFor: (id) => todoJournalPathFor(specsDir, SLUG, id),
-        readJournal: () => readSpecJournal(specsDir, SLUG),
+        journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), SLUG, id),
+        readJournal: () => readPlanJournal(path.dirname(specsDir), SLUG),
         modelForRole: () => ({ model: 'test-model' }),
         adapterForRole: () => adapter,
         newRunId: (req) => `run-${req.todoId}-${req.action}-${req.attempt}-${counter++}`,
@@ -359,7 +359,7 @@ describe('run queue per-todo worktrees (real repo)', () => {
       assert.ok(fs.existsSync(path.join(rig.specsDir, SLUG, 'todos', id, 'execute-1.md')));
       const sha = git(repo, 'rev-parse', branch).trim();
       const records = fs
-        .readFileSync(todoJournalPathFor(rig.specsDir, SLUG, id), 'utf8')
+        .readFileSync(phaseJournalPathFor(path.dirname(rig.specsDir), SLUG, id), 'utf8')
         .split('\n')
         .filter(Boolean)
         .map((l) => JSON.parse(l) as { runId?: string; commit?: string; result?: string; stage?: string });

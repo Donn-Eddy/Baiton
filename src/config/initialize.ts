@@ -2,7 +2,7 @@
  * The Initialize command's file scaffolding (Requirement 1).
  *
  * `initialize` creates the `.baiton/` layout — `config.json`, `.gitignore`, and
- * the `runs/` and `specs/` directories (Req 1.1, 1.2, 1.7) — under a workspace
+ * the `runs/` and `plans/` directories (Req 1.1, 1.2, 1.7) — under a workspace
  * root. It never overwrites an existing `config.json` (Req 1.3): when one is
  * present its contents are left untouched and only `.gitignore` (and the
  * directories) are ensured. On any write failure it rolls back exactly the
@@ -21,6 +21,7 @@ import * as path from 'path';
 import { Result, err, ok } from '../model';
 import { defaultConfigJson } from './defaultConfig';
 import { GITIGNORE_CONTENTS } from './gitignore';
+import { PLANS_SUBDIR } from '../storage/documentLocation';
 
 /**
  * What `initialize` accomplished on success.
@@ -60,7 +61,7 @@ interface CreatedTracker {
  * Scaffolds the `.baiton/` layout at `baitonDir` (an absolute filesystem path).
  *
  * Order of operations, chosen so rollback is precise:
- * 1. Ensure `baitonDir`, `runs/` and `specs/` exist, recording only the
+ * 1. Ensure `baitonDir`, `runs/` and `plans/` exist, recording only the
  *    directories this call actually created.
  * 2. Write `.gitignore` (Req 1.2), recording it if newly created.
  * 3. If `config.json` is absent, write the default (Req 1.1) and record it; if
@@ -77,14 +78,14 @@ export async function initialize(baitonDir: string): Promise<Result<InitOutcome,
   const configPath = path.join(baitonDir, 'config.json');
   const gitignorePath = path.join(baitonDir, '.gitignore');
   const runsDir = path.join(baitonDir, 'runs');
-  const specsDir = path.join(baitonDir, 'specs');
+  const plansDir = path.join(baitonDir, PLANS_SUBDIR);
 
   try {
     // 1. Directories. `ensureDir` records only directories it actually creates,
     //    so a pre-existing `.baiton/` (or its subdirs) is never rolled back.
     await ensureDir(baitonDir, created);
     await ensureDir(runsDir, created);
-    await ensureDir(specsDir, created);
+    await ensureDir(plansDir, created);
 
     // 2. `.gitignore` is always ensured with the required exclusions, whether
     //    or not `config.json` already exists (Req 1.2, 1.3). Writing it fresh

@@ -12,7 +12,7 @@ import {
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
-import type { SpecStore } from '../src/engine/runQueue';
+import type { PlanStore } from '../src/engine/runQueue';
 import type { TerminalHost, HostTerminal } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
 import { ok } from '../src/model/result';
@@ -236,7 +236,7 @@ function makeRig(journalPath: string): Rig {
 
   // A spec store that keeps the `execute` transition legal: the todo is
   // `planned`, the spec is approved, unblocked, and the input rev matches.
-  const specStore: SpecStore = {
+  const specStore: PlanStore = {
     currentState: async () => 'planned',
     readSpec: async () => undefined,
     readArtifact: async () => '# Plan T01\n',

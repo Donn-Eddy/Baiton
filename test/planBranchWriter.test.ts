@@ -6,7 +6,8 @@ import * as path from 'path';
 
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
-import { createSpecBranchWriter, specFolderPathspec } from '../src/engine/specBranchWriter';
+import { createPlanBranchWriter, planFolderPathspec } from '../src/engine/planBranchWriter';
+import { locationFor } from '../src/storage/documentLocation';
 
 /** Unit tests for the per-slug serialized spec-branch writer. */
 
@@ -32,7 +33,7 @@ function writeFile(repo: string, relPath: string, contents: string): void {
 
 const noGit = { commitPaths: async (): Promise<string> => 'sha' };
 
-describe('specBranchWriter', () => {
+describe('planBranchWriter', () => {
   const repos: string[] = [];
   afterEach(() => {
     for (const r of repos.splice(0)) {
@@ -41,7 +42,7 @@ describe('specBranchWriter', () => {
   });
 
   it('serializes same-slug callers', async () => {
-    const w = createSpecBranchWriter({ specsDir: '/x', git: noGit });
+    const w = createPlanBranchWriter({ baitonDir: '/x/.baiton', git: noGit });
     const log: string[] = [];
     const gate = deferred();
     const a = w.apply('s', async () => {
@@ -61,7 +62,7 @@ describe('specBranchWriter', () => {
   });
 
   it('runs 5 callers FIFO with no overlap', async () => {
-    const w = createSpecBranchWriter({ specsDir: '/x', git: noGit });
+    const w = createPlanBranchWriter({ baitonDir: '/x/.baiton', git: noGit });
     const order: number[] = [];
     let active = 0;
     let maxActive = 0;
@@ -80,7 +81,7 @@ describe('specBranchWriter', () => {
   });
 
   it('does not block different slugs', async () => {
-    const w = createSpecBranchWriter({ specsDir: '/x', git: noGit });
+    const w = createPlanBranchWriter({ baitonDir: '/x/.baiton', git: noGit });
     const gate = deferred();
     const a = w.apply('a', () => gate.promise);
     let aDone = false;
@@ -94,7 +95,7 @@ describe('specBranchWriter', () => {
   });
 
   it('isolates rejections', async () => {
-    const w = createSpecBranchWriter({ specsDir: '/x', git: noGit });
+    const w = createPlanBranchWriter({ baitonDir: '/x/.baiton', git: noGit });
     const boom = new Error('boom');
     await assert.rejects(
       w.apply('s', async () => {
@@ -106,14 +107,14 @@ describe('specBranchWriter', () => {
   });
 
   it('passes return values through (sync fn allowed)', async () => {
-    const w = createSpecBranchWriter({ specsDir: '/x', git: noGit });
+    const w = createPlanBranchWriter({ baitonDir: '/x/.baiton', git: noGit });
     assert.strictEqual(await w.apply('s', () => 42), 42);
   });
 
-  it('scope.commit delegates to commitPaths on the spec folder', async () => {
+  it('scope.commit delegates to commitPaths on the resolved document folder', async () => {
     const calls: unknown[][] = [];
-    const w = createSpecBranchWriter({
-      specsDir: '/repo/.baiton/specs',
+    const w = createPlanBranchWriter({
+      baitonDir: '/repo/.baiton',
       git: {
         commitPaths: async (...args: unknown[]) => {
           calls.push(args);
@@ -122,15 +123,16 @@ describe('specBranchWriter', () => {
       },
     });
     const sha = await w.apply('s', (scope) => {
-      assert.strictEqual(scope.dir, path.join('/repo/.baiton/specs', 's'));
+      assert.strictEqual(scope.dir, path.join('/repo/.baiton/plans', 's'));
       return scope.commit('msg', { K: 'v' });
     });
     assert.strictEqual(sha, 'sha1');
-    assert.deepStrictEqual(calls, [[['.baiton/specs/s'], 'msg', { K: 'v' }]]);
-    assert.strictEqual(specFolderPathspec('x'), '.baiton/specs/x');
+    assert.deepStrictEqual(calls, [[['.baiton/plans/s'], 'msg', { K: 'v' }]]);
+    assert.strictEqual(planFolderPathspec(locationFor('/x/.baiton', 'x', 'plan')), '.baiton/plans/x');
+    assert.strictEqual(planFolderPathspec(locationFor('/x/.baiton', 'x', 'legacy-spec')), '.baiton/specs/x');
   });
 
-  it('commits only the spec folder in a real repo', async () => {
+  it('commits only the legacy document folder in a real repo', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-sbw-'));
     repos.push(repo);
     git(repo, 'init', '-q');
@@ -142,13 +144,31 @@ describe('specBranchWriter', () => {
     git(repo, 'commit', '-q', '-m', 'initial commit');
     writeFile(repo, '.baiton/specs/s/spec.md', 'spec\n');
     writeFile(repo, 'src/other.ts', 'x\n');
-    const w = createSpecBranchWriter({
-      specsDir: path.join(repo, '.baiton', 'specs'),
+    const w = createPlanBranchWriter({
+      baitonDir: path.join(repo, '.baiton'),
       git: createGitService(repo),
     });
-    await w.apply('s', (scope) => scope.commit('spec(s): T01 planning'));
+    await w.apply('s', (scope) => scope.commit('plan(s): T01 planning'));
     const files = git(repo, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n');
     assert.deepStrictEqual(files, ['.baiton/specs/s/spec.md']);
+    assert.ok(git(repo, 'status', '--porcelain').includes('src/'));
+  });
+
+  it('commits only the plan document folder in a real repo', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-pbw-plan-'));
+    repos.push(repo);
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'Baiton Test');
+    git(repo, 'config', 'user.email', 'baiton-test@example.com');
+    writeFile(repo, 'README.md', 'baseline\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'initial commit');
+    writeFile(repo, '.baiton/plans/s/plan.md', '# PHASES\n- [pending] P01 Plan\n');
+    writeFile(repo, 'src/other.ts', 'x\n');
+    const w = createPlanBranchWriter({ baitonDir: path.join(repo, '.baiton'), git: createGitService(repo) });
+    await w.apply('s', (scope) => scope.commit('plan(s): P01 planning'));
+    const files = git(repo, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n');
+    assert.deepStrictEqual(files, ['.baiton/plans/s/plan.md']);
     assert.ok(git(repo, 'status', '--porcelain').includes('src/'));
   });
 });

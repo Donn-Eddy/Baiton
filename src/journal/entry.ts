@@ -72,7 +72,8 @@ export interface PrCompletion {
 }
 
 /**
- * The record appended when a stage starts (Req 21.1): the run id, todo, stage,
+ * The record appended when a stage starts (Req 21.1): the run id, phase id
+ * (serialized in the existing `todoId` field), stage,
  * attempt, starting HEAD, input rev, and terminal process id.
  */
 export interface StartRecord {

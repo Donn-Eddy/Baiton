@@ -24,7 +24,7 @@
  *
  * Pure: every artifact is passed in by the caller, so this module performs no
  * `fs` or `vscode` access. The run queue reads the artifacts through the
- * `SpecStore` seam and supplies them here.
+ * `PlanStore` seam and supplies them here.
  */
 import type { ParsedPlan } from '../model/parser';
 

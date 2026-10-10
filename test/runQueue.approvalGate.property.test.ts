@@ -8,7 +8,7 @@ import {
   type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
-  type SpecStore,
+  type PlanStore,
   type ResultWatcherFactory,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
@@ -33,7 +33,7 @@ import { ok } from '../src/model/result';
  *
  * Two complementary properties are asserted:
  *
- *  (A) At the run-queue level, through the `SpecStore.isApproved` seam that
+ *  (A) At the run-queue level, through the `PlanStore.isApproved` seam that
  *      `checkGuards` consults before launching Execute (src/engine/runQueue.ts,
  *      `cleanTreeAndInputRev` guard). With `isApproved` returning false — the
  *      exact predicate for "approved_rev != current Approval_Hash, or unset" —
@@ -158,14 +158,14 @@ function makeGit(): GitService {
 }
 
 /**
- * Build a SpecStore whose approval verdict is fixed and whose other Execute
+ * Build a PlanStore whose approval verdict is fixed and whose other Execute
  * guards (blocked, input-rev) are satisfied, so `isApproved` is the only gate
  * under test. Records every state write for assertions.
  */
 function makeSpecStore(opts: {
   state: PhaseState;
   approved: boolean;
-}): SpecStore & { writes: PhaseState[] } {
+}): PlanStore & { writes: PhaseState[] } {
   const writes: PhaseState[] = [];
   return {
     writes,
@@ -186,9 +186,9 @@ function makeSpecStore(opts: {
   };
 }
 
-/** Assemble RunQueueDeps around the given SpecStore and host doubles. */
+/** Assemble RunQueueDeps around the given PlanStore and host doubles. */
 function makeDeps(
-  specStore: SpecStore,
+  specStore: PlanStore,
   terminalHost: TerminalHost,
   watcherFactory: ResultWatcherFactory,
   workspaceRoot: string,
@@ -216,7 +216,7 @@ function makeWorkspace(): string {
   return root;
 }
 
-/** An execute request (todo state is fixed by the SpecStore double). */
+/** An execute request (todo state is fixed by the PlanStore double). */
 function executeRequest(): RunRequest {
   return { slug: 's', todoId: 'T01', action: 'execute', role: 'executor', attempt: 1, resume: false };
 }

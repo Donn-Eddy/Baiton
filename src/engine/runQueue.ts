@@ -53,7 +53,7 @@ import type { GitService } from '../git';
 import { createGitService } from '../git/gitService';
 import { err, ok, type Result } from '../model/result';
 import { createTodoWorktree, unlandedTodos, type TodoWorktreeDeps } from './todoWorktree';
-import type { SpecBranchWriter } from './specBranchWriter';
+import type { PlanBranchWriter } from './planBranchWriter';
 import type { Adapter } from '../adapter';
 import type { HostTerminal } from './terminalHost';
 import type { TerminalHost } from './terminalHost';
@@ -207,7 +207,7 @@ export interface RunQueue {
  * activation layer wires a store backed by {@link writePhaseState} over the
  * on-disk spec (re-reading before each write per Req 6.3).
  */
-export interface SpecStore {
+export interface PlanStore {
   /** The todo's current lifecycle state, or `undefined` when it cannot be read. */
   currentState(slug: string, todoId: string): Promise<PhaseState | undefined>;
   /**
@@ -320,7 +320,7 @@ export interface RunQueueDeps {
   watcherFactory: ResultWatcherFactory;
   /** When wired, launched stages relay harness asks into chat; absent leaves launches unchanged. */
   askWatcherFactory?: AskWatcherFactory;
-  specStore: SpecStore;
+  specStore: PlanStore;
   /** Absolute path of the run journal `runs.jsonl` (Req 21.1, 21.2). */
   journalPath: string;
   /**
@@ -331,7 +331,7 @@ export interface RunQueueDeps {
   journalPathFor?: (todoId: string) => string;
   /**
    * The merged journal the queue reads (spec-level + per-todo files, see
-   * readSpecJournal); absent → `parseJournal(journalPath)`.
+   * readPlanJournal); absent → `parseJournal(journalPath)`.
    */
   readJournal?: () => JournalEntry[];
   /** Per-role model, resolved from config; selects the adapter `--model`. */
@@ -373,7 +373,7 @@ export interface RunQueueDeps {
    * The per-slug spec-branch writer; when set, journal appends run under
    * `specWriter.apply(slug, ...)` so they serialize with state/artifact commits.
    */
-  specWriter?: Pick<SpecBranchWriter, 'apply'>;
+  specWriter?: Pick<PlanBranchWriter, 'apply'>;
 }
 
 /** Where one todo's stages run: its worktree dir and a git service bound to it. */
@@ -392,7 +392,7 @@ export interface QueueWorktreeSeam {
 
 /** The real {@link QueueWorktreeSeam} over the todo-worktree lifecycle. */
 export function createQueueWorktreeSeam(
-  deps: TodoWorktreeDeps & { writer?: Pick<SpecBranchWriter, 'apply'> },
+  deps: TodoWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'> },
 ): QueueWorktreeSeam {
   return {
     async ensure(slug, todoId) {
@@ -1034,7 +1034,7 @@ class SerialRunQueue implements RunQueue {
 
   /**
    * Assemble the Brief's Context section for a stage (Req 18.3), reading the
-   * spec and the todo's own artifacts through the {@link SpecStore} seam.
+   * spec and the todo's own artifacts through the {@link PlanStore} seam.
    *
    * Each role gets exactly what it needs and nothing else — the planner the
    * OVERVIEW, its todo line and its dependencies' execution summaries; the

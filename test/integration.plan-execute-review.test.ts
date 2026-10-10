@@ -8,17 +8,17 @@ import * as path from 'path';
 
 import { createGitService } from '../src/git/gitService';
 import type { GitWorktreeService } from '../src/git';
-import type { RunQueue, SpecStore, ResultWatcherFactory } from '../src/engine/runQueue';
-import { createSpecBranchWriter, type SpecBranchWriter } from '../src/engine/specBranchWriter';
+import type { RunQueue, PlanStore, ResultWatcherFactory } from '../src/engine/runQueue';
+import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
 import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor } from '../src/engine/todoWorktree';
-import { createSpecStore } from '../src/activation/specStore';
+import { createPlanStore } from '../src/activation/planStore';
 import { createTodoQueues, type TodoQueues } from '../src/activation/engineFacade';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import type { HostTerminal, TerminalHost, CreateTerminalOptions } from '../src/engine/terminalHost';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 import { recoverJournal, type ProcessControl } from '../src/engine/recovery';
-import { parseJournal, appendStart, specJournalPathFor } from '../src/journal';
+import { parseJournal, appendStart, planJournalPathFor } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import { isOk } from '../src/model/result';
@@ -337,8 +337,8 @@ interface Harness {
   repo: string;
   specsDir: string;
   git: GitWorktreeService;
-  writer: SpecBranchWriter;
-  store: SpecStore;
+  writer: PlanBranchWriter;
+  store: PlanStore;
   queues: TodoQueues;
   queue: RunQueue;
   factory: StubSubAgentFactory;
@@ -350,12 +350,12 @@ interface Harness {
 function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const specsDir = path.join(repo, '.baiton', 'specs');
   const gitService = createGitService(repo);
-  const writer = createSpecBranchWriter({ specsDir, git: gitService });
-  const store = createSpecStore(specsDir, gitService, writer);
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: gitService });
+  const store = createPlanStore(path.dirname(specsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
   const queues = createTodoQueues({
     workspaceRoot: repo,
-    specsDir,
+    baitonDir: path.dirname(specsDir),
     git: gitService,
     specWriter: writer,
     specStore: store,
@@ -374,7 +374,7 @@ function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
     queue: queues.queueFor(SLUG, TODO_ID),
     factory: factory as unknown as StubSubAgentFactory,
     terminalHost,
-    journalPath: specJournalPathFor(specsDir, SLUG),
+    journalPath: planJournalPathFor(path.dirname(specsDir), SLUG),
   };
 }
 
@@ -550,11 +550,11 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.notStrictEqual(headAfterPlan, headBeforePlan, 'metadata was committed during plan');
     const planSubjects = commitSubjects(h.repo);
     assert.ok(
-      planSubjects.includes(`spec(${SLUG}): ${TODO_ID} planning`),
+      planSubjects.includes(`plan(${SLUG}): ${TODO_ID} planning`),
       'a planning metadata commit landed',
     );
     assert.ok(
-      planSubjects.includes(`spec(${SLUG}): ${TODO_ID} planned`),
+      planSubjects.includes(`plan(${SLUG}): ${TODO_ID} planned`),
       'a planned metadata commit landed',
     );
 
@@ -746,7 +746,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
     const subjects = commitSubjects(h.repo);
     assert.ok(
-      subjects.some((s) => s === `spec(${SLUG}): ${TODO_ID} pending (closed (exit 1))`),
+      subjects.some((s) => s === `plan(${SLUG}): ${TODO_ID} pending (closed (exit 1))`),
       'the revert commit names the closed exit code',
     );
 

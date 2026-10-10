@@ -9,7 +9,7 @@ import {
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
-  type SpecStore,
+  type PlanStore,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
@@ -177,7 +177,7 @@ function makeRig(
     remoteUrl: async () => '',
   };
 
-  const specStore: SpecStore = {
+  const specStore: PlanStore = {
     currentState: async () => state,
     readSpec: async () => parsePlan(SPEC_TEXT),
     readArtifact: async (_slug, _todoId, stage) => artifacts[stage],

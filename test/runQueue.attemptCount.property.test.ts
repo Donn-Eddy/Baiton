@@ -9,7 +9,7 @@ import {
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
-  type SpecStore,
+  type PlanStore,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
@@ -240,7 +240,7 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
     unlanded: async () => [],
   };
 
-  const specStore: SpecStore = {
+  const specStore: PlanStore = {
     currentState: async () => 'planned',
     readSpec: async () => undefined,
     readArtifact: async () => '# Plan T01\n',

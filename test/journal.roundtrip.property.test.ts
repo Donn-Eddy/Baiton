@@ -7,9 +7,9 @@ import {
   appendStart,
   appendCompletion,
   parseJournal,
-  readSpecJournal,
-  specJournalPathFor,
-  todoJournalPathFor,
+  readPlanJournal,
+  planJournalPathFor,
+  phaseJournalPathFor,
   StartInput,
   CompletionInput,
   JournalEntry,
@@ -332,7 +332,7 @@ describe('run journal round trip (property)', () => {
   });
 });
 
-describe('readSpecJournal', () => {
+describe('readPlanJournal', () => {
   const start = (runId: string, todoId: string): StartInput => ({
     runId,
     todoId,
@@ -342,12 +342,14 @@ describe('readSpecJournal', () => {
     inputRev: 'r',
   });
 
-  function withDir(fn: (specsDir: string) => void): void {
-    const specsDir = mkdtempSync(join(tmpdir(), 'baiton-specjournal-'));
+  function withDir(fn: (baitonDir: string) => void): void {
+    const baitonDir = mkdtempSync(join(tmpdir(), 'baiton-planjournal-'));
     try {
-      fn(specsDir);
+      mkdirSync(join(baitonDir, 'specs', 'demo'), { recursive: true });
+      writeFileSync(join(baitonDir, 'specs', 'demo', 'spec.md'), '# OVERVIEW\nLegacy.\n');
+      fn(baitonDir);
     } finally {
-      rmSync(specsDir, { recursive: true, force: true });
+      rmSync(baitonDir, { recursive: true, force: true });
     }
   }
 
@@ -368,14 +370,14 @@ describe('readSpecJournal', () => {
             runs.forEach((r, i) => {
               const runId = `run-${i}`;
               const file = r.legacy
-                ? specJournalPathFor(specsDir, 'demo')
-                : todoJournalPathFor(specsDir, 'demo', r.todo);
+                ? planJournalPathFor(specsDir, 'demo')
+                : phaseJournalPathFor(specsDir, 'demo', r.todo);
               appendStart(file, start(runId, r.todo));
               if (r.done) {
                 appendCompletion(file, { runId, result: 'completed' });
               }
             });
-            const merged = readSpecJournal(specsDir, 'demo');
+            const merged = readPlanJournal(specsDir, 'demo');
             assert.strictEqual(merged.length, runs.length);
             const byId = new Map(merged.map((e) => [e.runId, e]));
             runs.forEach((r, i) => {
@@ -401,13 +403,13 @@ describe('readSpecJournal', () => {
 
   it('attaches a per-todo completion to a spec-level start', () => {
     withDir((specsDir) => {
-      appendStart(specJournalPathFor(specsDir, 'demo'), start('r1', 'T01'));
-      appendCompletion(todoJournalPathFor(specsDir, 'demo', 'T01'), {
+      appendStart(planJournalPathFor(specsDir, 'demo'), start('r1', 'T01'));
+      appendCompletion(phaseJournalPathFor(specsDir, 'demo', 'T01'), {
         runId: 'r1',
         result: 'completed',
         commit: 'sha',
       });
-      const merged = readSpecJournal(specsDir, 'demo');
+      const merged = readPlanJournal(specsDir, 'demo');
       assert.strictEqual(merged.length, 1);
       assert.strictEqual(merged[0].result, 'completed');
       assert.strictEqual(merged[0].commit, 'sha');
@@ -416,13 +418,13 @@ describe('readSpecJournal', () => {
 
   it('tolerates missing files and folders without a journal', () => {
     withDir((specsDir) => {
-      assert.deepStrictEqual(readSpecJournal(specsDir, 'demo'), []);
-      mkdirSync(join(specsDir, 'demo', 'todos', 'T05'), { recursive: true });
-      writeFileSync(join(specsDir, 'demo', 'todos', 'T05', 'plan.md'), '# plan\n');
-      assert.deepStrictEqual(readSpecJournal(specsDir, 'demo'), []);
-      appendStart(todoJournalPathFor(specsDir, 'demo', 'T01'), start('r1', 'T01'));
+      assert.deepStrictEqual(readPlanJournal(specsDir, 'demo'), []);
+      mkdirSync(join(specsDir, 'specs', 'demo', 'todos', 'T05'), { recursive: true });
+      writeFileSync(join(specsDir, 'specs', 'demo', 'todos', 'T05', 'plan.md'), '# plan\n');
+      assert.deepStrictEqual(readPlanJournal(specsDir, 'demo'), []);
+      appendStart(phaseJournalPathFor(specsDir, 'demo', 'T01'), start('r1', 'T01'));
       assert.deepStrictEqual(
-        readSpecJournal(specsDir, 'demo').map((e) => e.runId),
+        readPlanJournal(specsDir, 'demo').map((e) => e.runId),
         ['r1'],
       );
     });
@@ -430,10 +432,21 @@ describe('readSpecJournal', () => {
 
   it('appendStart creates a missing todos/<id>/ directory', () => {
     withDir((specsDir) => {
-      const file = todoJournalPathFor(specsDir, 'demo', 'T09');
-      assert.ok(!existsSync(join(specsDir, 'demo', 'todos', 'T09')));
+      const file = phaseJournalPathFor(specsDir, 'demo', 'T09');
+      assert.ok(!existsSync(join(specsDir, 'specs', 'demo', 'todos', 'T09')));
       appendStart(file, start('r1', 'T09'));
       assert.ok(existsSync(file));
+    });
+  });
+
+  it('reads plan phase journals under phases/<id>', () => {
+    withDir((baitonDir) => {
+      mkdirSync(join(baitonDir, 'plans', 'new'), { recursive: true });
+      writeFileSync(join(baitonDir, 'plans', 'new', 'plan.md'), '# PHASES\n- [pending] P01 Plan\n');
+      const file = phaseJournalPathFor(baitonDir, 'new', 'P01');
+      assert.ok(file.endsWith(join('phases', 'P01', 'runs.jsonl')));
+      appendStart(file, start('plan-run', 'P01'));
+      assert.deepStrictEqual(readPlanJournal(baitonDir, 'new').map((entry) => entry.runId), ['plan-run']);
     });
   });
 });

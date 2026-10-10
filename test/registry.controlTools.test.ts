@@ -1714,7 +1714,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         ['demo/T01', fakeQueue()],
         ['demo/T02', fakeQueue()],
       ]);
-      const seam = createRunQueueSeam((slug, todoId) => queues.get(`${slug}/${todoId}`)!, specsDir, () => undefined);
+      const seam = createRunQueueSeam((slug, todoId) => queues.get(`${slug}/${todoId}`)!, path.dirname(specsDir), () => undefined);
       const t01 = queues.get('demo/T01')!;
       const t02 = queues.get('demo/T02')!;
       const req = (todoId: string) => ({ slug: 'demo', todoId, stage: 'plan' as const });
@@ -1740,7 +1740,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     it('answers busy while the queue itself is running and maps refusals to illegal', async () => {
       const specsDir = path.join(newRepo(), '.baiton', 'specs');
       const q = fakeQueue();
-      const seam = createRunQueueSeam(() => q, specsDir, () => undefined);
+      const seam = createRunQueueSeam(() => q, path.dirname(specsDir), () => undefined);
       const req = { slug: 'demo', todoId: 'T01', stage: 'plan' as const };
 
       q.running = true;
