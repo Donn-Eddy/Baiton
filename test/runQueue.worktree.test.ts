@@ -25,10 +25,10 @@ import {
 } from '../src/engine/todoWorktree';
 import { createGitService } from '../src/git/gitService';
 import { readSpecJournal, todoJournalPathFor } from '../src/journal';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import type { Role } from '../src/model/role';
 import type { Stage } from '../src/model/stage';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 
 /**
  * The run queue in per-todo worktree mode, against a real temporary git
@@ -108,18 +108,18 @@ interface DrivenStage {
 interface Rig {
   repo: string;
   specsDir: string;
-  states: Map<string, TodoState>;
+  states: Map<string, PhaseState>;
   stages: DrivenStage[];
   created: Array<string | undefined>;
   queueFor(todoId: string): RunQueue;
   dispatch(todoId: string, action: RunRequest['action'], role: Role, attempt?: number): Promise<DispatchResult>;
 }
 
-function makeRig(repo: string, initial: Record<string, TodoState>): Rig {
+function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
   const specsDir = path.join(repo, '.baiton', 'specs');
   const mainGit = createGitService(repo);
   const writer = createSpecBranchWriter({ specsDir, git: mainGit });
-  const states = new Map<string, TodoState>(Object.entries(initial));
+  const states = new Map<string, PhaseState>(Object.entries(initial));
   const stages: DrivenStage[] = [];
   const created: Array<string | undefined> = [];
 
@@ -138,7 +138,7 @@ function makeRig(repo: string, initial: Record<string, TodoState>): Rig {
 
   const specStore: SpecStore = {
     currentState: async (_slug, todoId) => states.get(todoId),
-    readSpec: async () => parseSpec(SPEC_TEXT),
+    readSpec: async () => parsePlan(SPEC_TEXT),
     readArtifact: async (_slug, todoId, stage) => (stage === 'plan' ? '# Plan\n' : latest(todoId, stage)),
     latestExecuteCommit: async () => undefined,
     persistArtifact: (slug, artifactPath, contents) =>

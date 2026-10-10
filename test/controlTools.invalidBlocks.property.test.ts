@@ -9,9 +9,9 @@ import { ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
-import { parseSpec } from '../src/model/parser';
-import { validateSpec } from '../src/model/validator';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { parsePlan } from '../src/model/parser';
+import { validatePlan } from '../src/model/validator';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 import { Stage } from '../src/model/stage';
 
 /**
@@ -27,7 +27,7 @@ import { Stage } from '../src/model/stage';
  * Validates: Requirements 4.9
  *
  * Strategy: generate a clean, acyclic base spec, then inject exactly one
- * malformed construct so `validateSpec` reports it invalid. Drive `run` through
+ * malformed construct so `validatePlan` reports it invalid. Drive `run` through
  * the real tool registry against a temp repo, using a run-queue seam that throws
  * if it is ever dispatched into. Because the gate reads and validates the spec
  * before touching the queue, an invalid spec must produce an error result with
@@ -56,7 +56,7 @@ const fmValueArb: fc.Arbitrary<string> = fc
 
 interface CleanTodo {
   id: string;
-  state: TodoState;
+  state: PhaseState;
   title: string;
   after: string[];
 }
@@ -84,7 +84,7 @@ const baseSpecArb: fc.Arbitrary<{ ids: string[]; todos: CleanTodo[]; overview: s
       .tuple(
         ...ids.map((_id, index) =>
           fc.record({
-            state: fc.constantFrom<TodoState>(...TODO_STATES),
+            state: fc.constantFrom<PhaseState>(...PHASE_STATES),
             title: titleArb,
             after: fc.subarray(ids.slice(0, index)),
           }),
@@ -287,7 +287,7 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
           const raw = injectMalformed(base, kind, seed);
 
           // Precondition: the injected spec really is invalid.
-          fc.pre(validateSpec(parseSpec(raw), raw).length > 0);
+          fc.pre(validatePlan(parsePlan(raw), raw).length > 0);
 
           const repo = newRepo();
           const slug = 'sample';
@@ -343,7 +343,7 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
           const raw = renderSpec(base.overview, base.todos.map(renderTodo));
 
           // Precondition: the base spec is valid.
-          fc.pre(validateSpec(parseSpec(raw), raw).length === 0);
+          fc.pre(validatePlan(parsePlan(raw), raw).length === 0);
 
           const repo = newRepo();
           const slug = 'sample';

@@ -26,7 +26,7 @@ import {
   type TodoQueues,
 } from '../src/activation/engineFacade';
 import { parseJournal, todoJournalPathFor } from '../src/journal';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import type { Role } from '../src/model/role';
 import type { SpecStore } from '../src/engine/runQueue';
@@ -135,7 +135,7 @@ async function approveSpec(g: GitWorktreeService, repo: string): Promise<void> {
   content = setKey(content, 'base_commit', baseCommit);
   content = setKey(content, 'branch', branch);
   content = setKey(content, 'status', 'approved');
-  content = setKey(content, 'approved_rev', approvalHash(parseSpec(content)));
+  content = setKey(content, 'approved_rev', approvalHash(parsePlan(content)));
   fs.writeFileSync(specAbs, content, 'utf8');
   await g.commit(`spec(${SLUG}): approve`);
 }
@@ -760,7 +760,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     assert.deepStrictEqual(h.prCalls, [], 'still nothing pushed or created');
 
     // -- Spec state was not clobbered -----------------------------------------
-    const todos = parseSpec(readRepoFile(repo, SPEC_REL)).todos;
+    const todos = parsePlan(readRepoFile(repo, SPEC_REL)).phases;
     assert.deepStrictEqual(todos.map((t) => [t.id, t.state]), [['T01', 'done'], ['T02', 'done']]);
     assert.strictEqual(await h.store.currentState(SLUG, 'T01'), 'done');
     assert.strictEqual(await h.store.currentState(SLUG, 'T02'), 'done');
@@ -900,7 +900,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     assert.strictEqual(outcome.commits.length, 1);
     assert.strictEqual(git(runWorktree, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'baiton/bug/bug-20260101-000000-aaaa');
     assert.strictEqual(
-      parseSpec(readRepoFile(repo, SPEC_REL)).todos.find((t) => t.id === 'T01')?.state,
+      parsePlan(readRepoFile(repo, SPEC_REL)).phases.find((t) => t.id === 'T01')?.state,
       'planning',
       'the run did not touch the in-flight todo',
     );
@@ -919,7 +919,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     // The held stage finishes and nothing was clobbered.
     factory.release('T01', 'plan');
     assert.deepStrictEqual(await planning, { kind: 'dispatched', runId: 'completed' });
-    const states = parseSpec(readRepoFile(repo, SPEC_REL)).todos.map((t) => [t.id, t.state]);
+    const states = parsePlan(readRepoFile(repo, SPEC_REL)).phases.map((t) => [t.id, t.state]);
     assert.deepStrictEqual(states, [['T01', 'planned'], ['T02', 'planned']]);
     await assertOnlyJournalsDirty(h.git, 'the main checkout');
   });

@@ -24,8 +24,8 @@ import type { GitService } from './git';
 import { recoverJournal } from './engine';
 import { specJournalPaths } from './journal';
 import type { ProcessControl } from './engine';
-import { writeTodoState } from './model/writer';
-import type { TodoState } from './model/todoState';
+import { writePhaseState } from './model/writer';
+import type { PhaseState } from './model/phaseState';
 import { Surface } from './activation/surface';
 import {
   COMMANDS,
@@ -572,7 +572,7 @@ const hostProcessControl: ProcessControl = {
 /**
  * Build the serializer-backed `writeState` seam recovery replays a lost state
  * write through (Req 21.5, 21.7). Re-reads the spec's `spec.md`, applies the
- * minimal state-box edit via the pure {@link writeTodoState} serializer, writes
+ * minimal state-box edit via the pure {@link writePhaseState} serializer, writes
  * the result back, and commits the change on the spec branch (Req 17.1).
  * Resolves `false` when the serializer aborts (the target could not be located)
  * so recovery records a `no-op` rather than claiming a state change (Req 6.5).
@@ -584,16 +584,16 @@ function makeRecoveryWriteState(
   repoRoot: string,
   slug: string,
   git: GitService,
-): (slug: string, todoId: string, state: TodoState, note?: string) => Promise<boolean> {
+): (slug: string, todoId: string, state: PhaseState, note?: string) => Promise<boolean> {
   const specPath = path.join(repoRoot, '.baiton', 'specs', slug, 'spec.md');
-  return async (_slug: string, todoId: string, state: TodoState): Promise<boolean> => {
+  return async (_slug: string, todoId: string, state: PhaseState): Promise<boolean> => {
     let current: string;
     try {
       current = await fsp.readFile(specPath, 'utf8');
     } catch {
       return false;
     }
-    const written = writeTodoState(current, todoId, state);
+    const written = writePhaseState(current, todoId, state);
     if (isErr(written)) {
       return false;
     }

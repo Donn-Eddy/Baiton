@@ -28,7 +28,7 @@ import {
   StartRecord,
 } from './entry';
 import { Stage, isStage } from '../model/stage';
-import { TodoState, isTodoState } from '../model/todoState';
+import { PhaseState, isPhaseState } from '../model/phaseState';
 
 /** File name of every run journal (spec-level and per-todo). */
 export const JOURNAL_FILE = 'runs.jsonl';
@@ -82,7 +82,7 @@ export interface StartInput {
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch (Req 1.2); omitted from the line when undefined. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /** The Claude `--session-id` UUID (Req 1.2); omitted from the line when undefined. */
   sessionId?: string;
 }
@@ -360,7 +360,7 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
   if (typeof obj.terminalPid === 'number') {
     record.terminalPid = obj.terminalPid;
   }
-  if (typeof obj.fromState === 'string' && isTodoState(obj.fromState)) {
+  if (typeof obj.fromState === 'string' && isPhaseState(obj.fromState)) {
     record.fromState = obj.fromState;
   }
   if (typeof obj.sessionId === 'string') {

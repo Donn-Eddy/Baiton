@@ -4,8 +4,8 @@ import {
   err,
   isOk,
   isErr,
-  TODO_STATES,
-  isTodoState,
+  PHASE_STATES,
+  isPhaseState,
   STAGES,
   isStage,
   ROLES,
@@ -35,15 +35,15 @@ describe('shared types', () => {
     });
   });
 
-  describe('TodoState', () => {
+  describe('PhaseState', () => {
     it('recognizes every known state', () => {
-      for (const s of TODO_STATES) {
-        assert.strictEqual(isTodoState(s), true);
+      for (const s of PHASE_STATES) {
+        assert.strictEqual(isPhaseState(s), true);
       }
     });
 
     it('rejects an unknown state', () => {
-      assert.strictEqual(isTodoState('bogus'), false);
+      assert.strictEqual(isPhaseState('bogus'), false);
     });
   });
 

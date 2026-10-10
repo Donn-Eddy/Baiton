@@ -17,8 +17,8 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/ada
 import type { Role } from '../src/model/role';
 import type { GitService, GitStatus } from '../src/git';
 import type { ToolServices } from '../src/orchestrator/toolServices';
-import { parseSpec } from '../src/model/parser';
-import { validateSpec } from '../src/model/validator';
+import { parsePlan } from '../src/model/parser';
+import { validatePlan } from '../src/model/validator';
 import { parseJournal } from '../src/journal';
 import { Result, ok } from '../src/model/result';
 
@@ -302,18 +302,18 @@ describe('spec-draft runner (unit)', () => {
     assert.strictEqual(outcome.specPath, '.baiton/specs/greeting/spec.md');
 
     const content = fs.readFileSync(h.specFile('greeting'), 'utf8');
-    const spec = parseSpec(content);
-    assert.deepStrictEqual(validateSpec(spec, content), [], 'the drafted spec must be valid');
+    const spec = parsePlan(content);
+    assert.deepStrictEqual(validatePlan(spec, content), [], 'the drafted spec must be valid');
     assert.deepStrictEqual(
-      spec.todos.map((t) => [t.id, t.state, t.title]),
+      spec.phases.map((t) => [t.id, t.state, t.title]),
       [
         ['T01', 'pending', 'Add the greeting function'],
         ['T02', 'pending', 'Test the greeting function'],
       ],
     );
     // The 1-based position in the writer's list became the assigned id.
-    assert.deepStrictEqual(spec.todos[1].after, ['T01']);
-    assert.deepStrictEqual(spec.todos[0].files, ['src/greeting.ts']);
+    assert.deepStrictEqual(spec.phases[1].after, ['T01']);
+    assert.deepStrictEqual(spec.phases[0].files, ['src/greeting.ts']);
     assert.strictEqual((spec.frontmatter.get('status') ?? '').trim(), 'draft');
 
     // The spec was committed under the spec-folder commit convention.

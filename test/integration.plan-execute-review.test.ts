@@ -19,10 +19,10 @@ import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 import { recoverJournal, type ProcessControl } from '../src/engine/recovery';
 import { parseJournal, appendStart, specJournalPathFor } from '../src/journal';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import { isOk } from '../src/model/result';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Stage } from '../src/model/stage';
 import type { Role } from '../src/model/role';
 import {
@@ -401,7 +401,7 @@ async function approveSpec(h: Harness): Promise<{ baseCommit: string; branch: st
   content = setKey(content, 'base_commit', baseCommit);
   content = setKey(content, 'branch', branch);
   content = setKey(content, 'status', 'approved');
-  const hash = approvalHash(parseSpec(content));
+  const hash = approvalHash(parsePlan(content));
   content = setKey(content, 'approved_rev', hash);
   fs.writeFileSync(specAbs, content, 'utf8');
   const approveCommit = await h.git.commit(`spec(${SLUG}): approve`);
@@ -428,7 +428,7 @@ function setKey(content: string, key: string, value: string): string {
 }
 
 /** The current state of the single todo. */
-async function stateOf(h: Harness): Promise<TodoState | undefined> {
+async function stateOf(h: Harness): Promise<PhaseState | undefined> {
   return h.store.currentState(SLUG, TODO_ID);
 }
 

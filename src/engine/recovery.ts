@@ -34,7 +34,7 @@ import type { GitService } from '../git';
 import type { JournalEntry } from '../journal';
 import { parseJournal, readSpecJournal } from '../journal';
 import type { SpecStore } from './runQueue';
-import type { TodoState } from '../model/todoState';
+import type { PhaseState } from '../model/phaseState';
 import type { Stage } from '../model/stage';
 
 /**
@@ -238,7 +238,7 @@ async function findLandedCommit(
  * action and moves no lifecycle state of its own, so it has no success state to
  * replay (the todo is left in `planning` for the next trigger).
  */
-function successStateFor(stage: Stage): TodoState | undefined {
+function successStateFor(stage: Stage): PhaseState | undefined {
   switch (stage) {
     case 'plan':
       return 'planned';
@@ -263,7 +263,7 @@ function successStateFor(stage: Stage): TodoState | undefined {
 async function applyState(
   deps: RecoveryDeps,
   entry: JournalEntry,
-  state: TodoState | undefined,
+  state: PhaseState | undefined,
   note?: string,
 ): Promise<'wrote' | 'skipped'> {
   if (state === undefined) {

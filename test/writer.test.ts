@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { isErr, isOk } from '../src/model/result';
-import { writeFrontmatterKey, writeTodoState } from '../src/model/writer';
+import { writeFrontmatterKey, writePhaseState } from '../src/model/writer';
 
 /** A representative spec with frontmatter, an OVERVIEW and several todos. */
 const SPEC = [
@@ -24,9 +24,28 @@ const SPEC = [
 ].join('\n');
 
 describe('writer', () => {
-  describe('writeTodoState', () => {
+  describe('writePhaseState', () => {
+    it('edits a plan phase state box and rejects a legacy id prefix', () => {
+      const plan = [
+        '## Endstate',
+        'A usable result.',
+        '# PHASES',
+        '- [pending] P01 First phase',
+      ].join('\n');
+      const written = writePhaseState(plan, 'P01', 'planning', 'plan');
+      assert.ok(isOk(written));
+      if (isOk(written)) {
+        assert.strictEqual(written.value, plan.replace('[pending]', '[planning]'));
+      }
+      const wrongKind = writePhaseState(plan, 'T01', 'planning', 'plan');
+      assert.ok(isErr(wrongKind));
+      if (isErr(wrongKind)) {
+        assert.strictEqual(wrongKind.error.kind, 'phase-not-found');
+      }
+    });
+
     it('rewrites only the target todo state box, leaving every other byte identical', () => {
-      const r = writeTodoState(SPEC, 'T01', 'planning');
+      const r = writePhaseState(SPEC, 'T01', 'planning');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
         const expected = SPEC.replace(
@@ -38,7 +57,7 @@ describe('writer', () => {
     });
 
     it('preserves the id, title and hints on the edited line', () => {
-      const r = writeTodoState(SPEC, 'T01', 'executed');
+      const r = writePhaseState(SPEC, 'T01', 'executed');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
         assert.ok(
@@ -49,27 +68,27 @@ describe('writer', () => {
       }
     });
 
-    it('aborts with todo-not-found when the id is absent', () => {
-      const r = writeTodoState(SPEC, 'T99', 'planning');
+    it('aborts with phase-not-found when the id is absent', () => {
+      const r = writePhaseState(SPEC, 'T99', 'planning');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
-        assert.strictEqual(r.error.kind, 'todo-not-found');
+        assert.strictEqual(r.error.kind, 'phase-not-found');
       }
     });
 
     it('refuses to change a done todo and reports done-protected', () => {
-      const r = writeTodoState(SPEC, 'T03', 'executing');
+      const r = writePhaseState(SPEC, 'T03', 'executing');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');
         if (r.error.kind === 'done-protected') {
-          assert.strictEqual(r.error.todoId, 'T03');
+          assert.strictEqual(r.error.phaseId, 'T03');
         }
       }
     });
 
     it('leaves a done todo unchanged even when the requested state is done', () => {
-      const r = writeTodoState(SPEC, 'T03', 'done');
+      const r = writePhaseState(SPEC, 'T03', 'done');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');

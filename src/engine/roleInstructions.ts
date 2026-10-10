@@ -83,7 +83,7 @@ export const SPEC_WRITER_INSTRUCTION = [
     'code, and turn the requirements into a spec: one OVERVIEW and a ' +
     'dependency-ordered list of todos.',
   '',
-  'Todo rules:',
+  'Phase rules:',
   '- A todo carries a title only. Never write a lifecycle state, and never ' +
     'assign an id — the extension assigns `T01`, `T02`, ... in the order you ' +
     'list them.',

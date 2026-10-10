@@ -16,9 +16,9 @@ import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
 import type { Stage } from '../src/model/stage';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Role } from '../src/model/role';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 /**
@@ -72,7 +72,7 @@ const PLAN_RESULT = JSON.stringify({
 interface Rig {
   deps: RunQueueDeps;
   /** Every lifecycle state the queue wrote, in order. */
-  writes: TodoState[];
+  writes: PhaseState[];
   /** The brief path of the launched run, once one has launched. */
   briefPath: () => string | undefined;
   /** Whether any terminal was created at all. */
@@ -91,9 +91,9 @@ function makeRig(
   workspaceRoot: string,
   artifacts: Partial<Record<Stage, string>>,
   resultJson: string,
-  state: TodoState = 'planned',
+  state: PhaseState = 'planned',
 ): Rig {
-  const writes: TodoState[] = [];
+  const writes: PhaseState[] = [];
   let briefPath: string | undefined;
   let terminalCount = 0;
   const cwds: Array<string | undefined> = [];
@@ -179,7 +179,7 @@ function makeRig(
 
   const specStore: SpecStore = {
     currentState: async () => state,
-    readSpec: async () => parseSpec(SPEC_TEXT),
+    readSpec: async () => parsePlan(SPEC_TEXT),
     readArtifact: async (_slug, _todoId, stage) => artifacts[stage],
     latestExecuteCommit: async () => 'deadbee',
     isApproved: async () => true,

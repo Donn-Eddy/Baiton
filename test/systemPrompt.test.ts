@@ -30,7 +30,7 @@ import {
  *   stage table in a driven spec only, the new-spec flow while gathering
  *   only — Req 11.1.
  * - Ask / propose / `create_spec`-after-agreement flow — Req 11.2.
- * - Todo grammar, eight states, id form, hint groups — Req 11.3.
+ * - Phase grammar, eight states, id form, hint groups — Req 11.3.
  * - Frontmatter rules, status/mode enums, extension-written keys — Req 11.4.
  * - Spec content included when supplied — Req 11.5.
  * - Spec content omitted without error when absent — Req 11.7.
@@ -65,7 +65,7 @@ function specWithStatus(status: string): string {
 const DRAFT_SPEC = specWithStatus('draft');
 const APPROVED_SPEC = specWithStatus('approved');
 
-const TODO_STATES = [
+const PHASE_STATES = [
   'pending',
   'planning',
   'planned',
@@ -175,7 +175,7 @@ describe('buildSystemPrompt', () => {
 
     it('includes all eight allowed states', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
-      for (const state of TODO_STATES) {
+      for (const state of PHASE_STATES) {
         assert.ok(prompt.includes(state), `prompt should mention state "${state}"`);
       }
     });

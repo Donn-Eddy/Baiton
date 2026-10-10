@@ -28,13 +28,13 @@
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { parseSpec } from '../model/parser';
-import { TodoState } from '../model/todoState';
+import { parsePlan } from '../model/parser';
+import { PhaseState } from '../model/phaseState';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { ToolServices } from './toolServices';
 
 /** The states a todo cannot be edited or removed from (Req 9.8). */
-const PROTECTED_STATES: ReadonlySet<TodoState> = new Set<TodoState>([
+const PROTECTED_STATES: ReadonlySet<PhaseState> = new Set<PhaseState>([
   'done',
   'failed',
   'planning',
@@ -133,8 +133,8 @@ function addTodoTool(services: ToolServices): Tool {
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parseSpec(loaded.content);
-      if (spec.todos.some((t) => t.id === id)) {
+      const spec = parsePlan(loaded.content);
+      if (spec.phases.some((t) => t.id === id)) {
         return { ok: false, error: `add_todo: todo "${id}" already exists in spec "${slug}"` };
       }
       const line = renderTodoLine('pending', id, title, after, files);
@@ -181,8 +181,8 @@ function editTodoTool(services: ToolServices): Tool {
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parseSpec(loaded.content);
-      const todo = spec.todos.find((t) => t.id === id);
+      const spec = parsePlan(loaded.content);
+      const todo = spec.phases.find((t) => t.id === id);
       if (todo === undefined) {
         return { ok: false, error: `edit_todo: todo "${id}" was not found in spec "${slug}"` };
       }
@@ -234,8 +234,8 @@ function removeTodoTool(services: ToolServices): Tool {
       if (!loaded.ok) {
         return loaded.error;
       }
-      const spec = parseSpec(loaded.content);
-      const todo = spec.todos.find((t) => t.id === id);
+      const spec = parsePlan(loaded.content);
+      const todo = spec.phases.find((t) => t.id === id);
       if (todo === undefined) {
         return { ok: false, error: `remove_todo: todo "${id}" was not found in spec "${slug}"` };
       }
@@ -403,7 +403,7 @@ function resolveAfter(
 
 /** Render a single `- [<state>] <id> <title>` line with optional hints. */
 function renderTodoLine(
-  state: TodoState,
+  state: PhaseState,
   id: string,
   title: string,
   after: string[],

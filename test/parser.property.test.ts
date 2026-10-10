@@ -1,25 +1,26 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { parseSpec } from '../src/model';
+import { DocumentKind, parsePlan } from '../src/model';
 
 /**
- * Property tests for the pure spec parser (Requirement 3).
+ * Property tests for the dual-kind document parser (Requirement 3).
+ * Legacy cases explicitly render the `# OVERVIEW` + `# TODOS` format.
  *
  * Feature: baiton-first-pass, Property 2: Trailing non-hint parentheses stay in
  * the title
  *
- * For any todo whose title ends with a parenthesized group that does NOT parse
+ * For any phase whose title ends with a parenthesized group that does NOT parse
  * as an after/files hint set, parsing SHALL retain that group as part of the
- * title rather than as hints (Requirement 3.7). We generate todo lines whose
+ * title rather than as hints (Requirement 3.7). We generate phase lines whose
  * trailing `(...)` group is deliberately not a valid hint group, parse the
- * spec, and assert the whole trailing group survives in the title while
+ * document, and assert the whole trailing group survives in the title while
  * `after` and `files` stay empty.
  */
 
-/** A valid todo id: `T` followed by two or more decimal digits (Req 3.3). */
-const idArb: fc.Arbitrary<string> = fc
+/** A phase id uses its kind's prefix (`P`, or legacy `T`) and two or more digits. */
+const idArb = (kind: DocumentKind): fc.Arbitrary<string> => fc
   .integer({ min: 0, max: 999999 })
-  .map((n) => 'T' + String(n).padStart(2, '0'));
+  .map((n) => (kind === 'plan' ? 'P' : 'T') + String(n).padStart(2, '0'));
 
 /**
  * A base title fragment with no parentheses, semicolons, or newlines so it
@@ -65,7 +66,7 @@ const nonHintInnerArb: fc.Arbitrary<string> = fc.oneof(
   fc.constantFrom('after', 'after:', 'after: ', 'after   '),
   // `files` group with no items -> unparseable.
   fc.constantFrom('files', 'files:', 'files: ', 'files   '),
-  // `after` group whose items are not valid ids.
+  // `after` group whose items are not valid ids, including legacy T ids in a plan.
   fc.constantFrom('after nope', 'after: X1, foo', 'after 12', 'after: bar'),
   // A trailing empty sub-group (trailing `;`) makes the whole group non-hint.
   fc.constantFrom('after T01;', 'files a.ts;', ';', 'after T01; '),
@@ -74,50 +75,52 @@ const nonHintInnerArb: fc.Arbitrary<string> = fc.oneof(
 );
 
 /**
- * Assembles a single todo line whose trailing `(<inner>)` group is not a hint,
+ * Assembles a single phase line whose trailing `(<inner>)` group is not a hint,
  * along with the exact trailing group text that must survive in the title.
  */
 const nonHintLineArb: fc.Arbitrary<{
+  kind: DocumentKind;
   line: string;
   id: string;
   group: string;
 }> = fc
   .record({
-    id: idArb,
+    kind: fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
     prefix: titleFragmentArb,
     inner: nonHintInnerArb,
   })
-  .map(({ id, prefix, inner }) => {
+  .chain(({ kind, prefix, inner }) => idArb(kind).map((id) => {
     const group = '(' + inner + ')';
     // Ensure there is real title text before the group so the id is followed by
     // a title; the parser needs at least a space after the id.
     const titleBody = prefix === '' ? 'task' : prefix;
     const line = `- [pending] ${id} ${titleBody} ${group}`;
-    return { line, id, group };
-  });
+    return { kind, line, id, group };
+  }));
 
 describe('parser (property harness)', () => {
   // Feature: baiton-first-pass, Property 2: Trailing non-hint parentheses stay
   // in the title
   it('retains a trailing non-hint parenthesized group in the title', () => {
     fc.assert(
-      fc.property(nonHintLineArb, ({ line, id, group }) => {
-        const raw = ['# OVERVIEW', '', 'Some overview.', '', '# TODOS', '', line].join(
-          '\n',
-        );
-        const spec = parseSpec(raw);
+      fc.property(nonHintLineArb, ({ kind, line, id, group }) => {
+        const raw = kind === 'plan'
+          ? ['## Endstate', 'Some endstate.', '# PHASES', '', line].join('\n')
+          : ['# OVERVIEW', '', 'Some overview.', '', '# TODOS', '', line].join('\n');
+        const plan = parsePlan(raw, kind);
+        assert.strictEqual(plan.kind, kind);
 
-        const todo = spec.todos.find((t) => t.id === id);
-        assert.ok(todo, `expected a parsed todo with id ${id} for line: ${line}`);
+        const phase = plan.phases.find((t) => t.id === id);
+        assert.ok(phase, `expected a parsed phase with id ${id} for line: ${line}`);
 
         // The trailing group is not a hint set: no after/files parsed.
-        assert.deepStrictEqual(todo!.after, [], `after should be empty for: ${line}`);
-        assert.deepStrictEqual(todo!.files, [], `files should be empty for: ${line}`);
+        assert.deepStrictEqual(phase!.after, [], `after should be empty for: ${line}`);
+        assert.deepStrictEqual(phase!.files, [], `files should be empty for: ${line}`);
 
         // The trailing group survives verbatim as part of the title (Req 3.7).
         assert.ok(
-          todo!.title.endsWith(group),
-          `title "${todo!.title}" should end with group "${group}" for: ${line}`,
+          phase!.title.endsWith(group),
+          `title "${phase!.title}" should end with group "${group}" for: ${line}`,
         );
       }),
       { numRuns: 200 },

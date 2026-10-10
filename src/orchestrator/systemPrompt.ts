@@ -50,7 +50,7 @@
  * (Req 11.7).
  */
 import { isSpecless, RunMode } from '../model/mode';
-import { parseSpec } from '../model/parser';
+import { parsePlan } from '../model/parser';
 import { OrchestratorPhase } from './guard';
 import { MAX_SUBAGENT_DEPTH } from './seams';
 
@@ -60,7 +60,7 @@ export type ConversationKind =
   | { kind: 'spec'; slug: string };
 
 /** The eight allowed todo lifecycle states, per tech-sheet section 5. */
-const TODO_STATES = [
+const PHASE_STATES = [
   'pending',
   'planning',
   'planned',
@@ -124,7 +124,7 @@ export function phaseFor(
   if (kind.kind !== 'spec' || specContent === undefined) {
     return 'gather';
   }
-  const status = (parseSpec(specContent).frontmatter.get('status') ?? '').trim();
+  const status = (parsePlan(specContent).frontmatter.get('status') ?? '').trim();
   return DRIVE_STATUSES.includes(status) ? 'drive' : 'gather';
 }
 
@@ -339,9 +339,9 @@ const STYLE_TEXT = [
 
 /** The section-5 todo line grammar (Req 11.3). */
 const TODO_GRAMMAR_TEXT = [
-  'Todo line grammar (tech-sheet section 5):',
+  'Phase line grammar (tech-sheet section 5):',
   '- Each todo line has the shape `- [<state>] <id> <title>`, optionally followed by ` (<hints>)` as the last thing on the line.',
-  `- \`state\` is one of: ${TODO_STATES.join(', ')}.`,
+  `- \`state\` is one of: ${PHASE_STATES.join(', ')}.`,
   '- `id` is `T` followed by two or more digits (for example `T01`), unique in the file, and never renumbered.',
   '- `hints` are groups separated by `;`. `after T01, T02` lists dependency ids. `files: a, b` lists starting files.',
   '- A trailing parenthesis that does not parse as hints is part of the title.',

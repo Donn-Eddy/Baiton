@@ -26,7 +26,7 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import type { Stage } from '../model/stage';
-import type { TodoState } from '../model/todoState';
+import type { PhaseState } from '../model/phaseState';
 import type {
   ExecuteResult,
   InvestigateResult,
@@ -70,7 +70,7 @@ export type RunOutcome =
   | { kind: 'invalid_output'; detail: string }
   | { kind: 'closed'; exitCode: number | undefined }
   | { kind: 'cancelled' }
-  | { kind: 'control-applied'; state: TodoState };
+  | { kind: 'control-applied'; state: PhaseState };
 
 /** Persists an artifact's text to an absolute path; the `fs` seam. */
 export type ArtifactWriter = (artifactPath: string, contents: string) => void;

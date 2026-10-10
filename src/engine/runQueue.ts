@@ -47,8 +47,8 @@
  */
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
-import type { ParsedSpec } from '../model/parser';
-import type { TodoState } from '../model/todoState';
+import type { ParsedPlan } from '../model/parser';
+import type { PhaseState } from '../model/phaseState';
 import type { GitService } from '../git';
 import { createGitService } from '../git/gitService';
 import { err, ok, type Result } from '../model/result';
@@ -204,17 +204,17 @@ export interface RunQueue {
  * The spec-store seam the queue uses to read approval/blocked/input-rev facts
  * and to apply lifecycle state writes through the pure serializer. Keeping this
  * behind an interface lets the queue stay free of `fs`/`vscode` while the
- * activation layer wires a store backed by {@link writeTodoState} over the
+ * activation layer wires a store backed by {@link writePhaseState} over the
  * on-disk spec (re-reading before each write per Req 6.3).
  */
 export interface SpecStore {
   /** The todo's current lifecycle state, or `undefined` when it cannot be read. */
-  currentState(slug: string, todoId: string): Promise<TodoState | undefined>;
+  currentState(slug: string, todoId: string): Promise<PhaseState | undefined>;
   /**
    * The spec, freshly re-read and parsed, or `undefined` when it cannot be
    * read. The queue uses it to assemble each Brief's Context section (Req 18.3).
    */
-  readSpec(slug: string): Promise<ParsedSpec | undefined>;
+  readSpec(slug: string): Promise<ParsedPlan | undefined>;
   /**
    * The text of a todo's persisted artifact for a stage, or `undefined` when
    * none is on file. For the numbered stages this is the artifact with the
@@ -265,7 +265,7 @@ export interface SpecStore {
   writeState(
     slug: string,
     todoId: string,
-    state: TodoState,
+    state: PhaseState,
     note?: string,
   ): Promise<boolean>;
 }
@@ -386,7 +386,7 @@ export interface TodoStageWorkspace {
 export interface QueueWorktreeSeam {
   /** Create (first dispatch) or reuse the todo's worktree. Never resets an existing one. */
   ensure(slug: string, todoId: string): Promise<Result<TodoStageWorkspace, string>>;
-  /** Todo ids of `slug` whose todo branch still exists (not landed). */
+  /** Phase ids of `slug` whose todo branch still exists (not landed). */
   unlanded(slug: string): Promise<readonly string[]>;
 }
 
@@ -729,7 +729,7 @@ class SerialRunQueue implements RunQueue {
       }
       if (this.deps.worktrees !== undefined) {
         const spec = await this.deps.specStore.readSpec(req.slug);
-        const after = spec?.todos.find((t) => t.id === req.todoId)?.after ?? [];
+        const after = spec?.phases.find((t) => t.id === req.todoId)?.after ?? [];
         if (after.length > 0) {
           let unlanded: readonly string[];
           try {
@@ -1081,7 +1081,7 @@ class SerialRunQueue implements RunQueue {
       case 'plan': {
         // Only the target's own `after` targets are consulted; every other
         // todo's artifacts are never read, which is the confinement rule.
-        const target = spec.todos.find((t) => t.id === req.todoId);
+        const target = spec.phases.find((t) => t.id === req.todoId);
         const afterExecutes: Record<string, string> = {};
         for (const depId of target?.after ?? []) {
           const summary = await store.readArtifact(req.slug, depId, 'execute');
@@ -1321,7 +1321,7 @@ class SerialRunQueue implements RunQueue {
     transition: Transition,
     stage: Stage,
     outcome: Extract<RunOutcome, { kind: 'completed' }>,
-  ): TodoState | undefined {
+  ): PhaseState | undefined {
     if (stage === 'review' && transition.onFindings !== undefined) {
       const verdict = readVerdict(outcome.structured);
       return verdict === 'pass' ? transition.onSuccess : transition.onFindings;

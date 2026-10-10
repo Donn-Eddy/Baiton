@@ -1,196 +1,110 @@
-/**
- * Pure spec-file validator (Requirement 4).
- *
- * Runs over the parsed model plus the raw text and reports every structural
- * problem as a located {@link SpecError}: grammar failures on `- [` lines,
- * duplicate ids, unknown states, missing or self `after` targets, dependency
- * cycles (naming the ids that form them), and merge-conflict markers anywhere
- * in the file. An empty array means the spec is valid. The validator NEVER
- * mutates the spec — it only reports (Req 4.2) — and, like the parser, never
- * throws.
- */
-import { ParsedSpec, Todo } from './parser';
-import { TODO_STATES, isTodoState } from './todoState';
+/** Pure validator for plan.md and the legacy spec.md document format. */
+import {
+  DocumentKind,
+  ParsedPlan,
+  Phase,
+  phaseIdPattern,
+  phaseIdPrefix,
+  trailingHintIdsOfOtherKind,
+} from './parser';
+import { PHASE_STATES, isPhaseState } from './phaseState';
 
-/**
- * One located validation problem. `line` is the 1-based line number of the
- * offending line in the raw spec text, `text` is that line's content, and
- * `reason` explains why it failed.
- */
-export interface SpecError {
-  /** 1-based line number of the offending line. */
+/** One located validation problem. */
+export interface PlanError {
   line: number;
-  /** The raw text of the offending line. */
   text: string;
-  /** Human-readable explanation of the failure. */
   reason: string;
 }
 
-/** A todo id is the character `T` followed by two or more decimal digits (Req 3.3). */
-const TODO_ID = /^T\d{2,}$/;
-
-/** Leading `- [<state>] ` prefix of a todo line (Req 3.2), same shape as the parser. */
-const TODO_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
-
-/**
- * Merge-conflict markers, matched at the start of a line (Req 4.8). Covers the
- * three git markers `<<<<<<<`, `=======` and `>>>>>>>`.
- */
+const PHASE_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
 const CONFLICT_MARKERS = ['<<<<<<<', '=======', '>>>>>>>'];
 
-/**
- * Validates a parsed spec against its raw text. Returns a list of located
- * errors; an empty list means the spec is valid (Req 4.9). The spec text is
- * never changed by this function (Req 4.2).
- */
-export function validateSpec(spec: ParsedSpec, raw: string): SpecError[] {
+/** Validate a parsed plan against its raw text. Never mutates and never throws. */
+export function validatePlan(plan: ParsedPlan, raw: string): PlanError[] {
   const rawLines = raw.split('\n');
-  const errors: SpecError[] = [];
-
-  // Merge-conflict markers on any line of the file (Req 4.8). Reported first so
-  // their line numbers surface even when the rest of the file is well-formed.
+  const errors: PlanError[] = [];
   errors.push(...findConflictMarkers(rawLines));
-
-  // Grammar failures on `- [` lines the parser could not turn into a todo
-  // (Req 4.1, 4.2, 4.4).
-  errors.push(...findGrammarErrors(spec, rawLines));
-
-  // Duplicate ids across the parsed todos (Req 4.3).
-  errors.push(...findDuplicateIds(spec.todos));
-
-  // Dependency errors: missing targets and self-references (Req 4.5, 4.6).
-  errors.push(...findDependencyErrors(spec.todos));
-
-  // Dependency cycles, naming the participating ids (Req 4.7).
-  errors.push(...findCycleErrors(spec.todos));
-
+  errors.push(...findGrammarErrors(plan, rawLines));
+  errors.push(...findDuplicateIds(plan.phases));
+  errors.push(...findDependencyErrors(plan.phases, plan.kind));
+  errors.push(...findForeignHintErrors(plan));
+  errors.push(...findCycleErrors(plan.phases));
   return errors;
 }
 
-/**
- * Scans every line for a leading merge-conflict marker and reports one error
- * per marked line with its 1-based line number (Req 4.8).
- */
-function findConflictMarkers(rawLines: string[]): SpecError[] {
-  const errors: SpecError[] = [];
+function findConflictMarkers(rawLines: string[]): PlanError[] {
+  const errors: PlanError[] = [];
   for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i];
-    const marker = CONFLICT_MARKERS.find((m) => line.startsWith(m));
-    if (marker) {
-      errors.push({
-        line: i + 1,
-        text: line,
-        reason: `merge-conflict marker "${marker}" found`,
-      });
-    }
+    const marker = CONFLICT_MARKERS.find((m) => rawLines[i].startsWith(m));
+    if (marker) errors.push({ line: i + 1, text: rawLines[i], reason: 'merge-conflict marker "' + marker + '" found' });
   }
   return errors;
 }
 
-/**
- * Finds `- [` lines that do not parse against the todo grammar. The parser
- * silently drops such lines, so this re-examines each raw `- [` line to report
- * a specific reason: a malformed grammar, an unknown state, or a malformed id
- * (Req 4.1, 4.2, 4.4).
- */
-function findGrammarErrors(spec: ParsedSpec, rawLines: string[]): SpecError[] {
-  const errors: SpecError[] = [];
-
-  // Line indices the parser already recognized as valid todos; those need no
-  // grammar re-check.
-  const parsedLines = new Set(spec.todos.map((t) => t.lineIndex));
-
-  const todosStart = findTodosStart(rawLines);
-  if (todosStart === -1) {
-    return errors;
-  }
-
-  for (let i = todosStart; i < rawLines.length; i++) {
+function findGrammarErrors(plan: ParsedPlan, rawLines: string[]): PlanError[] {
+  const parsedLines = new Set(plan.phases.map((phase) => phase.lineIndex));
+  const phasesStart = findPhasesStart(rawLines, plan.kind);
+  if (phasesStart === -1) return [];
+  const errors: PlanError[] = [];
+  for (let i = phasesStart; i < rawLines.length; i++) {
     const line = rawLines[i];
-    if (!line.startsWith('- [') || parsedLines.has(i)) {
-      continue;
-    }
-    errors.push({
-      line: i + 1,
-      text: line,
-      reason: grammarFailureReason(line),
-    });
+    if (!line.startsWith('- [') || parsedLines.has(i)) continue;
+    errors.push({ line: i + 1, text: line, reason: grammarFailureReason(line, plan.kind) });
   }
   return errors;
 }
 
-/**
- * Explains why a `- [` line failed the todo grammar. Distinguishes an unknown
- * state (Req 4.4) from a general grammar failure (Req 4.2) and a malformed id.
- */
-function grammarFailureReason(line: string): string {
-  const m = TODO_PREFIX.exec(line);
-  if (!m) {
-    return 'malformed todo line: expected "- [<state>] <id> <title>"';
-  }
-
+function grammarFailureReason(line: string, kind: DocumentKind): string {
+  const noun = itemNoun(kind);
+  const m = PHASE_PREFIX.exec(line);
+  const generic = 'malformed ' + noun + ' line: expected "- [<state>] <id> <title>"';
+  if (!m) return generic;
   const stateText = m[1].trim();
-  if (!isTodoState(stateText)) {
-    return `unknown state "${stateText}"; expected one of ${TODO_STATES.join(', ')}`;
+  if (!isPhaseState(stateText)) {
+    return 'unknown state "' + stateText + '"; expected one of ' + PHASE_STATES.join(', ');
   }
-
   const rest = m[2];
   const spaceIdx = rest.search(/\s/);
   const id = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
-  if (!TODO_ID.test(id)) {
-    return `malformed id "${id}"; expected "T" followed by two or more digits`;
+  if (!phaseIdPattern(kind).test(id)) {
+    const wrongKind = /^[PT]\d{2,}$/.test(id)
+      ? ' (' + (kind === 'plan' ? 'T## ids belong to legacy spec documents' : 'P## ids belong to plan documents') + ')'
+      : '';
+    return 'malformed id "' + id + '"; expected "' + phaseIdPrefix(kind) + '" followed by two or more digits' + wrongKind;
   }
-
-  return 'malformed todo line: expected "- [<state>] <id> <title>"';
+  return generic;
 }
 
-/**
- * Reports every todo id that appears on more than one todo line. Each
- * duplicated occurrence after the first is located so the user sees the id and
- * its line (Req 4.3).
- */
-function findDuplicateIds(todos: Todo[]): SpecError[] {
-  const errors: SpecError[] = [];
-  const seen = new Map<string, Todo>();
-
-  for (const todo of todos) {
-    if (seen.has(todo.id)) {
-      errors.push({
-        line: todo.lineIndex + 1,
-        text: renderTodoRef(todo),
-        reason: `duplicate id "${todo.id}"`,
-      });
+function findDuplicateIds(phases: Phase[]): PlanError[] {
+  const errors: PlanError[] = [];
+  const seen = new Set<string>();
+  for (const phase of phases) {
+    if (seen.has(phase.id)) {
+      errors.push({ line: phase.lineIndex + 1, text: renderPhaseRef(phase), reason: 'duplicate id "' + phase.id + '"' });
     } else {
-      seen.set(todo.id, todo);
+      seen.add(phase.id);
     }
   }
   return errors;
 }
 
-/**
- * Reports `after` references to ids that no todo declares (Req 4.5) and todos
- * that list their own id in `after` (Req 4.6). Both are located on the
- * referencing todo's line.
- */
-function findDependencyErrors(todos: Todo[]): SpecError[] {
-  const errors: SpecError[] = [];
-  const knownIds = new Set(todos.map((t) => t.id));
-
-  for (const todo of todos) {
-    for (const dep of todo.after) {
-      if (dep === todo.id) {
+function findDependencyErrors(phases: Phase[], kind: DocumentKind): PlanError[] {
+  const errors: PlanError[] = [];
+  const knownIds = new Set(phases.map((phase) => phase.id));
+  const noun = itemNoun(kind);
+  for (const phase of phases) {
+    for (const dep of phase.after) {
+      if (dep === phase.id) {
         errors.push({
-          line: todo.lineIndex + 1,
-          text: renderTodoRef(todo),
-          reason: `todo "${todo.id}" lists itself in its "after" dependencies`,
+          line: phase.lineIndex + 1,
+          text: renderPhaseRef(phase),
+          reason: noun + ' "' + phase.id + '" lists itself in its "after" dependencies',
         });
-        continue;
-      }
-      if (!knownIds.has(dep)) {
+      } else if (!knownIds.has(dep)) {
         errors.push({
-          line: todo.lineIndex + 1,
-          text: renderTodoRef(todo),
-          reason: `todo "${todo.id}" depends on unknown id "${dep}"`,
+          line: phase.lineIndex + 1,
+          text: renderPhaseRef(phase),
+          reason: noun + ' "' + phase.id + '" depends on unknown id "' + dep + '"',
         });
       }
     }
@@ -198,118 +112,86 @@ function findDependencyErrors(todos: Todo[]): SpecError[] {
   return errors;
 }
 
-/**
- * Detects cycles in the dependency graph formed by `after` references and
- * reports the ids forming each cycle (Req 4.7). Self-references are handled by
- * {@link findDependencyErrors} and are excluded here so a self-loop is not also
- * reported as a cycle. Edges to unknown ids are ignored (they are already
- * reported as missing dependencies).
- */
-function findCycleErrors(todos: Todo[]): SpecError[] {
-  const byId = new Map<string, Todo>();
-  for (const todo of todos) {
-    // On a duplicate id, keep the first declaration for graph purposes; the
-    // duplicate is reported separately.
-    if (!byId.has(todo.id)) {
-      byId.set(todo.id, todo);
-    }
-  }
-
-  // Adjacency limited to real, non-self edges between known todos.
+function findCycleErrors(phases: Phase[]): PlanError[] {
+  const byId = new Map<string, Phase>();
+  for (const phase of phases) if (!byId.has(phase.id)) byId.set(phase.id, phase);
   const adjacency = new Map<string, string[]>();
-  for (const todo of byId.values()) {
-    const edges = todo.after.filter(
-      (dep) => dep !== todo.id && byId.has(dep),
-    );
-    adjacency.set(todo.id, edges);
+  for (const phase of byId.values()) {
+    adjacency.set(phase.id, phase.after.filter((dep) => dep !== phase.id && byId.has(dep)));
   }
-
-  const cycles = findCycles(adjacency);
-  return cycles.map((cycle) => {
+  return findCycles(adjacency).map((cycle) => {
     const start = byId.get(cycle[0]);
     return {
       line: start ? start.lineIndex + 1 : 1,
-      text: start ? renderTodoRef(start) : cycle.join(' -> '),
-      reason: `dependency cycle: ${cycle.join(' -> ')}`,
+      text: start ? renderPhaseRef(start) : cycle.join(' -> '),
+      reason: 'dependency cycle: ' + cycle.join(' -> '),
     };
   });
 }
 
-/**
- * Finds distinct cycles in a directed graph via depth-first search, returning
- * for each the list of node ids that form it in traversal order. Each cycle is
- * reported once, keyed by its normalized set of members.
- */
+function findForeignHintErrors(plan: ParsedPlan): PlanError[] {
+  const errors: PlanError[] = [];
+  for (const phase of plan.phases) {
+    const ids = trailingHintIdsOfOtherKind(phase.title, plan.kind);
+    if (ids) {
+      errors.push({
+        line: phase.lineIndex + 1,
+        text: renderPhaseRef(phase),
+        reason: 'after hint uses ids of the wrong kind (' + ids.join(', ') + '); expected "' + phaseIdPrefix(plan.kind) + '" ids',
+      });
+    }
+  }
+  return errors;
+}
+
 function findCycles(adjacency: Map<string, string[]>): string[][] {
   const cycles: string[][] = [];
   const reported = new Set<string>();
-
-  const WHITE = 0; // unvisited
-  const GRAY = 1; // on the current DFS stack
-  const BLACK = 2; // fully explored
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
   const color = new Map<string, number>();
-  for (const id of adjacency.keys()) {
-    color.set(id, WHITE);
-  }
-
+  for (const id of adjacency.keys()) color.set(id, WHITE);
   const stack: string[] = [];
-
   const visit = (node: string): void => {
     color.set(node, GRAY);
     stack.push(node);
-
     for (const next of adjacency.get(node) ?? []) {
-      const c = color.get(next) ?? WHITE;
-      if (c === GRAY) {
-        // Back edge: the cycle is the stack slice from `next` to the top.
+      const nextColor = color.get(next) ?? WHITE;
+      if (nextColor === GRAY) {
         const idx = stack.indexOf(next);
         if (idx !== -1) {
           const cycle = stack.slice(idx);
-          const key = cycleKey(cycle);
+          const key = [...cycle].sort().join('\u0000');
           if (!reported.has(key)) {
             reported.add(key);
             cycles.push(cycle);
           }
         }
-      } else if (c === WHITE) {
-        visit(next);
-      }
+      } else if (nextColor === WHITE) visit(next);
     }
-
     stack.pop();
     color.set(node, BLACK);
   };
-
-  for (const id of adjacency.keys()) {
-    if ((color.get(id) ?? WHITE) === WHITE) {
-      visit(id);
-    }
-  }
-
+  for (const id of adjacency.keys()) if ((color.get(id) ?? WHITE) === WHITE) visit(id);
   return cycles;
 }
 
-/**
- * A stable key identifying a cycle by its members regardless of the rotation at
- * which it was discovered, so the same cycle reached from two entry points is
- * reported once.
- */
-function cycleKey(cycle: string[]): string {
-  return [...cycle].sort().join('\u0000');
-}
-
-/** Finds the index of the `# TODOS` header line, or -1 when absent. */
-function findTodosStart(rawLines: string[]): number {
+function findPhasesStart(rawLines: string[], kind: DocumentKind): number {
+  // Legacy spec.md format keeps the item section named TODOS.
+  const header = kind === 'plan' ? 'PHASES' : 'TODOS';
   for (let i = 0; i < rawLines.length; i++) {
     const m = /^#+\s+(.*)$/.exec(rawLines[i]);
-    if (m && m[1].trim() === 'TODOS') {
-      return i + 1;
-    }
+    if (m && m[1].trim() === header) return i + 1;
   }
   return -1;
 }
 
-/** Renders a short reference to a todo for an error's `text` field. */
-function renderTodoRef(todo: Todo): string {
-  return `- [${todo.state}] ${todo.id} ${todo.title}`.trimEnd();
+function renderPhaseRef(phase: Phase): string {
+  return ('- [' + phase.state + '] ' + phase.id + ' ' + phase.title).trimEnd();
+}
+
+function itemNoun(kind: DocumentKind): 'phase' | 'todo' {
+  // Legacy spec.md format keeps the user-facing "todo" wording byte-identical.
+  return kind === 'plan' ? 'phase' : 'todo';
 }

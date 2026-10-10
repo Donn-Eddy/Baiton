@@ -1,10 +1,10 @@
 import * as assert from 'assert';
-import { parseSpec, validateSpec, SpecError } from '../src/model';
+import { detectDocumentKind, parsePlan, validatePlan, PlanError } from '../src/model';
 
 /**
  * Unit tests for validator error messages and located errors (Task 3.7).
  *
- * These tests pin down the concrete, user-visible output of `validateSpec`:
+ * These tests pin down the concrete, user-visible output of `validatePlan`:
  * the located `line`/`text` of each error and the human-readable `reason`
  * displayed to the user. They cover grammar failures, duplicate ids, unknown
  * states, missing and self `after` dependencies, and merge-conflict marker
@@ -17,12 +17,12 @@ import { parseSpec, validateSpec, SpecError } from '../src/model';
  */
 
 /** Parses `raw` then validates it, returning the located errors. */
-function validate(raw: string): SpecError[] {
-  return validateSpec(parseSpec(raw), raw);
+function validate(raw: string): PlanError[] {
+  return validatePlan(parsePlan(raw), raw);
 }
 
 /** Finds the first error whose reason contains `needle`, or fails the test. */
-function findError(errors: SpecError[], needle: string): SpecError {
+function findError(errors: PlanError[], needle: string): PlanError {
   const match = errors.find((e) => e.reason.includes(needle));
   assert.ok(
     match,
@@ -36,6 +36,52 @@ function findError(errors: SpecError[], needle: string): SpecError {
 }
 
 describe('validator error messages and located errors', () => {
+  // The # OVERVIEW / # TODOS / T## cases below are legacy-spec fixtures;
+  // the plan-specific cases above exercise PHASES and P## ids.
+  it('detects both document kinds and respects an explicit parse kind', () => {
+    assert.strictEqual(detectDocumentKind('# PHASES\n- [pending] P01 x'), 'plan');
+    assert.strictEqual(detectDocumentKind('# TODOS\n- [pending] T01 x'), 'legacy-spec');
+    assert.strictEqual(detectDocumentKind('# OVERVIEW\nLegacy text'), 'legacy-spec');
+    assert.strictEqual(detectDocumentKind(''), 'plan');
+    assert.strictEqual(detectDocumentKind('Headerless body'), 'plan');
+    assert.strictEqual(parsePlan('# PHASES\n- [pending] P01 x', 'legacy-spec').kind, 'legacy-spec');
+  });
+
+  it('rejects an id with the other kind prefix at its source line', () => {
+    const cases = [
+      { raw: '# PHASES\n- [pending] T01 x', line: 2, expected: 'expected "P"', wrong: 'T## ids belong to legacy spec documents' },
+      { raw: '# TODOS\n- [pending] P01 x', line: 2, expected: 'expected "T"', wrong: 'P## ids belong to plan documents' },
+    ];
+    for (const testCase of cases) {
+      const errors = validate(testCase.raw);
+      assert.strictEqual(errors.length, 1);
+      assert.strictEqual(errors[0].line, testCase.line);
+      assert.match(errors[0].reason, /malformed id/);
+      assert.ok(errors[0].reason.includes(testCase.expected));
+      assert.ok(errors[0].reason.includes(testCase.wrong));
+    }
+  });
+
+  it('reports a foreign-kind after hint in a plan title', () => {
+    const raw = '# PHASES\n- [pending] P02 y (after T01)';
+    const errors = validate(raw);
+    assert.strictEqual(errors.length, 1);
+    assert.strictEqual(errors[0].line, 2);
+    assert.match(errors[0].reason, /after hint uses ids of the wrong kind/);
+  });
+
+  it('applies dependency and duplicate checks to plan ids', () => {
+    const raw = [
+      '# PHASES',
+      '- [pending] P01 first (after P01, P99)',
+      '- [pending] P01 duplicate',
+    ].join('\n');
+    const errors = validate(raw);
+    assert.ok(errors.some((error) => error.reason.includes('duplicate id "P01"')));
+    assert.ok(errors.some((error) => error.reason.includes('phase "P01" lists itself')));
+    assert.ok(errors.some((error) => error.reason.includes('phase "P01" depends on unknown id "P99"')));
+  });
+
   describe('grammar failure (Req 4.2)', () => {
     it('locates a malformed todo line and displays the grammar reason', () => {
       // The offending line is on line 5 (1-based). Only the state box would

@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import {
   ConversationKind,
   DRIVE_TEXT,
@@ -27,7 +27,7 @@ import {
  * arbitrary keys and values (sometimes including `status`, sometimes not,
  * sometimes with a broken fence), plus free-form text that is not a spec at
  * all. For each, the property compares `phaseFor` against the status
- * `parseSpec` itself reports, so the test cannot drift from the parser. The
+ * `parsePlan` itself reports, so the test cannot drift from the parser. The
  * scope and refusal text must survive in both phases, and the drive text must
  * appear exactly when the phase is `drive`.
  */
@@ -120,7 +120,7 @@ describe('orchestrator phase derivation (property, Req 11.1)', () => {
   it('is drive if and only if the parsed status is a non-draft enum value', () => {
     fc.assert(
       fc.property(contentArb, (content) => {
-        const parsedStatus = (parseSpec(content).frontmatter.get('status') ?? '').trim();
+        const parsedStatus = (parsePlan(content).frontmatter.get('status') ?? '').trim();
         const expected = DRIVE_STATUSES.includes(parsedStatus) ? 'drive' : 'gather';
         assert.strictEqual(
           phaseFor(SPEC, content),

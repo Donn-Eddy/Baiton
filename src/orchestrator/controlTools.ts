@@ -67,8 +67,8 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { approvalHash } from '../model/hash';
-import { parseSpec } from '../model/parser';
-import { validateSpec } from '../model/validator';
+import { parsePlan } from '../model/parser';
+import { validatePlan } from '../model/validator';
 import { RunMode, isRunMode } from '../model/mode';
 import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
@@ -548,7 +548,7 @@ function approveSpecTool(services: ToolServices): Tool {
         };
       }
 
-      const spec = parseSpec(content);
+      const spec = parsePlan(content);
       const alreadyApproved = (spec.frontmatter.get('approved_rev') ?? '').trim() !== '';
 
       // A re-approval only recomputes the Approval_Hash into `approved_rev` and
@@ -571,7 +571,7 @@ async function freshApprove(
   services: ToolServices,
   absolute: string,
   content: string,
-  spec: ReturnType<typeof parseSpec>,
+  spec: ReturnType<typeof parsePlan>,
   slug: string,
 ): Promise<ToolResult> {
   // Req 16.1/16.2: clean only if every change is confined to the spec folder.
@@ -626,7 +626,7 @@ async function freshApprove(
   updated = setFrontmatterKey(updated, 'base_commit', baseCommit);
   updated = setFrontmatterKey(updated, 'branch', branch);
   updated = setFrontmatterKey(updated, 'status', 'approved');
-  const hash = approvalHash(parseSpec(updated));
+  const hash = approvalHash(parsePlan(updated));
   updated = setFrontmatterKey(updated, 'approved_rev', hash);
 
   // Persist and commit the carried-over spec folder as `spec(<slug>): approve`
@@ -653,7 +653,7 @@ async function reapprove(
   services: ToolServices,
   absolute: string,
   content: string,
-  spec: ReturnType<typeof parseSpec>,
+  spec: ReturnType<typeof parsePlan>,
   slug: string,
 ): Promise<ToolResult> {
   const hash = approvalHash(spec);
@@ -748,7 +748,7 @@ function runTool(services: ToolServices): Tool {
       } catch {
         return { ok: false, error: `spec "${slug}" was not found` };
       }
-      const errors = validateSpec(parseSpec(content), content);
+      const errors = validatePlan(parsePlan(content), content);
       if (errors.length > 0) {
         const detail = errors
           .map((e) => `line ${e.line}: ${e.reason}`)
@@ -824,7 +824,7 @@ function landTodoTool(services: ToolServices): Tool {
       } catch {
         return { ok: false, error: `spec "${slug}" was not found` };
       }
-      const entry = parseSpec(content).todos.find((t) => t.id === todo);
+      const entry = parsePlan(content).phases.find((t) => t.id === todo);
       if (entry === undefined) {
         return { ok: false, error: `todo "${todo}" was not found in spec "${slug}"` };
       }

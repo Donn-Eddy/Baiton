@@ -1,61 +1,71 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { approvalHash } from '../src/model/hash';
-import { parseSpec, ParsedSpec } from '../src/model/parser';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { createHash } from 'crypto';
+import { approvalHash, computeInputRev } from '../src/model/hash';
+import { DocumentKind, parsePlan, ParsedPlan } from '../src/model/parser';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 7: Approval hash is invariant under
  * state-box changes and sensitive to content
  *
- * For any spec, changing only the `[state]` boxes of one or more todo lines
- * SHALL leave the approval hash unchanged, while changing the OVERVIEW text,
- * any todo title, id, or hints SHALL change the approval hash.
+ * For any supported document, changing only the `[state]` boxes of one or more phase lines
+ * SHALL leave the approval hash unchanged, while changing the preamble text,
+ * any phase title, id, or hints SHALL change the approval hash.
  *
  * Validates: Requirements 5.1, 5.5
  *
- * The approval hash (src/model/hash.ts) covers the OVERVIEW section plus every
- * todo line with its state box blanked to `[]` (Req 5.1). Blanking makes the
+ * The approval hash (src/model/hash.ts) covers the preamble section plus every
+ * phase line with its state box blanked to `[]` (Req 5.1). Blanking makes the
  * hash stable across lifecycle state changes, which is exactly what Re-approve
- * relies on to leave todo states meaningful while re-tying approval to content
- * (Req 5.5). This test generates a spec, renders it, and asserts (a) mutating
+ * relies on to leave phase states meaningful while re-tying approval to content
+ * (Req 5.5). This test generates documents, renders it, and asserts (a) mutating
  * only the state boxes leaves the hash unchanged, and (b) mutating the OVERVIEW,
- * a todo title, id, or hints changes the hash.
+ * a phase title, id, or hints changes the hash.
  */
 
-/** The model a generated spec is rendered from and parsed back into. */
-interface SpecModel {
-  overviewLines: string[];
-  todos: TodoModel[];
+/** The model a generated document is rendered from and parsed back into. */
+interface DocumentModel {
+  kind: DocumentKind;
+  preambleLines: string[];
+  phases: PhaseModel[];
 }
 
-interface TodoModel {
+interface PhaseModel {
   id: string;
-  state: TodoState;
+  state: PhaseState;
   title: string;
   after: string[];
   files: string[];
 }
 
-/** Renders a {@link SpecModel} to canonical spec text `parseSpec` consumes. */
-function renderSpec(model: SpecModel): string {
+/** Renders a {@link DocumentModel} to canonical document text `parsePlan` consumes. */
+function renderDocument(model: DocumentModel): string {
   const lines: string[] = [];
   lines.push('---');
   lines.push('title: sample');
   lines.push('---');
-  lines.push('# OVERVIEW');
-  for (const l of model.overviewLines) {
-    lines.push(l);
+  if (model.kind === 'legacy-spec') {
+    lines.push('# OVERVIEW');
+    lines.push(...model.preambleLines);
+    lines.push('# TODOS');
+  } else {
+    lines.push('## Endstate');
+    lines.push(...model.preambleLines);
+    lines.push('## What needs changing');
+    lines.push('Change behavior.');
+    lines.push('## Limitations & constraints');
+    lines.push('None.');
+    lines.push('# PHASES');
   }
-  lines.push('# TODOS');
-  for (const t of model.todos) {
-    lines.push(renderTodoLine(t));
+  for (const t of model.phases) {
+    lines.push(renderPhaseLine(t));
   }
   return lines.join('\n');
 }
 
-/** Renders one todo line: `- [state] id title` with an optional hint group. */
-function renderTodoLine(t: TodoModel): string {
+/** Renders one phase line: `- [state] id title` with an optional hint group. */
+function renderPhaseLine(t: PhaseModel): string {
   let line = `- [${t.state}] ${t.id} ${t.title}`;
   const groups: string[] = [];
   if (t.after.length > 0) {
@@ -72,13 +82,13 @@ function renderTodoLine(t: TodoModel): string {
 
 // --- Generators ------------------------------------------------------------
 
-/** A todo id: `T` followed by two or more decimal digits (Req 3.3). */
-const idArb: fc.Arbitrary<string> = fc
+/** A phase id uses the document prefix (`P`, or legacy `T`) and two or more digits (Req 3.3). */
+const idArb = (kind: DocumentKind): fc.Arbitrary<string> => fc
   .integer({ min: 0, max: 999999 })
-  .map((n) => 'T' + String(n).padStart(2, '0'));
+  .map((n) => (kind === 'plan' ? 'P' : 'T') + String(n).padStart(2, '0'));
 
 /**
- * A todo title free of the characters the hint/section grammar reserves, so it
+ * A phase title free of the characters the hint/section grammar reserves, so it
  * never collides with a trailing hint group.
  */
 const titleArb: fc.Arbitrary<string> = fc
@@ -93,7 +103,7 @@ const pathArb: fc.Arbitrary<string> = fc
   .filter((s) => s.length > 0);
 
 /**
- * An overview prose line that cannot be mistaken for a section header or a
+ * A preamble prose line that cannot be mistaken for a section header or a
  * frontmatter fence.
  */
 const overviewLineArb: fc.Arbitrary<string> = fc
@@ -102,20 +112,21 @@ const overviewLineArb: fc.Arbitrary<string> = fc
   .filter((s) => s.trim() !== '---' && !/^#+\s/.test(s));
 
 /**
- * A spec with at least one todo (so state-box and content mutations always have
+ * A document with at least one phase (so state-box and content mutations always have
  * a target). Ids are unique; `after` targets are drawn from the generated ids.
  */
-const specModelArb: fc.Arbitrary<SpecModel> = fc
+const documentModelArb: fc.Arbitrary<DocumentModel> = fc
   .record({
-    overviewLines: fc.array(overviewLineArb, { maxLength: 6 }),
-    ids: fc.uniqueArray(idArb, { minLength: 1, maxLength: 6 }),
+    kind: fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
+    preambleLines: fc.array(overviewLineArb, { maxLength: 6 }),
   })
-  .chain(({ overviewLines, ids }) => {
-    const todoArb = fc.tuple(
+  .chain(({ kind, preambleLines }) =>
+    fc.uniqueArray(idArb(kind), { minLength: 1, maxLength: 6 }).chain((ids) => {
+    const phaseArb = fc.tuple(
       ...ids.map((id) =>
         fc
           .record({
-            state: fc.constantFrom<TodoState>(...TODO_STATES),
+            state: fc.constantFrom<PhaseState>(...PHASE_STATES),
             title: titleArb,
             after: fc.subarray(ids),
             files: fc.array(pathArb, { maxLength: 4 }),
@@ -124,14 +135,16 @@ const specModelArb: fc.Arbitrary<SpecModel> = fc
       ),
     );
     return fc.record({
-      overviewLines: fc.constant(overviewLines),
-      todos: todoArb,
+      kind: fc.constant(kind),
+      preambleLines: fc.constant(preambleLines),
+      phases: phaseArb,
     });
-  });
+    }),
+  );
 
-/** A fresh state per todo, drawn independently so mutations can differ. */
-const statesArb = (n: number): fc.Arbitrary<TodoState[]> =>
-  fc.array(fc.constantFrom<TodoState>(...TODO_STATES), {
+/** A fresh state per phase, drawn independently so mutations can differ. */
+const statesArb = (n: number): fc.Arbitrary<PhaseState[]> =>
+  fc.array(fc.constantFrom<PhaseState>(...PHASE_STATES), {
     minLength: n,
     maxLength: n,
   });
@@ -139,27 +152,49 @@ const statesArb = (n: number): fc.Arbitrary<TodoState[]> =>
 // --- Property --------------------------------------------------------------
 
 describe('approval hash (property)', () => {
+  it('preserves the pre-change legacy hash payload exactly', () => {
+    const raw = [
+      '# OVERVIEW',
+      'Legacy overview.',
+      '',
+      '# TODOS',
+      '- [pending] T01 first',
+      '- [done] T02 second (after T01)',
+    ].join('\n');
+    const blankedLegacyItemLines = [
+      '- [] T01 first',
+      '- [] T02 second (after T01)',
+    ];
+    const oldPayload = ['Legacy overview.\n', ...blankedLegacyItemLines].join('\n');
+    const expected = createHash('sha256').update(oldPayload, 'utf8').digest('hex');
+    assert.strictEqual(approvalHash(parsePlan(raw)), expected);
+    const oldInputRevPayload = ['Legacy overview.\n', '- [] T01 first'].join('\n');
+    const expectedInputRev = createHash('sha256').update(oldInputRevPayload, 'utf8').digest('hex');
+    assert.strictEqual(computeInputRev(parsePlan(raw), 'T01'), expectedInputRev);
+  });
+
   // Feature: baiton-first-pass, Property 7: Approval hash is invariant under
   // state-box changes and sensitive to content
   it('is invariant under state-box changes', () => {
     fc.assert(
       fc.property(
-        specModelArb.chain((model) =>
+        documentModelArb.chain((model) =>
           fc.record({
             model: fc.constant(model),
-            newStates: statesArb(model.todos.length),
+            newStates: statesArb(model.phases.length),
           }),
         ),
         ({ model, newStates }) => {
-          const original: ParsedSpec = parseSpec(renderSpec(model));
+          const original: ParsedPlan = parsePlan(renderDocument(model));
           const baseHash = approvalHash(original);
 
           // Mutate ONLY the state boxes; keep id/title/hints/overview intact.
-          const mutated: SpecModel = {
-            overviewLines: model.overviewLines,
-            todos: model.todos.map((t, i) => ({ ...t, state: newStates[i] })),
+          const mutated: DocumentModel = {
+            kind: model.kind,
+            preambleLines: model.preambleLines,
+            phases: model.phases.map((t, i) => ({ ...t, state: newStates[i] })),
           };
-          const mutatedHash = approvalHash(parseSpec(renderSpec(mutated)));
+          const mutatedHash = approvalHash(parsePlan(renderDocument(mutated)));
 
           assert.strictEqual(
             mutatedHash,
@@ -174,27 +209,27 @@ describe('approval hash (property)', () => {
 
   // Feature: baiton-first-pass, Property 7: Approval hash is invariant under
   // state-box changes and sensitive to content
-  it('changes when the OVERVIEW, a title, an id, or hints change', () => {
+  it('changes when the preamble, a title, an id, or hints change', () => {
     fc.assert(
       fc.property(
-        specModelArb.chain((model) =>
+        documentModelArb.chain((model) =>
           fc.record({
             model: fc.constant(model),
             // Which kind of content mutation to apply.
-            kind: fc.constantFrom<'overview' | 'title' | 'id' | 'after' | 'files'>(
-              'overview',
+            kind: fc.constantFrom<'preamble' | 'title' | 'id' | 'after' | 'files'>(
+              'preamble',
               'title',
               'id',
               'after',
               'files',
             ),
-            idx: fc.nat({ max: Math.max(0, model.todos.length - 1) }),
+            idx: fc.nat({ max: Math.max(0, model.phases.length - 1) }),
           }),
         ),
         ({ model, kind, idx }) => {
-          const baseHash = approvalHash(parseSpec(renderSpec(model)));
+          const baseHash = approvalHash(parsePlan(renderDocument(model)));
           const mutated = mutateContent(model, kind, idx);
-          const mutatedHash = approvalHash(parseSpec(renderSpec(mutated)));
+          const mutatedHash = approvalHash(parsePlan(renderDocument(mutated)));
 
           assert.notStrictEqual(
             mutatedHash,
@@ -214,42 +249,43 @@ describe('approval hash (property)', () => {
  * are never touched here.
  */
 function mutateContent(
-  model: SpecModel,
-  kind: 'overview' | 'title' | 'id' | 'after' | 'files',
+  model: DocumentModel,
+  kind: 'preamble' | 'title' | 'id' | 'after' | 'files',
   idx: number,
-): SpecModel {
-  const todos = model.todos.map((t) => ({ ...t, after: [...t.after], files: [...t.files] }));
-  const overviewLines = [...model.overviewLines];
+): DocumentModel {
+  const phases = model.phases.map((t) => ({ ...t, after: [...t.after], files: [...t.files] }));
+  const preambleLines = [...model.preambleLines];
 
   switch (kind) {
-    case 'overview':
-      // Appending a distinct marker line always changes the OVERVIEW text.
-      overviewLines.push('changed-overview-marker');
+    case 'preamble':
+      // Appending a distinct marker line always changes the preamble text.
+      preambleLines.push('changed-overview-marker');
       break;
     case 'title':
-      todos[idx].title = todos[idx].title + ' X';
+      phases[idx].title = phases[idx].title + ' X';
       break;
     case 'id': {
       // Pick an id not already present so the set stays well-defined and the
       // mutated line differs from the original.
-      const used = new Set(todos.map((t) => t.id));
+      const used = new Set(phases.map((t) => t.id));
       let n = 0;
-      let candidate = 'T' + String(n).padStart(2, '0');
+      const prefix = model.kind === 'plan' ? 'P' : 'T';
+      let candidate = prefix + String(n).padStart(2, '0');
       while (used.has(candidate)) {
         n++;
-        candidate = 'T' + String(n).padStart(2, '0');
+        candidate = prefix + String(n).padStart(2, '0');
       }
-      todos[idx].id = candidate;
+      phases[idx].id = candidate;
       break;
     }
     case 'after':
-      // Append a fresh id to the hint group; this always alters the todo line.
-      todos[idx].after = [...todos[idx].after, 'T99'];
+      // Append a fresh id to the hint group; this always alters the phase line.
+      phases[idx].after = [...phases[idx].after, (model.kind === 'plan' ? 'P' : 'T') + '99'];
       break;
     case 'files':
-      todos[idx].files = [...todos[idx].files, 'extra.ts'];
+      phases[idx].files = [...phases[idx].files, 'extra.ts'];
       break;
   }
 
-  return { overviewLines, todos };
+  return { kind: model.kind, preambleLines, phases };
 }

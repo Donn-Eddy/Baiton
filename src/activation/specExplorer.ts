@@ -9,9 +9,9 @@
  *      `.baiton/specs/<slug>/spec.md` in ascending slug order (Req 2.1, 6.5);
  *   2. obtains each spec's approval fact from the {@link SpecStore} (never
  *      recomputed here, Req 2.4);
- *   3. builds the ordered nodes with {@link buildSpecTree}, reusing the pure
- *      `parseSpec`/`validateSpec`/`isBlocked` cores (Req 18.1);
- *   4. maps each `SpecNode`/`TodoNode`/`ErrorNode` to a `TreeItem`.
+ *   3. builds the ordered nodes with {@link buildPlanTree}, reusing the pure
+ *      `parsePlan`/`validatePlan`/`isBlocked` cores (Req 18.1);
+ *   4. maps each `PlanNode`/`PhaseNode`/`ErrorNode` to a `TreeItem`.
  *
  * A `FileSystemWatcher` over `.baiton/specs/**` (create/change/delete) drives a
  * ~500 ms debounced/coalescing refresh that re-derives everything from disk
@@ -29,14 +29,14 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import type { SpecStore } from '../engine';
 import {
-  buildSpecTree,
-  type SpecNode,
-  type TodoNode,
+  buildPlanTree,
+  type PlanNode,
+  type PhaseNode,
   type ErrorNode,
-  type SpecStatus,
+  type PlanStatus,
 } from '../model/treeModel';
-import { todoContextValue } from '../model/todoActions';
-import { specContextValue } from '../model/specActions';
+import { phaseContextValue } from '../model/phaseActions';
+import { planContextValue } from '../model/planActions';
 import { readSpecJournal, type JournalEntry } from '../journal';
 import { listSpecs, listTodoPlans } from './specLister';
 import type { Surface } from './surface';
@@ -59,8 +59,8 @@ const REFRESH_DEBOUNCE_MS = 500;
  * The `contextValue`s the `view/item/context` menu contributions match on to
  * surface the inline actions (design "SpecExplorer inline actions"). A todo
  * node's contextValue is `baiton.todo` plus one token per legal action (built
- * by {@link todoContextValue}); a valid spec root's is `baiton.spec` plus one
- * token per legal action (built by {@link specContextValue}), so it offers
+ * by {@link phaseContextValue}); a valid spec root's is `baiton.spec` plus one
+ * token per legal action (built by {@link planContextValue}), so it offers
  * Approve, Submit PR or Show PR only when that action is legal. An invalid or
  * unreadable root keeps the fixed error context value below and offers none.
  */
@@ -74,8 +74,8 @@ const CONTEXT_ERROR = 'baiton.specError';
  * actions"). Exported for that wiring and its {@link treeNodeTarget} helper.
  */
 export type TreeNode =
-  | { kind: 'spec'; node: SpecNode }
-  | { kind: 'todo'; node: TodoNode }
+  | { kind: 'spec'; node: PlanNode }
+  | { kind: 'todo'; node: PhaseNode }
   | { kind: 'error'; node: ErrorNode };
 
 /**
@@ -108,7 +108,7 @@ export class SpecExplorer
   public readonly onDidChangeTreeData = this.emitter.event;
 
   /** The current roots, recomputed from disk on each refresh (no cache, Req 6.3). */
-  private roots: SpecNode[] = [];
+  private roots: PlanNode[] = [];
 
   private readonly disposables: vscode.Disposable[] = [];
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -193,9 +193,9 @@ export class SpecExplorer
       if (children.kind === 'errors') {
         return children.errors.map((node) => ({ kind: 'error', node }));
       }
-      return children.todos.map((node) => ({ kind: 'todo', node }));
+      return children.phases.map((node) => ({ kind: 'todo', node }));
     }
-    // Todo and error nodes are leaves.
+    // Phase and error nodes are leaves.
     return [];
   }
 
@@ -239,10 +239,10 @@ export class SpecExplorer
         readError: spec.readError,
         // The approval fact comes from the store, never recomputed here (Req 2.4).
         approved: await this.approvalFor(spec.slug),
-        // Todo ids with a recorded Session_Id, from the spec's own journal
+        // Phase ids with a recorded Session_Id, from the spec's own journal
         // (Req 4.4); a spec with no journals reads back as no entries.
         sessions: sessionSet(readSpecJournal(this.specsDir, spec.slug)),
-        // Todo ids whose plan is on file, which gates the View plan action.
+        // Phase ids whose plan is on file, which gates the View plan action.
         plans: await listTodoPlans(this.specsDir, spec.slug),
       })),
     );
@@ -250,7 +250,7 @@ export class SpecExplorer
       // A newer refresh superseded this one while we awaited; drop this result.
       return;
     }
-    this.roots = buildSpecTree(inputs);
+    this.roots = buildPlanTree(inputs);
     this.emitter.fire(undefined);
   }
 
@@ -270,7 +270,7 @@ export class SpecExplorer
    * approved marker, and an invalid marker (Req 2.2, 2.3, 2.4, 2.5, 3.1).
    * Clicking it opens the spec's `spec.md` and sets it active (Req 2.6).
    */
-  private specItem(node: SpecNode): vscode.TreeItem {
+  private specItem(node: PlanNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
       node.slug,
       vscode.TreeItemCollapsibleState.Collapsed,
@@ -279,7 +279,7 @@ export class SpecExplorer
     // `baiton.spec` plus one token per legal action; the `view/item/context`
     // `when` clauses in `package.json` match those tokens with `\b<action>\b`
     // so the tree and the menu cannot disagree.
-    item.contextValue = node.invalid ? CONTEXT_ERROR : specContextValue(node.actions);
+    item.contextValue = node.invalid ? CONTEXT_ERROR : planContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.invalid ? 'warning' : 'file');
     item.tooltip = this.specTooltip(node);
     item.command = {
@@ -291,7 +291,7 @@ export class SpecExplorer
   }
 
   /** The `<status> · approved · invalid` description shown beside a spec root. */
-  private specDescription(node: SpecNode): string {
+  private specDescription(node: PlanNode): string {
     const parts: string[] = [statusLabel(node.status)];
     if (node.approved) {
       parts.push('approved');
@@ -303,7 +303,7 @@ export class SpecExplorer
   }
 
   /** A tooltip spelling out the spec's derived facts. */
-  private specTooltip(node: SpecNode): string {
+  private specTooltip(node: PlanNode): string {
     const lines = [
       `Spec: ${node.slug}`,
       `Status: ${statusLabel(node.status)}`,
@@ -321,7 +321,7 @@ export class SpecExplorer
    * a blocked marker (Req 4.1, 4.2, 4.3, 4.4, 4.5). Inline actions attach via
    * the `baiton.todo` context value (design "SpecExplorer inline actions").
    */
-  private todoItem(node: TodoNode): vscode.TreeItem {
+  private todoItem(node: PhaseNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
       `${node.id} ${node.title}`,
       vscode.TreeItemCollapsibleState.None,
@@ -330,7 +330,7 @@ export class SpecExplorer
     // `baiton.todo` plus one token per legal action (Req 4.1); the
     // `view/item/context` `when` clauses in `package.json` match on those
     // tokens with `\b<action>\b` so the tree and the menu cannot disagree.
-    item.contextValue = todoContextValue(node.actions);
+    item.contextValue = phaseContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.blocked ? 'circle-slash' : 'circle-outline');
     item.tooltip = `${node.id} ${node.title}\nState: ${node.state}\nBlocked: ${node.blocked ? 'yes' : 'no'}`;
     return item;
@@ -373,7 +373,7 @@ export class SpecExplorer
 }
 
 /** The label for a spec's status: the set value, or an unset indication (Req 2.3). */
-function statusLabel(status: SpecStatus): string {
+function statusLabel(status: PlanStatus): string {
   return status.kind === 'set' ? status.value : 'no status';
 }
 

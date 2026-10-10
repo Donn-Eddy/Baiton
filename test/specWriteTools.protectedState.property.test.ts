@@ -9,7 +9,7 @@ import { ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 13: Protected-state todos reject edit and remove
@@ -35,7 +35,7 @@ import { TODO_STATES, TodoState } from '../src/model/todoState';
  */
 
 /** States a protected todo cannot be edited or removed from (Req 9.8). */
-const PROTECTED: ReadonlySet<TodoState> = new Set<TodoState>([
+const PROTECTED: ReadonlySet<PhaseState> = new Set<PhaseState>([
   'done',
   'failed',
   'planning',
@@ -112,7 +112,7 @@ function toolByName(tools: Tool[], name: string): Tool {
  * Render a spec.md containing one todo per state. Returns the text and the map
  * of assigned id → state so the property knows each todo's protection status.
  */
-function renderSpecAllStates(): { text: string; idStates: { id: string; state: TodoState }[] } {
+function renderSpecAllStates(): { text: string; idStates: { id: string; state: PhaseState }[] } {
   const lines: string[] = [];
   lines.push('---');
   lines.push('version: 1');
@@ -126,11 +126,11 @@ function renderSpecAllStates(): { text: string; idStates: { id: string; state: T
   lines.push('');
   lines.push('# TODOS');
   lines.push('');
-  const idStates: { id: string; state: TodoState }[] = [];
-  TODO_STATES.forEach((state, i) => {
+  const idStates: { id: string; state: PhaseState }[] = [];
+  PHASE_STATES.forEach((state, i) => {
     const id = `T${String(i + 1).padStart(2, '0')}`;
     idStates.push({ id, state });
-    lines.push(`- [${state}] ${id} Todo in ${state} state`);
+    lines.push(`- [${state}] ${id} Phase in ${state} state`);
   });
   lines.push('');
   return { text: lines.join('\n'), idStates };
@@ -140,7 +140,7 @@ function renderSpecAllStates(): { text: string; idStates: { id: string; state: T
 function makeRepoWithSpec(slug: string): {
   repoRoot: string;
   specFile: string;
-  idStates: { id: string; state: TodoState }[];
+  idStates: { id: string; state: PhaseState }[];
 } {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-prot-'));
   const specDir = path.join(repoRoot, '.baiton', 'specs', slug);
@@ -159,7 +159,7 @@ describe('spec-writing tools: protected-state edit/remove rejection (property)',
     await fc.assert(
       fc.asyncProperty(
         // Pick which todo (by index into the eight states) and which tool.
-        fc.nat({ max: TODO_STATES.length - 1 }),
+        fc.nat({ max: PHASE_STATES.length - 1 }),
         fc.constantFrom<'edit_todo' | 'remove_todo'>('edit_todo', 'remove_todo'),
         fc.string({ minLength: 1, maxLength: 30 }),
         async (todoPick, toolName, rawTitle) => {

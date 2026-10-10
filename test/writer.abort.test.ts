@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { isErr } from '../src/model/result';
-import { writeFrontmatterKey, writeTodoState } from '../src/model/writer';
+import { writeFrontmatterKey, writePhaseState } from '../src/model/writer';
 
 /**
  * Task 4.3 — focused unit tests for the serializer's abort and `done`-line
@@ -35,12 +35,12 @@ const SPEC = [
 describe('writer abort and done-line warning (Req 6.5, 4.11)', () => {
   describe('abort on unlocatable target (Req 6.5)', () => {
     it('leaves the content unchanged when the todo id cannot be located', () => {
-      const r = writeTodoState(SPEC, 'T99', 'planning');
+      const r = writePhaseState(SPEC, 'T99', 'planning');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
-        assert.strictEqual(r.error.kind, 'todo-not-found');
-        if (r.error.kind === 'todo-not-found') {
-          assert.strictEqual(r.error.todoId, 'T99');
+        assert.strictEqual(r.error.kind, 'phase-not-found');
+        if (r.error.kind === 'phase-not-found') {
+          assert.strictEqual(r.error.phaseId, 'T99');
           // The abort surfaces a message indicating the write was not applied.
           assert.ok(r.error.message.length > 0);
         }
@@ -72,20 +72,20 @@ describe('writer abort and done-line warning (Req 6.5, 4.11)', () => {
 
   describe('done-line edit warning leaves state unchanged (Req 4.11)', () => {
     it('refuses to advance a done todo and identifies it in the error', () => {
-      const r = writeTodoState(SPEC, 'T03', 'executing');
+      const r = writePhaseState(SPEC, 'T03', 'executing');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');
         if (r.error.kind === 'done-protected') {
           // The warning must identify the todo whose state was left unchanged.
-          assert.strictEqual(r.error.todoId, 'T03');
+          assert.strictEqual(r.error.phaseId, 'T03');
           assert.ok(r.error.message.includes('T03'));
         }
       }
     });
 
     it('treats a no-op re-write of a done todo as a protected abort', () => {
-      const r = writeTodoState(SPEC, 'T03', 'done');
+      const r = writePhaseState(SPEC, 'T03', 'done');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');
@@ -96,10 +96,10 @@ describe('writer abort and done-line warning (Req 6.5, 4.11)', () => {
       // The abort returns an error rather than a rewritten string, so no other
       // todo (e.g. the still-executing T02) can have been advanced. Confirm a
       // legal sibling write still works, proving the done abort was isolated.
-      const done = writeTodoState(SPEC, 'T03', 'reviewing');
+      const done = writePhaseState(SPEC, 'T03', 'reviewing');
       assert.strictEqual(isErr(done), true);
 
-      const sibling = writeTodoState(SPEC, 'T02', 'executed');
+      const sibling = writePhaseState(SPEC, 'T02', 'executed');
       assert.strictEqual(isErr(sibling), false);
     });
   });

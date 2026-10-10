@@ -1,8 +1,8 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import { buildStageContext } from '../src/engine/stageContext';
-import { parseSpec, ParsedSpec } from '../src/model/parser';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { parsePlan, ParsedPlan } from '../src/model/parser';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 15: Planner context is confined to
@@ -41,13 +41,13 @@ interface SpecModel {
 
 interface TodoModel {
   id: string;
-  state: TodoState;
+  state: PhaseState;
   /** A unique marker embedded in this todo's title (and thus its line). */
   titleMarker: string;
   after: string[];
 }
 
-/** Renders a {@link SpecModel} to canonical spec text `parseSpec` consumes. */
+/** Renders a {@link SpecModel} to canonical spec text `parsePlan` consumes. */
 function renderSpec(model: SpecModel): string {
   const lines: string[] = [];
   lines.push('---');
@@ -93,7 +93,7 @@ const specModelArb: fc.Arbitrary<SpecModel> = fc
       ...ids.map((id, index) =>
         fc
           .record({
-            state: fc.constantFrom<TodoState>(...TODO_STATES),
+            state: fc.constantFrom<PhaseState>(...PHASE_STATES),
             after: fc.subarray(ids.filter((other) => other !== id)),
           })
           .map(
@@ -154,7 +154,7 @@ describe('plan stage context confinement (property)', () => {
           }),
         ),
         ({ model, targetIdx }) => {
-          const spec: ParsedSpec = parseSpec(renderSpec(model));
+          const spec: ParsedPlan = parsePlan(renderSpec(model));
           const target = model.todos[targetIdx];
 
           const context = buildStageContext({

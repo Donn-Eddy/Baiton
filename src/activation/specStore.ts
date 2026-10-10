@@ -8,9 +8,9 @@
  *
  *   - Reads (`currentState`, `isApproved`, `isBlocked`, `inputRev`,
  *     `inputRevMatches`) re-read the spec's `spec.md` fresh each call and use
- *     the pure {@link parseSpec} / {@link approvalHash} / {@link computeInputRev}
+ *     the pure {@link parsePlan} / {@link approvalHash} / {@link computeInputRev}
  *     cores so no cached copy is trusted (Req 6.3).
- *   - `writeState` applies the minimal state-box edit via {@link writeTodoState}
+ *   - `writeState` applies the minimal state-box edit via {@link writePhaseState}
  *     to freshly re-read content, writes it back, and commits the change on the
  *     spec branch as `spec(<slug>): <id> <what>`, all under the per-slug
  *     spec-branch writer and committing only `.baiton/specs/<slug>` via
@@ -29,11 +29,11 @@
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { approvalHash, computeInputRev } from '../model/hash';
-import { parseSpec, type ParsedSpec } from '../model/parser';
+import { parsePlan, type ParsedPlan } from '../model/parser';
 import { isBlocked as deriveBlocked } from '../model/hash';
-import { writeTodoState } from '../model/writer';
+import { writePhaseState } from '../model/writer';
 import { isErr } from '../model/result';
-import type { TodoState } from '../model/todoState';
+import type { PhaseState } from '../model/phaseState';
 import type { Stage } from '../model/stage';
 import type { GitWorktreeService } from '../git';
 import { createSpecBranchWriter, type SpecBranchWriter, type SpecStore } from '../engine';
@@ -59,19 +59,19 @@ export function createSpecStore(
     path.join(specsDir, slug, 'todos', todoId);
 
   /** Re-read and parse a spec's `spec.md`, or `undefined` when unreadable. */
-  const readSpec = async (slug: string): Promise<ParsedSpec | undefined> => {
+  const readSpec = async (slug: string): Promise<ParsedPlan | undefined> => {
     try {
       const raw = await fsp.readFile(specPath(slug), 'utf8');
-      return parseSpec(raw);
+      return parsePlan(raw);
     } catch {
       return undefined;
     }
   };
 
   return {
-    async currentState(slug, todoId): Promise<TodoState | undefined> {
+    async currentState(slug, todoId): Promise<PhaseState | undefined> {
       const spec = await readSpec(slug);
-      return spec?.todos.find((t) => t.id === todoId)?.state;
+      return spec?.phases.find((t) => t.id === todoId)?.state;
     },
 
     readSpec,
@@ -123,11 +123,11 @@ export function createSpecStore(
       if (spec === undefined) {
         return false;
       }
-      const todo = spec.todos.find((t) => t.id === todoId);
+      const todo = spec.phases.find((t) => t.id === todoId);
       if (todo === undefined) {
         return false;
       }
-      return deriveBlocked(todo, spec.todos);
+      return deriveBlocked(todo, spec.phases);
     },
 
     async inputRev(slug, todoId): Promise<string> {
@@ -154,7 +154,7 @@ export function createSpecStore(
         } catch {
           return false;
         }
-        const written = writeTodoState(current, todoId, state);
+        const written = writePhaseState(current, todoId, state);
         if (isErr(written)) {
           return false;
         }
@@ -238,6 +238,6 @@ function recordedPlanInputRev(
 }
 
 /** A short verb for the state-write commit message `spec(<slug>): <id> <what>`. */
-function what(state: TodoState, note?: string): string {
+function what(state: PhaseState, note?: string): string {
   return note !== undefined && note.length > 0 ? `${state} (${note})` : state;
 }

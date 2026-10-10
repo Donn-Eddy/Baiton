@@ -15,10 +15,10 @@ import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Role } from '../src/model/role';
 import { approvalHash } from '../src/model/hash';
-import { parseSpec, ParsedSpec } from '../src/model/parser';
+import { parsePlan, ParsedPlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 /**
@@ -163,10 +163,10 @@ function makeGit(): GitService {
  * under test. Records every state write for assertions.
  */
 function makeSpecStore(opts: {
-  state: TodoState;
+  state: PhaseState;
   approved: boolean;
-}): SpecStore & { writes: TodoState[] } {
-  const writes: TodoState[] = [];
+}): SpecStore & { writes: PhaseState[] } {
+  const writes: PhaseState[] = [];
   return {
     writes,
     currentState: async () => opts.state,
@@ -224,7 +224,7 @@ function executeRequest(): RunRequest {
 // --- Generators ------------------------------------------------------------
 
 /** The todo states from which Execute is a legal transition (transitions.ts). */
-const executeLegalStateArb: fc.Arbitrary<TodoState> = fc.constantFrom<TodoState>(
+const executeLegalStateArb: fc.Arbitrary<PhaseState> = fc.constantFrom<PhaseState>(
   'planned',
   'executed',
   'failed',
@@ -390,13 +390,13 @@ describe('run queue worktree mode guards', () => {
   });
 
   /** A spec whose T06 depends on `after` (a subset of T01..T05). */
-  function specWithAfter(after: readonly string[]): ParsedSpec {
+  function specWithAfter(after: readonly string[]): ParsedPlan {
     const lines = ['---', 'title: sample', '---', '# OVERVIEW', 'o', '# TODOS'];
     for (const id of ['T01', 'T02', 'T03', 'T04', 'T05']) {
       lines.push(`- [done] ${id} dep`);
     }
     lines.push(`- [pending] T06 target${after.length > 0 ? ` (after ${after.join(',')})` : ''}`);
-    return parseSpec(lines.join('\n'));
+    return parsePlan(lines.join('\n'));
   }
 
   const idsArb = fc.subarray(['T01', 'T02', 'T03', 'T04', 'T05']);
@@ -508,7 +508,7 @@ describe('approval-hash gate predicate (property)', () => {
           'flip',
         ),
         (overview, title, tamper) => {
-          const spec: ParsedSpec = parseSpec(renderSpec(overview, title));
+          const spec: ParsedPlan = parsePlan(renderSpec(overview, title));
           const currentHash = approvalHash(spec);
 
           let approvedRev: string | undefined;
@@ -546,7 +546,7 @@ describe('approval-hash gate predicate (property)', () => {
   it('is true only for the exact, non-empty current hash', () => {
     fc.assert(
       fc.property(cleanTextArb, cleanTextArb, (overview, title) => {
-        const spec: ParsedSpec = parseSpec(renderSpec(overview, title));
+        const spec: ParsedPlan = parsePlan(renderSpec(overview, title));
         const currentHash = approvalHash(spec);
         assert.strictEqual(
           isApprovedPredicate(currentHash, currentHash),

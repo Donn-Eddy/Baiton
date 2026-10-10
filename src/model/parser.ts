@@ -1,311 +1,250 @@
 /**
- * Pure spec-file parser (Requirement 3).
+ * Pure parser for plan.md and legacy spec.md documents.
  *
- * Splits a spec file into its flat `---`-fenced frontmatter, its `# OVERVIEW`
- * section and its `# TODOS` section, and parses each `- [<state>] <id> <title>`
- * todo line into a structured {@link Todo}. The parser NEVER throws: any input,
- * including malformed frontmatter, missing sections or malformed todo lines,
- * produces a {@link ParsedSpec}. Structural validity is the validator's job
- * (Requirement 4), not the parser's.
+ * A plan has a preamble followed by `# PHASES` and `P##` phase lines. The
+ * legacy spec.md format has `# OVERVIEW`, `# TODOS` and `T##` lines. The parser
+ * never throws; structural validity is the validator's job.
  */
-import { TodoState, isTodoState } from './todoState';
+import { PhaseState, isPhaseState } from './phaseState';
 
-/**
- * A spec file parsed into its frontmatter, overview prose, structured todos and
- * the raw lines that back conflict-marker scanning and minimal-edit writes.
- */
-export interface ParsedSpec {
-  /** Flat, order-preserving `key: value` frontmatter. */
+/** The supported document grammars. `legacy-spec` is the legacy spec.md format (`# OVERVIEW` + `# TODOS`, `T##`). */
+export type DocumentKind = 'plan' | 'legacy-spec';
+
+/** A plan document parsed into frontmatter, preamble, phases and raw lines. */
+export interface ParsedPlan {
+  kind: DocumentKind;
   frontmatter: Map<string, string>;
-  /** Raw text of the OVERVIEW section (between `# OVERVIEW` and `# TODOS`). */
-  overview: string;
-  /** The parsed todos, in file order. */
-  todos: Todo[];
-  /** The file split into lines, for conflict-marker scanning and edits. */
+  /** The plan preamble, or the legacy OVERVIEW section. */
+  preamble: string;
+  phases: Phase[];
   rawLines: string[];
 }
 
-/** One work item under the TODOS section. */
-export interface Todo {
-  /** `T` followed by two or more decimal digits. */
+/** One work item under the document's PHASES or legacy TODOS section. */
+export interface Phase {
+  /** The kind's prefix (`P`, or `T` for legacy) followed by two or more digits. */
   id: string;
-  /** Lifecycle state from the `[state]` box. */
-  state: TodoState;
-  /** Everything after the id up to (but excluding) a parsed trailing hint group. */
+  state: PhaseState;
   title: string;
-  /** Dependency ids from an `after` hint group. */
   after: string[];
-  /** Starting file paths from a `files:` hint group. */
   files: string[];
-  /** Index of this todo's line in {@link ParsedSpec.rawLines}. */
   lineIndex: number;
 }
 
-/** A todo id is the character `T` followed by two or more decimal digits (Req 3.3). */
-const TODO_ID = /^T\d{2,}$/;
-
-/** Matches the leading `- [<state>] ` prefix of a todo line (Req 3.2). */
-const TODO_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
-
-/**
- * Splits raw spec text into a parsed model. Never throws.
- */
-export function parseSpec(raw: string): ParsedSpec {
-  const rawLines = raw.split('\n');
-
-  const { frontmatter, bodyStart } = parseFrontmatter(rawLines);
-  const { overview, todosStart } = parseOverview(rawLines, bodyStart);
-  const todos = parseTodos(rawLines, todosStart);
-
-  return { frontmatter, overview, todos, rawLines };
+/** Pattern for phase ids belonging to a document kind. */
+export function phaseIdPattern(kind: DocumentKind): RegExp {
+  return kind === 'plan' ? /^P\d{2,}$/ : /^T\d{2,}$/;
 }
 
-/**
- * Parses a leading `---`-fenced block of flat `key: value` lines. Returns the
- * frontmatter map and the index of the first body line after the closing fence.
- * If the first non-empty line is not a `---` fence there is no frontmatter and
- * the body starts at line 0.
- */
+/** Prefix used by phase ids belonging to a document kind. */
+export function phaseIdPrefix(kind: DocumentKind): 'P' | 'T' {
+  return kind === 'plan' ? 'P' : 'T';
+}
+
+function phasesSectionName(kind: DocumentKind): 'PHASES' | 'TODOS' {
+  // Legacy spec.md format uses the TODOS section.
+  return kind === 'plan' ? 'PHASES' : 'TODOS';
+}
+
+/** Infer document kind from its first PHASES/TODOS header, then OVERVIEW. */
+export function detectDocumentKind(raw: string): DocumentKind {
+  const lines = raw.split('\n');
+  const { bodyStart } = parseFrontmatter(lines);
+  let phasesHeader = -1;
+  let todosHeader = -1;
+  for (let i = bodyStart; i < lines.length; i++) {
+    if (phasesHeader === -1 && isHeader(lines[i], 'PHASES')) phasesHeader = i;
+    // Legacy spec.md format is identified by its TODOS header.
+    if (todosHeader === -1 && isHeader(lines[i], 'TODOS')) todosHeader = i;
+    if (phasesHeader !== -1 || todosHeader !== -1) {
+      if (phasesHeader !== -1 && todosHeader !== -1) {
+        return phasesHeader < todosHeader ? 'plan' : 'legacy-spec';
+      }
+    }
+  }
+  if (phasesHeader !== -1) return 'plan';
+  if (todosHeader !== -1) return 'legacy-spec';
+  return findHeader(lines, bodyStart, 'OVERVIEW') !== -1 ? 'legacy-spec' : 'plan';
+}
+
+/** Parse document text. Never throws. */
+export function parsePlan(
+  raw: string,
+  kind: DocumentKind = detectDocumentKind(raw),
+): ParsedPlan {
+  const rawLines = raw.split('\n');
+  const { frontmatter, bodyStart } = parseFrontmatter(rawLines);
+  const { preamble, phasesStart } = parsePreamble(rawLines, bodyStart, kind);
+  const phases = parsePhases(rawLines, phasesStart, kind);
+  return { kind, frontmatter, preamble, phases, rawLines };
+}
+
+/** Parse a leading flat `---`-fenced frontmatter block. */
 function parseFrontmatter(lines: string[]): {
   frontmatter: Map<string, string>;
   bodyStart: number;
 } {
   const frontmatter = new Map<string, string>();
-
-  // The opening fence must be the first line of the file (allowing that a file
-  // may legitimately start with frontmatter). A line that is exactly `---`.
   if (lines.length === 0 || lines[0].trim() !== '---') {
     return { frontmatter, bodyStart: 0 };
   }
-
   let i = 1;
   for (; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      // Closing fence consumed; body starts on the next line.
-      return { frontmatter, bodyStart: i + 1 };
-    }
+    if (lines[i].trim() === '---') return { frontmatter, bodyStart: i + 1 };
     const line = lines[i];
-    if (line.trim() === '') {
-      continue;
-    }
-    // Flat `key: value`, exactly one key per line, no nested keys (Req 3.1).
+    if (line.trim() === '') continue;
     const sep = line.indexOf(':');
-    if (sep === -1) {
-      continue;
-    }
+    if (sep === -1) continue;
     const key = line.slice(0, sep).trim();
     const value = line.slice(sep + 1).trim();
-    if (key !== '') {
-      frontmatter.set(key, value);
-    }
+    if (key !== '') frontmatter.set(key, value);
   }
-
-  // No closing fence found; treat the whole remainder as consumed frontmatter.
   return { frontmatter, bodyStart: i };
 }
 
-/**
- * Extracts the OVERVIEW section: the raw text between a `# OVERVIEW` header and
- * the following `# TODOS` header. Returns the overview text and the index of
- * the line immediately after `# TODOS` (or the end of file if absent).
- */
-function parseOverview(
+/** Extract the plan preamble or the legacy OVERVIEW and locate the item section. */
+function parsePreamble(
   lines: string[],
   bodyStart: number,
-): { overview: string; todosStart: number } {
-  const overviewHeader = findHeader(lines, bodyStart, 'OVERVIEW');
-  const todosHeader = findHeader(lines, bodyStart, 'TODOS');
+  kind: DocumentKind,
+): { preamble: string; phasesStart: number } {
+  if (kind === 'plan') {
+    const phasesHeader = findHeader(lines, bodyStart, phasesSectionName(kind));
+    const preamble = lines
+      .slice(bodyStart, phasesHeader === -1 ? lines.length : phasesHeader)
+      .join('\n');
+    return {
+      preamble,
+      phasesStart: phasesHeader === -1 ? lines.length : phasesHeader + 1,
+    };
+  }
 
-  // Overview text runs from just after the OVERVIEW header up to the TODOS
-  // header (or end of file). When there is no OVERVIEW header the overview is
-  // empty.
-  let overview = '';
+  // Legacy spec.md format: preserve the original OVERVIEW slicing byte-for-byte.
+  const overviewHeader = findHeader(lines, bodyStart, 'OVERVIEW');
+  const todosHeader = findHeader(lines, bodyStart, phasesSectionName(kind));
+  let preamble = '';
   if (overviewHeader !== -1) {
     const end = todosHeader !== -1 ? todosHeader : lines.length;
     const start = overviewHeader + 1;
-    if (start < end) {
-      overview = lines.slice(start, end).join('\n');
-    }
+    if (start < end) preamble = lines.slice(start, end).join('\n');
   }
-
-  const todosStart = todosHeader !== -1 ? todosHeader + 1 : lines.length;
-  return { overview, todosStart };
+  return {
+    preamble,
+    phasesStart: todosHeader !== -1 ? todosHeader + 1 : lines.length,
+  };
 }
 
-/** Finds the index of a `# <NAME>` header line at or after `from`, else -1. */
 function findHeader(lines: string[], from: number, name: string): number {
   for (let i = from; i < lines.length; i++) {
-    if (isHeader(lines[i], name)) {
-      return i;
-    }
+    if (isHeader(lines[i], name)) return i;
   }
   return -1;
 }
 
-/** Whether a line is a `# <NAME>` header (leading `#` marks, then the name). */
 function isHeader(line: string, name: string): boolean {
   const m = /^#+\s+(.*)$/.exec(line);
-  if (!m) {
-    return false;
-  }
-  return m[1].trim() === name;
+  return m !== null && m[1].trim() === name;
 }
 
-/**
- * Parses every `- [` line at or after `todosStart` into a {@link Todo}. Lines
- * that do not begin with `- [` are prose and are ignored here (Req 3.8); the
- * validator inspects malformed `- [` lines against the grammar.
- */
-function parseTodos(lines: string[], todosStart: number): Todo[] {
-  const todos: Todo[] = [];
-  for (let i = todosStart; i < lines.length; i++) {
+/** Parse item lines in the selected section; prose is ignored. */
+function parsePhases(lines: string[], phasesStart: number, kind: DocumentKind): Phase[] {
+  const phases: Phase[] = [];
+  for (let i = phasesStart; i < lines.length; i++) {
     const line = lines[i];
-    if (!line.startsWith('- [')) {
-      // Prose under the TODOS section is left unchanged (Req 3.8).
-      continue;
-    }
-    const todo = parseTodoLine(line, i);
-    if (todo) {
-      todos.push(todo);
-    }
+    if (!line.startsWith('- [')) continue;
+    const phase = parsePhaseLine(line, i, kind);
+    if (phase) phases.push(phase);
   }
-  return todos;
+  return phases;
 }
 
-/**
- * Parses a single `- [<state>] <id> <title>` line. Returns undefined when the
- * line does not match the todo grammar (unknown state, missing/malformed id);
- * the validator reports those as located errors.
- */
-function parseTodoLine(line: string, lineIndex: number): Todo | undefined {
-  const m = TODO_PREFIX.exec(line);
-  if (!m) {
-    return undefined;
-  }
+/** Parse one phase line, returning undefined when it fails this kind's grammar. */
+function parsePhaseLine(line: string, lineIndex: number, kind: DocumentKind): Phase | undefined {
+  const m = PHASE_PREFIX.exec(line);
+  if (!m) return undefined;
   const stateText = m[1].trim();
-  if (!isTodoState(stateText)) {
-    return undefined;
-  }
-  const state = stateText;
-
-  // Remainder after the state box: `<id> <title>`.
+  if (!isPhaseState(stateText)) return undefined;
   const rest = m[2];
   const spaceIdx = rest.search(/\s/);
   const id = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
-  if (!TODO_ID.test(id)) {
-    return undefined;
-  }
+  if (!phaseIdPattern(kind).test(id)) return undefined;
   const afterId = spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1);
-
-  const { title, after, files } = parseTitleAndHints(afterId);
-
-  return { id, state, title, after, files, lineIndex };
+  const { title, after, files } = parseTitleAndHints(afterId, kind);
+  return { id, state: stateText, title, after, files, lineIndex };
 }
 
-/**
- * Splits the text after the id into a title and, when the line ends with a
- * parseable ` (<hints>)` group, the parsed `after`/`files` hints. When the
- * trailing group does not parse as hints it is retained as part of the title
- * (Req 3.7).
- */
-function parseTitleAndHints(text: string): {
-  title: string;
-  after: string[];
-  files: string[];
-} {
+/** Matches the leading `- [<state>] ` prefix of a phase line. */
+const PHASE_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
+
+function parseTitleAndHints(
+  text: string,
+  kind: DocumentKind,
+): { title: string; after: string[]; files: string[] } {
   const trimmed = text.replace(/\s+$/, '');
-
-  // A trailing hint group must be the last content on the line: `... (<hints>)`.
-  if (!trimmed.endsWith(')')) {
-    return { title: text.trim(), after: [], files: [] };
-  }
+  if (!trimmed.endsWith(')')) return { title: text.trim(), after: [], files: [] };
   const open = trimmed.lastIndexOf('(');
-  if (open === -1) {
-    return { title: text.trim(), after: [], files: [] };
-  }
-
-  const inner = trimmed.slice(open + 1, trimmed.length - 1);
-  const parsed = parseHints(inner);
-  if (!parsed) {
-    // Unparseable trailing parens stay in the title (Req 3.7).
-    return { title: text.trim(), after: [], files: [] };
-  }
-
-  const title = trimmed.slice(0, open).trim();
-  return { title, after: parsed.after, files: parsed.files };
+  if (open === -1) return { title: text.trim(), after: [], files: [] };
+  const parsed = parseHints(trimmed.slice(open + 1, -1), phaseIdPattern(kind));
+  if (!parsed) return { title: text.trim(), after: [], files: [] };
+  return {
+    title: trimmed.slice(0, open).trim(),
+    after: parsed.after,
+    files: parsed.files,
+  };
 }
 
-/**
- * Parses the inside of a trailing paren group as `;`-separated hint groups
- * (Req 3.6). Recognizes an `after` group of comma-separated ids (Req 3.4) and a
- * `files:` group of comma-separated paths (Req 3.5). Returns undefined when any
- * group is unrecognized or empty, so the caller keeps the parens in the title.
- */
+/** Return ids in a trailing after hint that uses the other document kind's ids. */
+export function trailingHintIdsOfOtherKind(
+  title: string,
+  kind: DocumentKind,
+): string[] | undefined {
+  const trimmed = title.replace(/\s+$/, '');
+  if (!trimmed.endsWith(')')) return undefined;
+  const open = trimmed.lastIndexOf('(');
+  if (open === -1) return undefined;
+  const otherKind: DocumentKind = kind === 'plan' ? 'legacy-spec' : 'plan';
+  const parsed = parseHints(trimmed.slice(open + 1, -1), phaseIdPattern(otherKind));
+  return parsed && parsed.after.length > 0 ? parsed.after : undefined;
+}
+
 function parseHints(
   inner: string,
+  idPattern: RegExp,
 ): { after: string[]; files: string[] } | undefined {
   const groups = inner.split(';');
   const after: string[] = [];
   const files: string[] = [];
   let sawAny = false;
-
   for (const rawGroup of groups) {
     const group = rawGroup.trim();
-    if (group === '') {
-      // An empty group (e.g. a trailing `;`) makes the whole thing non-hint.
-      return undefined;
-    }
-
+    if (group === '') return undefined;
     const afterItems = matchGroup(group, 'after');
     if (afterItems !== undefined) {
       const ids = splitList(afterItems);
-      if (ids.length === 0 || !ids.every((id) => TODO_ID.test(id))) {
-        return undefined;
-      }
+      if (ids.length === 0 || !ids.every((id) => idPattern.test(id))) return undefined;
       after.push(...ids);
       sawAny = true;
       continue;
     }
-
     const filesItems = matchGroup(group, 'files');
     if (filesItems !== undefined) {
       const paths = splitList(filesItems);
-      if (paths.length === 0) {
-        return undefined;
-      }
+      if (paths.length === 0) return undefined;
       files.push(...paths);
       sawAny = true;
       continue;
     }
-
-    // Unrecognized hint group: the trailing parens are not hints.
     return undefined;
   }
-
-  if (!sawAny) {
-    return undefined;
-  }
-  return { after, files };
+  return sawAny ? { after, files } : undefined;
 }
 
-/**
- * If `group` is of the form `<keyword> <items>` or `<keyword>: <items>`,
- * returns the items text; otherwise undefined. The keyword match is
- * case-insensitive and must be a whole word.
- */
 function matchGroup(group: string, keyword: string): string | undefined {
   const re = new RegExp(`^${keyword}\\s*:?\\s+(.*)$`, 'i');
   const m = re.exec(group);
-  if (!m) {
-    return undefined;
-  }
-  return m[1];
+  return m ? m[1] : undefined;
 }
 
-/** Splits a comma-separated list, trimming each item and dropping empties. */
 function splitList(text: string): string[] {
-  return text
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '');
+  return text.split(',').map((s) => s.trim()).filter((s) => s !== '');
 }

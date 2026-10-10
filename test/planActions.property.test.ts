@@ -1,25 +1,25 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import {
-  legalSpecActions,
-  specContextValue,
-  SpecAction,
-} from '../src/model/specActions';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+  legalPlanActions,
+  planContextValue,
+  PlanAction,
+} from '../src/model/planActions';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
- * Property test for the host-free legal-spec-actions function (Requirement 4).
+ * Property test for the host-free legalPlanActions function (Requirement 4).
  *
- * A spec root SHALL offer exactly the actions that are legal for its derived
- * facts: nothing for an invalid spec, only Show PR once a PR URL is recorded,
+ * A plan root SHALL offer exactly the actions that are legal for its derived
+ * facts: nothing for an invalid plan, only Show PR once a PR URL is recorded,
  * and otherwise Approve while unapproved / Submit PR when approved with at
- * least one todo and every todo done (mirroring the engine's `checkReady`
+ * least one phase and every phase done (mirroring the engine's `checkReady`
  * gate). The `contextValue` SHALL carry exactly those actions as `\b<action>\b`
  * tokens, which is what the `view/item/context` `when` clauses match.
  */
 
-/** Every spec action, for the token round-trip. */
-const ALL_SPEC_ACTIONS: readonly SpecAction[] = ['approve', 'submitPr', 'showPr'];
+/** Every plan action, for the token round-trip. */
+const ALL_PLAN_ACTIONS: readonly PlanAction[] = ['approve', 'submitPr', 'showPr'];
 
 /** A recorded PR URL, or undefined when the frontmatter key is absent/empty. */
 const prUrlArb: fc.Arbitrary<string | undefined> = fc.option(
@@ -30,23 +30,23 @@ const prUrlArb: fc.Arbitrary<string | undefined> = fc.option(
   { nil: undefined },
 );
 
-/** The todo states of a spec, in file order; an empty list is a todo-less spec. */
-const todoStatesArb: fc.Arbitrary<TodoState[]> = fc.oneof(
-  fc.array(fc.constantFrom(...TODO_STATES), { maxLength: 6 }),
+/** Phase states in file order; an empty list means the plan has no phases. */
+const phaseStatesArb: fc.Arbitrary<PhaseState[]> = fc.oneof(
+  fc.array(fc.constantFrom(...PHASE_STATES), { maxLength: 6 }),
   // Bias towards all-done lists so the Submit PR branch is exercised often.
-  fc.array(fc.constant<TodoState>('done'), { minLength: 1, maxLength: 6 }),
+  fc.array(fc.constant<PhaseState>('done'), { minLength: 1, maxLength: 6 }),
 );
 
-describe('specActions (property)', () => {
-  it('legalSpecActions gates approve/submitPr/showPr on the derived facts', () => {
+describe('planActions (property)', () => {
+  it('legalPlanActions gates approve/submitPr/showPr on the derived facts', () => {
     fc.assert(
       fc.property(
         fc.boolean(),
         fc.boolean(),
         prUrlArb,
-        todoStatesArb,
-        (approved, invalid, prUrl, todoStates) => {
-          const actions = legalSpecActions({ approved, invalid, prUrl, todoStates });
+        phaseStatesArb,
+        (approved, invalid, prUrl, phaseStates) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
 
           if (invalid) {
             assert.deepStrictEqual(actions, []);
@@ -54,7 +54,7 @@ describe('specActions (property)', () => {
           }
 
           // A recorded PR replaces every other action with Show PR, regardless
-          // of the approval or the todo states.
+          // of the approval or the phase states.
           if (prUrl !== undefined) {
             assert.deepStrictEqual(actions, ['showPr']);
             return;
@@ -64,11 +64,11 @@ describe('specActions (property)', () => {
           assert.strictEqual(actions.includes('approve'), !approved);
           assert.strictEqual(
             actions.includes('submitPr'),
-            approved && todoStates.length > 0 && todoStates.every((s) => s === 'done'),
+            approved && phaseStates.length > 0 && phaseStates.every((s) => s === 'done'),
           );
 
           // No duplicates and deterministic ordering: approve, submitPr, showPr.
-          const orderedIndices = actions.map((a) => ALL_SPEC_ACTIONS.indexOf(a));
+          const orderedIndices = actions.map((a) => ALL_PLAN_ACTIONS.indexOf(a));
           const sorted = [...orderedIndices].sort((a, b) => a - b);
           assert.deepStrictEqual(orderedIndices, sorted);
           assert.strictEqual(new Set(actions).size, actions.length);
@@ -78,15 +78,15 @@ describe('specActions (property)', () => {
     );
   });
 
-  it('showPr is offered exactly when a PR URL is recorded on a valid spec', () => {
+  it('showPr is offered exactly when a PR URL is recorded on a valid plan', () => {
     fc.assert(
       fc.property(
         fc.boolean(),
         fc.boolean(),
         prUrlArb,
-        todoStatesArb,
-        (approved, invalid, prUrl, todoStates) => {
-          const actions = legalSpecActions({ approved, invalid, prUrl, todoStates });
+        phaseStatesArb,
+        (approved, invalid, prUrl, phaseStates) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
           assert.strictEqual(
             actions.includes('showPr'),
             !invalid && prUrl !== undefined,
@@ -97,21 +97,21 @@ describe('specActions (property)', () => {
     );
   });
 
-  it('specContextValue matches \\b<action>\\b exactly for its actions and no other token', () => {
+  it('planContextValue matches \\b<action>\\b exactly for its actions and no other token', () => {
     fc.assert(
       fc.property(
         fc.boolean(),
         fc.boolean(),
         prUrlArb,
-        todoStatesArb,
-        (approved, invalid, prUrl, todoStates) => {
-          const actions = legalSpecActions({ approved, invalid, prUrl, todoStates });
-          const contextValue = specContextValue(actions);
+        phaseStatesArb,
+        (approved, invalid, prUrl, phaseStates) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
+          const contextValue = planContextValue(actions);
 
           // Begins with the fixed prefix the menu clauses share.
           assert.ok(contextValue.startsWith('baiton.spec'));
 
-          for (const action of ALL_SPEC_ACTIONS) {
+          for (const action of ALL_PLAN_ACTIONS) {
             // The exact regex shape used by the `when` clauses in package.json.
             const regex = new RegExp(`\\b${action}\\b`);
             const expected = actions.includes(action);
