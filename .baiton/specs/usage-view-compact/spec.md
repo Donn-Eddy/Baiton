@@ -1,12 +1,12 @@
 ---
 version: 1
 name: usage-view-compact
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: a28abf5120ae855e7188c7c8d9eeedfc2ba34b40
+branch: baiton/usage-view-compact
+approved_rev: 9a59673dccdc7a0d30dec55a74082e2c1472ec9c7e27f34a5f7c6574f4bb8085
 ---
 
 # OVERVIEW
