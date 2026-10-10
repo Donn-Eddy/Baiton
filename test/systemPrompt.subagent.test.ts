@@ -16,14 +16,15 @@ import { ORCHESTRATOR_PHASES } from '../src/orchestrator/guard';
 import { MAX_SUBAGENT_DEPTH } from '../src/orchestrator/seams';
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
-const SPEC: ConversationKind = { kind: 'spec', slug: 'sample' };
+// 'spec' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'spec', slug: 'sample' };
 const DEPTHS = [0, 1, 2];
 
 describe('buildSubAgentPrompt', () => {
-  it('states the role, refusal, ask_user and prohibitions for every phase and depth', () => {
-    for (const phase of ORCHESTRATOR_PHASES) {
+  it('states the role, refusal, ask_user and prohibitions for every conversation step and depth', () => {
+    for (const step of ORCHESTRATOR_PHASES) {
       for (const depth of DEPTHS) {
-        const prompt = buildSubAgentPrompt(WORKSPACE, phase, depth);
+        const prompt = buildSubAgentPrompt(WORKSPACE, step, depth);
         assert.ok(prompt.includes(SUBAGENT_ROLE_TEXT));
         assert.ok(prompt.includes(REFUSAL_TEXT));
         assert.ok(prompt.includes(ASK_USER_TEXT));
@@ -31,21 +32,23 @@ describe('buildSubAgentPrompt', () => {
           assert.ok(prompt.includes(line));
         }
         assert.ok(prompt.includes('report back concisely'));
-        assert.ok(prompt.includes('You never finish a spec'));
+        assert.ok(prompt.includes('You never finish a plan'));
       }
     }
   });
 
-  it('includes the run table only in the drive phase', () => {
-    assert.ok(buildSubAgentPrompt(SPEC, 'drive', 1).includes(SUBAGENT_DRIVE_TEXT));
-    assert.ok(buildSubAgentPrompt(SPEC, 'drive', 1).includes('`pending` -> `run` the `plan` stage.'));
-    assert.ok(!buildSubAgentPrompt(SPEC, 'gather', 1).includes(SUBAGENT_DRIVE_TEXT));
+  it('includes the run table only in the drive step', () => {
+    assert.ok(buildSubAgentPrompt(PLAN, 'drive', 1).includes(SUBAGENT_DRIVE_TEXT));
+    assert.ok(buildSubAgentPrompt(PLAN, 'drive', 1).includes('`pending` -> `run` the `plan` stage.'));
+    assert.match(SUBAGENT_DRIVE_TEXT, /move a phase forward/);
+    assert.match(SUBAGENT_DRIVE_TEXT, /review that sends the phase back/);
+    assert.ok(!buildSubAgentPrompt(PLAN, 'gather', 1).includes(SUBAGENT_DRIVE_TEXT));
     assert.ok(!buildSubAgentPrompt(WORKSPACE, 'run', 1).includes(SUBAGENT_DRIVE_TEXT));
   });
 
   it('never names the tools a sub-agent lacks or the top-level scope text', () => {
-    for (const phase of ORCHESTRATOR_PHASES) {
-      const prompt = buildSubAgentPrompt(SPEC, phase, 1, 'content');
+    for (const step of ORCHESTRATOR_PHASES) {
+      const prompt = buildSubAgentPrompt(PLAN, step, 1, 'content');
       assert.ok(!prompt.includes(DRIVE_TEXT));
       assert.ok(!prompt.includes(SCOPE_TEXT));
       assert.ok(!prompt.includes('`submit_pr`'));
@@ -67,16 +70,16 @@ describe('buildSubAgentPrompt', () => {
     assert.ok(!capped.includes('You may start your own sub-agents'));
   });
 
-  it('appends spec content only for a spec kind that has it', () => {
-    const withContent = buildSubAgentPrompt(SPEC, 'drive', 1, 'SPEC BODY');
-    assert.ok(withContent.includes('Current spec file content:\n\nSPEC BODY'));
-    assert.ok(!buildSubAgentPrompt(SPEC, 'drive', 1).includes('Current spec file content:'));
-    assert.ok(!buildSubAgentPrompt(WORKSPACE, 'run', 1, 'SPEC BODY').includes('Current spec file content:'));
+  it('appends document content only for a plan kind that has it', () => {
+    const withContent = buildSubAgentPrompt(PLAN, 'drive', 1, 'PLAN BODY');
+    assert.ok(withContent.includes('Current plan document content:\n\nPLAN BODY'));
+    assert.ok(!buildSubAgentPrompt(PLAN, 'drive', 1).includes('Current plan document content:'));
+    assert.ok(!buildSubAgentPrompt(WORKSPACE, 'run', 1, 'PLAN BODY').includes('Current plan document content:'));
   });
 
   it('leaves buildSystemPrompt unchanged', () => {
     const content = ['---', 'version: 1', 'name: s', 'status: approved', '---', ''].join('\n');
-    const prompt = buildSystemPrompt(SPEC, content);
+    const prompt = buildSystemPrompt(PLAN, content);
     assert.ok(prompt.includes(DRIVE_TEXT));
     assert.ok(!prompt.includes(SUBAGENT_ROLE_TEXT));
   });

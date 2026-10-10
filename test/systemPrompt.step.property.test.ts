@@ -7,35 +7,36 @@ import {
   REFUSAL_TEXT,
   SCOPE_TEXT,
   buildSystemPrompt,
-  phaseFor,
+  conversationStepFor,
 } from '../src/orchestrator/systemPrompt';
 
 /**
- * Feature: baiton-first-pass, Property: the orchestrator's phase follows the
- * spec's status and nothing else.
+ * Property: the orchestrator's conversation step follows the document's status
+ * and nothing else.
  *
- * For ANY spec content, a spec conversation is in the `drive` phase if and only
+ * For ANY plan document content, a plan conversation is in the `drive` step if and only
  * if the frontmatter `status` the parser reads is one of the five values that
- * mean the spec has been approved (`approved`, `in-progress`, `review`, `pr`,
+ * mean the plan has been approved (`approved`, `in-progress`, `review`, `pr`,
  * `done`). Every other content — `draft`, an unknown status, a malformed or
- * absent frontmatter block, arbitrary prose — is `gather`, which is the phase
- * that can still write the spec but cannot dispatch a stage (Req 11.1).
+ * absent frontmatter block, arbitrary prose — is `gather`, which is the step
+ * that can still write the plan but cannot dispatch a stage (Req 11.1).
  *
  * Validates: Requirement 11.1
  *
- * Strategy: generate spec-shaped content whose frontmatter is assembled from
+ * Strategy: generate plan-shaped content whose frontmatter is assembled from
  * arbitrary keys and values (sometimes including `status`, sometimes not,
- * sometimes with a broken fence), plus free-form text that is not a spec at
- * all. For each, the property compares `phaseFor` against the status
+ * sometimes with a broken fence), plus free-form text that is not a plan at
+ * all. For each, the property compares `conversationStepFor` against the status
  * `parsePlan` itself reports, so the test cannot drift from the parser. The
- * scope and refusal text must survive in both phases, and the drive text must
- * appear exactly when the phase is `drive`.
+ * scope and refusal text must survive in both conversation steps, and the drive text must
+ * appear exactly in the drive step.
  */
 
-const SPEC: ConversationKind = { kind: 'spec', slug: 'my-spec' };
+// 'spec' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'spec', slug: 'my-plan' };
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
 
-/** The statuses that mean the spec is being driven (Req 11.1). */
+/** The statuses that mean the plan is being driven (Req 11.1). */
 const DRIVE_STATUSES = ['approved', 'in-progress', 'review', 'pr', 'done'];
 
 /** A frontmatter value: the real enum values plus near-misses and noise. */
@@ -73,8 +74,8 @@ const otherKeyArb: fc.Arbitrary<string> = fc
       .map((value) => `${key}: ${value}`),
   );
 
-/** Spec-shaped content: an optional frontmatter block plus a body. */
-const specContentArb: fc.Arbitrary<string> = fc
+/** Plan document content: an optional frontmatter block plus a body. */
+const planDocumentContentArb: fc.Arbitrary<string> = fc
   .record({
     withFence: fc.boolean(),
     closed: fc.boolean(),
@@ -89,6 +90,12 @@ const specContentArb: fc.Arbitrary<string> = fc
         '# TODOS',
         '- [pending] T01 Do the first thing',
         '- [done] T02 Do the second thing',
+        '# Endstate',
+        '# What needs changing',
+        '# Limitations & constraints',
+        '# PHASES',
+        '- [pending] P01 Do the first thing',
+        '- [done] P02 Do the second thing',
         'status: approved',
       ),
       { maxLength: 6 },
@@ -110,49 +117,49 @@ const specContentArb: fc.Arbitrary<string> = fc
     return lines.join('\n');
   });
 
-/** Free-form content that is not spec-shaped at all. */
+/** Free-form content that is not plan-shaped at all. */
 const freeTextArb: fc.Arbitrary<string> = fc.string({ maxLength: 120 });
 
-const contentArb: fc.Arbitrary<string> = fc.oneof(specContentArb, freeTextArb);
+const contentArb: fc.Arbitrary<string> = fc.oneof(planDocumentContentArb, freeTextArb);
 
-describe('orchestrator phase derivation (property, Req 11.1)', () => {
-  // Feature: baiton-first-pass, Property: phase follows the parsed status
+describe('orchestrator conversation-step derivation (property, Req 11.1)', () => {
+  // Property: the conversation step follows the parsed status
   it('is drive if and only if the parsed status is a non-draft enum value', () => {
     fc.assert(
       fc.property(contentArb, (content) => {
         const parsedStatus = (parsePlan(content).frontmatter.get('status') ?? '').trim();
         const expected = DRIVE_STATUSES.includes(parsedStatus) ? 'drive' : 'gather';
         assert.strictEqual(
-          phaseFor(SPEC, content),
+          conversationStepFor(PLAN, content),
           expected,
-          `status "${parsedStatus}" should be ${expected}\n---\n${content}`,
+          `status "${parsedStatus}" should produce step ${expected}\n---\n${content}`,
         );
       }),
       { numRuns: 500 },
     );
   });
 
-  // Feature: baiton-first-pass, Property: a workspace conversation never drives
+  // Property: a workspace conversation never drives
   it('is gather for a workspace conversation whatever content is passed', () => {
     fc.assert(
       fc.property(contentArb, (content) => {
-        assert.strictEqual(phaseFor(WORKSPACE, content), 'gather');
+        assert.strictEqual(conversationStepFor(WORKSPACE, content), 'gather');
       }),
       { numRuns: 200 },
     );
   });
 
-  // Feature: baiton-first-pass, Property: scope is stated in every prompt
-  it('always states the scope and the refusal rule, and the drive text exactly when driving', () => {
+  // Property: scope is stated in every prompt
+  it('the drive text appears exactly in the drive step, with scope and refusal text always present', () => {
     fc.assert(
       fc.property(contentArb, (content) => {
-        const prompt = buildSystemPrompt(SPEC, content);
+        const prompt = buildSystemPrompt(PLAN, content);
         assert.ok(prompt.includes(SCOPE_TEXT), 'every prompt states the scope');
         assert.ok(prompt.includes(REFUSAL_TEXT), 'every prompt states the refusal rule');
         assert.strictEqual(
           prompt.includes(DRIVE_TEXT),
-          phaseFor(SPEC, content) === 'drive',
-          'the drive text appears exactly in the drive phase',
+          conversationStepFor(PLAN, content) === 'drive',
+          'the drive text appears exactly in the drive step',
         );
       }),
       { numRuns: 300 },
