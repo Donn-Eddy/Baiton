@@ -52,8 +52,8 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
   describe('rejection cases (Req 10.5)', () => {
     it('rejects an empty description, names the tool, and produces no definitions', () => {
       const tools = [
-        fakeTool('list_specs', 'Lists every spec in the workspace.'),
-        fakeTool('read_spec', ''),
+        fakeTool('list_plans', 'Lists every spec in the workspace.'),
+        fakeTool('read_plan', ''),
       ];
 
       const result = assembleToolSpecs(tools);
@@ -62,7 +62,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       if (!result.ok) {
         assert.strictEqual(
           result.error.tool,
-          'read_spec',
+          'read_plan',
           'the rejection names the offending tool',
         );
         assert.match(result.error.reason, /empty/i, 'the reason explains the failure');
@@ -76,13 +76,13 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
     });
 
     it('rejects a whitespace-only description as empty after trimming', () => {
-      const tools = [fakeTool('read_spec', '   \n\t  ')];
+      const tools = [fakeTool('read_plan', '   \n\t  ')];
 
       const result = assembleToolSpecs(tools);
 
       assert.strictEqual(result.ok, false);
       if (!result.ok) {
-        assert.strictEqual(result.error.tool, 'read_spec');
+        assert.strictEqual(result.error.tool, 'read_plan');
         assert.match(result.error.reason, /empty/i);
       }
     });
@@ -95,7 +95,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
         'the fixture must actually be under the minimum after trimming',
       );
       const tools = [
-        fakeTool('list_specs', 'Lists every spec in the workspace.'),
+        fakeTool('list_plans', 'Lists every spec in the workspace.'),
         fakeTool('read_file', shortDescription),
       ];
 
@@ -144,8 +144,8 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
   describe('successful assembly (Req 10.3, 10.4)', () => {
     it('assembles a ToolSpec per tool with each description set from the tool field', () => {
       const tools = [
-        fakeTool('list_specs', 'Lists every spec in the workspace.'),
-        fakeTool('read_spec', 'Reads the raw text of one spec by slug.'),
+        fakeTool('list_plans', 'Lists every spec in the workspace.'),
+        fakeTool('read_plan', 'Reads the raw text of one spec by slug.'),
       ];
 
       const result = assembleToolSpecs(tools);
@@ -313,7 +313,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       for (const expected of ['start_run', 'investigate', 'ask_user', 'read_file']) {
         assert.ok(names.includes(expected), `the run phase advertises "${expected}"`);
       }
-      for (const absent of ['run', 'draft_spec', 'submit_pr', 'approve_spec', 'add_todo']) {
+      for (const absent of ['run', 'draft_plan', 'submit_pr', 'approve_plan', 'add_phase']) {
         assert.ok(!names.includes(absent), `the run phase must not advertise "${absent}"`);
       }
 

@@ -750,7 +750,7 @@ class SerialRunQueue implements RunQueue {
               ok: false,
               error: {
                 kind: 'deps-unlanded',
-                message: `phase "${req.phaseId}" depends on ${pending.join(', ')}, which ${many ? 'are' : 'is'} done but not landed; land ${many ? 'them' : 'it'} (land_todo) before planning`,
+                message: `phase "${req.phaseId}" depends on ${pending.join(', ')}, which ${many ? 'are' : 'is'} done but not landed; land ${many ? 'them' : 'it'} (land_phase) before planning`,
               },
             };
           }

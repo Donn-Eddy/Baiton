@@ -80,7 +80,7 @@ function makeTool(
 function makeCtx(restricted: boolean): GuardContext {
   return new GuardContext({
     repoRoot: path.resolve('/tmp/baiton-guard-restricted'),
-    specsDir: path.resolve('/tmp/baiton-guard-restricted/.baiton/specs'),
+    baitonDir: path.resolve('/tmp/baiton-guard-restricted/.baiton'),
     restricted,
   });
 }
@@ -177,7 +177,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
       git,
       confirm: { confirm: boom('confirm') },
       runQueue: { dispatch: boom('runQueue.dispatch') },
-      draftSpec: { draft: boom('draftSpec.draft') },
+      draftPlan: { draft: boom('draftPlan.draft') },
       runPipeline: { start: boom('runPipeline.start') },
       submitPr: boom('submitPr'),
       clock: { now: () => '2024-01-01T00:00:00.000Z' },
@@ -190,7 +190,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
     const dispatchNames = dispatchTools.map((d) => d.name).sort();
     assert.deepStrictEqual(
       dispatchNames,
-      ['draft_spec', 'investigate', 'run', 'start_run'],
+      ['draft_plan', 'investigate', 'run', 'start_run'],
       'every dispatch tool is covered; a new one may not silently drop out',
     );
 

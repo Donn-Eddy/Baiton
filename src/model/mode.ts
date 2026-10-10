@@ -4,7 +4,7 @@
  * recommend-and-confirm mode that is never itself a run: it inspects the ask,
  * recommends one of the five concrete modes via one ask_user card, and
  * dispatches the picked mode with the existing tools. `plan` keeps the existing
- * gather -> draft_spec -> approve -> run per-todo flow byte-for-byte; `bug`,
+ * gather -> draft_plan -> approve -> run per-phase flow byte-for-byte; `bug`,
  * `quick` and `refactor` share one plan-less plan -> execute -> review
  * pipeline that differs only in the framing handed to the sub-agents; and
  * `investigate` is a read-only dispatch that ends in a written finding.

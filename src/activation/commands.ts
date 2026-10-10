@@ -15,7 +15,7 @@
  *     under Restricted Mode and that stage's role executable (Req 14.5, 22.1,
  *     22.2).
  *   - `baiton.approve` — the approve/re-approve action through the orchestrator
- *     `approve_spec` control tool (Req 5.3, 10.3).
+ *     `approve_plan` control tool (Req 5.3, 10.3).
  *   - `baiton.submitPr` / `baiton.showPr` — open a pull request for a spec, and
  *     re-open the URL a completed submit already recorded in its frontmatter.
  *   - `baiton.viewPlan` — open a todo's persisted plan (`todos/<id>/plan.md`)
@@ -129,7 +129,7 @@ import type {
   EvaluationTaskContext,
   Intervention,
   InterventionSeam,
-  LandTodoSeam,
+  LandPhaseSeam,
   OrchestratorPhase,
   PresentIntervention,
   RunPipelineSeam,
@@ -250,8 +250,8 @@ const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
 
 /**
  * Resolve what the Auto-mode risk evaluator is told about a relayed ask's
- * task: the workspace root, the command's working directory, the run's todo
- * (id and title, read from `spec.md` through the spec store) and the body of
+ * task: the workspace root, the command's working directory, the run's phase
+ * (id and title, read from the plan document through the plan store) and the body of
  * every script the command names. A script is read only when it resolves —
  * symlinks followed — to a regular file inside the workspace root, and only
  * its first {@link MAX_SCRIPT_CHARS} bytes; nothing outside the workspace is
@@ -261,23 +261,23 @@ async function autoModeTaskContext(
   workspaceRoot: string,
   ask: AutoModeAsk,
   context: AutoModeRunContext,
-  readSpec: (slug: string) => Promise<ParsedPlan | undefined>,
+  readPlan: (slug: string) => Promise<ParsedPlan | undefined>,
 ): Promise<EvaluationTaskContext> {
   const out: EvaluationTaskContext = { workspaceRoot };
   if (context.slug !== undefined) {
-    out.specSlug = context.slug;
+    out.planSlug = context.slug;
   }
-  if (context.todoId !== undefined) {
-    out.todoId = context.todoId;
+  if (context.phaseId !== undefined) {
+    out.phaseId = context.phaseId;
     if (context.slug !== undefined) {
       try {
-        const spec = await readSpec(context.slug);
-        const title = spec?.phases.find((t) => t.id === context.todoId)?.title;
+        const plan = await readPlan(context.slug);
+        const title = plan?.phases.find((phase) => phase.id === context.phaseId)?.title;
         if (title !== undefined) {
-          out.todoTitle = title;
+          out.phaseTitle = title;
         }
       } catch {
-        // No title: the todo id alone still names the task.
+        // No title: the phase id alone still names the task.
       }
     }
   }
@@ -558,23 +558,23 @@ export function registerCommands(
     }
   };
 
-  // land_todo (per-todo worktrees): merge a done todo's branch into the spec
+  // land_phase (per-phase worktrees): merge a done phase's branch into the plan
   // branch in the main checkout. It goes through the spec-branch writer so a
-  // land never interleaves with a state commit for another todo of the spec.
-  const landTodoSeam: LandTodoSeam = {
-    land: async ({ slug, todoId }) => {
+  // land never interleaves with a state commit for another phase of the plan.
+  const landPhaseSeam: LandPhaseSeam = {
+    land: async ({ slug, phaseId }) => {
       if (prInFlight.has(slug)) {
-        return { kind: 'refused', reason: `a pull request is being submitted for spec "${slug}"` };
+        return { kind: 'refused', reason: `a pull request is being submitted for plan "${slug}"` };
       }
-      if (queueFor(slug, todoId).isRunning()) {
-        return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
+      if (queueFor(slug, phaseId).isRunning()) {
+        return { kind: 'refused', reason: `a stage is still running for phase "${phaseId}"` };
       }
       try {
         return await specWriter.apply(slug, async () => {
-          if ((await git.branchHead(phaseBranchFor(slug, todoId, documentKindFor(repoRoot, slug)))) === undefined) {
+          if ((await git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
             return { kind: 'already-landed' as const };
           }
-          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId: todoId });
+          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId });
           if (landed.ok) {
             return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
           }
@@ -591,7 +591,7 @@ export function registerCommands(
   };
 
   // The plan-draft runner (the harness writes the plan): the
-  // orchestrator gathers requirements and calls `draft_spec`, which dispatches
+  // orchestrator gathers requirements and calls `draft_plan`, which dispatches
   // here. It is plan-scoped, so it runs beside the phase-scoped queues rather
   // than through one; it excludes only a run without a plan. Its completion
   // sink is bound after the ChatController exists.
@@ -628,7 +628,7 @@ export function registerCommands(
     confirm,
     interventionSeam,
     runPipelineSeam,
-    landTodoSeam,
+    landPhaseSeam,
   );
   const planDraftRunner = createPlanDraftRunner({
     workspaceRoot: repoRoot,
@@ -646,8 +646,8 @@ export function registerCommands(
   // The tool registry (read + spec-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
-    draftSpec: {
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents),
+    draftPlan: {
       draft: async (req) => {
         const started = await planDraftRunner.start(req);
         if (started.ok) {
@@ -890,7 +890,7 @@ export function registerCommands(
     const runId = opts.context?.runId ?? AUTO_MODE_UNKNOWN_RUN;
     const gateAsk = askFromPermission(ask);
     // Stage (b) judges the action's effect, so it is told where the
-    // workspace is, which todo the run is on and what any script it runs
+    // workspace is, which phase the run is on and what any script it runs
     // says. Only a relayed ask has a run context; an orchestrator-raised ask
     // keeps the context-free fallback.
     const taskContext =
@@ -1556,7 +1556,7 @@ function describeTrigger(trigger: EngineTrigger): string {
 // --- approve ---------------------------------------------------------------
 
 /**
- * Run the approve/re-approve action through the `approve_spec` control tool.
+ * Run the approve/re-approve action through the `approve_plan` control tool.
  * The guard disables it under Restricted Mode (Req 22.1); the tool confirms in
  * the UI and, on a fresh approval, creates the branch and records the approval
  * (Req 10.1, 16). A missing slug prompts the user.
@@ -1567,17 +1567,17 @@ async function runApprove(
   surface: Surface,
   slugArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await promptForSlug(workspace, 'Spec slug to approve'));
+  const slug = slugArg ?? (await promptForSlug(workspace, 'Plan slug to approve'));
   if (slug === undefined) {
     return;
   }
   const ctx = guardContextFor(workspace);
   const callId = `approve-${slug}-${Date.now()}`;
-  // `approve_spec` belongs to both orchestrator phases; a spec approved from
+  // `approve_plan` belongs to both orchestrator phases; a plan approved from
   // the UI is by definition still being gathered rather than driven (Req 11.1).
-  const result = await registry.call('approve_spec', { slug }, callId, ctx, 'gather');
+  const result = await registry.call('approve_plan', { slug }, callId, ctx, 'gather');
   if (result.ok) {
-    surface.info(`Baiton: approved spec "${slug}".`);
+    surface.info(`Baiton: approved plan "${slug}".`);
   } else {
     surface.warn(`Baiton: ${result.error}`);
   }
@@ -1851,7 +1851,7 @@ function slugFromSpecUri(uri: vscode.Uri): string | undefined {
 function guardContextFor(workspace: WorkspaceContext<vscode.Uri>): GuardContext {
   return new GuardContext({
     repoRoot: workspace.root.fsPath,
-    specsDir: vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath,
+    baitonDir: workspace.baitonDir.fsPath,
     restricted: workspace.restricted,
   });
 }
@@ -1905,7 +1905,7 @@ async function promptForSlug(
  * tools (`start_run` / `investigate`) start a run through, the injected
  * confirmation seam, and the shared intervention seam itself — the seam the
  * inline-card `confirm` adapter wraps, and which `ask_user` asks through
- * directly. Both seams, and the land seam `land_todo` merges through, are
+ * directly. Both seams, and the land seam `land_phase` merges through, are
  * supplied by the caller so both tool-services bundles share one of each.
  */
 function buildToolServices(
@@ -1918,7 +1918,7 @@ function buildToolServices(
   confirm: ConfirmSeam,
   intervention: InterventionSeam,
   runPipeline: RunPipelineSeam,
-  landTodo: LandTodoSeam,
+  landPhase: LandPhaseSeam,
   subAgents?: SubAgentSeam,
 ): ToolServices {
   return {
@@ -1929,7 +1929,7 @@ function buildToolServices(
     intervention,
     runQueue: createRunQueueSeam(queueFor, baitonDir, adapterForRole),
     runPipeline,
-    landTodo,
+    landPhase,
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),

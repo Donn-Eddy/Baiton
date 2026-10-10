@@ -98,11 +98,11 @@ describe('buildSystemPrompt', () => {
   });
 
   describe('new-spec flow (Req 11.2)', () => {
-    it('states the ask / requirements-document / agreement / draft_spec flow', () => {
+    it('states the ask / requirements-document / agreement / draft_plan flow', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.match(prompt, /clarifying questions/i);
       assert.match(prompt, /requirements document/i);
-      assert.match(prompt, /draft_spec/);
+      assert.match(prompt, /draft_plan/);
       assert.match(prompt, /agree/i);
     });
 
@@ -272,10 +272,10 @@ describe('buildSystemPrompt', () => {
       assert.match(SCOPE_TEXT, /exactly two jobs/i);
       assert.match(SCOPE_TEXT, /clarifying questions/i);
       assert.match(SCOPE_TEXT, /agree/i);
-      assert.ok(SCOPE_TEXT.includes('`draft_spec`'), 'job one ends at draft_spec');
+      assert.ok(SCOPE_TEXT.includes('`draft_plan`'), 'job one ends at draft_plan');
       assert.ok(SCOPE_TEXT.includes('`run`'), 'job two dispatches with run');
       assert.ok(SCOPE_TEXT.includes('`submit_pr`'), 'job two ends at submit_pr');
-      assert.ok(SCOPE_TEXT.includes('`land_todo`'), 'job two lands each done todo');
+      assert.ok(SCOPE_TEXT.includes('`land_phase`'), 'job two lands each done todo');
     });
 
     it('says a configured coding agent does the work it refuses', () => {
@@ -375,7 +375,7 @@ describe('buildSystemPrompt', () => {
       assert.ok(DRIVE_TEXT.includes('`planned` -> `run` the `execute` stage.'));
       assert.ok(DRIVE_TEXT.includes('`executed` -> `run` the `review` stage.'));
       assert.match(DRIVE_TEXT, /review that sends the todo back.*`execute`/);
-      assert.match(DRIVE_TEXT, /`done` \(unlanded\) -> `land_todo`/);
+      assert.match(DRIVE_TEXT, /`done` \(unlanded\) -> `land_phase`/);
     });
 
     it('offers submit_pr only once every todo is done and landed', () => {
@@ -384,9 +384,9 @@ describe('buildSystemPrompt', () => {
       assert.match(DRIVE_TEXT, /after.*done and landed/);
     });
 
-    it('mentions land_todo only in the drive prompt, never the run prompt', () => {
-      assert.ok(buildSystemPrompt(SPEC, APPROVED_SPEC).includes('`land_todo`'));
-      assert.ok(!buildSystemPrompt(WORKSPACE, undefined, 'bug').includes('land_todo'));
+    it('mentions land_phase only in the drive prompt, never the run prompt', () => {
+      assert.ok(buildSystemPrompt(SPEC, APPROVED_SPEC).includes('`land_phase`'));
+      assert.ok(!buildSystemPrompt(WORKSPACE, undefined, 'bug').includes('land_phase'));
     });
 
     it('states that run blocks and leaves nothing to poll or read', () => {

@@ -93,8 +93,8 @@ export interface SubAgentRunnerDeps {
   guardContext(): GuardContext;
   /** Resolved with resolveRoundBound per turn. */
   roundBound(): unknown;
-  /** Re-read every round for a spec scope. */
-  readSpec(slug: string): Promise<string | undefined>;
+  /** Re-read every round for a plan scope. */
+  readPlan(slug: string): Promise<string | undefined>;
   /** To decline a stopped sub-agent's pending forwarded asks. */
   asks?: PendingAskRegistry;
   /** For ChatTranscript timestamps; default systemClock. */
@@ -339,7 +339,7 @@ export class SubAgentRunner implements SubAgentSeam {
               entry.scope,
               entry.phase,
               entry.depth,
-              entry.scope.kind === 'spec' ? await this.deps.readSpec(entry.scope.slug) : undefined,
+              entry.scope.kind === 'spec' ? await this.deps.readPlan(entry.scope.slug) : undefined,
             ),
           append: async (m) => {
             await entry.transcript.append(m);

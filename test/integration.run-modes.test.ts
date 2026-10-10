@@ -553,7 +553,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
     function guardFor(repo: string): GuardContext {
       return new GuardContext({
         repoRoot: repo,
-        specsDir: path.join(repo, '.baiton', 'specs'),
+        baitonDir: path.join(repo, '.baiton'),
         restricted: false,
       });
     }

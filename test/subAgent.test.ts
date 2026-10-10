@@ -169,7 +169,7 @@ describe('SubAgentRunner', () => {
       tools: () => surface,
       guardContext: () => ({}) as GuardContext,
       roundBound: () => 5,
-      readSpec: async () => undefined,
+      readPlan: async () => undefined,
       asks,
       onEvent: (e) => events.push(e),
     });

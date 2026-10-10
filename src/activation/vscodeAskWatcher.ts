@@ -53,7 +53,7 @@ class VscodeAskWatcher implements AskWatcher {
   private readonly now: () => string;
   /**
    * The run's trusted identity, computed once and reused for every routed ask:
-   * agent, role and run id key the allow-list; slug and todo id let the host
+   * agent, role and run id key the allow-list; slug and phase id let the host
    * name the task to the Auto-mode risk evaluator.
    */
   private readonly context: AutoModeRunContext;
@@ -67,7 +67,7 @@ class VscodeAskWatcher implements AskWatcher {
       role: input.role,
       runId: input.runId,
       slug: input.slug,
-      todoId: input.phaseId,
+      phaseId: input.phaseId,
     };
     // An explicit Uri-based RelativePattern remains correct when VS Code opened
     // a symlinked spelling of the workspace while Baiton uses its canonical path.

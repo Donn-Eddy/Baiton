@@ -2,7 +2,7 @@
  * The orchestrator's read tools (Requirement 9.1).
  *
  * These let the orchestrator inspect the repository so it can propose accurate
- * work: list and read specs, list files by glob, read a file or a bounded line
+ * work: list and read plans, list files by glob, read a file or a bounded line
  * range, search file contents, and read `git status`, `git diff` and
  * `git log`. None of them are mutating, so the guard runs them directly; each
  * resolves any path argument through {@link GuardContext.resolveReadPath} so
@@ -15,22 +15,20 @@
  * `vscode`, so the whole read surface is testable against a temp repo.
  *
  * The same read surface serves the `run` phase, where a run-mode conversation
- * inspects the repository before dispatching a spec-less run.
+ * inspects the repository before dispatching a plan-less run.
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { listDocumentSlugs, resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { matchesGlob, walkFiles } from './glob';
 import { ToolServices } from './toolServices';
 
-/** The spec-relative directory holding one folder per spec. */
-const SPECS_SUBDIR = 'specs';
-
 /** Build every read tool for the registry. */
 export function createReadTools(services: ToolServices): Tool[] {
   return [
-    listDocumentsTool(services),
-    readSpecTool(services),
+    listPlansTool(services),
+    readPlanTool(services),
     listFilesTool(services),
     readFileTool(services),
     searchTool(services),
@@ -41,50 +39,37 @@ export function createReadTools(services: ToolServices): Tool[] {
 }
 
 /**
- * `list_specs` — the slugs of every spec under `.baiton/specs/`, each being a
- * directory that contains a `spec.md`.
+ * `list_plans` — the slugs of plans and legacy specs with a plan document.
  */
-function listDocumentsTool(services: ToolServices): Tool {
+function listPlansTool(services: ToolServices): Tool {
   return {
-    name: 'list_specs',
-    description: 'List the slugs of every spec under .baiton/specs/ that contains a spec.md.',
+    name: 'list_plans',
+    description: 'List the slugs of every plan under .baiton/plans/ (and legacy specs under .baiton/specs/) that has a plan document.',
     mutating: false,
     concurrent: true,
     phases: ['gather', 'drive', 'run'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
-      const specsDir = path.join(services.baitonDir, SPECS_SUBDIR);
-      let entries: import('fs').Dirent[];
-      try {
-        entries = await fs.readdir(specsDir, { withFileTypes: true });
-      } catch {
-        // No specs directory yet: an empty list, not an error.
-        return { ok: true, data: { specs: [] } };
-      }
       const slugs: string[] = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          continue;
-        }
-        const specFile = path.join(specsDir, entry.name, 'spec.md');
+      for (const slug of listDocumentSlugs(services.baitonDir)) {
+        const location = resolveDocument(services.baitonDir, slug);
         try {
-          await fs.access(specFile);
-          slugs.push(entry.name);
+          await fs.access(location.documentPath);
+          slugs.push(slug);
         } catch {
-          // A directory without a spec.md is not a spec.
+          // A directory without a document file is not a plan.
         }
       }
-      slugs.sort();
-      return { ok: true, data: { specs: slugs } };
+      return { ok: true, data: { plans: slugs } };
     },
   };
 }
 
-/** `read_spec` — the raw `spec.md` text for a slug, bounded to the read cap. */
-function readSpecTool(services: ToolServices): Tool {
+/** `read_plan` — the raw plan document for a slug, bounded to the read cap. */
+function readPlanTool(services: ToolServices): Tool {
   return {
-    name: 'read_spec',
-    description: "Read the raw spec.md text for a given spec slug, bounded to the read cap.",
+    name: 'read_plan',
+    description: 'Read the raw plan document (plan.md, or a legacy spec.md) for a slug, bounded to the read cap.',
     mutating: false,
     concurrent: true,
     phases: ['gather', 'drive', 'run'],
@@ -97,15 +82,10 @@ function readSpecTool(services: ToolServices): Tool {
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
       if (slug === undefined) {
-        return { ok: false, error: 'read_spec requires a string "slug"' };
+        return { ok: false, error: 'read_plan requires a string "slug"' };
       }
-      const specFile = path.join(
-        services.baitonDir,
-        SPECS_SUBDIR,
-        slug,
-        'spec.md',
-      );
-      const resolved = await tc.ctx.resolveReadPath(specFile);
+      const location = resolveDocument(services.baitonDir, slug);
+      const resolved = await tc.ctx.resolveReadPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -113,12 +93,12 @@ function readSpecTool(services: ToolServices): Tool {
       try {
         text = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `spec "${slug}" was not found` };
+        return { ok: false, error: `plan "${slug}" was not found` };
       }
       const bounded = tc.ctx.boundRead(text);
       return {
         ok: true,
-        data: { slug, text: bounded.text, truncated: bounded.truncated },
+        data: { slug, kind: location.kind, text: bounded.text, truncated: bounded.truncated },
       };
     },
   };

@@ -56,7 +56,7 @@ const repeatArb: fc.Arbitrary<number> = fc.integer({ min: 1, max: 5 });
 function makeCtx(): GuardContext {
   return new GuardContext({
     repoRoot: path.resolve('/tmp/baiton-guard-idempotency'),
-    specsDir: path.resolve('/tmp/baiton-guard-idempotency/.baiton/specs'),
+    baitonDir: path.resolve('/tmp/baiton-guard-idempotency/.baiton'),
     restricted: false,
   });
 }

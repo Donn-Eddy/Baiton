@@ -248,7 +248,7 @@ describe('runStore', () => {
       const d = store.create(inputFor('r1', { mode: 'default' }));
       assert.ok(!d.ok);
       assert.strictEqual(d.error.kind, 'invalid-id');
-      assert.match(d.error.message, /draft_spec/);
+      assert.match(d.error.message, /draft_plan/);
       assert.strictEqual(fs.existsSync(path.join(root, '.baiton', 'runs')), false);
     });
 

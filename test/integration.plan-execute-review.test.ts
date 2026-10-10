@@ -827,7 +827,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
             message: {
               content: null,
               tool_calls: [
-                { id: 'call_1', type: 'function', function: { name: 'read_spec', arguments: '{"slug":"demo"}' } },
+                { id: 'call_1', type: 'function', function: { name: 'read_plan', arguments: '{"slug":"demo"}' } },
               ],
             },
           },
@@ -842,7 +842,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       });
       const tools: ToolSpec[] = [
         {
-          name: 'read_spec',
+          name: 'read_plan',
           description: 'Read a spec',
           parameters: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] },
         },
@@ -856,10 +856,10 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       };
       assert.strictEqual(mock.captured[0].authorization, 'Bearer stub-key');
       assert.ok(Array.isArray(sent.tools) && sent.tools.length === 1, 'tools array sent on the wire');
-      assert.strictEqual(sent.tools![0].function.name, 'read_spec', 'the tool round-tripped by name');
+      assert.strictEqual(sent.tools![0].function.name, 'read_plan', 'the tool round-tripped by name');
       // The tool_calls round-tripped back into the parsed result.
       assert.deepStrictEqual(result.tool_calls, [
-        { id: 'call_1', name: 'read_spec', arguments: '{"slug":"demo"}' },
+        { id: 'call_1', name: 'read_plan', arguments: '{"slug":"demo"}' },
       ]);
     } finally {
       await mock.close();
