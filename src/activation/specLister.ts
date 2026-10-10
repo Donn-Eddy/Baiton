@@ -4,7 +4,7 @@
  * `listSpecs` is the only new filesystem reach for the Spec_Explorer: it scans
  * `.baiton/specs/*&#47;spec.md`, reads each present spec's raw `spec.md` text, and
  * returns one {@link ListedSpec} per spec in ascending slug order. The
- * host-free tree model (`buildSpecTree`) turns these listed specs plus each
+ * host-free tree model (`buildPlanTree`) turns these listed specs plus each
  * spec's approval fact from the `SpecStore` into the nodes the tree renders.
  * {@link planPath} and {@link listTodoPlans} locate the per-todo plan artifacts
  * beside them, which is what gates the View plan action.
@@ -22,7 +22,7 @@ import * as path from 'path';
 /**
  * One spec listed off disk: its slug and either the raw `spec.md` contents or a
  * read failure. Consumed as the lister-supplied half of the tree model's
- * `SpecInput` (the other half, the approval fact, comes from the `SpecStore`).
+ * `PlanInput` (the other half, the approval fact, comes from the `SpecStore`).
  */
 export interface ListedSpec {
   /** The `<slug>` directory segment under `.baiton/specs/`. */

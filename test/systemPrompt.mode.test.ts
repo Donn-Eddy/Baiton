@@ -173,7 +173,7 @@ describe('mode-scoped system prompt: run prompt content', () => {
       const prompt = buildSystemPrompt(WORKSPACE, undefined, mode);
       assert.ok(!/draft_spec/.test(prompt), 'no spec flow');
       assert.ok(!/submit_pr/.test(prompt), 'no drive stage table');
-      assert.ok(!/Todo line grammar/.test(prompt), 'no todo grammar');
+      assert.ok(!/Phase line grammar/.test(prompt), 'no todo grammar');
       assert.ok(!/Spec frontmatter rules/.test(prompt), 'no frontmatter rules');
       assert.ok(!prompt.includes('Current spec file content:'), 'no spec content block');
     });

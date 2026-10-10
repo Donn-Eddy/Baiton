@@ -13,7 +13,7 @@
  * (design notes the PR journal fields as an unused seam).
  */
 import { Stage } from '../model/stage';
-import { TodoState } from '../model/todoState';
+import { PhaseState } from '../model/phaseState';
 
 /**
  * The terminal result kind a run can record on completion. Mirrors the stage
@@ -41,7 +41,7 @@ export interface JournalEntry {
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch; absent on entries written before this field existed. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /**
    * The session id Baiton pre-assigned at launch. Only meaningful for a CLI
    * whose `Adapter.acceptsSessionId` is true (claude); other CLIs ignore it and
@@ -85,7 +85,7 @@ export interface StartRecord {
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch; written only when supplied. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /** The Claude `--session-id` UUID; written only when supplied. */
   sessionId?: string;
 }

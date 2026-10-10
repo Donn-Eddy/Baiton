@@ -26,7 +26,7 @@
  * `fs` or `vscode` access. The run queue reads the artifacts through the
  * `SpecStore` seam and supplies them here.
  */
-import type { ParsedSpec } from '../model/parser';
+import type { ParsedPlan } from '../model/parser';
 
 /** The four todo-level stages a Brief context is built for. */
 export type ContextStage = 'plan' | 'plan-review' | 'execute' | 'review';
@@ -40,7 +40,7 @@ export interface StageContextInput {
   /** The stage whose context is being assembled; selects the sections. */
   stage: ContextStage;
   /** The parsed spec, for the OVERVIEW and the target todo's raw line. */
-  spec: ParsedSpec;
+  spec: ParsedPlan;
   /** The target todo id. */
   todoId: string;
   /**
@@ -90,7 +90,7 @@ export function buildStageContext(input: StageContextInput): string {
  * summaries (Req 18.3).
  */
 function planSections(input: StageContextInput): string[] {
-  const sections = [`# OVERVIEW\n\n${input.spec.overview}`];
+  const sections = [`# OVERVIEW\n\n${input.spec.preamble}`];
   const target = findTodo(input);
   if (target === undefined) {
     // No such todo: the context is just the OVERVIEW. There is deliberately no
@@ -113,7 +113,7 @@ function planSections(input: StageContextInput): string[] {
 /** Plan review: the OVERVIEW, the todo line, and the plan under review. */
 function planReviewSections(input: StageContextInput): string[] {
   return [
-    `# OVERVIEW\n\n${input.spec.overview}`,
+    `# OVERVIEW\n\n${input.spec.preamble}`,
     todoSection(input),
     planSection(input),
   ];
@@ -158,9 +158,9 @@ function reviewSections(input: StageContextInput): string[] {
 function todoSection(input: StageContextInput): string {
   const target = findTodo(input);
   if (target === undefined) {
-    return `# Todo\n\nThe todo "${input.todoId}" is not present in the spec.`;
+    return `# Phase\n\nThe todo "${input.todoId}" is not present in the spec.`;
   }
-  return `# Todo\n\n${input.spec.rawLines[target.lineIndex]}`;
+  return `# Phase\n\n${input.spec.rawLines[target.lineIndex]}`;
 }
 
 /** The todo's plan, delimited so the role can see exactly where it ends. */
@@ -172,8 +172,8 @@ function planSection(input: StageContextInput): string {
 }
 
 /** The target todo, or `undefined` when the spec does not carry that id. */
-function findTodo(input: StageContextInput): ParsedSpec['todos'][number] | undefined {
-  return input.spec.todos.find((t) => t.id === input.todoId);
+function findTodo(input: StageContextInput): ParsedPlan['phases'][number] | undefined {
+  return input.spec.phases.find((t) => t.id === input.todoId);
 }
 
 /** Join sections with a blank line and a trailing newline. */

@@ -10,7 +10,7 @@ import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine';
 import type { ResultWatcher, ResultWatcherFactory, RunQueueDeps, SpecStore } from '../src/engine';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 interface WatchFake {
@@ -236,7 +236,7 @@ describe('run queue ask watcher wiring', () => {
       findCommitByRunId: async () => undefined, push: async () => undefined, remoteUrl: async () => '',
     };
     const specStore: SpecStore = {
-      currentState: async () => 'pending', readSpec: async () => parseSpec('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Todo\n'),
+      currentState: async () => 'pending', readSpec: async () => parsePlan('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Phase\n'),
       readArtifact: async () => undefined, latestExecuteCommit: async () => undefined, isApproved: async () => true,
       isBlocked: async () => false, inputRevMatches: async () => true, inputRev: async () => 'rev', writeState: async () => true,
     };

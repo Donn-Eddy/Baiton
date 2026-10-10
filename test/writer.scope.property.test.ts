@@ -1,9 +1,9 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { parseSpec } from '../src/model/parser';
-import { writeFrontmatterKey, writeTodoState } from '../src/model/writer';
+import { parsePlan } from '../src/model/parser';
+import { writeFrontmatterKey, writePhaseState } from '../src/model/writer';
 import { MANAGED_KEYS, ManagedKey } from '../src/model/managedKey';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 import { isOk } from '../src/model/result';
 
 /**
@@ -17,7 +17,7 @@ import { isOk } from '../src/model/result';
  * Validates: Requirements 6.1, 6.2, 9.7
  *
  * The test renders a spec whose frontmatter mixes extension-managed keys with
- * non-managed keys, then applies exactly one `writeTodoState` or
+ * non-managed keys, then applies exactly one `writePhaseState` or
  * `writeFrontmatterKey` to the freshly rendered text. It asserts, byte for
  * byte, that the only region that may differ is the targeted `[state]` box or
  * the targeted managed key's value; every other byte — including the prefix
@@ -37,7 +37,7 @@ interface FmEntry {
 
 interface TodoModel {
   id: string;
-  state: TodoState;
+  state: PhaseState;
   title: string;
   after: string[];
   files: string[];
@@ -49,7 +49,7 @@ interface SpecModel {
   todos: TodoModel[];
 }
 
-/** Renders a {@link SpecModel} to the canonical text `parseSpec` consumes. */
+/** Renders a {@link SpecModel} to the canonical text `parsePlan` consumes. */
 function renderSpec(model: SpecModel): string {
   const lines: string[] = [];
   lines.push('---');
@@ -167,7 +167,7 @@ const specModelArb: fc.Arbitrary<{ model: SpecModel; presentManaged: ManagedKey[
       ...ids.map((id) =>
         fc
           .record({
-            state: fc.constantFrom<TodoState>(...TODO_STATES),
+            state: fc.constantFrom<PhaseState>(...PHASE_STATES),
             title: titleArb,
             after: fc.subarray(ids),
             files: fc.array(pathArb, { maxLength: 3 }),
@@ -218,14 +218,14 @@ function lineStartOffset(text: string, lineIndex: number): number {
 // --- Properties ------------------------------------------------------------
 
 describe('writer scope containment (property)', () => {
-  it('Property 9: writeTodoState touches only the target state box', () => {
+  it('Property 9: writePhaseState touches only the target state box', () => {
     fc.assert(
       fc.property(specModelArb, fc.nat(), fc.nat(), ({ model }, todoPick, statePick) => {
         const before = renderSpec(model);
         const todo = model.todos[todoPick % model.todos.length];
-        const newState = TODO_STATES[statePick % TODO_STATES.length];
+        const newState = PHASE_STATES[statePick % PHASE_STATES.length];
 
-        const result = writeTodoState(before, todo.id, newState);
+        const result = writePhaseState(before, todo.id, newState);
 
         if (todo.state === 'done') {
           // done-protected abort: output is left unchanged (Req 4.11 / 6.5).
@@ -239,27 +239,27 @@ describe('writer scope containment (property)', () => {
         // The only region allowed to differ is this todo's `[state]` box.
         // Its line index is stable across the edit because the edit changes
         // only characters inside the box (state names are single-line).
-        const parsedTodo = parseSpec(before).todos.find((t) => t.id === todo.id);
+        const parsedTodo = parsePlan(before).phases.find((t) => t.id === todo.id);
         assert.ok(parsedTodo !== undefined, 'target todo parses');
         const lineStart = lineStartOffset(before, parsedTodo.lineIndex);
         const boxStart = before.indexOf('[', lineStart);
         const boxEnd = before.indexOf(']', boxStart) + 1;
-        assertOnlySpanChanged(before, after, boxStart, boxEnd, 'writeTodoState');
+        assertOnlySpanChanged(before, after, boxStart, boxEnd, 'writePhaseState');
 
         // And the parsed model confirms only that todo's state moved: every
         // other todo's id/state/title/hints and all frontmatter are intact.
-        const parsedBefore = parseSpec(before);
-        const parsedAfter = parseSpec(after);
+        const parsedBefore = parsePlan(before);
+        const parsedAfter = parsePlan(after);
         assert.deepStrictEqual(
           [...parsedAfter.frontmatter.entries()],
           [...parsedBefore.frontmatter.entries()],
           'frontmatter unchanged',
         );
-        assert.strictEqual(parsedAfter.overview, parsedBefore.overview, 'overview unchanged');
-        assert.strictEqual(parsedAfter.todos.length, parsedBefore.todos.length, 'todo count');
-        for (let i = 0; i < parsedBefore.todos.length; i++) {
-          const b = parsedBefore.todos[i];
-          const a = parsedAfter.todos[i];
+        assert.strictEqual(parsedAfter.preamble, parsedBefore.preamble, 'preamble unchanged');
+        assert.strictEqual(parsedAfter.phases.length, parsedBefore.phases.length, 'phase count');
+        for (let i = 0; i < parsedBefore.phases.length; i++) {
+          const b = parsedBefore.phases[i];
+          const a = parsedAfter.phases[i];
           assert.strictEqual(a.id, b.id, 'todo id unchanged');
           assert.strictEqual(a.title, b.title, 'todo title unchanged');
           assert.deepStrictEqual(a.after, b.after, 'todo after unchanged');
@@ -313,8 +313,8 @@ describe('writer scope containment (property)', () => {
           // Parsed model: the target key holds the new value, every other
           // frontmatter key (managed and non-managed) is unchanged, and no
           // todo, title, id, hint or overview byte moved.
-          const parsedBefore = parseSpec(before);
-          const parsedAfter = parseSpec(after);
+          const parsedBefore = parsePlan(before);
+          const parsedAfter = parsePlan(after);
           assert.strictEqual(parsedAfter.frontmatter.get(key), newValue, 'target value applied');
           for (const [k, v] of parsedBefore.frontmatter) {
             if (k === key) {
@@ -322,8 +322,8 @@ describe('writer scope containment (property)', () => {
             }
             assert.strictEqual(parsedAfter.frontmatter.get(k), v, `non-target key "${k}" unchanged`);
           }
-          assert.strictEqual(parsedAfter.overview, parsedBefore.overview, 'overview unchanged');
-          assert.deepStrictEqual(parsedAfter.todos, parsedBefore.todos, 'all todos unchanged');
+          assert.strictEqual(parsedAfter.preamble, parsedBefore.preamble, 'preamble unchanged');
+          assert.deepStrictEqual(parsedAfter.phases, parsedBefore.phases, 'all phases unchanged');
         },
       ),
       { numRuns: 150 },
@@ -332,11 +332,11 @@ describe('writer scope containment (property)', () => {
 
   it('Property 9: aborts on an absent todo id leave the text unchanged', () => {
     fc.assert(
-      fc.property(specModelArb, fc.constantFrom<TodoState>(...TODO_STATES), ({ model }, state) => {
+      fc.property(specModelArb, fc.constantFrom<PhaseState>(...PHASE_STATES), ({ model }, state) => {
         const before = renderSpec(model);
         // An id guaranteed not present: no generated id exceeds T999999.
         const absentId = 'T1000000';
-        const result = writeTodoState(before, absentId, state);
+        const result = writePhaseState(before, absentId, state);
         assert.ok(!isOk(result), 'expected todo-not-found abort');
       }),
       { numRuns: 100 },

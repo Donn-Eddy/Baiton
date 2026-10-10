@@ -160,7 +160,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'plan',
         role: 'planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Todo\n\nT01 do the thing.',
+        context: '## Phase\n\nT01 do the thing.',
         askRelay: { agent: 'antigravity', relay },
       });
 
@@ -184,7 +184,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'plan' as const,
         role: 'planner' as const,
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Todo\n\nT01 do the thing.',
+        context: '## Phase\n\nT01 do the thing.',
       };
       const without = buildBrief(base);
       const withField = buildBrief({ ...base, askRelay: undefined });
@@ -280,7 +280,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'execute',
         role: 'executor',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Todo\n\nT01 do the thing.',
+        context: '## Phase\n\nT01 do the thing.',
       });
 
     it('states the result-file requirement in the Role section, before the Context', () => {

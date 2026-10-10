@@ -30,7 +30,7 @@ import type { GitService } from '../git';
 import { appendCompletion, appendStart, readSpecJournal } from '../journal';
 import type { PrCompletion, RunResultKind } from '../journal';
 import { approvalHash } from '../model/hash';
-import { parseSpec } from '../model/parser';
+import { parsePlan } from '../model/parser';
 import type { Role } from '../model/role';
 import { setFrontmatterKey } from '../model/writer';
 import type { PrResult } from '../schema';
@@ -278,7 +278,7 @@ async function checkReady(
   } catch {
     return fail({ kind: 'not-ready', message: `spec "${slug}" was not found` });
   }
-  const spec = parseSpec(content);
+  const spec = parsePlan(content);
 
   const status = (spec.frontmatter.get('status') ?? '').trim();
   if (status === 'done') {
@@ -293,10 +293,10 @@ async function checkReady(
     });
   }
 
-  if (spec.todos.length === 0) {
+  if (spec.phases.length === 0) {
     return fail({ kind: 'not-ready', message: `spec "${slug}" has no todos` });
   }
-  const notDone = spec.todos.filter((t) => t.state !== 'done').map((t) => `${t.id} (${t.state})`);
+  const notDone = spec.phases.filter((t) => t.state !== 'done').map((t) => `${t.id} (${t.state})`);
   if (notDone.length > 0) {
     return fail({
       kind: 'not-ready',

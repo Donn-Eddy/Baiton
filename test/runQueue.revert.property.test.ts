@@ -18,7 +18,7 @@ import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { TerminalHost, HostTerminal } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Role } from '../src/model/role';
 import { ok } from '../src/model/result';
 
@@ -45,7 +45,7 @@ import { ok } from '../src/model/result';
 
 /** One legal (from-state, action) pair the queue can launch a stage for. */
 interface Scenario {
-  from: TodoState;
+  from: PhaseState;
   action: 'plan' | 'execute' | 'review';
   role: Role;
   /** A schema-conformant result body for a `completed` outcome. */
@@ -114,7 +114,7 @@ type OutcomeKind = 'completed' | 'closed' | 'cancelled';
 interface WriteCall {
   slug: string;
   todoId: string;
-  state: TodoState;
+  state: PhaseState;
   note?: string;
 }
 

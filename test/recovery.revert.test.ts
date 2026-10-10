@@ -6,7 +6,7 @@ import { recoverJournal, HOST_EXITED_NOTE, type ProcessControl } from '../src/en
 import type { SpecStore } from '../src/engine/runQueue';
 import type { GitService } from '../src/git';
 import { appendCompletion, appendStart, specJournalPathFor, todoJournalPathFor } from '../src/journal';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 
 /**
  * Unit tests for crash recovery's revert-on-`fromState` behaviour (Req 1.3;
@@ -49,9 +49,9 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
 
   /** A spec store recording every writeState call. */
   function makeRecordingSpecStore(): Pick<SpecStore, 'writeState'> & {
-    calls: Array<{ slug: string; todoId: string; state: TodoState; note?: string }>;
+    calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }>;
   } {
-    const calls: Array<{ slug: string; todoId: string; state: TodoState; note?: string }> = [];
+    const calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }> = [];
     return {
       calls,
       writeState: async (slug, todoId, state, note) => {

@@ -1,34 +1,34 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import {
-  parseSpec,
-  validateSpec,
+  parsePlan,
+  validatePlan,
   isBlocked,
-  buildSpecTree,
-  legalSpecActions,
-  TodoState,
+  buildPlanTree,
+  legalPlanActions,
+  PhaseState,
 } from '../src/model';
 
 /**
  * Property test for the host-free tree model (Requirement 4).
  *
- * Feature: baiton-ui-first-pass, Property 3: Tree model reflects parsed todos
+ * Feature: baiton-ui-first-pass, Property 3: Tree model reflects parsed phases
  * and derived blocked flags
  *
- * For any valid spec, the tree model's todo nodes SHALL be exactly the parsed
- * todos in file order, each carrying that todo's id, title and state, and each
- * node's blocked flag SHALL equal `isBlocked` for that todo
+ * For any valid legacy document, the tree model's phase nodes SHALL be exactly the parsed
+ * phases in file order, each carrying that phase's id, title and state, and each
+ * node's blocked flag SHALL equal `isBlocked` for that phase
  * (Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 20.4).
  *
- * The generator builds valid spec texts with varied frontmatter, prose, todo
+ * The generator builds valid legacy documents with varied frontmatter, prose, phase
  * states, and `after`/`files` hints. Validity is guaranteed structurally:
- * ids are unique, `after` targets reference only earlier todos in the list
+ * ids are unique, `after` targets reference only earlier phases in the list
  * (so there is no self-reference, no missing target, and no cycle), and every
- * generated line matches the todo grammar. The property is asserted against
- * `parseSpec` + `isBlocked` (the reused cores the tree model wraps).
+ * generated line matches the phase grammar. The property is asserted against
+ * `parsePlan` + `isBlocked` (the reused cores the tree model wraps).
  */
 
-const TODO_STATES: readonly TodoState[] = [
+const PHASE_STATES: readonly PhaseState[] = [
   'pending',
   'planning',
   'planned',
@@ -53,7 +53,7 @@ const titleFragmentArb: fc.Arbitrary<string> = fc
   // A non-empty title keeps the `- [state] id title` grammar unambiguous.
   .map((s) => (s === '' ? 'task' : s));
 
-/** Prose lines that live under OVERVIEW or between todos; never `- [`. */
+/** Prose lines that live under OVERVIEW or between phases; never `- [`. */
 const proseLineArb: fc.Arbitrary<string> = fc
   .stringOf(
     fc.char().filter((c) => c !== '\n' && c !== '\r'),
@@ -88,18 +88,20 @@ const frontmatterArb: fc.Arbitrary<string[]> = fc
   .map((entries) => entries.map((e) => `${e.key}: ${e.value}`));
 
 /**
- * A specification of a valid spec: a list of todos where each todo may depend
- * only on the ids of todos declared before it (guaranteeing acyclic, non-self,
+ * These generated `# OVERVIEW` + `# TODOS` + T## documents are explicit legacy
+ * fixtures; a separate case below covers plan.md and P## phases.
+ * A specification of a valid legacy document: phases where each phase may depend
+ * only on the ids of phases declared before it (guaranteeing acyclic, non-self,
  * present dependencies), plus optional files hints, frontmatter and prose.
  */
-interface SpecSpec {
+interface LegacyDocumentFixture {
   frontmatter: string[];
   /** An optional `pr:` frontmatter value; '' models a present-but-empty key. */
   pr: string | undefined;
-  /** The approval fact the SpecStore would supply for this spec. */
+  /** The approval fact the SpecStore would supply for the document. */
   approved: boolean;
   overviewProse: string[];
-  todos: { state: TodoState; title: string; afterIdx: number[]; files: string[] }[];
+  phases: { state: PhaseState; title: string; afterIdx: number[]; files: string[] }[];
 }
 
 /** A recorded PR URL, an empty value, or no `pr:` key at all. */
@@ -113,7 +115,7 @@ const prArb: fc.Arbitrary<string | undefined> = fc.option(
   { nil: undefined },
 );
 
-const specSpecArb: fc.Arbitrary<SpecSpec> = fc
+const legacyDocumentFixtureArb: fc.Arbitrary<LegacyDocumentFixture> = fc
   .record({
     frontmatter: frontmatterArb,
     pr: prArb,
@@ -123,7 +125,7 @@ const specSpecArb: fc.Arbitrary<SpecSpec> = fc
   })
   .chain(({ frontmatter, pr, approved, overviewProse, count }) => {
     const todoArbs: fc.Arbitrary<{
-      state: TodoState;
+      state: PhaseState;
       title: string;
       afterIdx: number[];
       files: string[];
@@ -131,9 +133,9 @@ const specSpecArb: fc.Arbitrary<SpecSpec> = fc
     for (let i = 0; i < count; i++) {
       todoArbs.push(
         fc.record({
-          state: fc.constantFrom(...TODO_STATES),
+          state: fc.constantFrom(...PHASE_STATES),
           title: titleFragmentArb,
-          // `after` targets reference only earlier todos (indices < i).
+          // `after` targets reference only earlier phases (indices < i).
           afterIdx:
             i === 0
               ? fc.constant<number[]>([])
@@ -152,24 +154,24 @@ const specSpecArb: fc.Arbitrary<SpecSpec> = fc
         }),
       );
     }
-    return fc.tuple(...todoArbs).map((todos) => ({
+    return fc.tuple(...todoArbs).map((phases) => ({
       frontmatter,
       pr,
       approved,
       overviewProse,
-      todos,
+      phases,
     }));
   });
 
-/** Renders a SpecSpec into raw spec text. Ids are assigned as T00, T01, ... */
-function renderSpec(spec: SpecSpec): string {
+/** Renders a LegacyDocumentFixture. Legacy ids are assigned as T00, T01, ... */
+function renderLegacyDocument(fixture: LegacyDocumentFixture): string {
   const lines: string[] = [];
 
   // The `pr:` line goes last so it wins if the random frontmatter happened to
   // generate a `pr` key too (the parser's map keeps the last value).
-  const frontmatterLines = [...spec.frontmatter];
-  if (spec.pr !== undefined) {
-    frontmatterLines.push(`pr: ${spec.pr}`);
+  const frontmatterLines = [...fixture.frontmatter];
+  if (fixture.pr !== undefined) {
+    frontmatterLines.push(`pr: ${fixture.pr}`);
   }
   if (frontmatterLines.length > 0) {
     lines.push('---');
@@ -178,41 +180,66 @@ function renderSpec(spec: SpecSpec): string {
   }
 
   lines.push('# OVERVIEW', '');
-  lines.push(...spec.overviewProse);
+  lines.push(...fixture.overviewProse);
   lines.push('', '# TODOS', '');
 
   const id = (idx: number) => 'T' + String(idx).padStart(2, '0');
 
-  spec.todos.forEach((todo, idx) => {
+  fixture.phases.forEach((phase, idx) => {
     const hintGroups: string[] = [];
-    if (todo.afterIdx.length > 0) {
-      hintGroups.push('after ' + todo.afterIdx.map((i) => id(i)).join(', '));
+    if (phase.afterIdx.length > 0) {
+      hintGroups.push('after ' + phase.afterIdx.map((i) => id(i)).join(', '));
     }
-    if (todo.files.length > 0) {
-      hintGroups.push('files: ' + todo.files.join(', '));
+    if (phase.files.length > 0) {
+      hintGroups.push('files: ' + phase.files.join(', '));
     }
     const hints = hintGroups.length > 0 ? ` (${hintGroups.join('; ')})` : '';
-    lines.push(`- [${todo.state}] ${id(idx)} ${todo.title}${hints}`);
+    lines.push(`- [${phase.state}] ${id(idx)} ${phase.title}${hints}`);
   });
 
   return lines.join('\n');
 }
 
 describe('tree model (property)', () => {
-  // Feature: baiton-ui-first-pass, Property 3: Tree model reflects parsed todos
+  it('builds plan nodes with P phases and records their kind', () => {
+    const raw = [
+      '## Endstate',
+      'A working result.',
+      '## What needs changing',
+      'Implement the behavior.',
+      '## Limitations & constraints',
+      'Keep the public API stable.',
+      '# PHASES',
+      '- [pending] P01 First phase',
+    ].join('\n');
+    const nodes = buildPlanTree([{
+      slug: 'plan-demo',
+      raw,
+      approved: false,
+      sessions: new Set<string>(),
+      plans: new Set<string>(),
+    }]);
+    assert.strictEqual(nodes[0].kind, 'plan');
+    assert.strictEqual(nodes[0].children.kind, 'phases');
+    if (nodes[0].children.kind === 'phases') {
+      assert.deepStrictEqual(nodes[0].children.phases.map((phase) => phase.id), ['P01']);
+    }
+  });
+
+  // Feature: baiton-ui-first-pass, Property 3: Tree model reflects parsed phases
   // and derived blocked flags
-  it('tree todo nodes equal parsed todos in order with matching id/title/state and blocked flag', () => {
+  it('tree phase nodes equal parsed phases in order with matching id/title/state and blocked flag', () => {
     fc.assert(
-      fc.property(specSpecArb, (specSpec) => {
-        const raw = renderSpec(specSpec);
+      fc.property(legacyDocumentFixtureArb, (fixture) => {
+        const raw = renderLegacyDocument(fixture);
 
-        // Guard: the generator is designed to only produce valid specs. If a
-        // generated spec is not valid, the generator (not the model) is wrong,
+        // Guard: the generator is designed to produce valid legacy documents.
+        // Invalid generated documents point to a generator, not a model defect,
         // so skip it rather than assert the property on invalid input.
-        const parsed = parseSpec(raw);
-        fc.pre(validateSpec(parsed, raw).length === 0);
+        const parsed = parsePlan(raw);
+        fc.pre(validatePlan(parsed, raw).length === 0);
 
-        const nodes = buildSpecTree([
+        const nodes = buildPlanTree([
           {
             slug: 'demo',
             raw,
@@ -224,42 +251,43 @@ describe('tree model (property)', () => {
         assert.strictEqual(nodes.length, 1);
         const node = nodes[0];
 
-        // A valid spec is not invalid and carries todo (not error) children.
+        // A valid legacy document is not invalid and carries phase children.
         assert.strictEqual(node.invalid, false);
-        assert.strictEqual(node.children.kind, 'todos');
-        if (node.children.kind !== 'todos') {
+        assert.strictEqual(node.children.kind, 'phases');
+        assert.strictEqual(node.kind, 'legacy-spec');
+        if (node.children.kind !== 'phases') {
           return;
         }
-        const todoNodes = node.children.todos;
+        const phaseNodes = node.children.phases;
 
-        // Exactly the parsed todos, in file order.
-        assert.strictEqual(todoNodes.length, parsed.todos.length);
-        parsed.todos.forEach((todo, i) => {
-          const tn = todoNodes[i];
+        // Exactly the parsed phases, in file order.
+        assert.strictEqual(phaseNodes.length, parsed.phases.length);
+        parsed.phases.forEach((phase, i) => {
+          const tn = phaseNodes[i];
           assert.strictEqual(tn.slug, 'demo');
-          assert.strictEqual(tn.id, todo.id);
-          assert.strictEqual(tn.title, todo.title);
-          assert.strictEqual(tn.state, todo.state);
-          // Blocked flag equals the reused core for that todo.
-          assert.strictEqual(tn.blocked, isBlocked(todo, parsed.todos));
+          assert.strictEqual(tn.id, phase.id);
+          assert.strictEqual(tn.title, phase.title);
+          assert.strictEqual(tn.state, phase.state);
+          // Blocked flag equals the reused core for that phase.
+          assert.strictEqual(tn.blocked, isBlocked(phase, parsed.phases));
         });
       }),
       { numRuns: 200 },
     );
   });
 
-  // The spec root carries the trimmed frontmatter `pr` URL and exactly the
-  // actions the host-free `legalSpecActions` derives from its own facts.
-  it('spec root prUrl and actions equal the derived frontmatter pr and legalSpecActions', () => {
+  // The plan root carries the trimmed frontmatter `pr` URL and exactly the
+  // actions the host-free `legalPlanActions` derives from its own facts.
+  it('plan root prUrl and actions equal the derived frontmatter pr and legalPlanActions', () => {
     fc.assert(
-      fc.property(specSpecArb, (specSpec) => {
-        const raw = renderSpec(specSpec);
+      fc.property(legacyDocumentFixtureArb, (fixture) => {
+        const raw = renderLegacyDocument(fixture);
 
-        const parsed = parseSpec(raw);
-        fc.pre(validateSpec(parsed, raw).length === 0);
+        const parsed = parsePlan(raw);
+        fc.pre(validatePlan(parsed, raw).length === 0);
 
-        const approved = specSpec.approved;
-        const nodes = buildSpecTree([
+        const approved = fixture.approved;
+        const nodes = buildPlanTree([
           {
             slug: 'demo',
             raw,
@@ -279,11 +307,11 @@ describe('tree model (property)', () => {
 
         assert.deepStrictEqual(
           node.actions,
-          legalSpecActions({
+          legalPlanActions({
             approved,
             invalid: false,
             prUrl: expectedPrUrl,
-            todoStates: parsed.todos.map((t) => t.state),
+            phaseStates: parsed.phases.map((t) => t.state),
           }),
         );
 
@@ -295,8 +323,8 @@ describe('tree model (property)', () => {
           assert.strictEqual(
             node.actions.includes('submitPr'),
             approved &&
-              parsed.todos.length > 0 &&
-              parsed.todos.every((t) => t.state === 'done'),
+              parsed.phases.length > 0 &&
+              parsed.phases.every((t) => t.state === 'done'),
           );
         }
       }),

@@ -1,6 +1,6 @@
 /**
- * The pure Todo State Machine transition table (Requirements 10.5, 18.1–18.16;
- * design "Todo State Machine").
+ * The pure Phase State Machine transition table (Requirements 10.5, 18.1–18.16;
+ * design "Phase State Machine").
  *
  * This module is a pure `(from-state, action) -> transition` lookup with the
  * guards each transition carries. It contains no I/O, no git, no terminals, and
@@ -25,7 +25,7 @@
  * lifecycle states, so it has no row here (the queue drives review rounds while
  * the todo stays in `planning`).
  */
-import type { TodoState } from '../model/todoState';
+import type { PhaseState } from '../model/phaseState';
 
 /**
  * A lifecycle action the user (or orchestrator) can trigger for a todo. These
@@ -67,34 +67,34 @@ export interface Transition {
   /** The action this transition is for. */
   readonly action: TransitionAction;
   /** The state the todo held when the transition was resolved. */
-  readonly from: TodoState;
+  readonly from: PhaseState;
   /**
    * The state written while the stage runs, e.g. `planning` for Plan. Absent
    * for control actions (`replan`, `stop`) which apply their terminal state
    * immediately without a running phase.
    */
-  readonly running?: TodoState;
+  readonly running?: PhaseState;
   /**
    * The state applied on a successful/`pass` terminal outcome (Req 18.1, 18.7,
    * 18.12). For `stop` this is the `failed` cancellation state (Req 18.15); for
    * `replan` it is `pending` (Req 18.14).
    */
-  readonly onSuccess: TodoState;
+  readonly onSuccess: PhaseState;
   /**
    * For the Review action only: the state applied when the reviewer returns a
    * `findings` verdict rather than `pass` (Req 18.13). Absent for every other
    * action, whose single outcome uses {@link onSuccess}.
    */
-  readonly onFindings?: TodoState;
+  readonly onFindings?: PhaseState;
   /** The guards that must hold before this transition may be dispatched. */
   readonly guards: TransitionGuards;
 }
 
 /** The set of states considered "running" (a stage is in flight). */
-const RUNNING_STATES: readonly TodoState[] = ['planning', 'executing', 'reviewing'];
+const RUNNING_STATES: readonly PhaseState[] = ['planning', 'executing', 'reviewing'];
 
 /** Whether a todo state is a running state (a stage is in flight). */
-export function isRunningState(state: TodoState): boolean {
+export function isRunningState(state: PhaseState): boolean {
   return RUNNING_STATES.includes(state);
 }
 
@@ -109,7 +109,7 @@ export function isRunningState(state: TodoState): boolean {
  * state for `stop`); {@link resolveTransition} handles those two actions
  * directly.
  */
-const TABLE: Partial<Record<TransitionAction, Partial<Record<TodoState, Transition>>>> = {
+const TABLE: Partial<Record<TransitionAction, Partial<Record<PhaseState, Transition>>>> = {
   plan: {
     pending: {
       action: 'plan',
@@ -137,7 +137,7 @@ const TABLE: Partial<Record<TransitionAction, Partial<Record<TodoState, Transiti
 };
 
 /** Build the Execute transition for a given legal `from` state (Req 18.7). */
-function executeTransition(from: TodoState): Transition {
+function executeTransition(from: PhaseState): Transition {
   return {
     action: 'execute',
     from,
@@ -155,7 +155,7 @@ function executeTransition(from: TodoState): Transition {
  * `failed` when that origin is unknown. Any non-running state is returned
  * unchanged.
  */
-export function revertStateFor(running: TodoState, executeFrom?: TodoState): TodoState {
+export function revertStateFor(running: PhaseState, executeFrom?: PhaseState): PhaseState {
   switch (running) {
     case 'planning':
       return 'pending';
@@ -184,9 +184,9 @@ export function revertStateFor(running: TodoState, executeFrom?: TodoState): Tod
  *   when `from` is `executing`.
  */
 export function resolveTransition(
-  from: TodoState,
+  from: PhaseState,
   action: TransitionAction,
-  opts?: { executeFrom?: TodoState },
+  opts?: { executeFrom?: PhaseState },
 ): Transition | undefined {
   if (action === 'replan') {
     // Re-plan is legal from any state that is not currently running (Req 18.14).
@@ -222,7 +222,7 @@ export function resolveTransition(
  * guard evaluation (Req 10.5). A thin predicate over {@link resolveTransition}
  * for callers that only need the legality decision.
  */
-export function isLegalTransition(from: TodoState, action: TransitionAction): boolean {
+export function isLegalTransition(from: PhaseState, action: TransitionAction): boolean {
   return resolveTransition(from, action) !== undefined;
 }
 

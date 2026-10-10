@@ -148,7 +148,7 @@ describe('launchStage config-driven ask-relay fallback', () => {
 
   it('keeps the section order: role, optional context, relay, result path, schema, stop', () => {
     const adapter = adapterThat(() => ({ shellPath: 'opencode', shellArgs: [] }), 'opencode');
-    launchWith(adapter, input(root, true, '## Todo\n\nT01 do the thing.'));
+    launchWith(adapter, input(root, true, '## Phase\n\nT01 do the thing.'));
     const brief = fs.readFileSync(briefPath(root), 'utf8');
 
     const roleIdx = brief.indexOf('# Role');

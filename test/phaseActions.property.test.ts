@@ -1,8 +1,8 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import { isLegalTransition, TransitionAction } from '../src/engine/transitions';
-import { legalActions, todoContextValue, TodoAction } from '../src/model/todoActions';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { legalActions, phaseContextValue, PhaseAction } from '../src/model/phaseActions';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Property test for the host-free legal-actions function (Requirement 4).
@@ -18,10 +18,10 @@ const TRANSITION_ACTIONS: readonly TransitionAction[] = [
   'stop',
 ];
 
-const RUNNING_STATES: readonly TodoState[] = ['planning', 'executing', 'reviewing'];
+const RUNNING_STATES: readonly PhaseState[] = ['planning', 'executing', 'reviewing'];
 
 /** The states from which a plan on file can be opened (`planned` and later). */
-const PLANNED_OR_LATER: readonly TodoState[] = [
+const PLANNED_OR_LATER: readonly PhaseState[] = [
   'planned',
   'executing',
   'executed',
@@ -34,7 +34,7 @@ describe('todoActions (property)', () => {
   it('legalActions equals isLegalTransition set plus view/viewPlan on their own facts', () => {
     fc.assert(
       fc.property(
-        fc.constantFrom(...TODO_STATES),
+        fc.constantFrom(...PHASE_STATES),
         fc.boolean(),
         fc.boolean(),
         (state, hasSession, hasPlan) => {
@@ -57,7 +57,7 @@ describe('todoActions (property)', () => {
 
           // No duplicates and deterministic ordering: plan, execute, review,
           // replan, stop, view, viewPlan.
-          const order: TodoAction[] = [
+          const order: PhaseAction[] = [
             'plan',
             'execute',
             'review',
@@ -76,8 +76,8 @@ describe('todoActions (property)', () => {
     );
   });
 
-  it('todoContextValue matches \\b<action>\\b exactly for its actions and no other token', () => {
-    const ALL_ACTIONS: readonly TodoAction[] = [
+  it('phaseContextValue matches \\b<action>\\b exactly for its actions and no other token', () => {
+    const ALL_ACTIONS: readonly PhaseAction[] = [
       'plan',
       'execute',
       'review',
@@ -89,12 +89,12 @@ describe('todoActions (property)', () => {
 
     fc.assert(
       fc.property(
-        fc.constantFrom(...TODO_STATES),
+        fc.constantFrom(...PHASE_STATES),
         fc.boolean(),
         fc.boolean(),
         (state, hasSession, hasPlan) => {
           const actions = legalActions(state, hasSession, hasPlan);
-          const contextValue = todoContextValue(actions);
+          const contextValue = phaseContextValue(actions);
 
           // Begins with the fixed prefix.
           assert.ok(contextValue.startsWith('baiton.todo'));

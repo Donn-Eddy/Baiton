@@ -27,7 +27,7 @@ import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 import type { Role } from '../src/model/role';
 import { parseJournal } from '../src/journal';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 
@@ -108,7 +108,7 @@ function makeRepo(states: string[], withRemote = true): Repo {
   git(root, 'checkout', '-q', '-b', BRANCH);
   const specRel = `.baiton/specs/${SLUG}/spec.md`;
   const unapproved = specText({ states, baseCommit });
-  const approvedRev = approvalHash(parseSpec(unapproved));
+  const approvedRev = approvalHash(parsePlan(unapproved));
   write(root, specRel, specText({ states, baseCommit, approvedRev }));
   write(root, `.baiton/specs/${SLUG}/plan.md`, '# plan\n');
   write(root, 'src/greeting.ts', 'export const greet = (n: string) => `hi ${n}`;\n');
@@ -246,8 +246,8 @@ async function deliverDraft(h: Harness, draft: unknown): Promise<void> {
 
 const DRAFT = { title: 'Add greeting', body: 'Adds greet().\n\nVerified by tests.' };
 
-function readSpec(repo: Repo): ReturnType<typeof parseSpec> {
-  return parseSpec(fs.readFileSync(path.join(repo.specsDir, SLUG, 'spec.md'), 'utf8'));
+function readSpec(repo: Repo): ReturnType<typeof parsePlan> {
+  return parsePlan(fs.readFileSync(path.join(repo.specsDir, SLUG, 'spec.md'), 'utf8'));
 }
 
 describe('submitPr (design section 8 "PR")', () => {

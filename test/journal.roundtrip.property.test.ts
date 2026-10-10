@@ -15,7 +15,7 @@ import {
   JournalEntry,
 } from '../src/journal';
 import { STAGES, Stage } from '../src/model/stage';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 20: Run-journal round trip —
@@ -66,7 +66,7 @@ const startInputArb = (runId: string): fc.Arbitrary<StartInput> =>
     terminalPid: fc.option(fc.integer({ min: 1, max: 999999 }), {
       nil: undefined,
     }),
-    fromState: fc.option(fc.constantFrom<TodoState>(...TODO_STATES), {
+    fromState: fc.option(fc.constantFrom<PhaseState>(...PHASE_STATES), {
       nil: undefined,
     }),
     sessionId: fc.option(fc.uuid(), { nil: undefined }),

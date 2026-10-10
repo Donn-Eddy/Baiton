@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { buildStageContext } from '../src/engine/stageContext';
-import { parseSpec, type ParsedSpec } from '../src/model/parser';
+import { parsePlan, type ParsedPlan } from '../src/model/parser';
 
 /**
  * Unit tests for the per-stage Brief context assembler (Requirement 18.3;
@@ -29,8 +29,8 @@ const REVIEW_MARK = 'REVIEWMARK';
 const EXEC_MARK = 'EXECMARK';
 
 /** A two-todo spec where `T02` depends on `T01`. */
-function makeSpec(): ParsedSpec {
-  return parseSpec(
+function makeSpec(): ParsedPlan {
+  return parsePlan(
     [
       '---',
       'title: sample',
@@ -96,7 +96,7 @@ describe('buildStageContext', () => {
       });
 
       assert.ok(context.includes(OVERVIEW_MARK));
-      assert.ok(!context.includes('# Todo'), 'no todo line is fabricated');
+      assert.ok(!context.includes('# Phase'), 'no todo line is fabricated');
       assert.ok(!context.includes(EXEC_MARK), 'no after content without a target todo');
     });
   });

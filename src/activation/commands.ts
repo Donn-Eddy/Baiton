@@ -64,8 +64,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { isErr } from '../model/result';
-import { parseSpec, type ParsedSpec } from '../model/parser';
-import { legalActions, type TodoAction } from '../model/todoActions';
+import { parsePlan, type ParsedPlan } from '../model/parser';
+import { legalActions, type PhaseAction } from '../model/phaseActions';
 import { DEFAULT_MODE, isRunMode } from '../model/mode';
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
@@ -259,7 +259,7 @@ async function autoModeTaskContext(
   workspaceRoot: string,
   ask: AutoModeAsk,
   context: AutoModeRunContext,
-  readSpec: (slug: string) => Promise<ParsedSpec | undefined>,
+  readSpec: (slug: string) => Promise<ParsedPlan | undefined>,
 ): Promise<EvaluationTaskContext> {
   const out: EvaluationTaskContext = { workspaceRoot };
   if (context.slug !== undefined) {
@@ -270,7 +270,7 @@ async function autoModeTaskContext(
     if (context.slug !== undefined) {
       try {
         const spec = await readSpec(context.slug);
-        const title = spec?.todos.find((t) => t.id === context.todoId)?.title;
+        const title = spec?.phases.find((t) => t.id === context.todoId)?.title;
         if (title !== undefined) {
           out.todoTitle = title;
         }
@@ -446,7 +446,7 @@ export function registerCommands(
   // in the todo's worktree. Manual mode runs one stage per trigger per todo and
   // the queue refuses a second while one is running (Req 19.1, 20.1). Every
   // refusal/halt is surfaced through the shared Surface (Req 5.3, 10.3, 14.5,
-  // 19.1). Todo queues sit outside the
+  // 19.1). Phase queues sit outside the
   // repository lock.
   const todoQueues: TodoQueues = createTodoQueues({
     workspaceRoot: repoRoot,
@@ -1676,7 +1676,7 @@ async function runShowPr(
     );
     return;
   }
-  const url = parseSpec(raw).frontmatter.get('pr')?.trim();
+  const url = parsePlan(raw).frontmatter.get('pr')?.trim();
   if (url === undefined || url === '') {
     surface.warn(
       `Baiton: spec "${slug}" has no recorded pull request; submit one first.`,
@@ -1774,7 +1774,7 @@ function describeSubmitPrError(error: SubmitPrError): string {
 // --- CodeLens --------------------------------------------------------------
 
 /** The lens title and command for each state-gated todo action (Req 4.2). */
-const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
+const ACTION_LENS: Record<PhaseAction, { title: string; command: string }> = {
   plan: { title: 'Plan', command: COMMANDS.plan },
   execute: { title: 'Execute', command: COMMANDS.execute },
   review: { title: 'Review', command: COMMANDS.review },
@@ -1800,10 +1800,10 @@ class SpecCodeLensProvider implements vscode.CodeLensProvider {
     if (slug === undefined) {
       return [];
     }
-    const spec = parseSpec(document.getText());
+    const spec = parsePlan(document.getText());
     const sessions = sessionSet(readSpecJournal(this.specsDir, slug));
     const lenses: vscode.CodeLens[] = [];
-    for (const todo of spec.todos) {
+    for (const todo of spec.phases) {
       const line = document.lineAt(todo.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
       const hasPlan = fs.existsSync(planPath(this.specsDir, slug, todo.id));
@@ -1871,7 +1871,7 @@ async function resolveTarget(
     return undefined;
   }
   const todoId =
-    todoArg ?? (await vscode.window.showInputBox({ prompt: 'Todo id (e.g. T01)' }));
+    todoArg ?? (await vscode.window.showInputBox({ prompt: 'Phase id (e.g. T01)' }));
   if (todoId === undefined || todoId.trim().length === 0) {
     surface.warn('Baiton: no todo id provided.');
     return undefined;
