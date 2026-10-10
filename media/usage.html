@@ -136,9 +136,21 @@
         border-color: transparent;
       }
 
+      .badge[tabindex] {
+        cursor: help;
+      }
+
+      .badge:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 1px;
+      }
+
+      .badge:focus:not(:focus-visible) {
+        outline: none;
+      }
+
       .tier,
       .reason,
-      .source-line,
       .muted {
         color: var(--vscode-descriptionForeground);
         font-size: 0.9em;
