@@ -28,7 +28,7 @@
  *
  * It holds the one-stage-per-repository lock from both sides, exactly as
  * `specDraft.ts` does: `start()` refuses `busy` while a spec queue or the
- * spec-draft runner has a stage in flight (`isSpecBusy`), and `isRunning()` is
+ * plan-draft runner has a stage in flight (`isSpecBusy`), and `isRunning()` is
  * what activation feeds back to `RunQueueDeps.isExternallyBusy` (Req 20.1).
  *
  * Every expected failure is a returned value, never a throw, and everything
@@ -41,7 +41,7 @@ import { readFileSync } from 'fs';
 
 import type { Adapter } from '../adapter';
 import type { Role } from '../model/role';
-import { type RunMode, isSpecless } from '../model/mode';
+import { type RunMode, isPlanless } from '../model/mode';
 import type { GitWorktreeService } from '../git/types';
 import type { InvestigateResult } from '../schema';
 import { appendCompletion, appendStart, type RunResultKind } from '../journal';
@@ -97,7 +97,7 @@ export const RUN_ID_TRAILER = 'Run-Id';
 
 /** One confirmed dispatch from the chat's run tool. */
 export interface RunPipelineRequest {
-  /** The mode the run executes as; never 'spec' or 'default'. */
+  /** The mode the run executes as; never 'plan' or 'default'. */
   mode: RunMode;
   /** What the composer's Mode select said when the run was confirmed (may be 'default'). */
   composerMode: RunMode;
@@ -225,7 +225,7 @@ export interface RunPipelineDeps {
   execAttempts?: () => number;
   /** `git.verify`, for the refactor brief's behaviour-preservation section. */
   verify?: () => string | undefined;
-  /** True while a spec queue or the spec-draft runner has a stage in flight. */
+  /** True while a spec queue or the plan-draft runner has a stage in flight. */
   isSpecBusy?: () => boolean;
   /** Factory for a git service bound to the run's worktree; injected for tests. */
   createService?: (dir: string) => GitWorktreeService;
@@ -316,21 +316,21 @@ class DefaultRunPipeline implements RunPipeline {
   }
 
   async start(req: RunPipelineRequest): Promise<RunPipelineStart> {
-    // 1. Mode. Neither 'spec' nor 'default' is ever a run. Belt and braces:
+    // 1. Mode. Neither 'plan' nor 'default' is ever a run. Belt and braces:
     //    a run pipeline for a spec conversation would write under
-    //    `.baiton/specs/`, and 'default' is spec-less per `isSpecless` but only
+    //    `.baiton/specs/`, and 'default' is plan-less per `isPlanless` but only
     //    recommends a concrete mode.
-    if (req.mode === 'spec' || !isSpecless(req.mode)) {
+    if (req.mode === 'plan' || !isPlanless(req.mode)) {
       return refuse({
         kind: 'invalid-mode',
-        message: 'mode "spec" has no run pipeline: a spec conversation dispatches draft_spec',
+        message: 'mode "plan" has no run pipeline: a plan conversation dispatches draft_spec',
       });
     }
     if (req.mode === 'default') {
       return refuse({
         kind: 'invalid-mode',
         message:
-          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a spec conversation dispatches draft_spec',
+          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a plan conversation dispatches draft_spec',
       });
     }
 

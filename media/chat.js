@@ -90,13 +90,13 @@
   const MAX_INPUT_CHARS = 100000;
 
   // Mirrors RUN_MODES in src/model/mode.ts, in the same order (default first,
-  // then spec). This is a plain browser script and cannot import it, so the list
+  // then plan). This is a plain browser script and cannot import it, so the list
   // and its labels are kept in sync by hand.
   const MODE_OPTIONS = [
     { id: 'default', label: 'Default' },
-    { id: 'spec', label: 'Spec' },
+    { id: 'plan', label: 'Phased Plan' },
     { id: 'bug', label: 'Bug' },
-    { id: 'quick', label: 'Quick' },
+    { id: 'quick', label: 'Quick Fix' },
     { id: 'refactor', label: 'Refactor' },
     { id: 'investigate', label: 'Investigate' },
   ];
@@ -1335,7 +1335,7 @@
     autoBtn.disabled = false;
   }
 
-  /** Whether the active conversation is a spec conversation (always Spec). */
+  /** Whether the active conversation is a spec conversation (always Plan). */
   function isSpecConversation() {
     return state.activeId !== '' && state.activeId !== WORKSPACE_CONVERSATION_ID;
   }
@@ -1345,7 +1345,7 @@
    * never writes it, it posts `setMode` and the view repaints when the host
    * echoes `setMode` back through the reducer. Unlike the Auto toggle it is
    * disabled while busy, while a run is in flight, and on a spec conversation
-   * (which always runs the Spec pipeline).
+   * (which always runs the Phased Plan pipeline).
    */
   function renderMode() {
     // The option list is static, so it is built exactly once: rebuilding it on
@@ -1359,17 +1359,17 @@
         modeSelect.appendChild(opt);
       });
     }
-    // A spec conversation is always Spec: shown pinned, whatever state.mode says.
+    // A spec conversation is always Plan: shown pinned, whatever state.mode says.
     const pinned = isSpecConversation();
-    modeSelect.value = pinned ? 'spec' : state.mode;
+    modeSelect.value = pinned ? 'plan' : state.mode;
     if (!modeSelect.value) {
       // An unknown mode matches no option and leaves the value empty; fall back
-      // to Spec (not DEFAULT_MODE) rather than showing a blank control.
-      modeSelect.value = 'spec';
+      // to Plan (not DEFAULT_MODE) rather than showing a blank control.
+      modeSelect.value = 'plan';
     }
     modeSelect.disabled = state.busy || state.runActive === true || pinned || state.readOnly === true;
     modeSelect.title = pinned
-      ? 'A spec conversation always runs the Spec pipeline.'
+      ? 'A plan conversation always runs the Phased Plan pipeline.'
       : state.runActive === true
         ? 'A run is in flight; the mode cannot change until it finishes.'
         : 'Conversation mode: the pipeline a dispatch from this chat runs.';

@@ -24,10 +24,10 @@
       busy: false,
       autoMode: false,
       // Mirrors initialWebviewState() in src/orchestrator/webviewProtocol.ts: the
-      // literal 'spec', deliberately not DEFAULT_MODE (now 'default'); the host's
+      // literal 'plan', deliberately not DEFAULT_MODE (now 'default'); the host's
       // setMode echo supplies the real mode. This is a plain browser script and
       // cannot import it, so the literal is kept in sync by hand.
-      mode: 'spec',
+      mode: 'plan',
       runActive: false,
       providers: [],
       selection: null,

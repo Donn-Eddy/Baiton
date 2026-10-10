@@ -297,6 +297,39 @@ describe('run journal round trip (property)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('reads a legacy spec-draft start as plan-draft', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'baiton-journal-legacy-stage-'));
+    const path = join(dir, 'runs.jsonl');
+    try {
+      writeFileSync(
+        path,
+        `${JSON.stringify({
+          type: 'start',
+          runId: 'r1',
+          todoId: 'T01',
+          stage: 'spec-draft',
+          attempt: 1,
+          startHead: 'head',
+          inputRev: 'rev',
+        })}\n`,
+        'utf8',
+      );
+
+      assert.deepStrictEqual(parseJournal(path), [
+        {
+          runId: 'r1',
+          todoId: 'T01',
+          stage: 'plan-draft',
+          attempt: 1,
+          startHead: 'head',
+          inputRev: 'rev',
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('readSpecJournal', () => {

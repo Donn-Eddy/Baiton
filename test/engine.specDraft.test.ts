@@ -23,14 +23,14 @@ import { parseJournal } from '../src/journal';
 import { Result, ok } from '../src/model/result';
 
 /**
- * Unit tests for the spec-draft runner (the harness writes the spec).
+ * Unit tests for the plan-draft runner (the harness writes the spec).
  *
  * The agent boundary is stubbed exactly as the plan/execute/review integration
  * test stubs it — an inert adapter, a terminal that only records disposal, and
  * a result watcher the test drives directly — so the runner's real behaviour is
  * exercised without a Claude CLI, a terminal, or a VS Code host: the Brief is
  * written under `.baiton/runs/<runId>/`, the result is validated against the
- * spec-draft schema, the spec is rendered and committed, and the run is
+ * plan-draft schema, the spec is rendered and committed, and the run is
  * journaled to the spec's `runs.jsonl`.
  */
 
@@ -219,7 +219,7 @@ function makeHarness(
   };
 }
 
-/** A schema-conformant spec-draft result. */
+/** A schema-conformant plan-draft result. */
 const DRAFT_RESULT = JSON.stringify({
   overview: 'Add a greeting module and cover it with tests.',
   todos: [
@@ -228,7 +228,7 @@ const DRAFT_RESULT = JSON.stringify({
   ],
 });
 
-describe('spec-draft runner (unit)', () => {
+describe('plan-draft runner (unit)', () => {
   const roots: string[] = [];
   const track = <T extends { root: string }>(h: T): T => {
     roots.push(h.root);
@@ -241,7 +241,7 @@ describe('spec-draft runner (unit)', () => {
     }
   });
 
-  it('launches the spec writer, writes the brief, and returns the run id immediately', async () => {
+  it('launches the plan writer, writes the brief, and returns the run id immediately', async () => {
     const h = track(makeHarness());
 
     const started = await h.runner.start({
@@ -257,25 +257,25 @@ describe('spec-draft runner (unit)', () => {
     assert.strictEqual(h.runner.isRunning(), true, 'the runner holds the repo lock');
 
     // The brief landed under the fresh run directory and carries the role,
-    // the requirements, and the spec-draft schema.
+    // the requirements, and the plan-draft schema.
     const brief = fs.readFileSync(
       path.join(h.root, '.baiton', 'runs', 'draft-run-1', 'brief.md'),
       'utf8',
     );
-    assert.match(brief, /spec writer/i);
+    assert.match(brief, /plan writer/i);
     assert.ok(brief.includes('Goal: add a greeting module.'));
     assert.ok(brief.includes('"todos"'));
 
-    // The launch used the spec-writer role and the configured model.
+    // The launch used the plan-writer role and the configured model.
     assert.deepStrictEqual(
       h.adapter.launches.map((l) => [l.role, l.model, l.effort]),
-      [['spec-writer', 'writer-model', 'high']],
+      [['plan-writer', 'writer-model', 'high']],
     );
 
     // The start is journaled before the result lands.
     const entries = parseJournal(h.journal('greeting'));
     assert.strictEqual(entries.length, 1);
-    assert.strictEqual(entries[0].stage, 'spec-draft');
+    assert.strictEqual(entries[0].stage, 'plan-draft');
     assert.strictEqual(entries[0].runId, 'draft-run-1');
 
     // Let the run finish so the harness is not left holding the lock.
@@ -504,8 +504,8 @@ describe('spec-draft runner (unit)', () => {
     assert.strictEqual(started.ok, false, 'an unknown agent id must refuse the draft');
     if (!started.ok) {
       assert.strictEqual(started.error.kind, 'unknown-agent');
-      assert.match(started.error.message, /spec-writer/);
-      assert.match(started.error.message, /roles\.spec-writer\.agent/);
+      assert.match(started.error.message, /plan-writer/);
+      assert.match(started.error.message, /roles\.plan-writer\.agent/);
       assert.match(started.error.message, /\.baiton\/config\.json/);
     }
     assert.strictEqual(h.adapter.probeCount, 0, 'no probe runs for an unknown agent');

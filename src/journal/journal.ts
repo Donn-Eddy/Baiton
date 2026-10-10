@@ -27,13 +27,13 @@ import {
   RunResultKind,
   StartRecord,
 } from './entry';
-import { Stage, isStage } from '../model/stage';
+import { Stage, toStage } from '../model/stage';
 import { PhaseState, isPhaseState } from '../model/phaseState';
 
 /** File name of every run journal (spec-level and per-todo). */
 export const JOURNAL_FILE = 'runs.jsonl';
 
-/** Spec-level journal: spec-draft, pr and legacy todo entries. */
+/** Spec-level journal: plan-draft, pr and legacy todo entries. */
 export function specJournalPathFor(specsDir: string, slug: string): string {
   return join(specsDir, slug, JOURNAL_FILE);
 }
@@ -337,11 +337,11 @@ function parseRecord(line: string): JournalRecord | undefined {
 
 /** Validates and narrows a raw object to a StartRecord, or undefined. */
 function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
+  const stage = typeof obj.stage === 'string' ? toStage(obj.stage) : undefined;
   if (
     typeof obj.runId !== 'string' ||
     typeof obj.todoId !== 'string' ||
-    typeof obj.stage !== 'string' ||
-    !isStage(obj.stage) ||
+    stage === undefined ||
     typeof obj.attempt !== 'number' ||
     typeof obj.startHead !== 'string' ||
     typeof obj.inputRev !== 'string'
@@ -352,7 +352,7 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
     type: 'start',
     runId: obj.runId,
     todoId: obj.todoId,
-    stage: obj.stage,
+    stage,
     attempt: obj.attempt,
     startHead: obj.startHead,
     inputRev: obj.inputRev,

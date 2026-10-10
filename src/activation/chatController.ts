@@ -53,7 +53,7 @@
  *  - show the empty state with the configured endpoint and model (indicating
  *    "not configured" for each unset one) and a Set API Key action (Req 13.5);
  *  - own the conversation's mode: host-authoritative and `workspaceState`-backed,
- *    pinned to Spec while a spec conversation is in view, refused while the chat
+ *    pinned to Plan while a spec conversation is in view, refused while the chat
  *    is busy or a run is in flight, echoed back on every path so the composer's
  *    Mode select is a pure projection, and the source of the phase, the tool
  *    surface and the system prompt of every send;
@@ -111,7 +111,7 @@ import {
   toRenderRecords,
   toolUpdate,
 } from '../orchestrator';
-import { DEFAULT_MODE, isRunMode, type RunMode } from '../model/mode';
+import { DEFAULT_MODE, isRunMode, toRunMode, type RunMode } from '../model/mode';
 import type {
   RunFinding,
   RunManifest,
@@ -528,7 +528,7 @@ export class ChatController {
     // silently falls back to DEFAULT_MODE (the Default a fresh Workspace
     // conversation starts in) rather than poisoning the phase.
     const stored = deps.modeMemory?.get();
-    this.mode = stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
+    this.mode = (stored !== undefined ? toRunMode(stored) : undefined) ?? DEFAULT_MODE;
     this.subAgents = createSubAgentRunner({
       sessions: this.sessions,
       client: deps.client,
@@ -853,7 +853,7 @@ export class ChatController {
 
   /**
    * The user picked a mode in the composer. The mode is a property of the
-   * Workspace_Conversation: a spec conversation is always Spec, so a `setMode`
+   * Workspace_Conversation: a spec conversation is always Plan, so a `setMode`
    * there changes nothing. A change is also refused while the chat is busy or a
    * spec-less run is in flight, and an off-union value is refused outright.
    * Every one of those paths still echoes, so the control can never hold a
@@ -880,14 +880,14 @@ export class ChatController {
 
   /**
    * The mode that actually governs the conversation in view. A spec conversation
-   * is always the literal Spec, deliberately not DEFAULT_MODE: the Workspace
-   * default no longer means Spec.
+   * is always the literal Plan, deliberately not DEFAULT_MODE: the Workspace
+   * default no longer means Plan.
    */
   private effectiveMode(): RunMode {
-    return this.activeSpec === undefined ? this.mode : 'spec';
+    return this.activeSpec === undefined ? this.mode : 'plan';
   }
 
-  /** Repaint the composer's Mode select from the host's state (a spec conversation always paints Spec). */
+  /** Repaint the composer's Mode select from the host's state (a spec conversation always paints Plan). */
   private postMode(): void {
     this.deps.webview.post({ type: 'setMode', mode: this.effectiveMode() });
   }
@@ -1405,7 +1405,7 @@ export class ChatController {
   /**
    * The orchestrator phase of the conversation being sent to (Req 11.1),
    * derived from the same `spec.md` the prompt is built from: a workspace
-   * conversation in Spec mode, or a spec that is missing, unreadable or still
+   * conversation in Plan mode, or a spec that is missing, unreadable or still
    * `draft`, is `gather`; an approved spec is `drive`; a spec-less mode on the
    * Workspace conversation is `run`. The spec branch deliberately passes no
    * mode, so a spec conversation maps exactly as it does today.
@@ -1431,7 +1431,7 @@ export class ChatController {
     await this.migrate(scope);
     this.conversations = await this.buildConversationItems();
     this.deps.webview.post({ type: 'setAutoMode', enabled: this.autoMode });
-    // Selecting a spec repaints the select as Spec and selecting Workspace again
+    // Selecting a spec repaints the select as Plan and selecting Workspace again
     // repaints the remembered mode, because both go through `refresh()`.
     this.postMode();
     this.postRunActive();

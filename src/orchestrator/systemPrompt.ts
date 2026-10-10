@@ -19,7 +19,7 @@
  * - **drive** — a spec whose `status` has moved past `draft`: the
  *   next-legal-step table (plan, execute, review, land_todo), one todo at a time,
  *   and `submit_pr` when every todo is done and landed.
- * - **run** — a non-Spec Workspace conversation (Default/Bug/Quick/Refactor/
+ * - **run** — a non-Plan Workspace conversation (Default/Bug/Quick/Refactor/
  *   Investigate): inspect with the read tools, state the work and the guessed
  *   files, then dispatch one spec-less run with `start_run` or `investigate`.
  *   Default first recommends one concrete mode and confirms it with `ask_user`
@@ -34,11 +34,11 @@
  * named `run` has no spec tools at all (the same warning `guard.ts` carries).
  *
  * The conversation's {@link RunMode} is a property of the Workspace
- * conversation only: a spec conversation is always Spec, so it ignores the
+ * conversation only: a plan conversation is always Plan, so it ignores the
  * mode and keeps its gather/drive split. The `mode` argument is optional and
  * trailing on both {@link phaseFor} and {@link buildSystemPrompt}, and an
- * absent mode or `'spec'` reproduces today's phase and today's prompt text byte
- * for byte, so every existing Spec-mode test keeps passing unmodified.
+ * absent mode or `'plan'` reproduces today's phase and today's prompt text byte
+ * for byte, so every existing Plan-mode test keeps passing unmodified.
  *
  * {@link buildSubAgentPrompt} builds the prompt for a sub-agent chat instead:
  * its role (do one task, report back, never finish a spec), the shared
@@ -49,7 +49,7 @@
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
  */
-import { isSpecless, RunMode } from '../model/mode';
+import { isPlanless, RunMode } from '../model/mode';
 import { parsePlan } from '../model/parser';
 import { OrchestratorPhase } from './guard';
 import { MAX_SUBAGENT_DEPTH } from './seams';
@@ -95,30 +95,30 @@ const DRIVE_STATUSES: readonly string[] = [
 
 /**
  * The phase a conversation is in (Req 11.1). A workspace conversation in a
- * spec-less mode is `run`; in Spec mode it is always `gather`. A spec
+ * plan-less mode is `run`; in Plan mode it is always `gather`. A spec
  * conversation is `drive` only when its frontmatter `status` parses to one of
  * {@link DRIVE_STATUSES}; missing, unparseable or `draft` content is `gather`,
  * so the orchestrator falls back to the phase that can still write the spec
  * rather than to the one that dispatches stages.
  *
- * Every non-Spec mode maps to the single `run` phase: the pipeline, not the
+ * Every non-Plan mode maps to the single `run` phase: the pipeline, not the
  * phase, distinguishes `investigate` from bug/quick/refactor, and
  * `controlTools.ts` advertises both `start_run` and `investigate` on
  * `phases: ['run']`.
  *
- * @param mode The conversation's mode. Absent means Spec (the literal `'spec'`,
+ * @param mode The conversation's mode. Absent means Plan (the literal `'plan'`,
  *   not DEFAULT_MODE, which is now Default), so the phase is computed exactly
  *   as before. The spec-less branch is guarded on
  *   `kind.kind === 'workspace'`, so a spec conversation ignores the argument
  *   entirely and keeps its gather/drive split even if a caller passes `'bug'`:
- *   that is the deliberate encoding of "a spec conversation is always Spec".
+ *   that is the deliberate encoding of "a spec conversation is always Plan".
  */
 export function phaseFor(
   kind: ConversationKind,
   specContent?: string,
-  mode: RunMode = 'spec',
+  mode: RunMode = 'plan',
 ): OrchestratorPhase {
-  if (kind.kind === 'workspace' && isSpecless(mode)) {
+  if (kind.kind === 'workspace' && isPlanless(mode)) {
     return 'run';
   }
   if (kind.kind !== 'spec' || specContent === undefined) {
@@ -225,8 +225,8 @@ export const RUN_SCOPE_TEXT = [
   ...PROHIBITION_LINES,
 ].join('\n');
 
-/** A mode whose conversation is in the `run` phase: every mode except `spec`. */
-export type SpeclessMode = Exclude<RunMode, 'spec'>;
+/** A mode whose conversation is in the `run` phase: every mode except `plan`. */
+export type PlanlessMode = Exclude<RunMode, 'plan'>;
 
 /**
  * The per-mode run flow text. An exhaustive `Record`, so adding a mode to
@@ -238,19 +238,19 @@ export type SpeclessMode = Exclude<RunMode, 'spec'>;
  * `ask_user` card, dispatch the pick with `start_run`/`investigate`; a Spec
  * pick and a decline dispatch nothing.
  */
-export const RUN_FLOW_TEXT: Readonly<Record<SpeclessMode, string>> = {
+export const RUN_FLOW_TEXT: Readonly<Record<PlanlessMode, string>> = {
   default: [
     'Default flow:',
     '1. When the user describes work, inspect the repository with the read tools until you can state it in one line.',
     '2. State the work in one line and name the files it most likely touches. A short, honest guess is better than a long one.',
-    '3. Recommend exactly one mode for it — Spec, Bug, Quick, Refactor or Investigate — with a one-line why.',
-    '4. Call `ask_user` once, with the five modes as `options` (ids `spec`, `bug`, `quick`, `refactor`, `investigate`), your recommendation first, and `allow_free_text` set.',
+    '3. Recommend exactly one mode for it — Phased Plan, Bug, Quick Fix, Refactor or Investigate — with a one-line why.',
+    '4. Call `ask_user` once, with the five modes as `options` (ids `plan`, `bug`, `quick`, `refactor`, `investigate`), your recommendation first, and `allow_free_text` set.',
     '5. Dispatch only the mode the user picks, from this conversation:',
     '- Bug -> call `start_run` with `mode: "bug"`, the one-line defect as `statement`, the guessed `files`, and the reproduction as `reproduction`. Ask for the reproduction with `ask_user` first if the user has not said.',
     '- Quick -> call `start_run` with `mode: "quick"`, the one-line statement of the change, and the guessed `files`.',
     '- Refactor -> call `start_run` with `mode: "refactor"`, the one-line statement of the restructure, and the guessed `files`.',
     '- Investigate -> call `investigate` with the one-line `question` and the guessed `files`.',
-    '- Spec -> dispatch nothing. Tell the user to change the Mode control in the composer to Spec and send the request again.',
+    '- Phased Plan -> dispatch nothing. Tell the user to change the Mode control in the composer to Phased Plan and send the request again.',
     '6. If the user declines the question, dispatch nothing: quote the refusal and stop. If they type an answer instead of picking, dispatch nothing: respond to what they typed.',
     '7. After a dispatch, tell the user what started: a run on its own branch and worktree that they can watch in the Runs view and merge when it passes, or an investigation whose finding will appear in the chat and under `.baiton/runs/`.',
     'Never dispatch without the user\'s pick. The dispatch tool shows its own confirm card, and that card still decides whether the work starts.',
@@ -292,7 +292,7 @@ export const RUN_FLOW_TEXT: Readonly<Record<SpeclessMode, string>> = {
 };
 
 /** The flow text for one spec-less mode, without an index-signature dance. */
-export function runFlowText(mode: SpeclessMode): string {
+export function runFlowText(mode: PlanlessMode): string {
   return RUN_FLOW_TEXT[mode];
 }
 
@@ -300,9 +300,9 @@ export function runFlowText(mode: SpeclessMode): string {
 export const MODE_PROPOSAL_TEXT = [
   'The mode is the user\'s choice, not yours, and you cannot change it yourself.',
   'When the work does not fit this mode, propose the mode that does with `ask_user` and wait for the answer:',
-  '- Work that needs an agreed requirements document and several todos -> Spec.',
+  '- Work that needs an agreed requirements document and several todos -> Phased Plan.',
   '- A defect with a reproduction -> Bug.',
-  '- One small, self-contained change -> Quick.',
+  '- One small, self-contained change -> Quick Fix.',
   '- A behaviour-preserving restructure -> Refactor.',
   '- A question to be answered rather than work to be done -> Investigate.',
   'If they agree, tell them to change the Mode control in the composer; do not dispatch under the wrong mode.',
@@ -310,7 +310,7 @@ export const MODE_PROPOSAL_TEXT = [
 
 /**
  * The new-spec flow: gather requirements, get agreement, then hand them to the
- * spec-writer harness through `draft_spec`. The orchestrator never proposes the
+ * plan-writer harness through `draft_spec`. The orchestrator never proposes the
  * todos itself — a configured sub-agent studies the repository and drafts them.
  */
 const FLOW_TEXT = [
@@ -319,8 +319,8 @@ const FLOW_TEXT = [
   '2. Write a short requirements document covering the goal, the constraints, the acceptance criteria, and the files of interest.',
   '3. Get the user to agree to that document. Revise it until they do.',
   '4. Once they agree, call `draft_spec` with a slug and the agreed requirements document.',
-  '5. Then tell the user the draft is being written by the configured harness, and that they can watch it in the spec-writer terminal and see the spec appear in the Spec Explorer once it lands.',
-  'You never propose the todo list yourself. `draft_spec` hands the requirements to the spec-writer agent, which studies the repository and drafts the OVERVIEW and todos.',
+  '5. Then tell the user the draft is being written by the configured harness, and that they can watch it in the plan-writer terminal and see the spec appear in the Spec Explorer once it lands.',
+  'You never propose the todo list yourself. `draft_spec` hands the requirements to the plan-writer agent, which studies the repository and drafts the OVERVIEW and todos.',
   'After a draft lands you may refine it with `update_overview`, `add_todo`, `edit_todo` and `remove_todo`.',
 ].join('\n');
 
@@ -364,26 +364,26 @@ const FRONTMATTER_TEXT = [
  *   available. Ignored for a workspace conversation. It also decides the phase
  *   (Req 11.1). When absent for a spec conversation the prompt is built without
  *   it, in the `gather` phase, and no error is raised (Req 11.7).
- * @param mode The conversation's mode. Absent or `spec` builds the prompt
+ * @param mode The conversation's mode. Absent or `plan` builds the prompt
  *   exactly as before; any other mode builds the run-phase prompt for that
- *   mode. Ignored for a spec conversation, which is always Spec.
+ *   mode. Ignored for a plan conversation, which is always Plan.
  * @returns The assembled system-prompt text.
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
   specContent?: string,
-  mode: RunMode = 'spec',
+  mode: RunMode = 'plan',
 ): string {
   // The `run` phase — every spec-less mode on a workspace conversation. The
-  // guard is written as `mode !== 'spec'` rather than `isSpecless(mode)` so
-  // control flow narrows `mode` to `SpeclessMode` with no cast. The run prompt
+  // guard is written as `mode !== 'plan'` rather than `isPlanless(mode)` so
+  // control flow narrows `mode` to `PlanlessMode` with no cast. The run prompt
   // deliberately omits TODO_GRAMMAR_TEXT, FRONTMATTER_TEXT and the
   // `Current spec file content:` block: a run-phase conversation has no
   // spec-writing tool at all (`controlTools.ts` keeps `draft_spec`, `add_todo`,
   // `edit_todo`, `remove_todo`, `update_overview`, `approve_spec`, `run` and
   // `submit_pr` off the `run` phase), so spec grammar would describe files it
   // cannot touch.
-  if (kind.kind === 'workspace' && mode !== 'spec') {
+  if (kind.kind === 'workspace' && mode !== 'plan') {
     return [
       RUN_ROLE_TEXT,
       RUN_SCOPE_TEXT,

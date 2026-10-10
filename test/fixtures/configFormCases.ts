@@ -106,12 +106,12 @@ cases.push({
   expectedPaths: ['roles.reviewer.model'],
 });
 cases.push({
-  name: 'whitespace-only model on spec-writer role',
+  name: 'whitespace-only model on plan-writer role',
   form: withEdits(validForm(), (f) => {
-    f.roles['spec-writer'].model = '   ';
+    f.roles['plan-writer'].model = '   ';
   }),
   options: DEFAULT_OPTIONS,
-  expectedPaths: ['roles.spec-writer.model'],
+  expectedPaths: ['roles.plan-writer.model'],
 });
 
 // (6) Effort: whitespace vs unset '' vs closed/open catalogue rules
@@ -286,7 +286,7 @@ cases.push({
 cases.push({
   name: 'multi-error form pinning roles -> limits -> git ordering and ROLES ordering',
   form: withEdits(validForm(), (f) => {
-    f.roles['spec-writer'].agent = '';
+    f.roles['plan-writer'].agent = '';
     f.roles.planner.agent = 'uninstalled';
     f.roles['plan-reviewer'].model = '   ';
     f.roles.executor.effort = '   ';
@@ -298,7 +298,7 @@ cases.push({
   }),
   options: DEFAULT_OPTIONS,
   expectedPaths: [
-    'roles.spec-writer.agent',
+    'roles.plan-writer.agent',
     'roles.planner.agent',
     'roles.plan-reviewer.model',
     'roles.executor.effort',

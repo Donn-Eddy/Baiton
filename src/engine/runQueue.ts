@@ -353,13 +353,13 @@ export interface RunQueueDeps {
    */
   newSessionId?: () => string;
   /**
-   * Reports a stage running outside this queue — today the spec-draft runner
+   * Reports a stage running outside this queue — today the plan-draft runner
    * AND the spec-less run pipeline (`createRunPipeline`). Neither can be
    * expressed as a queue request: both are repository-scoped rather than
    * todo-scoped, so they have no `todoId` and resolve no lifecycle transition.
    * The queue refuses a dispatch as `busy` while this answers true, which keeps
    * the one-stage-per-repository guarantee across all three paths (Req 20.1).
-   * Optional: the wiring decides whether spec-draft/run-pipeline still block; the
+   * Optional: the wiring decides whether plan-draft/run-pipeline still block; the
    * per-todo wiring does not pass it.
    */
   isExternallyBusy?: () => boolean;

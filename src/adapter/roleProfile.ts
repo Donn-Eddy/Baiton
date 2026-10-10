@@ -150,13 +150,13 @@ function readOnlyFragment(who: string): string {
 
 /** The six default profiles, keyed by role. Constants: there is no user override. */
 export const ROLE_PROFILES: Record<Role, RoleProfile> = {
-  'spec-writer': {
-    role: 'spec-writer',
-    agentName: 'baiton-spec-writer',
-    description: 'Baiton spec-writer (read-only, writes only its run result)',
+  'plan-writer': {
+    role: 'plan-writer',
+    agentName: 'baiton-plan-writer',
+    description: 'Baiton plan-writer (read-only, writes only its run result)',
     shell: false,
     write: 'run-dir',
-    systemPrompt: prompt(readOnlyFragment('spec writer')),
+    systemPrompt: prompt(readOnlyFragment('plan writer')),
   },
   planner: {
     role: 'planner',

@@ -7,8 +7,8 @@
  * the compile-time view the rest of the codebase programs against.
  */
 
-/** One todo the spec writer proposes, in dependency order. */
-export interface SpecDraftTodo {
+/** One todo the plan writer proposes, in dependency order. */
+export interface PlanDraftItem {
   /** The todo title — a title only; never a lifecycle state (Req 9.7). */
   title: string;
   /**
@@ -21,12 +21,12 @@ export interface SpecDraftTodo {
   files?: string[];
 }
 
-/** The spec writer's structured output (Spec_Draft stage). */
-export interface SpecDraftResult {
-  /** The spec's OVERVIEW prose. */
+/** The plan writer's structured output (Plan_Draft stage). */
+export interface PlanDraftResult {
+  /** The plan's OVERVIEW prose. */
   overview: string;
   /** The dependency-ordered todo list. */
-  todos: SpecDraftTodo[];
+  todos: PlanDraftItem[];
 }
 
 /** A single planned step in a {@link PlanResult}. */
@@ -144,7 +144,7 @@ export interface InvestigateResult {
 }
 
 export type StageResult =
-  | SpecDraftResult
+  | PlanDraftResult
   | PlanResult
   | PlanReviewResult
   | ExecuteResult

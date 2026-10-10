@@ -18,7 +18,7 @@ import {
   planSchema,
   prSchema,
   reviewSchema,
-  specDraftSchema,
+  planDraftSchema,
 } from './schemas';
 import type {
   ExecuteResult,
@@ -27,13 +27,13 @@ import type {
   PlanReviewResult,
   PrResult,
   ReviewResult,
-  SpecDraftResult,
+  PlanDraftResult,
   StageResult,
 } from './types';
 
 export * from './types';
 export {
-  specDraftSchema,
+  planDraftSchema,
   planSchema,
   planReviewSchema,
   executeSchema,
@@ -50,7 +50,7 @@ export {
  */
 const ajv = new Ajv({ allErrors: true, strict: false });
 
-const validateSpecDraft = ajv.compile(specDraftSchema);
+const validatePlanDraft = ajv.compile(planDraftSchema);
 const validatePlan = ajv.compile(planSchema);
 const validatePlanReview = ajv.compile(planReviewSchema);
 const validateExecute = ajv.compile(executeSchema);
@@ -60,7 +60,7 @@ const validateInvestigate = ajv.compile(investigateSchema);
 
 /** Stage → compiled Ajv validator (Req 12.2). */
 const VALIDATORS: Record<Stage, ValidateFunction> = {
-  'spec-draft': validateSpecDraft as ValidateFunction,
+  'plan-draft': validatePlanDraft as ValidateFunction,
   plan: validatePlan as ValidateFunction,
   'plan-review': validatePlanReview as ValidateFunction,
   execute: validateExecute as ValidateFunction,
@@ -71,7 +71,7 @@ const VALIDATORS: Record<Stage, ValidateFunction> = {
 
 /** Stage → its JSON Schema (the brief carries this to the Sub_Agent). */
 export const STAGE_SCHEMAS: Record<Stage, object> = {
-  'spec-draft': specDraftSchema,
+  'plan-draft': planDraftSchema,
   plan: planSchema,
   'plan-review': planReviewSchema,
   execute: executeSchema,
@@ -125,12 +125,12 @@ export function validateStageResult(
   return err(toSchemaErrors(validate.errors));
 }
 
-/** Typed convenience wrapper for the Spec_Draft stage. */
-export function validateSpecDraftResult(
+/** Typed convenience wrapper for the Plan_Draft stage. */
+export function validatePlanDraftResult(
   value: unknown,
-): Result<SpecDraftResult, SchemaError[]> {
-  return validateStageResult('spec-draft', value) as Result<
-    SpecDraftResult,
+): Result<PlanDraftResult, SchemaError[]> {
+  return validateStageResult('plan-draft', value) as Result<
+    PlanDraftResult,
     SchemaError[]
   >;
 }
@@ -197,7 +197,7 @@ export function stageArtifactIsNumbered(stage: Stage): boolean {
   return (
     stage !== 'plan' &&
     stage !== 'pr' &&
-    stage !== 'spec-draft' &&
+    stage !== 'plan-draft' &&
     stage !== 'investigate'
   );
 }
@@ -209,7 +209,7 @@ export function stageArtifactIsNumbered(stage: Stage): boolean {
  * artifacts can never overwrite another's: `todos/<todoId>/plan.md`,
  * `todos/<todoId>/plan-review-<n>.md`, `todos/<todoId>/execute-<n>.md`,
  * `todos/<todoId>/review-<n>.md` (Req 24.3). The two spec-scoped stages ignore
- * the todo id and stay at the spec root: `spec-draft` → `spec.md`, `pr` →
+ * the todo id and stay at the spec root: `plan-draft` → `spec.md`, `pr` →
  * `pr.md`.
  *
  * `investigate` is run-scoped rather than spec-scoped: its `finding.md` is
@@ -227,8 +227,8 @@ export function persistencePathForStage(
   n?: number,
 ): string {
   switch (stage) {
-    case 'spec-draft':
-      // The spec draft persists once per spec, as the spec file itself.
+    case 'plan-draft':
+      // The plan draft still persists to spec.md; document paths move in a later storage change.
       return 'spec.md';
     case 'plan':
       return `${todoArtifactDir(stage, todoId)}/plan.md`;

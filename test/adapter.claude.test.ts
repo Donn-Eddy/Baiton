@@ -216,14 +216,14 @@ describe('ClaudeAdapter attach() (Req 3.3, 3.4)', () => {
 describe('ClaudeAdapter role permission table', () => {
   it('treats the spec writer as a read-only role', () => {
     assert.ok(
-      (READ_ONLY_ROLES as readonly string[]).includes('spec-writer'),
-      'spec-writer must be read-only: it writes only its result file',
+      (READ_ONLY_ROLES as readonly string[]).includes('plan-writer'),
+      'plan-writer must be read-only: it writes only its result file',
     );
   });
 
   it('launches the spec writer with the read-only allow-list', () => {
     const spec = new ClaudeAdapter().launch({
-      role: 'spec-writer',
+      role: 'plan-writer',
       model: 'claude-sonnet-5',
       prompt: 'Read /repo/.baiton/runs/draft-1/brief.md and do what it says.',
       runId: 'draft-1',

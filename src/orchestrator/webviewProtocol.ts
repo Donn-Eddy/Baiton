@@ -360,7 +360,7 @@ export interface WebviewState {
   busy: boolean;
   /** Whether Auto mode is on: safe asks are auto-approved, the rest escalate. */
   autoMode: boolean;
-  /** The active conversation's mode; `'spec'` unless the host says otherwise. */
+  /** The active conversation's mode; `'plan'` unless the host says otherwise. */
   mode: RunMode;
   /** Whether a spec-less run is in flight; the Mode control is locked while true. */
   runActive: boolean;
@@ -397,10 +397,10 @@ export function initialWebviewState(): WebviewState {
     records: [],
     busy: false,
     autoMode: false,
-    // Deliberately the literal 'spec', not DEFAULT_MODE: the seed is only a
+    // Deliberately the literal 'plan', not DEFAULT_MODE: the seed is only a
     // placeholder until the host echoes setMode, and media/protocol.js mirrors
     // this literal by hand.
-    mode: 'spec',
+    mode: 'plan',
     runActive: false,
     providers: [],
     selection: null,

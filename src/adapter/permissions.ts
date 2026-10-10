@@ -30,7 +30,7 @@ import {
  * Whether a role only reads and searches (Requirement 15.1): it may write
  * nothing outside its run directory AND may not run shell commands. Derived
  * from the profile table, and by construction the historical set
- * `spec-writer, planner, plan-reviewer, pr-writer` — the reviewer is excluded
+ * `plan-writer, planner, plan-reviewer, pr-writer` — the reviewer is excluded
  * because it has shell.
  */
 export function isReadOnlyRole(role: Role): boolean {
@@ -96,7 +96,7 @@ export function permissionFlags(role: Role, mode: PermissionMode = DEFAULT_PERMI
   if (profile.shell) {
     return ['--allowedTools', REVIEWER_ALLOWED_TOOLS];
   }
-  // Read-only roles: spec-writer, planner, plan-reviewer, pr-writer.
+  // Read-only roles: plan-writer, planner, plan-reviewer, pr-writer.
   if (mode.readOnlyFallbackToAcceptEdits) {
     return ['--permission-mode', ACCEPT_EDITS_MODE];
   }

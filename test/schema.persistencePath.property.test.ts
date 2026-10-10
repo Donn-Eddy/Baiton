@@ -19,7 +19,7 @@ import { STAGES, Stage } from '../src/model/stage';
  * plan → `todos/<id>/plan.md`, plan-review → `todos/<id>/plan-review-<n>.md`,
  * execute → `todos/<id>/execute-<n>.md`, review → `todos/<id>/review-<n>.md`.
  * The `plan` stage persists once per todo and ignores n; the other three are
- * numbered. The two spec-scoped stages ignore the todo id entirely: spec-draft
+ * numbered. The two spec-scoped stages ignore the todo id entirely: plan-draft
  * → `spec.md`, pr → `pr.md`.
  *
  * The test generates random stages, todo ids and indexes, then asserts the
@@ -47,13 +47,13 @@ describe('Stage persistence-path naming (property harness)', () => {
       fc.property(stageArb, todoIdArb, indexArb, (stage, todoId, n) => {
         const path = persistencePathForStage(stage, todoId, n);
 
-        if (stage === 'spec-draft') {
+        if (stage === 'plan-draft') {
           // The spec draft persists once per spec, as the spec file itself.
-          assert.strictEqual(path, 'spec.md', `spec-draft must yield spec.md, got ${path}`);
+          assert.strictEqual(path, 'spec.md', `plan-draft must yield spec.md, got ${path}`);
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
             false,
-            'spec-draft artifact must not be numbered',
+            'plan-draft artifact must not be numbered',
           );
         } else if (stage === 'pr') {
           // The PR draft persists once per spec, at the spec root.
@@ -160,7 +160,7 @@ describe('Stage persistence-path naming (property harness)', () => {
   it('the run- and spec-scoped stages ignore the todo id', () => {
     fc.assert(
       fc.property(fc.option(todoIdArb, { nil: undefined }), (todoId) => {
-        assert.strictEqual(persistencePathForStage('spec-draft', todoId), 'spec.md');
+        assert.strictEqual(persistencePathForStage('plan-draft', todoId), 'spec.md');
         assert.strictEqual(persistencePathForStage('pr', todoId), 'pr.md');
         assert.strictEqual(
           persistencePathForStage('investigate', todoId),

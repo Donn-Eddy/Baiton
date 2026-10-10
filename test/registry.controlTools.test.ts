@@ -176,7 +176,7 @@ const noRunQueue = {
   }),
 };
 
-/** A spec-draft seam that records the requests it received. */
+/** A plan-draft seam that records the requests it received. */
 function recordingDraft(
   outcome: DraftSpecOutcome = { kind: 'started', runId: 'draft-1' },
 ): { draft: (req: DraftSpecRequest) => Promise<DraftSpecOutcome>; calls: DraftSpecRequest[] } {
@@ -1050,7 +1050,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('refuses invalid arguments before the card and before the seam', async () => {
       const cases: [string, unknown, RegExp][] = [
-        ['start_run', { mode: 'spec', statement: 'x', files: [] }, /bug, quick, refactor/],
+        ['start_run', { mode: 'plan', statement: 'x', files: [] }, /bug, quick, refactor/],
         ['start_run', { mode: 'investigate', statement: 'x', files: [] }, /bug, quick, refactor/],
         ['start_run', { mode: 'nope', statement: 'x', files: [] }, /bug, quick, refactor/],
         ['start_run', { mode: 'bug', files: [] }, /"statement"/],

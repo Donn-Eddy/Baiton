@@ -56,7 +56,7 @@ describe('RoleProfile capability table (Decision 1)', () => {
   });
 
   it('scopes every other role to its run dir with no shell', () => {
-    for (const role of ['spec-writer', 'planner', 'plan-reviewer', 'pr-writer'] as Role[]) {
+    for (const role of ['plan-writer', 'planner', 'plan-reviewer', 'pr-writer'] as Role[]) {
       const profile = roleProfile(role);
       assert.strictEqual(profile.write, 'run-dir', `${role} must be run-dir scoped`);
       assert.strictEqual(profile.shell, false, `${role} must not have shell`);
@@ -104,9 +104,9 @@ describe('isReadOnlyRole derived from the profile table', () => {
   it('matches the historical read-only set exactly', () => {
     assert.deepStrictEqual([...READ_ONLY_ROLES].sort(), [
       'plan-reviewer',
+      'plan-writer',
       'planner',
       'pr-writer',
-      'spec-writer',
     ]);
   });
 

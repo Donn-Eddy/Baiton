@@ -108,7 +108,7 @@ describe('runStore', () => {
       for (const stage of RUN_STAGES) {
         assert.ok(isRunStage(stage), `${stage} should be a run stage`);
       }
-      assert.strictEqual(isRunStage('spec-draft'), false);
+      assert.strictEqual(isRunStage('plan-draft'), false);
       assert.strictEqual(isRunStage('plan-review'), false);
       assert.strictEqual(isRunStage('pr'), false);
       assert.strictEqual(isRunStage('nope'), false);
@@ -231,10 +231,11 @@ describe('runStore', () => {
       assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
     });
 
-    it('refuses a spec mode and a dotted id, writing nothing', () => {
-      const spec = store.create(inputFor('r1', { mode: 'spec' }));
-      assert.ok(!spec.ok);
-      assert.strictEqual(spec.error.kind, 'invalid-id');
+    it('refuses a plan mode and a dotted id, writing nothing', () => {
+      const plan = store.create(inputFor('r1', { mode: 'plan' }));
+      assert.ok(!plan.ok);
+      assert.strictEqual(plan.error.kind, 'invalid-id');
+      assert.match(plan.error.message, /mode "plan"/);
 
       const dotted = store.create(inputFor('r.1'));
       assert.ok(!dotted.ok);
@@ -315,7 +316,7 @@ describe('runStore', () => {
 
       const cases: Record<string, unknown> = {
         'bad state': { ...base, state: 'nope' },
-        'spec mode': { ...base, mode: 'spec' },
+        'plan mode': { ...base, mode: 'plan' },
         'default mode': { ...base, mode: 'default' },
         'missing counter': { ...base, attempts: { plan: 0, execute: 0, investigate: 0 } },
         'wrong version': { ...base, version: 2 },
@@ -337,6 +338,22 @@ describe('runStore', () => {
       assert.strictEqual(read.value.composerMode, 'default');
       assert.strictEqual(read.value.explicitMode, true);
       assert.ok(parseRunManifest(text).ok);
+    });
+
+    it('normalizes legacy composerMode spec to plan', () => {
+      const base = validManifest();
+      const text = JSON.stringify({ ...base, composerMode: 'spec' }, null, 2) + '\n';
+      writeRaw('r1', text);
+      const read = store.read('r1');
+      assert.ok(read.ok);
+      if (read.ok) {
+        assert.strictEqual(read.value.composerMode, 'plan');
+      }
+      const parsed = parseRunManifest(text);
+      assert.ok(parsed.ok);
+      if (parsed.ok) {
+        assert.strictEqual(parsed.value.composerMode, 'plan');
+      }
     });
 
     it('drops unknown keys', () => {
