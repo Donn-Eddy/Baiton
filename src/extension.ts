@@ -526,7 +526,7 @@ async function runCrashRecovery(
         baitonDir,
         git,
         process: hostProcessControl,
-        specStore: { writeState: makeRecoveryWriteState(repoRoot, slug, git) },
+        planStore: { writeState: makeRecoveryWriteState(repoRoot, slug, git) },
       });
     } catch (e) {
       surface.warn(

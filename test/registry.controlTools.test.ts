@@ -1398,7 +1398,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
 
       assert.strictEqual(result.ok, true, 'a legal stage still dispatches');
-      assert.deepStrictEqual(queue.calls, [{ slug, todoId: 'T01', stage: 'plan' }]);
+      assert.deepStrictEqual(queue.calls, [{ slug, phaseId: 'T01', stage: 'plan' }]);
     });
   });
 
@@ -1717,7 +1717,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const seam = createRunQueueSeam((slug, todoId) => queues.get(`${slug}/${todoId}`)!, path.dirname(specsDir), () => undefined);
       const t01 = queues.get('demo/T01')!;
       const t02 = queues.get('demo/T02')!;
-      const req = (todoId: string) => ({ slug: 'demo', todoId, stage: 'plan' as const });
+      const req = (phaseId: string) => ({ slug: 'demo', phaseId, stage: 'plan' as const });
 
       const first = seam.dispatch(req('T01'));
       assert.deepStrictEqual(await seam.dispatch(req('T01')), { kind: 'busy' });
@@ -1741,7 +1741,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const specsDir = path.join(newRepo(), '.baiton', 'specs');
       const q = fakeQueue();
       const seam = createRunQueueSeam(() => q, path.dirname(specsDir), () => undefined);
-      const req = { slug: 'demo', todoId: 'T01', stage: 'plan' as const };
+      const req = { slug: 'demo', phaseId: 'T01', stage: 'plan' as const };
 
       q.running = true;
       assert.deepStrictEqual(await seam.dispatch(req), { kind: 'busy' });

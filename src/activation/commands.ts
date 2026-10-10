@@ -81,14 +81,15 @@ import {
   createSpecDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
-  landTodoWorktree,
+  landPhaseWorktree,
   resolveProviderExecutable,
   runsRootDir,
   selectProvider,
   submitPr,
-  todoBranchFor,
-  todoWorktreeDirFor,
-  unlandedTodos,
+  phaseBranchFor,
+  phaseWorktreeDirFor,
+  unlandedPhases,
+  documentKindFor,
 } from '../engine';
 import type {
   DispatchResult,
@@ -453,11 +454,11 @@ export function registerCommands(
     workspaceRoot: repoRoot,
     baitonDir,
     git,
-    specWriter,
+    planWriter: specWriter,
     terminalHost,
     watcherFactory,
     askWatcherFactory,
-    specStore,
+    planStore: specStore,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
     report: (error) => surface.reportDispatchError(error),
@@ -492,7 +493,7 @@ export function registerCommands(
     verify: () => cfg().git.verify,
     // A spec-less run refuses only while the spec draft runs; per-todo stages
     // run in their own worktrees and do not block it.
-    isSpecBusy: () => stageLock.runPipelineBusy(),
+    isPlanBusy: () => stageLock.runPipelineBusy(),
     onComplete: (outcome) => surface.log(`Baiton: run ${outcome.runId} ${outcome.state}: ${outcome.message}`),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -545,7 +546,7 @@ export function registerCommands(
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
-        unlandedTodos: (s) => unlandedTodos({ git }, s),
+        unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repoRoot, git }, s),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -570,10 +571,10 @@ export function registerCommands(
       }
       try {
         return await specWriter.apply(slug, async () => {
-          if ((await git.branchHead(todoBranchFor(slug, todoId))) === undefined) {
+          if ((await git.branchHead(phaseBranchFor(slug, todoId, documentKindFor(repoRoot, slug)))) === undefined) {
             return { kind: 'already-landed' as const };
           }
-          const landed = await landTodoWorktree({ workspaceRoot: repoRoot, git }, { slug, todoId });
+          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId: todoId });
           if (landed.ok) {
             return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
           }
@@ -895,7 +896,7 @@ export function registerCommands(
     const taskContext =
       opts.context === undefined
         ? undefined
-        : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => specStore.readSpec(slug));
+        : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => specStore.readPlan(slug));
     return decideAsk(gateAsk, agentAllowList(agent, role, runId), router, {
       role,
       runId,
@@ -1116,7 +1117,7 @@ export function registerCommands(
   return {
     disposables,
     runningSlugs: () => {
-      const running = todoQueues.running().map((r) => `${r.slug}/${r.todoId}`);
+      const running = todoQueues.running().map((r) => `${r.slug}/${r.phaseId}`);
       if (specDraftRunner.isRunning()) {
         running.push('(spec draft)');
       }
@@ -1419,7 +1420,7 @@ async function runView(
   // below), while codex/antigravity minted their own — for those only an id
   // discovered after the run can be reopened (Req 3.2).
   // Attach in the directory the session was created in.
-  const worktreeDir = todoWorktreeDirFor(repoRoot, slug, todoId);
+  const worktreeDir = phaseWorktreeDirFor(repoRoot, slug, todoId);
   const cwd = fs.existsSync(worktreeDir) ? worktreeDir : repoRoot;
   let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
   if (sessionId === undefined) {

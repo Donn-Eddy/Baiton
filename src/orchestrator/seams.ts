@@ -59,7 +59,7 @@ export interface ConfirmSeam {
  */
 export interface RunDispatchRequest {
   slug: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
 }
 

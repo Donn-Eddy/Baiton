@@ -49,13 +49,13 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
 
   /** A spec store recording every writeState call. */
   function makeRecordingSpecStore(): Pick<PlanStore, 'writeState'> & {
-    calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }>;
+    calls: Array<{ slug: string; phaseId: string; state: PhaseState; note?: string }>;
   } {
-    const calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }> = [];
+    const calls: Array<{ slug: string; phaseId: string; state: PhaseState; note?: string }> = [];
     return {
       calls,
-      writeState: async (slug, todoId, state, note) => {
-        calls.push({ slug, todoId, state, note });
+      writeState: async (slug, phaseId, state, note) => {
+        calls.push({ slug, phaseId, state, note });
         return true;
       },
     };
@@ -73,13 +73,13 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
       sessionId: 'session-1',
     });
 
-    const specStore = makeRecordingSpecStore();
+    const planStore = makeRecordingSpecStore();
     const outcomes = await recoverJournal({
       slug: 'demo',
       journalPath,
       git: noCommitGit,
       process: noLiveProcess,
-      specStore,
+      planStore,
     });
 
     assert.strictEqual(outcomes.length, 1);
@@ -89,10 +89,10 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     assert.strictEqual(outcome.killedPid, false);
     assert.strictEqual(outcome.commit, undefined, 'no Run-Id commit landed');
 
-    assert.strictEqual(specStore.calls.length, 1);
-    assert.deepStrictEqual(specStore.calls[0], {
+    assert.strictEqual(planStore.calls.length, 1);
+    assert.deepStrictEqual(planStore.calls[0], {
       slug: 'demo',
-      todoId: 'T01',
+      phaseId: 'T01',
       state: 'planned',
       note: HOST_EXITED_NOTE,
     });
@@ -109,13 +109,13 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
       // No fromState/sessionId: an entry written before this change.
     });
 
-    const specStore = makeRecordingSpecStore();
+    const planStore = makeRecordingSpecStore();
     const outcomes = await recoverJournal({
       slug: 'demo',
       journalPath,
       git: noCommitGit,
       process: noLiveProcess,
-      specStore,
+      planStore,
     });
 
     assert.strictEqual(outcomes.length, 1);
@@ -125,10 +125,10 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     assert.strictEqual(outcome.killedPid, false);
     assert.strictEqual(outcome.commit, undefined);
 
-    assert.strictEqual(specStore.calls.length, 1);
-    assert.deepStrictEqual(specStore.calls[0], {
+    assert.strictEqual(planStore.calls.length, 1);
+    assert.deepStrictEqual(planStore.calls[0], {
       slug: 'demo',
-      todoId: 'T02',
+      phaseId: 'T02',
       state: 'failed',
       note: HOST_EXITED_NOTE,
     });
@@ -160,19 +160,19 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
       result: 'completed',
     });
 
-    const specStore = makeRecordingSpecStore();
+    const planStore = makeRecordingSpecStore();
     const outcomes = await recoverJournal({
       slug: 'demo',
     baitonDir: path.dirname(specsDir),
       git: noCommitGit,
       process: noLiveProcess,
-      specStore,
+      planStore,
     });
 
     assert.strictEqual(outcomes.length, 2);
-    assert.deepStrictEqual(specStore.calls, [
-      { slug: 'demo', todoId: 'T01', state: 'planned', note: HOST_EXITED_NOTE },
-      { slug: 'demo', todoId: 'T02', state: 'executed', note: HOST_EXITED_NOTE },
+    assert.deepStrictEqual(planStore.calls, [
+      { slug: 'demo', phaseId: 'T01', state: 'planned', note: HOST_EXITED_NOTE },
+      { slug: 'demo', phaseId: 'T02', state: 'executed', note: HOST_EXITED_NOTE },
     ]);
   });
 });

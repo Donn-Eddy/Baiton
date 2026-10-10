@@ -270,7 +270,7 @@ interface Harness {
  */
 function makeHarness(
   repo: string,
-  options: { runId?: string; execAttempts?: number; isSpecBusy?: () => boolean } = {},
+  options: { runId?: string; execAttempts?: number; isPlanBusy?: () => boolean } = {},
 ): Harness {
   const service = createGitService(repo);
   const store = createRunStore({ workspaceRoot: repo });
@@ -292,7 +292,7 @@ function makeHarness(
     adapterForRole: () => adapter,
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
-    ...(options.isSpecBusy !== undefined ? { isSpecBusy: options.isSpecBusy } : {}),
+    ...(options.isPlanBusy !== undefined ? { isPlanBusy: options.isPlanBusy } : {}),
     newRunId: () => options.runId ?? RUN_ID,
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
     onComplete: (o) => outcomes.push(o),
@@ -856,7 +856,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
         specDraftRunning: () => drafting,
         runRunning: () => h.pipeline.isRunning(),
       });
-      h = makeHarness(repo, { isSpecBusy: () => lock.runPipelineBusy() });
+      h = makeHarness(repo, { isPlanBusy: () => lock.runPipelineBusy() });
 
       // While the spec draft runs, a spec-less run is refused and creates nothing.
       const refused = await h.pipeline.start(bugRequest());

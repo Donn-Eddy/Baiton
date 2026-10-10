@@ -93,7 +93,7 @@ describe('vscode ask watcher routing', () => {
       decline: (id, reason) => { declined.push({ id, reason }); registry.reject(id, reason); },
       log: (message) => { logs.push(message); },
       now: () => '2026-01-01T00:00:00.000Z',
-    }).create({ slug: 'spec-a', todoId: 'T17', runId: 'run-a', agent: 'claude', role: 'executor', asksDir });
+    }).create({ slug: 'spec-a', phaseId: 'T17', runId: 'run-a', agent: 'claude', role: 'executor', asksDir });
   }
 
   it('carries the run context with every routed ask', async () => {
@@ -235,25 +235,25 @@ describe('run queue ask watcher wiring', () => {
       diffAgainstWorkingTree: async () => '', log: async () => '', resetWorkingTree: async () => ok(undefined),
       findCommitByRunId: async () => undefined, push: async () => undefined, remoteUrl: async () => '',
     };
-    const specStore: PlanStore = {
-      currentState: async () => 'pending', readSpec: async () => parsePlan('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Phase\n'),
+    const planStore: PlanStore = {
+      currentState: async () => 'pending', readPlan: async () => parsePlan('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Phase\n'),
       readArtifact: async () => undefined, latestExecuteCommit: async () => undefined, isApproved: async () => true,
       isBlocked: async () => false, inputRevMatches: async () => true, inputRev: async () => 'rev', writeState: async () => true,
     };
     const deps: RunQueueDeps = {
-      workspaceRoot, terminalHost, watcherFactory, git, specStore,
+      workspaceRoot, terminalHost, watcherFactory, git, planStore,
       journalPath: join(workspaceRoot, '.baiton', 'specs', slug, 'runs.jsonl'), modelForRole: () => ({ model: 'm' }),
       adapterForRole: () => adapter, newRunId: () => 'run-1', newSessionId: () => '11111111-1111-1111-1111-111111111111',
       ...(wire ? { askWatcherFactory: { create: (input) => { creates.push(input); return { dispose: () => { disposeCount += 1; } }; } } } : {}),
     };
-    const outcome = await createRunQueue(deps).dispatch({ slug, todoId, action: 'plan', role: 'planner', attempt: 1, resume: false });
+    const outcome = await createRunQueue(deps).dispatch({ slug, phaseId: todoId, action: 'plan', role: 'planner', attempt: 1, resume: false });
     assert.ok(outcome.ok);
     return { relay, creates, disposes: () => disposeCount };
   }
 
   it('creates and disposes a watcher over the launched relay directory', async () => {
     const result = await dispatch(true);
-    assert.deepStrictEqual(result.creates, [{ slug, todoId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
+    assert.deepStrictEqual(result.creates, [{ slug, phaseId: todoId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
     assert.strictEqual(result.disposes(), 1);
     assert.ok(result.relay !== undefined);
   });

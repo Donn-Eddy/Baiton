@@ -236,9 +236,9 @@ function makeRig(journalPath: string): Rig {
 
   // A spec store that keeps the `execute` transition legal: the todo is
   // `planned`, the spec is approved, unblocked, and the input rev matches.
-  const specStore: PlanStore = {
+  const planStore: PlanStore = {
     currentState: async () => 'planned',
-    readSpec: async () => undefined,
+    readPlan: async () => undefined,
     readArtifact: async () => '# Plan T01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
@@ -260,7 +260,7 @@ function makeRig(journalPath: string): Rig {
     git,
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath,
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
     report: () => {},
@@ -268,7 +268,7 @@ function makeRig(journalPath: string): Rig {
       let t = 0;
       return () => t++;
     })(),
-    newRunId: (req) => `${req.slug}-${req.todoId}-${req.attempt}-${nextId()}`,
+    newRunId: (req) => `${req.slug}-${req.phaseId}-${req.attempt}-${nextId()}`,
   };
 
   return { deps, stages, peakInFlight: () => peak };
@@ -278,7 +278,7 @@ function makeRig(journalPath: string): Rig {
 function executeRequest(index: number): RunRequest {
   return {
     slug: 'demo',
-    todoId: `todo-${index}`,
+    phaseId: `todo-${index}`,
     action: 'execute',
     role: 'executor',
     attempt: index + 1,
@@ -493,7 +493,7 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
           const rig = makeRig(path.join(tmpDir, 'runs.jsonl'));
           const seam = fakeSeam(rig);
           const queues = Array.from({ length: n }, (_, i) =>
-            createRunQueue({ ...rig.deps, slug: 'demo', todoId: `todo-${i}`, worktrees: seam }),
+            createRunQueue({ ...rig.deps, slug: 'demo', phaseId: `todo-${i}`, worktrees: seam }),
           );
           const results = queues.map((q, i) => q.dispatch(executeRequest(i)));
           await flush();
@@ -526,10 +526,10 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
     const queue = createRunQueue({
       ...rig.deps,
       slug: 'demo',
-      todoId: 'T01',
+      phaseId: 'T01',
       worktrees: fakeSeam(rig),
     });
-    const r = await queue.dispatch({ ...executeRequest(0), todoId: 'T02' });
+    const r = await queue.dispatch({ ...executeRequest(0), phaseId: 'T02' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(!r.ok && r.error.kind, 'illegal-transition');
     assert.strictEqual(rig.stages.length, 0);

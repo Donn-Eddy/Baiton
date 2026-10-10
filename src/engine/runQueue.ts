@@ -6,19 +6,19 @@
  * This module owns the run lifecycle independent of which agent runs. A single
  * in-memory FIFO per queue guarantees at most one running stage per queue: a
  * request dispatched while one runs is appended and started only when the running
- * stage reaches a terminal outcome (Req 20.1–20.3). When wired per (slug, todo)
- * (`RunQueueDeps.slug`/`todoId`/`worktrees`) there is one queue per todo, FIFO and
- * `busy` are per todo, every stage runs in that todo's worktree, and there is no
- * repo-wide serialization between todo queues. In first-pass manual mode the
+ * stage reaches a terminal outcome (Req 20.1–20.3). When wired per (slug, phase)
+ * (`RunQueueDeps.slug`/`phaseId`/`worktrees`) there is one queue per phase, FIFO and
+ * `busy` are per phase, every stage runs in that phase's worktree, and there is no
+ * repo-wide serialization between phase queues. In first-pass manual mode the
  * queue never auto-chains — each user trigger runs exactly one stage and, on
  * completion, the queue is left for the next trigger (Req 19.1, 19.2). `stop()`
- * disposes the running terminal, records the outcome `cancelled`, sets the todo
+ * disposes the running terminal, records the outcome `cancelled`, sets the phase
  * `failed`, and clears every queued request (Req 20.4–20.6).
  *
  * For each dispatched action the queue:
- *   1. Resolves the legal transition from the todo's current state; refuses an
+ *   1. Resolves the legal transition from the phase's current state; refuses an
  *      illegal pair (Req 10.5, 18.x).
- *   2. Evaluates the transition's guards against live git/spec state — the
+ *   2. Evaluates the transition's guards against live git/plan state — the
  *      approval-hash gate and clean-tree/input-rev guards for Execute (Req 5.3,
  *      5.4, 17.2, 17.3, 18.8, 18.9).
  *   3. Runs the adapter probe before launching (Req 14.2, 14.5).
@@ -41,7 +41,7 @@
  *
  * Everything host-specific is injected — the per-role adapter lookup, git
  * service, terminal host, result-watcher factory, journal path, the
- * serializer-backed spec store, a clock and an id generator, and a reporter —
+ * serializer-backed plan store, a clock and an id generator, and a reporter —
  * so the queue is unit- and property-testable without `vscode`. The activation
  * layer wires the real implementations.
  */
@@ -52,7 +52,7 @@ import type { PhaseState } from '../model/phaseState';
 import type { GitService } from '../git';
 import { createGitService } from '../git/gitService';
 import { err, ok, type Result } from '../model/result';
-import { createTodoWorktree, unlandedTodos, type TodoWorktreeDeps } from './todoWorktree';
+import { createPhaseWorktree, unlandedPhases, type PhaseWorktreeDeps } from './phaseWorktree';
 import type { PlanBranchWriter } from './planBranchWriter';
 import type { Adapter } from '../adapter';
 import type { HostTerminal } from './terminalHost';
@@ -87,10 +87,10 @@ import * as fs from 'fs';
  * the executor continuation flag (Req 13).
  */
 export interface RunRequest {
-  /** The spec slug whose todo is being acted on. */
+  /** The plan slug whose phase is being acted on. */
   slug: string;
-  /** The todo id being acted on. */
-  todoId: string;
+  /** The phase id being acted on. */
+  phaseId: string;
   /** The lifecycle action to perform. */
   action: TransitionAction;
   /** The sub-agent role for the launched stage (ignored for control actions). */
@@ -110,20 +110,20 @@ export interface RunRequest {
 }
 
 /**
- * Why a dispatch did not run to a stage launch. Every variant means the todo's
- * state is left unchanged (except `input-rev-mismatch`, which reverts the todo
+ * Why a dispatch did not run to a stage launch. Every variant means the phase's
+ * state is left unchanged (except `input-rev-mismatch`, which reverts the phase
  * to `pending` per Req 18.9) and the reason is surfaced to the user.
  *
  * - `busy`               — a stage is already running (Req 10.4, 19.3).
- * - `illegal-transition` — the action is not legal for the todo's state (Req
+ * - `illegal-transition` — the action is not legal for the phase's state (Req
  *                          10.5, 18.2).
  * - `not-approved`       — the approval-hash gate failed (Req 5.3, 5.4).
- * - `blocked`            — the todo's derived blocked status is true (Req 18.2).
+ * - `blocked`            — the phase's derived blocked status is true (Req 18.2).
  * - `deps-unlanded`      — a Plan whose `after` dependencies are done but not yet
- *                          landed — their todo branches still exist.
+ *                          landed — their phase branches still exist.
  * - `dirty-tree`         — the working tree is not clean for Execute (Req 17.3,
  *                          18.8).
- * - `input-rev-mismatch` — the plan's Input_Rev no longer matches; the todo was
+ * - `input-rev-mismatch` — the plan's Input_Rev no longer matches; the phase was
  *                          reverted to `pending` (Req 18.9).
  * - `unknown-agent`      — the role's configured `agent` is not a supported
  *                          agent id; no stage is launched and state is
@@ -134,7 +134,7 @@ export interface RunRequest {
  * - `reset-failed`       — the post-run reset exited non-zero; the run halts
  *                          before the next stage (Req 15.6).
  * - `git-state-changed`  — HEAD or branch drifted during Execute (Req 17.6).
- * - `spec-write-failed`  — a serializer write of a lifecycle state box aborted
+ * - `plan-write-failed`  — a serializer write of a lifecycle state box aborted
  *                          (Req 6.5).
  * - `outcome`            — the stage produced a non-`completed` outcome
  *                          (`invalid_output`, `closed`, `cancelled`) (Req 12.6,
@@ -153,7 +153,7 @@ export type DispatchError =
   | { kind: 'launch-failed'; message: string }
   | { kind: 'reset-failed'; message: string }
   | { kind: 'git-state-changed'; message: string }
-  | { kind: 'spec-write-failed'; message: string }
+  | { kind: 'plan-write-failed'; message: string }
   | { kind: 'outcome'; outcome: RunOutcome; message: string };
 
 /**
@@ -167,18 +167,18 @@ export type DispatchResult =
   | { ok: false; error: DispatchError };
 
 /**
- * The stage currently in flight on a {@link RunQueue}: its run id, the todo it
+ * The stage currently in flight on a {@link RunQueue}: its run id, the phase it
  * acts on, its Session_Id, and its terminal (Req 3.6). Lets the command layer
  * show/reveal the live terminal without a second terminal registry.
  */
 export interface LiveRun {
   runId: string;
   slug: string;
-  todoId: string;
+  phaseId: string;
   /** The Claude `--session-id` UUID generated for this run (Req 3.1). */
   sessionId: string;
   terminal: HostTerminal;
-  /** The todo worktree the run executes in; absent when it runs in the main checkout. */
+  /** The phase worktree the run executes in; absent when it runs in the main checkout. */
   worktreeDir?: string;
 }
 
@@ -201,70 +201,70 @@ export interface RunQueue {
 }
 
 /**
- * The spec-store seam the queue uses to read approval/blocked/input-rev facts
+ * The plan-store seam the queue uses to read approval/blocked/input-rev facts
  * and to apply lifecycle state writes through the pure serializer. Keeping this
  * behind an interface lets the queue stay free of `fs`/`vscode` while the
  * activation layer wires a store backed by {@link writePhaseState} over the
- * on-disk spec (re-reading before each write per Req 6.3).
+ * on-disk plan (re-reading before each write per Req 6.3).
  */
 export interface PlanStore {
-  /** The todo's current lifecycle state, or `undefined` when it cannot be read. */
-  currentState(slug: string, todoId: string): Promise<PhaseState | undefined>;
+  /** The phase's current lifecycle state, or `undefined` when it cannot be read. */
+  currentState(slug: string, phaseId: string): Promise<PhaseState | undefined>;
   /**
-   * The spec, freshly re-read and parsed, or `undefined` when it cannot be
+   * The plan, freshly re-read and parsed, or `undefined` when it cannot be
    * read. The queue uses it to assemble each Brief's Context section (Req 18.3).
    */
-  readSpec(slug: string): Promise<ParsedPlan | undefined>;
+  readPlan(slug: string): Promise<ParsedPlan | undefined>;
   /**
-   * The text of a todo's persisted artifact for a stage, or `undefined` when
+   * The text of a phase's persisted artifact for a stage, or `undefined` when
    * none is on file. For the numbered stages this is the artifact with the
-   * highest `<n>` in `todos/<todoId>/`, found by listing that directory rather
+   * highest `<n>` in the document's phase artifact directory, found by listing that directory rather
    * than by trusting the journal (Req 24.3).
    */
   readArtifact(
     slug: string,
-    todoId: string,
+    phaseId: string,
     stage: Stage,
   ): Promise<string | undefined>;
   /**
-   * The commit the todo's most recent completed Execute landed in, from the
+   * The commit the phase's most recent completed Execute landed in, from the
    * journal's completion record, or `undefined` when none is recorded. The
    * reviewer's Brief names it so the reviewer inspects that commit (Req 21.2).
    */
-  latestExecuteCommit(slug: string, todoId: string): Promise<string | undefined>;
+  latestExecuteCommit(slug: string, phaseId: string): Promise<string | undefined>;
   /**
-   * Persist a validated stage artifact (absolute path under the spec folder) through the
-   * spec-branch writer, so it is serialized with state writes for the same spec. It is not
+   * Persist a validated stage artifact (absolute path under the plan folder) through the
+   * plan-branch writer, so it is serialized with state writes for the same plan. It is not
    * committed on its own: the next state write (or the Execute commit) records it. Absent
    * → the queue writes the file directly, as before.
    */
   persistArtifact?(slug: string, artifactPath: string, contents: string): Promise<void>;
   /**
-   * Whether the spec is approved: its `approved_rev` byte-equals the current
+   * Whether the plan is approved: its `approved_rev` byte-equals the current
    * Approval_Hash and is non-empty (Req 5.3, 5.4).
    */
   isApproved(slug: string): Promise<boolean>;
-  /** The todo's derived blocked status (Req 4.10, 18.2). */
-  isBlocked(slug: string, todoId: string): Promise<boolean>;
+  /** The phase's derived blocked status (Req 4.10, 18.2). */
+  isBlocked(slug: string, phaseId: string): Promise<boolean>;
   /**
    * Whether the plan's recorded Input_Rev still matches the current Input_Rev
-   * for the todo (Req 18.9). `false` reverts Execute to `pending`.
+   * for the phase (Req 18.9). `false` reverts Execute to `pending`.
    */
-  inputRevMatches(slug: string, todoId: string): Promise<boolean>;
+  inputRevMatches(slug: string, phaseId: string): Promise<boolean>;
   /** The plan's recorded Input_Rev, journaled at stage start (Req 21.1). */
-  inputRev(slug: string, todoId: string): Promise<string>;
+  inputRev(slug: string, phaseId: string): Promise<string>;
   /**
    * Apply a lifecycle state write through the serializer, committing the change
-   * on the spec branch before the next stage (Req 17.1). The write is applied
-   * through the per-slug spec-branch writer on freshly re-read content and
-   * committed path-scoped (`spec(<slug>): <id> <what>`, only
-   * `.baiton/specs/<slug>`). Resolves `false` when
+   * on the plan branch before the next stage (Req 17.1). The write is applied
+   * through the per-slug plan-branch writer on freshly re-read content and
+   * committed path-scoped (`plan(<slug>): <id> <what>`, only
+   * the document folder). Resolves `false` when
    * the serializer aborted (the target could not be located) so the caller can
-   * surface a `spec-write-failed` error and leave state unchanged (Req 6.5).
+   * surface a `plan-write-failed` error and leave state unchanged (Req 6.5).
    */
   writeState(
     slug: string,
-    todoId: string,
+    phaseId: string,
     state: PhaseState,
     note?: string,
   ): Promise<boolean>;
@@ -290,7 +290,7 @@ export interface AskWatcher {
 export interface AskWatcherFactory {
   create(input: {
     slug: string;
-    todoId: string;
+    phaseId: string;
     runId: string;
     /** The adapter id the run launched with (`adapter.id`), for the card's agent line. */
     agent: string;
@@ -314,23 +314,23 @@ export type RunIdGenerator = (req: RunRequest) => string;
 export interface RunQueueDeps {
   /** Absolute workspace root; the terminal cwd and artifact base. */
   workspaceRoot: string;
-  /** The spec slug's git branch is assumed already checked out (Req 16.6). */
+  /** The plan slug's git branch is assumed already checked out (Req 16.6). */
   git: GitService;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
   /** When wired, launched stages relay harness asks into chat; absent leaves launches unchanged. */
   askWatcherFactory?: AskWatcherFactory;
-  specStore: PlanStore;
+  planStore: PlanStore;
   /** Absolute path of the run journal `runs.jsonl` (Req 21.1, 21.2). */
   journalPath: string;
   /**
-   * Per-todo journal file for a todo's stage records
-   * (`.baiton/specs/<slug>/todos/<id>/runs.jsonl`); absent → every record goes
+   * Per-phase journal file for a phase's stage records
+   * (the phase's document artifact folder); absent → every record goes
    * to `journalPath`.
    */
-  journalPathFor?: (todoId: string) => string;
+  journalPathFor?: (phaseId: string) => string;
   /**
-   * The merged journal the queue reads (spec-level + per-todo files, see
+   * The merged journal the queue reads (plan-level + per-phase files, see
    * readPlanJournal); absent → `parseJournal(journalPath)`.
    */
   readJournal?: () => JournalEntry[];
@@ -345,7 +345,7 @@ export interface RunQueueDeps {
   report?: QueueReporter;
   /** Monotonic clock; defaults to `Date.now`. */
   clock?: Clock;
-  /** Run-id generator; defaults to a slug/todo/stage/attempt/time composite. */
+  /** Run-id generator; defaults to a slug/phase/stage/attempt/time composite. */
   newRunId?: RunIdGenerator;
   /**
    * Session-id generator for each launched stage's `--session-id` (Req 1.2,
@@ -354,51 +354,51 @@ export interface RunQueueDeps {
   newSessionId?: () => string;
   /**
    * Reports a stage running outside this queue — today the plan-draft runner
-   * AND the spec-less run pipeline (`createRunPipeline`). Neither can be
+   * AND the plan-less run pipeline (`createRunPipeline`). Neither can be
    * expressed as a queue request: both are repository-scoped rather than
-   * todo-scoped, so they have no `todoId` and resolve no lifecycle transition.
+   * phase-scoped, so they have no `phaseId` and resolve no lifecycle transition.
    * The queue refuses a dispatch as `busy` while this answers true, which keeps
    * the one-stage-per-repository guarantee across all three paths (Req 20.1).
    * Optional: the wiring decides whether plan-draft/run-pipeline still block; the
-   * per-todo wiring does not pass it.
+   * per-phase wiring does not pass it.
    */
   isExternallyBusy?: () => boolean;
-  /** The spec slug this queue serves; a request for another slug is refused. */
+  /** The plan slug this queue serves; a request for another slug is refused. */
   slug?: string;
-  /** The todo this queue serves; a request for another todo is refused. */
-  todoId?: string;
-  /** When set, every todo-level stage runs in the todo's worktree; absent → main checkout. */
+  /** The phase this queue serves; a request for another phase is refused. */
+  phaseId?: string;
+  /** When set, every phase-level stage runs in the phase's worktree; absent → main checkout. */
   worktrees?: QueueWorktreeSeam;
   /**
-   * The per-slug spec-branch writer; when set, journal appends run under
-   * `specWriter.apply(slug, ...)` so they serialize with state/artifact commits.
+   * The per-slug plan-branch writer; when set, journal appends run under
+   * `planWriter.apply(slug, ...)` so they serialize with state/artifact commits.
    */
-  specWriter?: Pick<PlanBranchWriter, 'apply'>;
+  planWriter?: Pick<PlanBranchWriter, 'apply'>;
 }
 
-/** Where one todo's stages run: its worktree dir and a git service bound to it. */
-export interface TodoStageWorkspace {
+/** Where one phase's stages run: its worktree dir and a git service bound to it. */
+export interface PhaseStageWorkspace {
   dir: string;
   git: GitService;
 }
 
-/** The per-todo worktree seam the queue dispatches through. */
+/** The per-phase worktree seam the queue dispatches through. */
 export interface QueueWorktreeSeam {
-  /** Create (first dispatch) or reuse the todo's worktree. Never resets an existing one. */
-  ensure(slug: string, todoId: string): Promise<Result<TodoStageWorkspace, string>>;
-  /** Phase ids of `slug` whose todo branch still exists (not landed). */
+  /** Create (first dispatch) or reuse the phase's worktree. Never resets an existing one. */
+  ensure(slug: string, phaseId: string): Promise<Result<PhaseStageWorkspace, string>>;
+  /** Phase ids of `slug` whose phase branch still exists (not landed). */
   unlanded(slug: string): Promise<readonly string[]>;
 }
 
-/** The real {@link QueueWorktreeSeam} over the todo-worktree lifecycle. */
+/** The real {@link QueueWorktreeSeam} over the phase-worktree lifecycle. */
 export function createQueueWorktreeSeam(
-  deps: TodoWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'> },
+  deps: PhaseWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'> },
 ): QueueWorktreeSeam {
   return {
-    async ensure(slug, todoId) {
+    async ensure(slug, phaseId) {
       try {
-        const run = async (): Promise<Result<TodoStageWorkspace, string>> => {
-          const r = await createTodoWorktree(deps, { slug, todoId });
+        const run = async (): Promise<Result<PhaseStageWorkspace, string>> => {
+          const r = await createPhaseWorktree(deps, { slug, phaseId });
           if (!r.ok) {
             return err(r.error.message);
           }
@@ -410,7 +410,7 @@ export function createQueueWorktreeSeam(
         return err(describe(e));
       }
     },
-    unlanded: (slug) => unlandedTodos(deps, slug),
+    unlanded: (slug) => unlandedPhases(deps, slug),
   };
 }
 
@@ -439,7 +439,7 @@ interface QueuedItem {
 interface RunningState {
   runId: string;
   slug: string;
-  todoId: string;
+  phaseId: string;
   sessionId: string;
   terminal: HostTerminal;
   worktreeDir?: string;
@@ -477,11 +477,11 @@ class SerialRunQueue implements RunQueue {
     if (this.running === undefined) {
       return undefined;
     }
-    const { runId, slug, todoId, sessionId, terminal, worktreeDir } = this.running;
+    const { runId, slug, phaseId, sessionId, terminal, worktreeDir } = this.running;
     return {
       runId,
       slug,
-      todoId,
+      phaseId,
       sessionId,
       terminal,
       ...(worktreeDir !== undefined ? { worktreeDir } : {}),
@@ -502,7 +502,7 @@ class SerialRunQueue implements RunQueue {
 
   /**
    * Cancel the running stage — dispose its terminal to end the process tree,
-   * mark it cancelled so its outcome is recorded `cancelled` and the todo set
+   * mark it cancelled so its outcome is recorded `cancelled` and the phase set
    * `failed` — and clear every queued request (Req 20.4–20.6). Each cleared
    * request resolves with a `busy`/cancellation refusal so its caller is not
    * left hanging.
@@ -523,7 +523,7 @@ class SerialRunQueue implements RunQueue {
 
     // Cancel the running stage: disposing the terminal drives the watcher's
     // terminal-close path; `cancel()` flips the outcome to `cancelled` so the
-    // lifecycle records a cancellation and sets the todo `failed` (Req 20.6).
+    // lifecycle records a cancellation and sets the phase `failed` (Req 20.6).
     if (this.running) {
       this.running.cancel();
       this.running.terminal.dispose();
@@ -560,7 +560,7 @@ class SerialRunQueue implements RunQueue {
    * {@link DispatchError} that has already been reported.
    */
   private async runOne(req: RunRequest): Promise<DispatchResult> {
-    // A stage running outside the queue (a spec draft or a spec-less run) holds
+    // A stage running outside the queue (a plan draft or a plan-less run) holds
     // the same one-stage-per-repository lock (Req 20.1).
     if (this.deps.isExternallyBusy?.() === true) {
       return this.refuse({
@@ -571,19 +571,19 @@ class SerialRunQueue implements RunQueue {
 
     if (
       (this.deps.slug !== undefined && this.deps.slug !== req.slug) ||
-      (this.deps.todoId !== undefined && this.deps.todoId !== req.todoId)
+      (this.deps.phaseId !== undefined && this.deps.phaseId !== req.phaseId)
     ) {
       return this.refuse({
         kind: 'illegal-transition',
-        message: `this run queue serves ${this.deps.slug ?? req.slug}/${this.deps.todoId ?? req.todoId}, not ${req.slug}/${req.todoId}`,
+        message: `this run queue serves ${this.deps.slug ?? req.slug}/${this.deps.phaseId ?? req.phaseId}, not ${req.slug}/${req.phaseId}`,
       });
     }
 
-    const state = await this.deps.specStore.currentState(req.slug, req.todoId);
+    const state = await this.deps.planStore.currentState(req.slug, req.phaseId);
     if (state === undefined) {
       return this.refuse({
         kind: 'illegal-transition',
-        message: `todo "${req.todoId}" could not be read`,
+        message: `phase "${req.phaseId}" could not be read`,
       });
     }
 
@@ -595,7 +595,7 @@ class SerialRunQueue implements RunQueue {
         ? {
             executeFrom: latestStart(
               this.readJournal(),
-              req.todoId,
+              req.phaseId,
               'execute',
             )?.fromState,
           }
@@ -616,13 +616,13 @@ class SerialRunQueue implements RunQueue {
       return this.applyControlAction(req, transition);
     }
 
-    // Evaluate guards against live git/spec state before launching.
-    const guarded = await this.checkSpecGuards(req, transition);
+    // Evaluate guards against live git/plan state before launching.
+    const guarded = await this.checkPlanGuards(req, transition);
     if (!guarded.ok) {
       return this.refuse(guarded.error);
     }
 
-    // Create or reuse the todo's worktree (never before the spec guards pass),
+    // Create or reuse the phase's worktree (never before the plan guards pass),
     // then check the tree guards against the worktree's own git.
     const workspace = await this.stageWorkspace(req);
     if (!workspace.ok) {
@@ -661,30 +661,30 @@ class SerialRunQueue implements RunQueue {
   /**
    * Apply a control action's state immediately (Req 18.14, 18.15). Re-plan sets
    * `pending`; Stop sets `failed` with a `cancelled` note. A serializer abort
-   * surfaces `spec-write-failed` and leaves state unchanged (Req 6.5).
+   * surfaces `plan-write-failed` and leaves state unchanged (Req 6.5).
    */
   private async applyControlAction(
     req: RunRequest,
     transition: Transition,
   ): Promise<DispatchResult> {
     const note = req.action === 'stop' ? 'cancelled' : undefined;
-    const wrote = await this.deps.specStore.writeState(
+    const wrote = await this.deps.planStore.writeState(
       req.slug,
-      req.todoId,
+      req.phaseId,
       transition.onSuccess,
       note,
     );
     if (!wrote) {
       return this.refuse({
-        kind: 'spec-write-failed',
-        message: `could not write "${transition.onSuccess}" for "${req.todoId}"`,
+        kind: 'plan-write-failed',
+        message: `could not write "${transition.onSuccess}" for "${req.phaseId}"`,
       });
     }
     return { ok: true, outcome: { kind: 'control-applied', state: transition.onSuccess } };
   }
 
   /**
-   * Resolve where the stage runs: the todo's worktree when the seam is wired
+   * Resolve where the stage runs: the phase's worktree when the seam is wired
    * (created on first dispatch, reused after), else the main checkout.
    */
   private async stageWorkspace(
@@ -693,43 +693,43 @@ class SerialRunQueue implements RunQueue {
     if (this.deps.worktrees === undefined) {
       return { ok: true, ws: { git: this.deps.git } };
     }
-    const r = await this.deps.worktrees.ensure(req.slug, req.todoId);
+    const r = await this.deps.worktrees.ensure(req.slug, req.phaseId);
     return r.ok
       ? { ok: true, ws: { git: r.value.git, cwd: r.value.dir } }
       : {
           ok: false,
           error: {
             kind: 'launch-failed',
-            message: `could not prepare the worktree for "${req.todoId}": ${r.error}`,
+            message: `could not prepare the worktree for "${req.phaseId}": ${r.error}`,
           },
         };
   }
 
   /**
-   * Evaluate the spec-level guards. Plan requires approval + unblocked (Req
+   * Evaluate the plan-level guards. Plan requires approval + unblocked (Req
    * 18.1, 18.2) and, with a worktree seam, that its `after` dependencies are
    * landed. Execute requires the approval-hash gate (Req 5.3, 5.4).
    */
-  private async checkSpecGuards(
+  private async checkPlanGuards(
     req: RunRequest,
     transition: Transition,
   ): Promise<{ ok: true } | { ok: false; error: DispatchError }> {
     if (transition.guards.approvedAndUnblocked) {
-      if (!(await this.deps.specStore.isApproved(req.slug))) {
+      if (!(await this.deps.planStore.isApproved(req.slug))) {
         return {
           ok: false,
-          error: { kind: 'not-approved', message: 'spec is not approved; planning is not allowed' },
+          error: { kind: 'not-approved', message: 'plan is not approved; planning is not allowed' },
         };
       }
-      if (await this.deps.specStore.isBlocked(req.slug, req.todoId)) {
+      if (await this.deps.planStore.isBlocked(req.slug, req.phaseId)) {
         return {
           ok: false,
-          error: { kind: 'blocked', message: `todo "${req.todoId}" is blocked by unmet dependencies` },
+          error: { kind: 'blocked', message: `phase "${req.phaseId}" is blocked by unmet dependencies` },
         };
       }
       if (this.deps.worktrees !== undefined) {
-        const spec = await this.deps.specStore.readSpec(req.slug);
-        const after = spec?.phases.find((t) => t.id === req.todoId)?.after ?? [];
+        const plan = await this.deps.planStore.readPlan(req.slug);
+        const after = plan?.phases.find((t) => t.id === req.phaseId)?.after ?? [];
         if (after.length > 0) {
           let unlanded: readonly string[];
           try {
@@ -739,7 +739,7 @@ class SerialRunQueue implements RunQueue {
               ok: false,
               error: {
                 kind: 'launch-failed',
-                message: `could not list unlanded todos of "${req.slug}": ${describe(e)}`,
+              message: `could not list unlanded phases of "${req.slug}": ${describe(e)}`,
               },
             };
           }
@@ -750,7 +750,7 @@ class SerialRunQueue implements RunQueue {
               ok: false,
               error: {
                 kind: 'deps-unlanded',
-                message: `todo "${req.todoId}" depends on ${pending.join(', ')}, which ${many ? 'are' : 'is'} done but not landed; land ${many ? 'them' : 'it'} (land_todo) before planning`,
+                message: `phase "${req.phaseId}" depends on ${pending.join(', ')}, which ${many ? 'are' : 'is'} done but not landed; land ${many ? 'them' : 'it'} (land_todo) before planning`,
               },
             };
           }
@@ -760,10 +760,10 @@ class SerialRunQueue implements RunQueue {
 
     if (transition.guards.cleanTreeAndInputRev) {
       // The approval-hash gate also protects Execute (Req 5.3, 5.4).
-      if (!(await this.deps.specStore.isApproved(req.slug))) {
+      if (!(await this.deps.planStore.isApproved(req.slug))) {
         return {
           ok: false,
-          error: { kind: 'not-approved', message: 'spec approval is stale; re-approve before executing' },
+          error: { kind: 'not-approved', message: 'plan approval is stale; re-approve before executing' },
         };
       }
     }
@@ -774,7 +774,7 @@ class SerialRunQueue implements RunQueue {
   /**
    * Evaluate the tree guards against the stage's git (the worktree's when one
    * is in use). Execute requires a clean tree (Req 17.2, 17.3, 18.8) and a
-   * matching Input_Rev; a mismatch reverts the todo to `pending` and refuses
+   * matching Input_Rev; a mismatch reverts the phase to `pending` and refuses
    * (Req 18.9).
    */
   private async checkTreeGuards(
@@ -783,7 +783,7 @@ class SerialRunQueue implements RunQueue {
     git: GitService,
   ): Promise<{ ok: true } | { ok: false; error: DispatchError }> {
     if (transition.guards.cleanTreeAndInputRev) {
-      // Clean tree required except changes confined to the spec folder (Req
+      // Clean tree required except changes confined to the plan folder (Req
       // 16.1, 17.2, 17.3).
       if (!(await git.isCleanExceptSpecFolder(req.slug))) {
         return {
@@ -791,12 +791,12 @@ class SerialRunQueue implements RunQueue {
           error: { kind: 'dirty-tree', message: 'a clean working tree is required to execute' },
         };
       }
-      // Input_Rev mismatch reverts the todo to `pending` with a note and does
+      // Input_Rev mismatch reverts the phase to `pending` with a note and does
       // not start executing (Req 18.9).
-      if (!(await this.deps.specStore.inputRevMatches(req.slug, req.todoId))) {
-        await this.deps.specStore.writeState(
+      if (!(await this.deps.planStore.inputRevMatches(req.slug, req.phaseId))) {
+        await this.deps.planStore.writeState(
           req.slug,
-          req.todoId,
+          req.phaseId,
           'pending',
           'plan input changed; re-plan required',
         );
@@ -804,7 +804,7 @@ class SerialRunQueue implements RunQueue {
           ok: false,
           error: {
             kind: 'input-rev-mismatch',
-            message: `plan input for "${req.todoId}" changed; reverted to pending`,
+            message: `plan input for "${req.phaseId}" changed; reverted to pending`,
           },
         };
       }
@@ -831,10 +831,10 @@ class SerialRunQueue implements RunQueue {
     const sessionId = this.newSessionId();
     const { model, effort } = this.deps.modelForRole(req.role);
 
-    // 0. Assemble the Brief's Context section from the spec and the todo's own
+    // 0. Assemble the Brief's Context section from the plan and the phase's own
     //    artifacts (Req 18.3). This runs before any state write, so a stage
     //    that cannot be briefed — Execute or Review with no plan on file —
-    //    refuses with the todo's state untouched, exactly like a guard.
+    //    refuses with the phase's state untouched, exactly like a guard.
     const briefContext = await this.buildBriefContext(req, stage);
     if (!briefContext.ok) {
       return this.refuse(briefContext.error);
@@ -843,15 +843,15 @@ class SerialRunQueue implements RunQueue {
     // 1. Write the running state and commit the metadata before launch (Req
     //    17.1). A serializer abort halts before launching (Req 6.5).
     if (transition.running !== undefined) {
-      const wrote = await this.deps.specStore.writeState(
+      const wrote = await this.deps.planStore.writeState(
         req.slug,
-        req.todoId,
+        req.phaseId,
         transition.running,
       );
       if (!wrote) {
         return this.refuse({
-          kind: 'spec-write-failed',
-          message: `could not write "${transition.running}" for "${req.todoId}"`,
+          kind: 'plan-write-failed',
+          message: `could not write "${transition.running}" for "${req.phaseId}"`,
         });
       }
     }
@@ -862,7 +862,7 @@ class SerialRunQueue implements RunQueue {
     const launchedAt = this.clock();
     const startHead = await this.safeHead(ws.git);
     const startBranch = await this.safeBranch(ws.git);
-    const inputRev = await this.deps.specStore.inputRev(req.slug, req.todoId);
+    const inputRev = await this.deps.planStore.inputRev(req.slug, req.phaseId);
 
     // 3. Launch the stage (Req 11). A launch failure halts and leaves state.
     //    Adapters whose CLI mints its own session ids (opencode) first map the
@@ -905,9 +905,9 @@ class SerialRunQueue implements RunQueue {
     // 4. Journal the start (Req 21.1). The pid is best-effort.
     const terminalPid = await resolvePid(terminal);
     await this.journal(req.slug, () =>
-      appendStart(this.journalFor(req.todoId), {
+      appendStart(this.journalFor(req.phaseId), {
         runId,
-        todoId: req.todoId,
+        todoId: req.phaseId,
         stage,
         attempt: req.attempt,
         startHead,
@@ -930,7 +930,7 @@ class SerialRunQueue implements RunQueue {
     this.running = {
       runId,
       slug: req.slug,
-      todoId: req.todoId,
+      phaseId: req.phaseId,
       sessionId,
       terminal,
       ...(ws.cwd !== undefined ? { worktreeDir: ws.cwd } : {}),
@@ -943,7 +943,7 @@ class SerialRunQueue implements RunQueue {
       try {
         askWatcher = this.deps.askWatcherFactory.create({
           slug: req.slug,
-          todoId: req.todoId,
+          phaseId: req.phaseId,
           runId,
           agent: adapter.id,
           role: req.role,
@@ -956,14 +956,14 @@ class SerialRunQueue implements RunQueue {
 
     let outcome: RunOutcome;
     let captured: { path: string; contents: string } | undefined;
-    const persistArtifact = this.deps.specStore.persistArtifact?.bind(this.deps.specStore);
+    const persistArtifact = this.deps.planStore.persistArtifact?.bind(this.deps.planStore);
     try {
       outcome = await awaitStageResult(
         {
           workspaceRoot: this.deps.workspaceRoot,
           slug: req.slug,
           stage,
-          todoId: req.todoId,
+          todoId: req.phaseId,
           index: req.attempt,
           terminal,
           watcher,
@@ -985,7 +985,7 @@ class SerialRunQueue implements RunQueue {
       this.running = undefined;
     }
 
-    // Persist the captured artifact through the spec-branch writer, before the
+    // Persist the captured artifact through the plan-branch writer, before the
     // Execute commit and the terminal state write pick it up.
     if (captured !== undefined && persistArtifact !== undefined) {
       const { path: artifactPath, contents } = captured;
@@ -993,11 +993,11 @@ class SerialRunQueue implements RunQueue {
         await persistArtifact(req.slug, artifactPath, contents);
       } catch {
         await this.journal(req.slug, () =>
-          appendCompletion(this.journalFor(req.todoId), { runId, result: 'completed' }),
+          appendCompletion(this.journalFor(req.phaseId), { runId, result: 'completed' }),
         );
         return this.refuse({
-          kind: 'spec-write-failed',
-          message: `could not persist the ${stage} artifact for "${req.todoId}"`,
+          kind: 'plan-write-failed',
+          message: `could not persist the ${stage} artifact for "${req.phaseId}"`,
         });
       }
     }
@@ -1034,54 +1034,54 @@ class SerialRunQueue implements RunQueue {
 
   /**
    * Assemble the Brief's Context section for a stage (Req 18.3), reading the
-   * spec and the todo's own artifacts through the {@link PlanStore} seam.
+   * plan and the phase's own artifacts through the {@link PlanStore} seam.
    *
    * Each role gets exactly what it needs and nothing else — the planner the
-   * OVERVIEW, its todo line and its dependencies' execution summaries; the
-   * executor its todo line and plan; the reviewer those plus the execution
-   * summary and the commit it landed in — so no sub-agent has to read `spec.md`
-   * or another todo's artifacts.
+   * OVERVIEW, its phase line and its dependencies' execution summaries; the
+   * executor its phase line and plan; the reviewer those plus the execution
+   * summary and the commit it landed in — so no sub-agent has to read `plan.md`
+   * or another phase's artifacts.
    *
-   * Execute and Review consume a plan, so a todo with no `todos/<id>/plan.md`
+   * Execute and Review consume a plan, so a phase with no plan artifact
    * refuses here rather than launching a sub-agent that would have to guess.
    * Plan needs no artifact: a dependency with no execution summary simply
-   * contributes nothing. An unreadable spec yields no context rather than a
+   * contributes nothing. An unreadable plan yields no context rather than a
    * refusal — the stage still launches with the four required Brief sections.
    */
   private async buildBriefContext(
     req: RunRequest,
     stage: Stage,
   ): Promise<{ ok: true; value: string | undefined } | { ok: false; error: DispatchError }> {
-    const store = this.deps.specStore;
+    const store = this.deps.planStore;
     const contextStage = stage as ContextStage;
 
     // Execute and Review are briefed from the plan; without one there is
     // nothing to implement or to review against (see the View plan action).
-    let plan: string | undefined;
+    let phasePlan: string | undefined;
     if (contextStage !== 'plan') {
-      plan = await store.readArtifact(req.slug, req.todoId, 'plan');
-      const missing = plan === undefined || plan.trim() === '';
+      phasePlan = await store.readArtifact(req.slug, req.phaseId, 'plan');
+      const missing = phasePlan === undefined || phasePlan.trim() === '';
       if (missing && (contextStage === 'execute' || contextStage === 'review')) {
         return {
           ok: false,
           error: {
             kind: 'launch-failed',
-            message: `no plan on file for "${req.todoId}"; run Plan first`,
+            message: `no plan on file for "${req.phaseId}"; run Plan first`,
           },
         };
       }
     }
 
-    const spec = await store.readSpec(req.slug);
-    if (spec === undefined) {
+    const plan = await store.readPlan(req.slug);
+    if (plan === undefined) {
       return { ok: true, value: undefined };
     }
 
     switch (contextStage) {
       case 'plan': {
         // Only the target's own `after` targets are consulted; every other
-        // todo's artifacts are never read, which is the confinement rule.
-        const target = spec.phases.find((t) => t.id === req.todoId);
+        // phase's artifacts are never read, which is the confinement rule.
+        const target = plan.phases.find((t) => t.id === req.phaseId);
         const afterExecutes: Record<string, string> = {};
         for (const depId of target?.after ?? []) {
           const summary = await store.readArtifact(req.slug, depId, 'execute');
@@ -1093,8 +1093,8 @@ class SerialRunQueue implements RunQueue {
           ok: true,
           value: buildStageContext({
             stage: 'plan',
-            spec,
-            todoId: req.todoId,
+            plan,
+            phaseId: req.phaseId,
             afterExecutes,
           }),
         };
@@ -1104,17 +1104,17 @@ class SerialRunQueue implements RunQueue {
         // executor knows what it has to fix (Req 13.2, 18.13).
         const retry = req.attempt >= 2 || req.resume;
         const latestReview = retry
-          ? await store.readArtifact(req.slug, req.todoId, 'review')
+          ? await store.readArtifact(req.slug, req.phaseId, 'review')
           : undefined;
         return {
           ok: true,
           value: buildStageContext({
             stage: 'execute',
-            spec,
-            todoId: req.todoId,
+            plan,
+            phaseId: req.phaseId,
             attempt: req.attempt,
             resume: req.resume,
-            ...(plan !== undefined ? { plan } : {}),
+            ...(phasePlan !== undefined ? { phasePlan } : {}),
             ...(latestReview !== undefined ? { latestReview } : {}),
           }),
         };
@@ -1122,20 +1122,20 @@ class SerialRunQueue implements RunQueue {
       case 'review': {
         const latestExecute = await store.readArtifact(
           req.slug,
-          req.todoId,
+          req.phaseId,
           'execute',
         );
         const executeCommit = await store.latestExecuteCommit(
           req.slug,
-          req.todoId,
+          req.phaseId,
         );
         return {
           ok: true,
           value: buildStageContext({
             stage: 'review',
-            spec,
-            todoId: req.todoId,
-            ...(plan !== undefined ? { plan } : {}),
+            plan,
+            phaseId: req.phaseId,
+            ...(phasePlan !== undefined ? { phasePlan } : {}),
             ...(latestExecute !== undefined ? { latestExecute } : {}),
             ...(executeCommit !== undefined ? { executeCommit } : {}),
           }),
@@ -1146,9 +1146,9 @@ class SerialRunQueue implements RunQueue {
           ok: true,
           value: buildStageContext({
             stage: 'plan-review',
-            spec,
-            todoId: req.todoId,
-            ...(plan !== undefined ? { plan } : {}),
+            plan,
+            phaseId: req.phaseId,
+            ...(phasePlan !== undefined ? { phasePlan } : {}),
           }),
         };
     }
@@ -1187,7 +1187,7 @@ class SerialRunQueue implements RunQueue {
     // whatever the outcome kind.
     const journalDone = (result: RunResultKind, commit?: string): Promise<void> =>
       this.journal(req.slug, () =>
-        appendCompletion(this.journalFor(req.todoId), {
+        appendCompletion(this.journalFor(req.phaseId), {
           runId,
           result,
           ...(commit !== undefined ? { commit } : {}),
@@ -1197,7 +1197,7 @@ class SerialRunQueue implements RunQueue {
 
     if (outcome.kind !== 'completed') {
       // Halt and journal the non-completing kind (Req 12.6, 14.7). A `closed`
-      // or `cancelled` outcome additionally reverts the todo to the state the
+      // or `cancelled` outcome additionally reverts the phase to the state the
       // stage launched from (Req 1.1, 1.4); `invalid_output` leaves state
       // unchanged (unreachable today — the flow keeps waiting for a valid
       // result — but kept as the conservative default).
@@ -1209,16 +1209,16 @@ class SerialRunQueue implements RunQueue {
       ) {
         const note =
           outcome.kind === 'cancelled' ? 'cancelled' : closedNote(outcome.exitCode);
-        const wrote = await this.deps.specStore.writeState(
+        const wrote = await this.deps.planStore.writeState(
           req.slug,
-          req.todoId,
+          req.phaseId,
           transition.from,
           note,
         );
         if (!wrote) {
           return this.refuse({
-            kind: 'spec-write-failed',
-            message: `could not write "${transition.from}" for "${req.todoId}"`,
+            kind: 'plan-write-failed',
+            message: `could not write "${transition.from}" for "${req.phaseId}"`,
           });
         }
         const detail =
@@ -1249,7 +1249,7 @@ class SerialRunQueue implements RunQueue {
         return this.refuse({
           kind: 'outcome',
           outcome,
-          message: `stage ${outcome.kind}${detail}; "${req.todoId}" reverted to "${transition.from}"${hint}`,
+          message: `stage ${outcome.kind}${detail}; "${req.phaseId}" reverted to "${transition.from}"${hint}`,
         });
       }
 
@@ -1273,7 +1273,7 @@ class SerialRunQueue implements RunQueue {
           message: 'HEAD or branch changed during execute; stage halted (git_state_changed)',
         });
       }
-      const message = `spec(${req.slug}): ${req.todoId} execute attempt ${req.attempt}`;
+      const message = `plan(${req.slug}): ${req.phaseId} execute attempt ${req.attempt}`;
       commit = await this.safeCommit(ws.git, message, { 'Run-Id': runId });
     }
 
@@ -1281,12 +1281,12 @@ class SerialRunQueue implements RunQueue {
     // branches on the reviewer's verdict.
     const terminalState = this.terminalStateFor(transition, stage, outcome);
     if (terminalState !== undefined) {
-      const wrote = await this.deps.specStore.writeState(req.slug, req.todoId, terminalState);
+      const wrote = await this.deps.planStore.writeState(req.slug, req.phaseId, terminalState);
       if (!wrote) {
         await journalDone('completed', commit);
         return this.refuse({
-          kind: 'spec-write-failed',
-          message: `could not write "${terminalState}" for "${req.todoId}"`,
+          kind: 'plan-write-failed',
+          message: `could not write "${terminalState}" for "${req.phaseId}"`,
         });
       }
     }
@@ -1387,14 +1387,14 @@ class SerialRunQueue implements RunQueue {
   }
 
   /** Refuse a dispatch: report the error and resolve with it. */
-  private journalFor(todoId: string): string {
-    return this.deps.journalPathFor?.(todoId) ?? this.deps.journalPath;
+  private journalFor(phaseId: string): string {
+    return this.deps.journalPathFor?.(phaseId) ?? this.deps.journalPath;
   }
 
-  /** Run a journal append under the spec-branch writer when wired, else directly. */
+  /** Run a journal append under the plan-branch writer when wired, else directly. */
   private async journal(slug: string, write: () => void): Promise<void> {
-    if (this.deps.specWriter) {
-      await this.deps.specWriter.apply(slug, () => write());
+    if (this.deps.planWriter) {
+      await this.deps.planWriter.apply(slug, () => write());
     } else {
       write();
     }
@@ -1480,7 +1480,7 @@ export const MISSING_RESULT_HINT =
  * one was discovered for the run (Req 3.2).
  */
 export const PRESERVED_CHANGES_HINT =
-  '; the executor exited without writing result.json but left changes in the working tree — those changes were preserved (nothing was reset or discarded). Re-run Execute to finish the todo; it resumes the executor\'s session when one was discovered.';
+  '; the executor exited without writing result.json but left changes in the working tree — those changes were preserved (nothing was reset or discarded). Re-run Execute to finish the phase; it resumes the executor\'s session when one was discovered.';
 
 /** Whether the run's `result.json` exists on disk; any fs error reads as absent. */
 function resultFileExists(resultPath: string): boolean {
@@ -1508,7 +1508,7 @@ async function resolvePid(terminal: HostTerminal): Promise<number | undefined> {
  */
 function defaultRunId(req: RunRequest, clock: Clock): string {
   const stage = stageForAction(req.action) ?? req.action;
-  return `${req.slug}-${req.todoId}-${stage}-${req.attempt}-${clock()}`;
+  return `${req.slug}-${req.phaseId}-${stage}-${req.attempt}-${clock()}`;
 }
 
 /**

@@ -34,7 +34,7 @@ export function createPlanStore(
       return (await readPlan(slug))?.phases.find((phase) => phase.id === phaseId)?.state;
     },
 
-    readSpec: readPlan,
+    readPlan,
 
     async readArtifact(slug, phaseId, stage): Promise<string | undefined> {
       const location = locate(slug);

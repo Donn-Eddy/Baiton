@@ -131,11 +131,11 @@ function makeGit(): GitService {
 }
 
 /** A spec store that keeps every `execute` transition legal, regardless of history. */
-const specStore: PlanStore = {
+const planStore: PlanStore = {
   currentState: async () => 'planned',
   // Every todo has a plan on file, so the Execute brief can be assembled; the
   // spec itself is not needed for what this test observes.
-  readSpec: async () => undefined,
+  readPlan: async () => undefined,
   readArtifact: async () => '# Plan T01\n',
   latestExecuteCommit: async () => undefined,
   isApproved: async () => true,
@@ -187,7 +187,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
-      specStore,
+      planStore,
       journalPath,
       modelForRole: (_role: Role) => ({ model: 'test-model' }),
       report: () => {},
@@ -242,7 +242,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
-      specStore,
+      planStore,
       journalPath,
       modelForRole: (_role: Role) => ({ model: 'test-model' }),
       report: () => {},
@@ -312,7 +312,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
-      specStore,
+      planStore,
       journalPath,
       modelForRole: (_role: Role) => ({ model: 'test-model' }),
       report: () => {},
@@ -466,7 +466,7 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
       git: makeGit(),
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
-      specStore,
+      planStore,
       journalPath: planJournalPathFor(path.dirname(specsDir), 'demo'),
       journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), 'demo', id),
       readJournal: () => readPlanJournal(path.dirname(specsDir), 'demo'),

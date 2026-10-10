@@ -38,7 +38,7 @@ export interface AskRoute {
 
 interface AskWatcherInput {
   slug: string;
-  todoId: string;
+  phaseId: string;
   runId: string;
   agent: string;
   role: Role;
@@ -67,7 +67,7 @@ class VscodeAskWatcher implements AskWatcher {
       role: input.role,
       runId: input.runId,
       slug: input.slug,
-      todoId: input.todoId,
+      todoId: input.phaseId,
     };
     // An explicit Uri-based RelativePattern remains correct when VS Code opened
     // a symlinked spelling of the workspace while Baiton uses its canonical path.

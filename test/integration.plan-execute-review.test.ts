@@ -10,7 +10,7 @@ import { createGitService } from '../src/git/gitService';
 import type { GitWorktreeService } from '../src/git';
 import type { RunQueue, PlanStore, ResultWatcherFactory } from '../src/engine/runQueue';
 import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
-import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor } from '../src/engine/todoWorktree';
+import { landPhaseWorktree, phaseBranchFor, phaseWorktreeDirFor } from '../src/engine/phaseWorktree';
 import { createPlanStore } from '../src/activation/planStore';
 import { createTodoQueues, type TodoQueues } from '../src/activation/engineFacade';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
@@ -49,7 +49,7 @@ import {
  *      (Req 17.1).
  *   3. Execute requires a clean tree (Req 17.2); a dirty tree outside the spec
  *      folder is refused (Req 17.3). On completion: todo executed, `todos/<id>/execute-1.md`
- *      persisted, and one `spec(<slug>): <id> execute attempt 1` commit carrying
+ *      persisted, and one `plan(<slug>): <id> execute attempt 1` commit carrying
  *      a `Run-Id:` trailer (Req 17.4), findable via findCommitByRunId (Req 21.5).
  *   4. Review → done, `todos/<id>/review-1.md` persisted; the non-executor post-run reset
  *      leaves gitignored files untouched (Req 15.5).
@@ -84,7 +84,7 @@ function readRepoFile(repo: string, relPath: string): string {
 
 /** The spec slug and its single todo used throughout the test. */
 const SLUG = 'demo-spec';
-const TODO_ID = 'T01';
+const PHASE_ID = 'T01';
 
 /** Spec-relative path of the spec file. */
 const SPEC_REL = `.baiton/specs/${SLUG}/spec.md`;
@@ -107,7 +107,7 @@ function initialSpec(): string {
     '',
     '# TODOS',
     '',
-    `- [pending] ${TODO_ID} Add a greeting function (files: src/greeting.ts)`,
+    `- [pending] ${PHASE_ID} Add a greeting function (files: src/greeting.ts)`,
     '',
   ].join('\n');
 }
@@ -357,8 +357,8 @@ function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
     workspaceRoot: repo,
     baitonDir: path.dirname(specsDir),
     git: gitService,
-    specWriter: writer,
-    specStore: store,
+    planWriter: writer,
+    planStore: store,
     terminalHost,
     watcherFactory: factory,
     adapterForRole: () => new StubAdapter(),
@@ -371,7 +371,7 @@ function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
     writer,
     store,
     queues,
-    queue: queues.queueFor(SLUG, TODO_ID),
+    queue: queues.queueFor(SLUG, PHASE_ID),
     factory: factory as unknown as StubSubAgentFactory,
     terminalHost,
     journalPath: planJournalPathFor(path.dirname(specsDir), SLUG),
@@ -429,7 +429,7 @@ function setKey(content: string, key: string, value: string): string {
 
 /** The current state of the single todo. */
 async function stateOf(h: Harness): Promise<PhaseState | undefined> {
-  return h.store.currentState(SLUG, TODO_ID);
+  return h.store.currentState(SLUG, PHASE_ID);
 }
 
 /** Count commits whose subject matches `subject` (first line) reachable from HEAD. */
@@ -531,7 +531,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     const headBeforePlan = await h.git.head();
     const planResult = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'plan',
       role: 'planner',
       attempt: 1,
@@ -541,7 +541,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned');
     // Artifact persisted at the plan path under the spec.
     const planArtifact = path.join(
-      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'plan.md',
+      h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'plan.md',
     );
     assert.ok(fs.existsSync(planArtifact), "plan.md persisted under the todo's folder");
     // Between plan start and finish the queue wrote the running (`planning`) and
@@ -550,23 +550,23 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.notStrictEqual(headAfterPlan, headBeforePlan, 'metadata was committed during plan');
     const planSubjects = commitSubjects(h.repo);
     assert.ok(
-      planSubjects.includes(`plan(${SLUG}): ${TODO_ID} planning`),
+      planSubjects.includes(`plan(${SLUG}): ${PHASE_ID} planning`),
       'a planning metadata commit landed',
     );
     assert.ok(
-      planSubjects.includes(`plan(${SLUG}): ${TODO_ID} planned`),
+      planSubjects.includes(`plan(${SLUG}): ${PHASE_ID} planned`),
       'a planned metadata commit landed',
     );
 
     // The stages ran in the todo's worktree, on the todo branch.
-    const wt = todoWorktreeDirFor(h.repo, SLUG, TODO_ID);
+    const wt = phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID);
     assert.ok(fs.existsSync(wt), 'the todo worktree exists after Plan');
     assert.strictEqual(
       git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').trim(),
-      todoBranchFor(SLUG, TODO_ID),
+      phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'),
       'the worktree is on the todo branch',
     );
-    assert.strictEqual(todoBranchFor(SLUG, TODO_ID), 'baiton-todo/demo-spec/T01');
+    assert.strictEqual(phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'), 'baiton-todo/demo-spec/T01');
     const wtGit = createGitService(wt);
 
     // -- Dirty-tree refusal for Execute (Req 17.2/17.3) --------------------
@@ -574,7 +574,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     writeRepoFile(wt, 'src/greeting.ts', 'export const version = 99; // dirty\n');
     const dirtyResult = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'execute',
       role: 'executor',
       attempt: 1,
@@ -591,7 +591,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     // -- Execute → executed, execute-1.md, Run-Id commit (Req 17.4, 21.5) --
     const executeResult = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'execute',
       role: 'executor',
       attempt: 1,
@@ -600,7 +600,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.strictEqual(executeResult.ok, true, 'execute dispatch succeeded');
     assert.strictEqual(await stateOf(h), 'executed', 'todo transitioned to executed');
     const executeArtifact = path.join(
-      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'execute-1.md',
+      h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'execute-1.md',
     );
     assert.ok(
       fs.existsSync(executeArtifact),
@@ -608,8 +608,8 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
 
     // Exactly one execute commit with the expected message.
-    const executeSubject = `spec(${SLUG}): ${TODO_ID} execute attempt 1`;
-    const todoBranch = todoBranchFor(SLUG, TODO_ID);
+    const executeSubject = `plan(${SLUG}): ${PHASE_ID} execute attempt 1`;
+    const todoBranch = phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec');
     const todoSubjects = git(h.repo, 'log', '--format=%s', todoBranch).split('\n');
     assert.strictEqual(
       todoSubjects.filter((s) => s === executeSubject).length,
@@ -651,7 +651,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
 
     const reviewResult = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'review',
       role: 'reviewer',
       attempt: 1,
@@ -660,7 +660,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.strictEqual(reviewResult.ok, true, 'review dispatch succeeded');
     assert.strictEqual(await stateOf(h), 'done', 'todo transitioned to done on a pass verdict');
     const reviewArtifact = path.join(
-      h.repo, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'review-1.md',
+      h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'review-1.md',
     );
     assert.ok(
       fs.existsSync(reviewArtifact),
@@ -672,7 +672,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
 
     // -- Land the todo into the spec branch ---------------------------------
     const landed = await h.writer.apply(SLUG, () =>
-      landTodoWorktree({ workspaceRoot: h.repo, git: h.git }, { slug: SLUG, todoId: TODO_ID }),
+      landPhaseWorktree({ workspaceRoot: h.repo, git: h.git }, { slug: SLUG, phaseId: PHASE_ID }),
     );
     assert.ok(landed.ok, `land succeeded: ${JSON.stringify(landed)}`);
     assert.ok(
@@ -681,7 +681,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
     assert.strictEqual(git(h.repo, 'branch', '--list', todoBranch).trim(), '', 'the todo branch is gone');
     assert.ok(!fs.existsSync(wt), 'the worktree is gone');
-    assert.strictEqual(commitSubjects(h.repo)[0], `spec(${SLUG}): land ${TODO_ID}`);
+    assert.strictEqual(commitSubjects(h.repo)[0], `plan(${SLUG}): land ${PHASE_ID}`);
   });
 
   it('reverts to pending on a closed terminal, then Plan succeeds on the next dispatch (Req 1.1, 1.4)', async () => {
@@ -728,7 +728,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     // halts with `closed` and the todo reverts to its From_State (`pending`).
     const firstPlan = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'plan',
       role: 'planner',
       attempt: 1,
@@ -741,19 +741,19 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     );
     assert.strictEqual(await stateOf(h), 'pending', 'todo reverted to pending, its From_State');
     assert.ok(
-      fs.existsSync(todoWorktreeDirFor(h.repo, SLUG, TODO_ID)),
+      fs.existsSync(phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID)),
       'a failed stage never removes the worktree',
     );
     const subjects = commitSubjects(h.repo);
     assert.ok(
-      subjects.some((s) => s === `plan(${SLUG}): ${TODO_ID} pending (closed (exit 1))`),
+      subjects.some((s) => s === `plan(${SLUG}): ${PHASE_ID} pending (closed (exit 1))`),
       'the revert commit names the closed exit code',
     );
 
     // Plan succeeds on the next dispatch against the same (reverted) todo.
     const secondPlan = await h.queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: PHASE_ID,
       action: 'plan',
       role: 'planner',
       attempt: 1,
@@ -761,7 +761,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     });
     assert.strictEqual(secondPlan.ok, true, 'plan succeeds once retried');
     assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned on retry');
-    assert.ok(fs.existsSync(todoWorktreeDirFor(h.repo, SLUG, TODO_ID)), 'the retry reused the worktree');
+    assert.ok(fs.existsSync(phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID)), 'the retry reused the worktree');
   });
 
   it('replays a lost state write on crash recovery when the Run-Id commit landed (Req 21.5)', async () => {
@@ -772,16 +772,16 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     // the crash run's Run-Id trailer, but journal ONLY the START record — the
     // shape a crash leaves behind (a result-less entry whose work landed).
     const crashRunId = 'crash-run-replay-01';
-    assert.strictEqual(await h.store.writeState(SLUG, TODO_ID, 'executing'), true);
+    assert.strictEqual(await h.store.writeState(SLUG, PHASE_ID, 'executing'), true);
     writeRepoFile(h.repo, 'src/greeting.ts', 'export const version = 2;\nexport const hello = () => "hi";\n');
-    await h.git.commit(`spec(${SLUG}): ${TODO_ID} execute attempt 1`, { 'Run-Id': crashRunId });
+    await h.git.commit(`plan(${SLUG}): ${PHASE_ID} execute attempt 1`, { 'Run-Id': crashRunId });
     appendStart(h.journalPath, {
       runId: crashRunId,
-      todoId: TODO_ID,
+      todoId: PHASE_ID,
       stage: 'execute',
       attempt: 1,
       startHead: await h.git.head(),
-      inputRev: await h.store.inputRev(SLUG, TODO_ID),
+      inputRev: await h.store.inputRev(SLUG, PHASE_ID),
       terminalPid: 999999, // a dead pid
     });
 
@@ -804,7 +804,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       journalPath: h.journalPath,
       git: h.git,
       process: processSeam,
-      specStore: h.store,
+      planStore: h.store,
     });
     const replayed = outcomes.find((o) => o.runId === crashRunId);
     assert.ok(replayed, 'recovery produced an outcome for the crash run');

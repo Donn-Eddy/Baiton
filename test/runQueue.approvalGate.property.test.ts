@@ -172,7 +172,7 @@ function makeSpecStore(opts: {
     currentState: async () => opts.state,
     // A plan is always on file, so the approval gate is the only thing that can
     // refuse an Execute dispatch here.
-    readSpec: async () => undefined,
+    readPlan: async () => undefined,
     readArtifact: async () => '# Plan T01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => opts.approved,
@@ -188,7 +188,7 @@ function makeSpecStore(opts: {
 
 /** Assemble RunQueueDeps around the given PlanStore and host doubles. */
 function makeDeps(
-  specStore: PlanStore,
+  planStore: PlanStore,
   terminalHost: TerminalHost,
   watcherFactory: ResultWatcherFactory,
   workspaceRoot: string,
@@ -199,7 +199,7 @@ function makeDeps(
     git: makeGit(),
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath: path.join(workspaceRoot, '.baiton', 'specs', 's', 'runs.jsonl'),
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
   };
@@ -218,7 +218,7 @@ function makeWorkspace(): string {
 
 /** An execute request (todo state is fixed by the PlanStore double). */
 function executeRequest(): RunRequest {
-  return { slug: 's', todoId: 'T01', action: 'execute', role: 'executor', attempt: 1, resume: false };
+  return { slug: 's', phaseId: 'T01', action: 'execute', role: 'executor', attempt: 1, resume: false };
 }
 
 // --- Generators ------------------------------------------------------------
@@ -244,12 +244,12 @@ describe('run queue approval gate (property)', () => {
   });
 
   // Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
-  it('refuses Execute with not-approved whenever the spec is not approved', async () => {
+  it('refuses Execute with not-approved whenever the plan is not approved', async () => {
     await fc.assert(
       fc.asyncProperty(executeLegalStateArb, async (state) => {
-        const specStore = makeSpecStore({ state, approved: false });
+        const planStore = makeSpecStore({ state, approved: false });
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const queue = createRunQueue(deps);
 
         const result = await queue.dispatch(executeRequest());
@@ -265,19 +265,19 @@ describe('run queue approval gate (property)', () => {
         }
         // No terminal was launched and no running/terminal state was written.
         assert.strictEqual(terminalHost.created.length, 0, 'no stage may launch when unapproved');
-        assert.deepStrictEqual(specStore.writes, [], 'no state write on an approval refusal');
+        assert.deepStrictEqual(planStore.writes, [], 'no state write on an approval refusal');
       }),
       { numRuns: 100 },
     );
   });
 
   // Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
-  it('passes the approval gate and launches Execute when the spec is approved', async () => {
+  it('passes the approval gate and launches Execute when the plan is approved', async () => {
     await fc.assert(
       fc.asyncProperty(executeLegalStateArb, async (state) => {
-        const specStore = makeSpecStore({ state, approved: true });
+        const planStore = makeSpecStore({ state, approved: true });
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const queue = createRunQueue(deps);
 
         const result = await queue.dispatch(executeRequest());
@@ -291,7 +291,7 @@ describe('run queue approval gate (property)', () => {
         assert.ok(terminalHost.created.length >= 1, 'an approved Execute must launch a stage');
         // The running (`executing`) and terminal (`executed`) states were written.
         assert.ok(
-          specStore.writes.includes('executing'),
+          planStore.writes.includes('executing'),
           'approved Execute writes the running state',
         );
       }),
@@ -314,9 +314,9 @@ describe('run queue unknown-agent refusal', () => {
   });
 
   it('refuses a dispatch with unknown-agent when adapterForRole returns undefined, without probing or launching', async () => {
-    const specStore = makeSpecStore({ state: 'planned', approved: true });
+    const planStore = makeSpecStore({ state: 'planned', approved: true });
     const terminalHost = makeTerminalHost();
-    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
     const queue = createRunQueue({ ...deps, adapterForRole: () => undefined });
 
     const result = await queue.dispatch(executeRequest());
@@ -327,7 +327,7 @@ describe('run queue unknown-agent refusal', () => {
     }
     assert.strictEqual(terminalHost.created.length, 0, 'no terminal is created for an unknown agent');
     assert.strictEqual(
-      specStore.writes.filter((s) => s === 'executing').length,
+      planStore.writes.filter((s) => s === 'executing').length,
       0,
       'no running state is written for an unknown agent',
     );
@@ -367,15 +367,15 @@ describe('run queue worktree mode guards', () => {
       [true, false],
       [false, true],
     ] as const) {
-      const specStore = makeSpecStore({ state: 'planned', approved: true });
+      const planStore = makeSpecStore({ state: 'planned', approved: true });
       const terminalHost = makeTerminalHost();
-      const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+      const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
       const wtGit: GitService = { ...makeGit(), isCleanExceptSpecFolder: async () => wtClean };
       const queue = createRunQueue({
         ...deps,
         git: { ...makeGit(), isCleanExceptSpecFolder: async () => mainClean },
         slug: 's',
-        todoId: 'T01',
+        phaseId: 'T01',
         worktrees: seam(wtGit, []),
       });
       const result = await queue.dispatch(executeRequest());
@@ -405,14 +405,14 @@ describe('run queue worktree mode guards', () => {
     await fc.assert(
       fc.asyncProperty(idsArb, idsArb, async (after, unlanded) => {
         const base = makeSpecStore({ state: 'pending', approved: true });
-        const specStore = { ...base, readSpec: async () => specWithAfter(after) };
+        const planStore = { ...base, readPlan: async () => specWithAfter(after) };
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const wt = seam(makeGit(), unlanded);
-        const queue = createRunQueue({ ...deps, slug: 's', todoId: 'T06', worktrees: wt });
+        const queue = createRunQueue({ ...deps, slug: 's', phaseId: 'T06', worktrees: wt });
         const req: RunRequest = {
           slug: 's',
-          todoId: 'T06',
+          phaseId: 'T06',
           action: 'plan',
           role: 'planner',
           attempt: 1,
@@ -442,13 +442,13 @@ describe('run queue worktree mode guards', () => {
 
   it('never fires the deps-unlanded guard without a worktree seam', async () => {
     const base = makeSpecStore({ state: 'pending', approved: true });
-    const specStore = { ...base, readSpec: async () => specWithAfter(['T01']) };
+    const planStore = { ...base, readPlan: async () => specWithAfter(['T01']) };
     const terminalHost = makeTerminalHost();
-    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
     const queue = createRunQueue(deps);
     const dispatched = queue.dispatch({
       slug: 's',
-      todoId: 'T06',
+      phaseId: 'T06',
       action: 'plan',
       role: 'planner',
       attempt: 1,

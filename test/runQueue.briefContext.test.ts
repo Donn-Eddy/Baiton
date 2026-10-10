@@ -177,9 +177,9 @@ function makeRig(
     remoteUrl: async () => '',
   };
 
-  const specStore: PlanStore = {
+  const planStore: PlanStore = {
     currentState: async () => state,
-    readSpec: async () => parsePlan(SPEC_TEXT),
+    readPlan: async () => parsePlan(SPEC_TEXT),
     readArtifact: async (_slug, _todoId, stage) => artifacts[stage],
     latestExecuteCommit: async () => 'deadbee',
     isApproved: async () => true,
@@ -198,11 +198,11 @@ function makeRig(
     git,
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath: path.join(workspaceRoot, '.baiton', 'specs', SLUG, 'runs.jsonl'),
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
     report: () => {},
-    newRunId: (req) => `run-${req.todoId}-${req.action}`,
+    newRunId: (req) => `run-${req.phaseId}-${req.action}`,
     newSessionId: () => '11111111-1111-1111-1111-111111111111',
   };
 
@@ -216,7 +216,7 @@ function makeRig(
 }
 
 function request(action: 'plan' | 'execute', role: Role): RunRequest {
-  return { slug: SLUG, todoId: TODO_ID, action, role, attempt: 1, resume: false };
+  return { slug: SLUG, phaseId: TODO_ID, action, role, attempt: 1, resume: false };
 }
 
 describe('run queue brief context (Req 18.3, 11.3)', () => {
@@ -332,7 +332,7 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
       ensure: async () => ok({ dir: wtDir, git: rig.deps.git }),
       unlanded: async () => [],
     };
-    const queue = createRunQueue({ ...rig.deps, slug: SLUG, todoId: TODO_ID, worktrees });
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, phaseId: TODO_ID, worktrees });
 
     const result = await queue.dispatch(request('execute', 'executor'));
     assert.ok(result.ok, 'the execute dispatch ran');

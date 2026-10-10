@@ -1,10 +1,10 @@
 /**
  * Run manifest store (host-free core).
  *
- * One manifest per spec-less run, at `.baiton/runs/<run-id>/run.json`. A
- * spec-less run has no spec and no todo, so the run id stands in for a todo id
- * everywhere the spec pipeline would use one: nothing in this module ever
- * touches `.baiton/specs/`.
+ * One manifest per plan-less run, at `.baiton/runs/<run-id>/run.json`. A
+ * plan-less run has no plan document or phase, so the run id stands in for a phase id
+ * everywhere the phase pipeline would use one: nothing in this module ever
+ * touches `a plan document folder`.
  *
  * The run directory also holds the run's journal (`runs.jsonl`) and the stage
  * artifacts the run persists (`plan.md`, `execute-<n>.md`, `review-<n>.md`,
@@ -97,7 +97,7 @@ export function isRunComplete(state: RunState): boolean {
   );
 }
 
-/** The stages a spec-less run can launch — a subset of the pipeline's stages. */
+/** The stages a plan-less run can launch — a subset of the pipeline's stages. */
 export type RunStage = Extract<Stage, 'plan' | 'execute' | 'review' | 'investigate'>;
 
 /** All stages a run can launch, in pipeline order. */
@@ -139,7 +139,7 @@ export type RunOutcomeRecord =
 /** The manifest schema version this build reads and writes. */
 export const RUN_MANIFEST_VERSION = 1;
 
-/** The whole persisted state of one spec-less run. */
+/** The whole persisted state of one plan-less run. */
 export interface RunManifest {
   /** Manifest schema version; always {@link RUN_MANIFEST_VERSION} here. */
   version: number;
@@ -214,7 +214,7 @@ export function runManifestPathFor(workspaceRoot: string, runId: string): string
 
 /**
  * One run's journal path. The run id is the journal's subject id, exactly as
- * `specDraft.ts` passes the spec slug as its `todoId`.
+ * `specDraft.ts` passes the plan slug as its phase id.
  */
 export function runJournalPathFor(workspaceRoot: string, runId: string): string {
   return path.join(runDirFor(workspaceRoot, runId), RUN_JOURNAL_FILE);
@@ -549,7 +549,7 @@ export class RunStore {
     return existsSync(this.manifestPath(runId));
   }
 
-  /** Write a new run's manifest, refusing a bad id, a spec or default mode, or a re-create. */
+  /** Write a new run's manifest, refusing a bad id, a plan or default mode, or a re-create. */
   public create(input: NewRunInput): Result<RunManifest, RunStoreError> {
     if (!isRunId(input.id)) {
       return err({
@@ -792,11 +792,11 @@ export function createRunStore(options: RunStoreOptions): RunStore {
 }
 
 /**
- * A placeholder todo id, used only to reach `persistencePathForStage`'s file
- * naming: the per-todo stages validate their todo id before building the path,
+ * A placeholder phase id, used only to reach `persistencePathForStage`'s file
+ * naming: the per-phase stages validate their phase id before building the path,
  * and only the basename of the result is meaningful for a run.
  */
-const RUN_ARTIFACT_TODO_ID = '_';
+const RUN_ARTIFACT_PHASE_ID = '_';
 
 /**
  * The file name a run's stage artifact is persisted under: `plan.md`,
@@ -805,7 +805,7 @@ const RUN_ARTIFACT_TODO_ID = '_';
  * stage given no attempt throws through that function's own index check.
  */
 export function runArtifactFileName(stage: RunStage, attempt?: number): string {
-  return path.basename(persistencePathForStage(stage, RUN_ARTIFACT_TODO_ID, attempt));
+  return path.basename(persistencePathForStage(stage, RUN_ARTIFACT_PHASE_ID, attempt));
 }
 
 /** The absolute path a run's stage artifact is persisted at. */
@@ -830,10 +830,10 @@ export interface RunArtifactTarget {
  * The artifact writer a run's stage launch hands to `awaitStageResult`.
  *
  * `awaitStageResult` composes its own destination with `artifactPathFor(root,
- * slug, ...)` under `.baiton/specs/<slug>/`, and a run has no slug — so this
+ * slug, ...)` under `a plan document folder<slug>/`, and a run has no slug — so this
  * writer ignores the path it is handed and writes into the run directory
  * instead. That also means the `artifactPath` on the `RunOutcome` it resolves
- * with is the unused spec-relative path: {@link RunArtifactTarget.path} is the
+ * with is the unused plan-relative path: {@link RunArtifactTarget.path} is the
  * one the caller journals and shows the user.
  */
 export function runArtifactWriter(

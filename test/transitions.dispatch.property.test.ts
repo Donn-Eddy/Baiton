@@ -11,7 +11,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 14: Stage dispatch obeys the transition
- * table — For any pair of a todo's current state and a requested stage/action,
+ * table — For any pair of a phase's current state and a requested stage/action,
  * the extension SHALL dispatch iff that pair is a legal transition in the state
  * table (Plan from `pending` when approved and unblocked; Execute from
  * `planned`/`executed`/`failed` with a clean tree; Review from `executed`;

@@ -113,7 +113,7 @@ type OutcomeKind = 'completed' | 'closed' | 'cancelled';
 /** A recorded `writeState` call, for asserting the revert (or its absence). */
 interface WriteCall {
   slug: string;
-  todoId: string;
+  phaseId: string;
   state: PhaseState;
   note?: string;
 }
@@ -274,17 +274,17 @@ function makeRig(
     ...gitOverrides,
   };
 
-  const specStore: PlanStore = {
+  const planStore: PlanStore = {
     currentState: async () => scenario.from,
-    readSpec: async () => undefined,
+    readPlan: async () => undefined,
     readArtifact: async () => '# Plan T01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,
     inputRev: async () => 'rev0',
-    writeState: async (slug, todoId, state, note) => {
-      writes.push({ slug, todoId, state, note });
+    writeState: async (slug, phaseId, state, note) => {
+      writes.push({ slug, phaseId, state, note });
       return true;
     },
   };
@@ -297,7 +297,7 @@ function makeRig(
     git,
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath,
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
     report: () => {},
@@ -343,7 +343,7 @@ describe('run queue revert on non-completion (property harness)', () => {
 
           const req: RunRequest = {
             slug: SLUG,
-            todoId: TODO_ID,
+            phaseId: TODO_ID,
             action: scenario.action,
             role: scenario.role,
             attempt: 1,
@@ -356,7 +356,7 @@ describe('run queue revert on non-completion (property harness)', () => {
           // The stage is live: currentRun() reports it (Req 3.6).
           const live = queue.currentRun();
           assert.ok(live !== undefined, 'currentRun() is defined while the stage runs');
-          assert.strictEqual(live?.todoId, TODO_ID);
+          assert.strictEqual(live?.phaseId, TODO_ID);
           assert.strictEqual(live?.slug, SLUG);
           assert.strictEqual(typeof live?.sessionId, 'string');
 
@@ -411,7 +411,7 @@ describe('run queue revert on non-completion (property harness)', () => {
           assert.ok(rig.writes.length >= 1, 'at least the revert write was made');
           const write = rig.writes[rig.writes.length - 1];
           assert.strictEqual(write.slug, SLUG);
-          assert.strictEqual(write.todoId, TODO_ID);
+          assert.strictEqual(write.phaseId, TODO_ID);
           assert.strictEqual(
             write.state,
             scenario.from,
@@ -460,7 +460,7 @@ describe('run queue closed-without-result hint', () => {
 
     const resultPromise = queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: TODO_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,
@@ -548,7 +548,7 @@ describe('run queue execute closed-without-result with a dirty tree', () => {
 
     const resultPromise = queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: TODO_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,
@@ -657,10 +657,10 @@ describe('run queue revert in worktree mode', () => {
       },
       unlanded: async () => [],
     };
-    const queue = createRunQueue({ ...rig.deps, slug: SLUG, todoId: TODO_ID, worktrees });
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, phaseId: TODO_ID, worktrees });
     const pending = queue.dispatch({
       slug: SLUG,
-      todoId: TODO_ID,
+      phaseId: TODO_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,

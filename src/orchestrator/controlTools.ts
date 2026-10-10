@@ -761,7 +761,7 @@ function runTool(services: ToolServices): Tool {
         };
       }
 
-      const outcome = await services.runQueue.dispatch({ slug, todoId: todo, stage });
+      const outcome = await services.runQueue.dispatch({ slug, phaseId: todo, stage });
       switch (outcome.kind) {
         case 'dispatched':
           return { ok: true, data: { slug, todo, stage, runId: outcome.runId } };
