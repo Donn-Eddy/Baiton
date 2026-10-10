@@ -78,7 +78,7 @@ import {
   createRunPipeline,
   createRunStore,
   createPlanBranchWriter,
-  createSpecDraftRunner,
+  createPlanDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
   landPhaseWorktree,
@@ -95,7 +95,7 @@ import type {
   DispatchResult,
   RunPipeline,
   RunQueue,
-  SpecDraftOutcome,
+  PlanDraftOutcome,
   SubmitPrError,
   TerminalHost,
 } from '../engine';
@@ -469,7 +469,7 @@ export function registerCommands(
   // runs exclude each other. Per-todo stages run concurrently in their own
   // worktrees and neither block nor are blocked by them.
   const stageLock = createStageLock({
-    specDraftRunning: () => specDraftRunner.isRunning(),
+    specDraftRunning: () => planDraftRunner.isRunning(),
     runRunning: () => runPipeline.isRunning(),
   });
 
@@ -590,11 +590,12 @@ export function registerCommands(
     },
   };
 
-  // The plan-draft runner (design "the harness writes the spec"): the
+  // The plan-draft runner (the harness writes the plan): the
   // orchestrator gathers requirements and calls `draft_spec`, which dispatches
-  // here. It is spec-scoped, so it runs beside the todo-scoped queues rather
-  // than through one; it excludes only a spec-less run. Its completion sink is bound after the ChatController exists.
-  let reportDraftOutcome: (outcome: SpecDraftOutcome) => void = () => {};
+  // here. It is plan-scoped, so it runs beside the phase-scoped queues rather
+  // than through one; it excludes only a run without a plan. Its completion
+  // sink is bound after the ChatController exists.
+  let reportDraftOutcome: (outcome: PlanDraftOutcome) => void = () => {};
   // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
   // goes through one registry and one seam. `present` is bound late: until the
   // Chat_View has resolved, an ask falls back to the modal so a confirmation
@@ -629,9 +630,8 @@ export function registerCommands(
     runPipelineSeam,
     landTodoSeam,
   );
-  const specDraftRunner = createSpecDraftRunner({
+  const planDraftRunner = createPlanDraftRunner({
     workspaceRoot: repoRoot,
-    specsDir,
     terminalHost,
     watcherFactory,
     services: draftServices,
@@ -649,7 +649,7 @@ export function registerCommands(
     ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
     draftSpec: {
       draft: async (req) => {
-        const started = await specDraftRunner.start(req);
+        const started = await planDraftRunner.start(req);
         if (started.ok) {
           return { kind: 'started', runId: started.runId };
         }
@@ -967,11 +967,11 @@ export function registerCommands(
   // (Req 8.8).
   // Bind the plan-draft completion sink now that the controller exists: a
   // finished draft records a system note on the Workspace_Conversation and
-  // refreshes the view so the new spec appears in the selector.
+  // refreshes the view so the new plan appears in the selector.
   reportDraftOutcome = (outcome) => {
     const message = outcome.ok
-      ? `Spec \`${outcome.slug}\` drafted with ${outcome.todoCount} todo${outcome.todoCount === 1 ? '' : 's'}.`
-      : `Drafting spec \`${outcome.slug}\` failed: ${outcome.message}`;
+      ? `Plan \`${outcome.slug}\` drafted with ${outcome.phaseCount} phase${outcome.phaseCount === 1 ? '' : 's'}.`
+      : `Drafting plan \`${outcome.slug}\` failed: ${outcome.message}`;
     if (!outcome.ok) {
       surface.warn(`Baiton: ${message}`);
     }
@@ -1118,8 +1118,8 @@ export function registerCommands(
     disposables,
     runningSlugs: () => {
       const running = todoQueues.running().map((r) => `${r.slug}/${r.phaseId}`);
-      if (specDraftRunner.isRunning()) {
-        running.push('(spec draft)');
+      if (planDraftRunner.isRunning()) {
+        running.push('(plan draft)');
       }
       const runId = runPipeline.currentRunId();
       if (runId !== undefined) {

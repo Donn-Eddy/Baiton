@@ -151,7 +151,7 @@ export type DraftSpecOutcome =
 
 /**
  * The plan-draft runner seam the `draft_spec` tool dispatches into. The stage
- * engine implements it (`createSpecDraftRunner`); the tool only asks it to
+ * engine implements it (`createPlanDraftRunner`); the tool only asks it to
  * start a draft and reports what it answers. It resolves as soon as the
  * sub-agent is running, so the chat turn is never blocked on the draft.
  */

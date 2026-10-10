@@ -9,10 +9,9 @@
  * `.baiton/specs/` (Req 8.1, 8.2).
  *
  * The spec file itself is no longer written here: the `draft_spec` control tool
- * hands the requirements to the plan-writer harness, which drafts the OVERVIEW
- * and todo list, and {@link renderSpec}/{@link writeAndCommit} (exported for
- * that runner) render and commit the result. These tools refine the spec after
- * the draft lands.
+ * hands the requirements to the plan-writer harness, and the plan-draft runner
+ * in `src/engine/planDraft.ts` renders and commits the resulting plan. These
+ * tools refine legacy spec documents after they exist.
  *
  * - `update_overview(slug, text)` rewrites the OVERVIEW section, leaving
  *   frontmatter and todos untouched.
@@ -293,8 +292,7 @@ async function loadSpecForWrite(
  * the new commit sha on success, or a {@link ToolResult} error preserving the
  * failure. The parent directory is created for a fresh spec.
  *
- * Exported so the plan-draft runner commits the spec it renders through the
- * same path, with the same message shape, as every other spec-folder write.
+ * Exported so the spec-writing tools share one write-and-commit path.
  */
 export async function writeAndCommit(
   services: ToolServices,
@@ -316,89 +314,6 @@ export async function writeAndCommit(
   } catch (e) {
     return { ok: false, error: gitCommitErrorMessage(e) };
   }
-}
-
-/**
- * One todo {@link renderSpec} can lay down: either a bare title, or a title
- * with the dependency positions and starting files the spec writer proposed.
- * `after` entries are 1-based positions in this same list — the writer does not
- * assign ids, so {@link renderSpec} maps each position to the `T##` id it
- * assigned to that position.
- */
-export interface RenderSpecTodo {
-  title: string;
-  after?: string[];
-  files?: string[];
-}
-
-/**
- * Render the full text of a new `spec.md` (Req 9.5, 23.5).
- *
- * Ids are assigned sequentially `T01`, `T02`, ... in list order and every todo
- * starts `pending` (a state is never supplied, Req 9.7). A todo's `after`
- * positions are translated into the ids assigned to those positions; a position
- * that is not an integer in range, or that does not name an *earlier* todo, is
- * dropped rather than emitted as a dangling dependency.
- */
-export function renderSpec(
-  slug: string,
-  overview: string,
-  todos: readonly (string | RenderSpecTodo)[],
-): string {
-  const entries: RenderSpecTodo[] = todos.map((t) =>
-    typeof t === 'string' ? { title: t } : t,
-  );
-  const idFor = (index: number): string => `T${String(index + 1).padStart(2, '0')}`;
-
-  const lines: string[] = [];
-  lines.push('---');
-  lines.push('version: 1');
-  lines.push(`name: ${slug}`);
-  lines.push('status: draft');
-  lines.push('mode: manual');
-  lines.push('base:');
-  lines.push('base_commit:');
-  lines.push('branch:');
-  lines.push('approved_rev:');
-  lines.push('---');
-  lines.push('');
-  lines.push('# OVERVIEW');
-  lines.push('');
-  lines.push(overview.replace(/\s+$/, ''));
-  lines.push('');
-  lines.push('# TODOS');
-  lines.push('');
-  entries.forEach((todo, i) => {
-    const after = resolveAfter(todo.after ?? [], i, idFor);
-    const files = (todo.files ?? []).filter((f) => f.trim().length > 0);
-    lines.push(renderTodoLine('pending', idFor(i), todo.title, after, files));
-  });
-  lines.push('');
-  return lines.join('\n');
-}
-
-/**
- * Translate 1-based dependency positions into the ids assigned to them,
- * dropping anything that is not an integer position strictly earlier in the
- * list (a self- or forward-reference would make the spec invalid).
- */
-function resolveAfter(
-  positions: readonly string[],
-  index: number,
-  idFor: (i: number) => string,
-): string[] {
-  const out: string[] = [];
-  for (const raw of positions) {
-    const position = Number.parseInt(String(raw).trim(), 10);
-    if (!Number.isInteger(position) || position < 1 || position > index) {
-      continue;
-    }
-    const id = idFor(position - 1);
-    if (!out.includes(id)) {
-      out.push(id);
-    }
-  }
-  return out;
 }
 
 /** Render a single `- [<state>] <id> <title>` line with optional hints. */
@@ -520,7 +435,7 @@ function readStringArray(args: unknown, key: string): string[] | undefined {
 }
 
 /** Render a caught git commit error into a user-facing message. */
-function gitCommitErrorMessage(e: unknown): string {
+export function gitCommitErrorMessage(e: unknown): string {
   if (typeof e === 'object' && e !== null && 'command' in e) {
     const ge = e as { command: string; stderr?: string };
     return `commit failed: ${ge.command}${ge.stderr ? `\n${ge.stderr}` : ''}`;

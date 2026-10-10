@@ -27,7 +27,7 @@
  * `todoId`).
  *
  * It holds the one-stage-per-repository lock from both sides, exactly as
- * `specDraft.ts` does: `start()` refuses `busy` while a plan queue or the
+ * `planDraft.ts` does: `start()` refuses `busy` while a phase queue or the
  * plan-draft runner has a stage in flight (`isPlanBusy`), and `isRunning()` is
  * what activation feeds back to `RunQueueDeps.isExternallyBusy` (Req 20.1).
  *
@@ -817,7 +817,7 @@ class DefaultRunPipeline implements RunPipeline {
     const { terminal, resultPath, relay } = launched.value;
 
     // 6. Journal the start. The run id stands in for `todoId` exactly as
-    //    `specDraft.ts` passes the plan slug, and `inputRev` is empty because a
+    //    `planDraft.ts` passes the plan slug, and `inputRev` is empty because a
     //    run has no plan input rev. The run directory already exists — the
     //    manifest was written there — so the append has somewhere to go.
     const journalPath = runJournalPathFor(this.deps.workspaceRoot, runId);

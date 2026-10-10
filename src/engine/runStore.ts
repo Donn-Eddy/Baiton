@@ -214,7 +214,7 @@ export function runManifestPathFor(workspaceRoot: string, runId: string): string
 
 /**
  * One run's journal path. The run id is the journal's subject id, exactly as
- * `specDraft.ts` passes the plan slug as its phase id.
+ * `planDraft.ts` passes the plan slug as its phase id.
  */
 export function runJournalPathFor(workspaceRoot: string, runId: string): string {
   return path.join(runDirFor(workspaceRoot, runId), RUN_JOURNAL_FILE);

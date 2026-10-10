@@ -95,7 +95,7 @@ export type EngineTrigger =
  */
 export const STAGE_ROLE: Record<Stage, Role> = {
   // `plan-draft` is plan-scoped and runs through its own runner
-  // (`src/engine/specDraft.ts`), never through the todo-scoped queue; the entry
+  // (`src/engine/planDraft.ts`), never through the phase-scoped queue; the entry
   // is here so the stage → role table stays total.
   'plan-draft': 'plan-writer',
   plan: 'planner',
