@@ -1,1 +1,2 @@
 {"type":"start","runId":"phased-plan-T04-plan-1-1791652880435","todoId":"T04","stage":"plan","attempt":1,"startHead":"688d4911a4fd428b1afc38c21c2b9b414da3a578","inputRev":"0fd3d0a95caaa3d8c15537b8f73b15f7113aa3a100d2da204d5cdd4e593505ba","terminalPid":119716,"fromState":"pending","sessionId":"6d3b5fd5-9535-4dc8-a87c-31a0870bec18"}
+{"type":"completion","runId":"phased-plan-T04-plan-1-1791652880435","result":"completed"}
