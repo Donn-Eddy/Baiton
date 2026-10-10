@@ -153,12 +153,29 @@
         margin: 6px 0;
       }
 
-      .window-label {
-        color: var(--vscode-foreground);
+      .window-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 2px var(--baiton-gap);
       }
 
-      .window-figure {
-        color: var(--vscode-foreground);
+      .window-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0 6px;
+        flex: 0 1 auto;
+        min-width: min-content;
+      }
+
+      .window-label { color: var(--vscode-foreground); }
+      .window-figure { color: var(--vscode-foreground); }
+
+      .window-reset {
+        margin-left: auto;
+        white-space: nowrap;
       }
 
       .window-reset,
