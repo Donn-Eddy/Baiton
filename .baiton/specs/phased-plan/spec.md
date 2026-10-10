@@ -1,12 +1,12 @@
 ---
 version: 1
 name: phased-plan
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: f2990e12c0e923e9d935d14a101f22dbf2263428
+branch: baiton/phased-plan
+approved_rev: 7aeb73fbef43779f424c5e325edbaa17808c36afaf80ab90b77de2b8a482fbe6
 ---
 
 # OVERVIEW
