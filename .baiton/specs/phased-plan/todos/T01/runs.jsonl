@@ -1,3 +1,4 @@
 {"type":"start","runId":"phased-plan-T01-plan-1-1791648730160","todoId":"T01","stage":"plan","attempt":1,"startHead":"e6e08d9663d2b437e11d02d179840baa9465c2e0","inputRev":"1784b944db84b21b96d4806ac68964e4d9450eb0ed3557ce3a3e6ceffed1db57","terminalPid":23654,"fromState":"pending","sessionId":"0d139ddb-14a9-452b-94a9-163e2542d7a0"}
 {"type":"completion","runId":"phased-plan-T01-plan-1-1791648730160","result":"completed"}
 {"type":"start","runId":"phased-plan-T01-execute-1-1791648891193","todoId":"T01","stage":"execute","attempt":1,"startHead":"e6e08d9663d2b437e11d02d179840baa9465c2e0","inputRev":"1784b944db84b21b96d4806ac68964e4d9450eb0ed3557ce3a3e6ceffed1db57","terminalPid":25805,"fromState":"planned","sessionId":"70e730f9-cc12-4df5-ad3b-adbb56d45ade"}
+{"type":"completion","runId":"phased-plan-T01-execute-1-1791648891193","result":"completed","commit":"535c2c758f6ee1566c1d834a7aac657437b019a3","discoveredSessionId":"01a12698-85e7-77f2-ad33-f78642d05870"}
