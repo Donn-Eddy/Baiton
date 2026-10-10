@@ -1,2 +1,3 @@
 {"type":"start","runId":"phased-plan-T03-plan-1-1791651306904","todoId":"T03","stage":"plan","attempt":1,"startHead":"ac88f1015236a199c9ae5920cd288b76fe18762d","inputRev":"987691647a68fda9850b50ef69e33c72106f2b6b356af88ef53dfb56f8dd09b4","terminalPid":83930,"fromState":"pending","sessionId":"f57aebcc-29b3-48ec-a7fa-f31970369db3"}
 {"type":"completion","runId":"phased-plan-T03-plan-1-1791651306904","result":"completed"}
+{"type":"start","runId":"phased-plan-T03-execute-1-1791651560419","todoId":"T03","stage":"execute","attempt":1,"startHead":"ac88f1015236a199c9ae5920cd288b76fe18762d","inputRev":"987691647a68fda9850b50ef69e33c72106f2b6b356af88ef53dfb56f8dd09b4","terminalPid":87228,"fromState":"planned","sessionId":"7d920fa1-57c1-43b0-b439-6622073709d6"}
