@@ -5,6 +5,7 @@ import {
   stageArtifactIsNumbered,
 } from '../src/schema';
 import { STAGES, Stage } from '../src/model/stage';
+import type { DocumentKind } from '../src/model/parser';
 
 /**
  * Property test for the stage → persistence-path mapping (Requirement 24.3,
@@ -44,12 +45,12 @@ describe('Stage persistence-path naming (property harness)', () => {
   // the stage naming rule
   it('matches the stage naming rule for any stage, todo id and index', () => {
     fc.assert(
-      fc.property(stageArb, todoIdArb, indexArb, (stage, todoId, n) => {
-        const path = persistencePathForStage(stage, todoId, n);
+      fc.property(stageArb, todoIdArb, indexArb, fc.constantFrom<DocumentKind>('plan', 'legacy-spec'), (stage, todoId, n, kind) => {
+        const path = persistencePathForStage(stage, todoId, n, kind);
 
         if (stage === 'plan-draft') {
-          // The spec draft persists once per spec, as the spec file itself.
-          assert.strictEqual(path, 'spec.md', `plan-draft must yield spec.md, got ${path}`);
+          const documentFile = kind === 'plan' ? 'plan.md' : 'spec.md';
+          assert.strictEqual(path, documentFile, `plan-draft must yield ${documentFile}, got ${path}`);
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
             false,
@@ -79,8 +80,8 @@ describe('Stage persistence-path naming (property harness)', () => {
           // The plan persists once per todo, under the todo's own folder.
           assert.strictEqual(
             path,
-            `todos/${todoId}/plan.md`,
-            `plan must yield todos/${todoId}/plan.md, got ${path}`,
+            `${kind === 'plan' ? 'phases' : 'todos'}/${todoId}/plan.md`,
+            `plan must yield the phase artifact path, got ${path}`,
           );
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
@@ -91,8 +92,8 @@ describe('Stage persistence-path naming (property harness)', () => {
           // Numbered todo-level stages yield `todos/<id>/<stage>-<n>.md`.
           assert.strictEqual(
             path,
-            `todos/${todoId}/${stage}-${n}.md`,
-            `numbered stage ${stage} must yield todos/${todoId}/${stage}-${n}.md, got ${path}`,
+            `${kind === 'plan' ? 'phases' : 'todos'}/${todoId}/${stage}-${n}.md`,
+            `numbered stage ${stage} must yield the phase artifact path, got ${path}`,
           );
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
@@ -110,8 +111,9 @@ describe('Stage persistence-path naming (property harness)', () => {
   it('plan ignores the index across many values', () => {
     fc.assert(
       fc.property(todoIdArb, fc.option(indexArb, { nil: undefined }), (todoId, n) => {
+        assert.strictEqual(persistencePathForStage('plan', todoId, n), `phases/${todoId}/plan.md`);
         assert.strictEqual(
-          persistencePathForStage('plan', todoId, n),
+          persistencePathForStage('plan', todoId, n, 'legacy-spec'),
           `todos/${todoId}/plan.md`,
         );
       }),
@@ -128,11 +130,12 @@ describe('Stage persistence-path naming (property harness)', () => {
         todoIdArb,
         todoIdArb,
         indexArb,
-        (stage, a, b, n) => {
+        fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
+        (stage, a, b, n, kind) => {
           fc.pre(a !== b);
           assert.notStrictEqual(
-            persistencePathForStage(stage, a, n),
-            persistencePathForStage(stage, b, n),
+            persistencePathForStage(stage, a, n, kind),
+            persistencePathForStage(stage, b, n, kind),
           );
         },
       ),
@@ -147,8 +150,9 @@ describe('Stage persistence-path naming (property harness)', () => {
       fc.property(
         fc.constantFrom<Stage>('plan', 'plan-review', 'execute', 'review'),
         fc.constantFrom<string | undefined>(undefined, '', '..', 'a/b', 'a\\b', '.'),
-        (stage, todoId) => {
-          assert.throws(() => persistencePathForStage(stage, todoId, 1));
+        fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
+        (stage, todoId, kind) => {
+          assert.throws(() => persistencePathForStage(stage, todoId, 1, kind));
         },
       ),
       { numRuns: 100 },
@@ -160,7 +164,8 @@ describe('Stage persistence-path naming (property harness)', () => {
   it('the run- and spec-scoped stages ignore the todo id', () => {
     fc.assert(
       fc.property(fc.option(todoIdArb, { nil: undefined }), (todoId) => {
-        assert.strictEqual(persistencePathForStage('plan-draft', todoId), 'spec.md');
+        assert.strictEqual(persistencePathForStage('plan-draft', todoId), 'plan.md');
+        assert.strictEqual(persistencePathForStage('plan-draft', todoId, undefined, 'legacy-spec'), 'spec.md');
         assert.strictEqual(persistencePathForStage('pr', todoId), 'pr.md');
         assert.strictEqual(
           persistencePathForStage('investigate', todoId),

@@ -29,7 +29,7 @@ const SPECS_SUBDIR = 'specs';
 /** Build every read tool for the registry. */
 export function createReadTools(services: ToolServices): Tool[] {
   return [
-    listSpecsTool(services),
+    listDocumentsTool(services),
     readSpecTool(services),
     listFilesTool(services),
     readFileTool(services),
@@ -44,7 +44,7 @@ export function createReadTools(services: ToolServices): Tool[] {
  * `list_specs` — the slugs of every spec under `.baiton/specs/`, each being a
  * directory that contains a `spec.md`.
  */
-function listSpecsTool(services: ToolServices): Tool {
+function listDocumentsTool(services: ToolServices): Tool {
   return {
     name: 'list_specs',
     description: 'List the slugs of every spec under .baiton/specs/ that contains a spec.md.',

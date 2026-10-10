@@ -24,7 +24,7 @@ export * from './transitions';
 export * from './stageContext';
 export * from './runContext';
 export * from './runQueue';
-export * from './specBranchWriter';
+export * from './planBranchWriter';
 export * from './recovery';
 export * from './specDraft';
 export * from './runStore';

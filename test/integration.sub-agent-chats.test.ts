@@ -7,7 +7,7 @@ import * as path from 'path';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
 import type { GitWorktreeService } from '../src/git';
-import { createSpecBranchWriter, type SpecBranchWriter } from '../src/engine/specBranchWriter';
+import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
 import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor, unlandedTodos } from '../src/engine/todoWorktree';
 import { submitPr } from '../src/engine/submitPr';
 import type { PrTool } from '../src/engine/prTool';
@@ -18,18 +18,18 @@ import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
-import { createSpecStore } from '../src/activation/specStore';
+import { createPlanStore } from '../src/activation/planStore';
 import {
   createRunQueueSeam,
   createStageLock,
   createTodoQueues,
   type TodoQueues,
 } from '../src/activation/engineFacade';
-import { parseJournal, todoJournalPathFor } from '../src/journal';
+import { parseJournal, phaseJournalPathFor } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import type { Role } from '../src/model/role';
-import type { SpecStore } from '../src/engine/runQueue';
+import type { PlanStore } from '../src/engine/runQueue';
 import { createToolRegistry, type ToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
 import type { SubmitPrOutcome, ToolServices } from '../src/orchestrator/toolServices';
@@ -447,8 +447,8 @@ interface Harness {
   specsDir: string;
   baitonDir: string;
   git: GitWorktreeService;
-  writer: SpecBranchWriter;
-  store: SpecStore;
+  writer: PlanBranchWriter;
+  store: PlanStore;
   queues: TodoQueues;
   registry: ToolRegistry;
   runner: SubAgentRunner;
@@ -466,12 +466,12 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const specsDir = path.join(repo, '.baiton', 'specs');
   const baitonDir = path.join(repo, '.baiton');
   const gitService = createGitService(repo);
-  const writer = createSpecBranchWriter({ specsDir, git: gitService });
-  const store = createSpecStore(specsDir, gitService, writer);
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: gitService });
+  const store = createPlanStore(path.dirname(specsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
   const queues = createTodoQueues({
     workspaceRoot: repo,
-    specsDir,
+    baitonDir: path.dirname(specsDir),
     git: gitService,
     specWriter: writer,
     specStore: store,
@@ -527,7 +527,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     }
     const result = await submitPr(slug, {
       workspaceRoot: repo,
-      specsDir,
+    baitonDir: path.dirname(specsDir),
       terminalHost,
       watcherFactory: factory,
       git: gitService,
@@ -569,7 +569,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
         return true;
       },
     },
-    runQueue: createRunQueueSeam(queues.queueFor, specsDir, () => new StubAdapter()),
+    runQueue: createRunQueueSeam(queues.queueFor, path.dirname(specsDir), () => new StubAdapter()),
     landTodo,
     submitPr: submitPrForSlug,
     subAgents: runner,
@@ -768,13 +768,13 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     const subjects = git(repo, 'log', '--format=%s', `baiton/${SLUG}`).split('\n').filter((s) => s.length > 0);
     for (const id of ['T01', 'T02']) {
       for (const suffix of ['planning', 'planned', 'executed', 'done']) {
-        assert.ok(subjects.includes(`spec(${SLUG}): ${id} ${suffix}`), `missing state commit "${id} ${suffix}"`);
+        assert.ok(subjects.includes(`plan(${SLUG}): ${id} ${suffix}`), `missing state commit "${id} ${suffix}"`);
       }
       assert.ok(subjects.includes(`spec(${SLUG}): land ${id}`), `missing land commit for ${id}`);
     }
     const stateCommits = git(repo, 'log', '--format=%H%x09%s', `baiton/${SLUG}`)
       .split('\n')
-      .filter((l) => /\tspec\(twin-todos\): T0[12] (planning|planned|executing|executed|reviewing|done)$/.test(l));
+      .filter((l) => /\tplan\(twin-todos\): T0[12] (planning|planned|executing|executed|reviewing|done)$/.test(l));
     assert.ok(stateCommits.length >= 8, 'the state commits are on the spec branch');
     for (const line of stateCommits) {
       const sha = line.split('\t')[0];
@@ -803,7 +803,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
 
     // -- Journals -------------------------------------------------------------
     for (const id of ['T01', 'T02']) {
-      const journalPath = todoJournalPathFor(h.specsDir, SLUG, id);
+      const journalPath = phaseJournalPathFor(h.baitonDir, SLUG, id);
       const entries = parseJournal(journalPath);
       assert.deepStrictEqual(
         entries.map((e) => [e.stage, e.result]),

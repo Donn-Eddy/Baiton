@@ -22,7 +22,7 @@ import type { Config } from './config';
 import { createGitService } from './git';
 import type { GitService } from './git';
 import { recoverJournal } from './engine';
-import { specJournalPaths } from './journal';
+import { planJournalPaths } from './journal';
 import type { ProcessControl } from './engine';
 import { writePhaseState } from './model/writer';
 import type { PhaseState } from './model/phaseState';
@@ -49,6 +49,7 @@ import {
   NOT_ACTIVATED_NOTE,
 } from './activation/configRefresh';
 import { ROLES } from './model/role';
+import { listDocumentSlugs, resolveDocument } from './storage/documentLocation';
 
 /**
  * Extension entry point — the thin `vscode`-backed shell over the pure
@@ -500,7 +501,7 @@ const resolveUsageCli = (cli: UsageCliName): string | undefined => {
 /**
  * Run crash recovery over every spec's journals on activation (Req 21.3–
  * 21.7). Each spec folder under `.baiton/specs/` owns a spec-level journal plus
- * per-todo journals (merged by readSpecJournal), so we
+ * per-todo journals (merged by readPlanJournal), so we
  * reconcile them one spec at a time, wiring the git seam, a `process`-backed
  * {@link ProcessControl}, and a serializer-backed spec-write seam. A failure
  * for one spec is contained so the rest still reconcile.
@@ -510,27 +511,19 @@ async function runCrashRecovery(
   surface: Surface,
 ): Promise<void> {
   const repoRoot = workspace.root.fsPath;
-  const specsDir = path.join(workspace.baitonDir.fsPath, 'specs');
+  const baitonDir = workspace.baitonDir.fsPath;
   const git = createGitService(repoRoot);
 
-  let slugs: string[];
-  try {
-    const entries = await fsp.readdir(specsDir, { withFileTypes: true });
-    slugs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch {
-    // No specs directory yet (freshly initialized or uninitialized): nothing to
-    // reconcile.
-    return;
-  }
+  const slugs = listDocumentSlugs(baitonDir);
 
   for (const slug of slugs) {
-    if (!specJournalPaths(specsDir, slug).some((p) => fs.existsSync(p))) {
+    if (!planJournalPaths(baitonDir, slug).some((p) => fs.existsSync(p))) {
       continue;
     }
     try {
       await recoverJournal({
         slug,
-        specsDir,
+        baitonDir,
         git,
         process: hostProcessControl,
         specStore: { writeState: makeRecoveryWriteState(repoRoot, slug, git) },
@@ -584,16 +577,16 @@ function makeRecoveryWriteState(
   repoRoot: string,
   slug: string,
   git: GitService,
-): (slug: string, todoId: string, state: PhaseState, note?: string) => Promise<boolean> {
-  const specPath = path.join(repoRoot, '.baiton', 'specs', slug, 'spec.md');
-  return async (_slug: string, todoId: string, state: PhaseState): Promise<boolean> => {
+): (slug: string, phaseId: string, state: PhaseState, note?: string) => Promise<boolean> {
+  return async (_slug: string, phaseId: string, state: PhaseState): Promise<boolean> => {
+    const documentPath = resolveDocument(path.join(repoRoot, '.baiton'), slug).documentPath;
     let current: string;
     try {
-      current = await fsp.readFile(specPath, 'utf8');
+      current = await fsp.readFile(documentPath, 'utf8');
     } catch {
       return false;
     }
-    const written = writePhaseState(current, todoId, state);
+    const written = writePhaseState(current, phaseId, state);
     if (isErr(written)) {
       return false;
     }
@@ -601,8 +594,8 @@ function makeRecoveryWriteState(
       return false;
     }
     try {
-      await fsp.writeFile(specPath, written.value, 'utf8');
-      await git.commit(`spec(${slug}): ${todoId} recover ${state}`);
+      await fsp.writeFile(documentPath, written.value, 'utf8');
+      await git.commit(`plan(${slug}): ${phaseId} recover ${state}`);
       return true;
     } catch {
       return false;

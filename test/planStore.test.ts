@@ -4,10 +4,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { createSpecStore } from '../src/activation/specStore';
+import { createPlanStore } from '../src/activation/planStore';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
-import { appendCompletion, appendStart, todoJournalPathFor } from '../src/journal';
+import { appendCompletion, appendStart, phaseJournalPathFor } from '../src/journal';
 
 const SPEC = [
   '---',
@@ -27,6 +27,11 @@ const SPEC = [
   '',
 ].join('\n');
 
+const PLAN = [
+  '# Endstate', 'Done.', '', '# What needs changing', 'Change it.', '',
+  '# Limitations & constraints', 'None.', '', '# PHASES', '- [pending] P01 Plan one', '',
+].join('\n');
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
@@ -37,10 +42,10 @@ function writeFile(repo: string, relPath: string, contents: string): void {
   fs.writeFileSync(full, contents);
 }
 
-describe('createSpecStore (real repo)', () => {
+describe('createPlanStore (real repo)', () => {
   let repo: string;
-  let specsDir: string;
-  let store: ReturnType<typeof createSpecStore>;
+  let baitonDir: string;
+  let store: ReturnType<typeof createPlanStore>;
 
   beforeEach(() => {
     repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-store-'));
@@ -54,8 +59,8 @@ describe('createSpecStore (real repo)', () => {
     git(repo, 'add', '-A');
     git(repo, 'commit', '-q', '-m', 'initial commit');
     git(repo, 'checkout', '-q', '-b', 'baiton/s');
-    specsDir = path.join(repo, '.baiton', 'specs');
-    store = createSpecStore(specsDir, createGitService(repo));
+    baitonDir = path.join(repo, '.baiton');
+    store = createPlanStore(baitonDir, createGitService(repo));
   });
 
   afterEach(() => {
@@ -73,7 +78,7 @@ describe('createSpecStore (real repo)', () => {
     assert.deepStrictEqual(r, [true, true]);
     assert.strictEqual(await store.currentState('s', 'T01'), 'planning');
     assert.strictEqual(await store.currentState('s', 'T02'), 'planning');
-    assert.deepStrictEqual(subjects(2), ['spec(s): T02 planning', 'spec(s): T01 planning']);
+    assert.deepStrictEqual(subjects(2), ['plan(s): T02 planning', 'plan(s): T01 planning']);
     assert.strictEqual(git(repo, 'status', '--porcelain', '--', '.baiton/specs/s').trim(), '');
   });
 
@@ -88,10 +93,10 @@ describe('createSpecStore (real repo)', () => {
     assert.strictEqual(await store.currentState('s', 'T01'), 'planned');
     assert.strictEqual(await store.currentState('s', 'T02'), 'planned');
     assert.deepStrictEqual(subjects(4), [
-      'spec(s): T02 planned',
-      'spec(s): T01 planned',
-      'spec(s): T02 planning',
-      'spec(s): T01 planning',
+      'plan(s): T02 planned',
+      'plan(s): T01 planned',
+      'plan(s): T02 planning',
+      'plan(s): T01 planning',
     ]);
   });
 
@@ -108,7 +113,7 @@ describe('createSpecStore (real repo)', () => {
   it('includes the note in the commit message', async () => {
     await store.writeState('s', 'T01', 'planning');
     await store.writeState('s', 'T01', 'failed', 'cancelled');
-    assert.strictEqual(subjects(1)[0], 'spec(s): T01 failed (cancelled)');
+    assert.strictEqual(subjects(1)[0], 'plan(s): T01 failed (cancelled)');
   });
 
   it('returns false without committing for unchanged or unknown targets', async () => {
@@ -119,7 +124,7 @@ describe('createSpecStore (real repo)', () => {
   });
 
   it('persistArtifact serializes with state and is swept by the next state commit', async () => {
-    const plan = path.join(specsDir, 's', 'todos', 'T01', 'plan.md');
+    const plan = path.join(baitonDir, 'specs', 's', 'todos', 'T01', 'plan.md');
     await Promise.all([
       store.persistArtifact!('s', plan, '# Plan T01\n'),
       store.writeState('s', 'T02', 'planning'),
@@ -131,7 +136,7 @@ describe('createSpecStore (real repo)', () => {
   });
 
   it('latestExecuteCommit and plan Input_Rev read per-todo journals', async () => {
-    const file = todoJournalPathFor(specsDir, 's', 'T01');
+    const file = phaseJournalPathFor(baitonDir, 's', 'T01');
     appendStart(file, {
       runId: 'r-plan',
       todoId: 'T01',
@@ -152,5 +157,37 @@ describe('createSpecStore (real repo)', () => {
     assert.strictEqual(await store.latestExecuteCommit('s', 'T01'), 'abc123');
     assert.strictEqual(await store.inputRevMatches('s', 'T01'), false);
     assert.strictEqual(await store.latestExecuteCommit('s', 'T02'), undefined);
+  });
+
+  it('routes a slug present in both roots to plans and leaves specs byte-identical', async () => {
+    const legacyFile = path.join(baitonDir, 'specs', 's', 'spec.md');
+    const legacyBefore = fs.readFileSync(legacyFile, 'utf8');
+    writeFile(repo, '.baiton/plans/s/plan.md', PLAN);
+    assert.strictEqual(await store.writeState('s', 'P01', 'planning'), true);
+    assert.strictEqual(fs.readFileSync(legacyFile, 'utf8'), legacyBefore);
+    const committed = git(repo, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n');
+    assert.deepStrictEqual(committed, ['.baiton/plans/s/plan.md']);
+    assert.strictEqual(git(repo, 'status', '--porcelain', '--', '.baiton/specs/s').trim(), '');
+  });
+
+  it('stores phase artifacts and reads phase journals for plan documents', async () => {
+    writeFile(repo, '.baiton/plans/s/plan.md', PLAN);
+    const artifact = path.join(baitonDir, 'plans', 's', 'phases', 'P01', 'plan.md');
+    await store.persistArtifact!('s', artifact, '# Plan P01\n');
+    assert.strictEqual(await store.writeState('s', 'P01', 'planning'), true);
+    assert.strictEqual(await store.readArtifact('s', 'P01', 'plan'), '# Plan P01\n');
+    assert.ok(git(repo, 'ls-files').includes('.baiton/plans/s/phases/P01/plan.md'));
+    const journal = phaseJournalPathFor(baitonDir, 's', 'P01');
+    appendStart(journal, {
+      runId: 'plan-run', todoId: 'P01', stage: 'plan', attempt: 1,
+      startHead: 'h', inputRev: 'old',
+    });
+    appendStart(journal, {
+      runId: 'execute-run', todoId: 'P01', stage: 'execute', attempt: 1,
+      startHead: 'h', inputRev: 'old',
+    });
+    appendCompletion(journal, { runId: 'execute-run', result: 'completed', commit: 'phase-commit' });
+    assert.strictEqual(await store.latestExecuteCommit('s', 'P01'), 'phase-commit');
+    assert.strictEqual(await store.inputRevMatches('s', 'P01'), false);
   });
 });

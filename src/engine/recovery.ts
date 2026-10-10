@@ -8,7 +8,7 @@
  * extension must reconcile every such result-less entry rather than leave the
  * todo wedged in a running state (`planning`/`executing`/`reviewing`) forever.
  *
- * {@link recoverJournal} reads the journal (the merged spec journal via {@link readSpecJournal}, or a single file via {@link parseJournal}), selects
+ * {@link recoverJournal} reads the journal (the merged spec journal via {@link readPlanJournal}, or a single file via {@link parseJournal}), selects
  * the entries with no `result` (Req 21.3), and for each one, in order:
  *
  *   1. If the entry recorded a `terminalPid` and a process with that id is
@@ -32,8 +32,8 @@
  */
 import type { GitService } from '../git';
 import type { JournalEntry } from '../journal';
-import { parseJournal, readSpecJournal } from '../journal';
-import type { SpecStore } from './runQueue';
+import { parseJournal, readPlanJournal } from '../journal';
+import type { PlanStore } from './runQueue';
 import type { PhaseState } from '../model/phaseState';
 import type { Stage } from '../model/stage';
 
@@ -99,15 +99,15 @@ export type RecoveryDeps = RecoveryBaseDeps &
     | {
         /**
          * Absolute `.baiton/specs/` dir; recovery reads the merged spec journal —
-         * spec-level plus every `todos/<id>/runs.jsonl` — via readSpecJournal.
+         * spec-level plus every `todos/<id>/runs.jsonl` — via readPlanJournal.
          */
-        specsDir: string;
+        baitonDir: string;
         journalPath?: never;
       }
     | {
-        /** A single journal file to reconcile instead; used when specsDir is absent. */
+        /** A single journal file to reconcile instead; used when baitonDir is absent. */
         journalPath: string;
-        specsDir?: never;
+        baitonDir?: never;
       }
   );
 
@@ -119,8 +119,8 @@ export interface RecoveryBaseDeps {
   git: Pick<GitService, 'findCommitByRunId'>;
   /** The process-control seam for the still-live-pid kill (Req 21.4). */
   process: ProcessControl;
-  /** The serializer-backed spec-write seam; only {@link SpecStore.writeState} is used. */
-  specStore: Pick<SpecStore, 'writeState'>;
+  /** The serializer-backed spec-write seam; only {@link PlanStore.writeState} is used. */
+  specStore: Pick<PlanStore, 'writeState'>;
 }
 
 /** The note recorded on a todo whose host exited without the work landing (Req 21.7). */
@@ -137,8 +137,8 @@ export const HOST_EXITED_NOTE = 'host exited';
  */
 export async function recoverJournal(deps: RecoveryDeps): Promise<RecoveryOutcome[]> {
   const all =
-    deps.specsDir !== undefined
-      ? readSpecJournal(deps.specsDir, deps.slug)
+    deps.baitonDir !== undefined
+      ? readPlanJournal(deps.baitonDir, deps.slug)
       : parseJournal(deps.journalPath);
   const entries = all.filter(isResultLess);
   const outcomes: RecoveryOutcome[] = [];

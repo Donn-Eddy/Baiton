@@ -98,7 +98,7 @@ interface LegacyDocumentFixture {
   frontmatter: string[];
   /** An optional `pr:` frontmatter value; '' models a present-but-empty key. */
   pr: string | undefined;
-  /** The approval fact the SpecStore would supply for the document. */
+  /** The approval fact the PlanStore would supply for the document. */
   approved: boolean;
   overviewProse: string[];
   phases: { state: PhaseState; title: string; afterIdx: number[]; files: string[] }[];

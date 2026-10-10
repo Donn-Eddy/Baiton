@@ -1,17 +1,17 @@
 /**
  * Submit PR (design section 8, "PR"; section 11 journal "PR steps").
  *
- * {@link submitPr} is the per-spec counterpart of the per-todo run queue. In
+ * {@link submitPr} is the plan-level counterpart of the phase run queue. In
  * order it:
  *
- *   1. Reads the spec and refuses unless every todo is `done` and landed (no todo branch remains), the approval
- *      hash is current, the spec carries `branch`/`base_commit`, that branch
+ *   1. Reads the resolved plan and refuses unless every phase is `done` and landed (no phase branch remains), the approval
+ *      hash is current, the plan carries `branch`/`base_commit`, that branch
  *      is checked out, and the tree is clean.
  *   2. Runs `git.verify` when configured; a failure halts with its output.
  *   3. Launches the pr-writer like any stage — Brief, terminal, result
- *      watcher — with a context section naming the spec folder and a
+ *      watcher — with a context section naming the plan folder and a
  *      `diff.patch` of the cumulative change from `base_commit`, journaled
- *      under the pseudo todo id {@link PR_TODO_ID}.
+ *      under the pseudo phase id {@link PR_TODO_ID}.
  *   4. On a valid `{title, body}` result: commits the persisted draft, pushes
  *      the branch with upstream set, reuses an open PR for that head or creates one, writes `pr:` and
  *      `status: pr` into the frontmatter, and commits the metadata. Each of
@@ -27,12 +27,13 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { Adapter } from '../adapter';
 import type { GitService } from '../git';
-import { appendCompletion, appendStart, readSpecJournal } from '../journal';
+import { appendCompletion, appendStart, planJournalPathFor, readPlanJournal } from '../journal';
 import type { PrCompletion, RunResultKind } from '../journal';
 import { approvalHash } from '../model/hash';
 import { parsePlan } from '../model/parser';
 import type { Role } from '../model/role';
 import { setFrontmatterKey } from '../model/writer';
+import { resolveDocument, type DocumentLocation } from '../storage/documentLocation';
 import type { PrResult } from '../schema';
 import { launchStage } from './launcher';
 import { describePrToolError, type PrTool, type PullRequest } from './prTool';
@@ -40,7 +41,7 @@ import { awaitStageResult, type RunOutcome } from './resultFlow';
 import type { ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
-/** The journal `todoId` a PR run is recorded under; no todo carries this id. */
+/** The journal `todoId` a PR run is recorded under; no phase carries this id. */
 export const PR_TODO_ID = 'PR';
 
 /** The cumulative diff file written into the run directory for the writer. */
@@ -54,8 +55,8 @@ export type CommandRunner = (
 
 export interface SubmitPrDeps {
   workspaceRoot: string;
-  /** The `.baiton/specs` directory. */
-  specsDir: string;
+  /** The `.baiton` directory. */
+  baitonDir: string;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
   git: GitService;
@@ -74,7 +75,7 @@ export interface SubmitPrDeps {
   /** Surfaces an invalid-result detail while the terminal stays open. */
   reportInvalid?: (detail: string) => void;
   /**
-   * The todo ids of `slug` whose todo branch still exists (not yet landed); the readiness check refuses while any remain. Optional so callers without per-todo worktrees keep today's behaviour. Real host: `(s) => unlandedTodos({ git }, s)`.
+   * The phase ids of `slug` whose branch still exists (not yet landed); the readiness check refuses while any remain.
    */
   unlandedTodos?: (slug: string) => Promise<readonly string[]>;
   clock?: () => number;
@@ -98,8 +99,8 @@ export type SubmitPrResult =
   | { ok: true; pr: PullRequest; reused: boolean; title: string }
   | { ok: false; error: SubmitPrError };
 
-/** What the readiness check established about the spec. */
-interface ReadySpec {
+/** What the readiness check established about the plan. */
+interface ReadyPlan {
   content: string;
   branch: string;
   base: string;
@@ -107,11 +108,12 @@ interface ReadySpec {
 }
 
 export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<SubmitPrResult> {
-  const specPath = path.join(deps.specsDir, slug, 'spec.md');
-  const journalPath = path.join(deps.specsDir, slug, 'runs.jsonl');
+  const location = resolveDocument(deps.baitonDir, slug);
+  const documentPath = location.documentPath;
+  const journalPath = planJournalPathFor(deps.baitonDir, slug);
 
-  // 1. Readiness (Req 8 "PR": every todo done, approval current, on branch).
-  const ready = await checkReady(slug, specPath, deps);
+  // 1. Readiness (Req 8 "PR": every phase done, approval current, on branch).
+  const ready = await checkReady(slug, documentPath, deps);
   if (!ready.ok) {
     return ready;
   }
@@ -144,9 +146,9 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
     return fail({ kind: 'probe-failed', message: `adapter probe failed: ${probe.reason ?? 'unknown reason'}` });
   }
 
-  // 4. Launch the pr-writer with the cumulative diff and spec folder as context.
+  // 4. Launch the pr-writer with the cumulative diff and plan folder as context.
   const clock = deps.clock ?? Date.now;
-  const attempt = countPrStarts(deps.specsDir, slug) + 1;
+  const attempt = countPrStarts(deps.baitonDir, slug) + 1;
   const runId = `${slug}-pr-${attempt}-${clock()}`;
   const sessionId = (deps.newSessionId ?? randomUUID)();
   const runDir = path.join(deps.workspaceRoot, '.baiton', 'runs', runId);
@@ -171,7 +173,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
       resume: false,
       sessionId,
       briefContext: prContext({
-        specDir: path.join(deps.specsDir, slug),
+        location,
         diffPath,
         base,
         branch,
@@ -211,7 +213,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
   // Commit the persisted draft (`pr.md`) before the reset below, as the queue
   // commits a stage's metadata before restoring the tree; otherwise the
   // untracked artifact would be cleaned away. A no-op commit is tolerated.
-  await safe(() => deps.git.commit(`spec(${slug}): pr draft`), undefined);
+  await safe(() => deps.git.commit(`plan(${slug}): pr draft`), undefined);
 
   // The writer is read-only; restore the tree like every non-execute stage.
   const reset = await deps.git.resetWorkingTree();
@@ -252,11 +254,11 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
   }
 
   try {
-    let content = await fsp.readFile(specPath, 'utf8');
+    let content = await fsp.readFile(documentPath, 'utf8');
     content = setFrontmatterKey(content, 'pr', pr.url);
     content = setFrontmatterKey(content, 'status', 'pr');
-    await fsp.writeFile(specPath, content, 'utf8');
-    await deps.git.commit(`spec(${slug}): pr`);
+    await fsp.writeFile(documentPath, content, 'utf8');
+    await deps.git.commit(`plan(${slug}): pr`);
     steps.record = true;
   } catch (e) {
     complete();
@@ -269,38 +271,38 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
 
 async function checkReady(
   slug: string,
-  specPath: string,
+  documentPath: string,
   deps: SubmitPrDeps,
-): Promise<{ ok: true; value: ReadySpec } | { ok: false; error: SubmitPrError }> {
+): Promise<{ ok: true; value: ReadyPlan } | { ok: false; error: SubmitPrError }> {
   let content: string;
   try {
-    content = await fsp.readFile(specPath, 'utf8');
+    content = await fsp.readFile(documentPath, 'utf8');
   } catch {
-    return fail({ kind: 'not-ready', message: `spec "${slug}" was not found` });
+    return fail({ kind: 'not-ready', message: `plan "${slug}" was not found` });
   }
-  const spec = parsePlan(content);
+  const plan = parsePlan(content);
 
-  const status = (spec.frontmatter.get('status') ?? '').trim();
+  const status = (plan.frontmatter.get('status') ?? '').trim();
   if (status === 'done') {
-    return fail({ kind: 'not-ready', message: `spec "${slug}" is already done` });
+    return fail({ kind: 'not-ready', message: `plan "${slug}" is already done` });
   }
 
-  const recorded = (spec.frontmatter.get('approved_rev') ?? '').trim();
-  if (recorded === '' || recorded !== approvalHash(spec)) {
+  const recorded = (plan.frontmatter.get('approved_rev') ?? '').trim();
+  if (recorded === '' || recorded !== approvalHash(plan)) {
     return fail({
       kind: 'not-ready',
-      message: `spec "${slug}" is not approved or its approval is stale; re-approve first`,
+      message: `plan "${slug}" is not approved or its approval is stale; re-approve first`,
     });
   }
 
-  if (spec.phases.length === 0) {
-    return fail({ kind: 'not-ready', message: `spec "${slug}" has no todos` });
+  if (plan.phases.length === 0) {
+    return fail({ kind: 'not-ready', message: `plan "${slug}" has no phases` });
   }
-  const notDone = spec.phases.filter((t) => t.state !== 'done').map((t) => `${t.id} (${t.state})`);
+  const notDone = plan.phases.filter((phase) => phase.state !== 'done').map((phase) => `${phase.id} (${phase.state})`);
   if (notDone.length > 0) {
     return fail({
       kind: 'not-ready',
-      message: `every todo must be done before submitting a PR; still open: ${notDone.join(', ')}`,
+      message: `every phase must be done before submitting a PR; still open: ${notDone.join(', ')}`,
     });
   }
 
@@ -309,23 +311,23 @@ async function checkReady(
     try {
       unlanded = await deps.unlandedTodos(slug);
     } catch (e) {
-      return fail({ kind: 'not-ready', message: `could not list the unlanded todos of spec "${slug}": ${errorMessage(e)}` });
+      return fail({ kind: 'not-ready', message: `could not list the unlanded phases of plan "${slug}": ${errorMessage(e)}` });
     }
     if (unlanded.length > 0) {
       return fail({
         kind: 'not-ready',
-        message: `every todo must be landed before submitting a PR; still unlanded: ${unlanded.join(', ')}. Land each with land_todo first.`,
+        message: `every phase must be landed before submitting a PR; still unlanded: ${unlanded.join(', ')}. Land each phase with land_todo, then try again.`,
       });
     }
   }
 
-  const branch = (spec.frontmatter.get('branch') ?? '').trim();
-  const baseCommit = (spec.frontmatter.get('base_commit') ?? '').trim();
-  const base = (spec.frontmatter.get('base') ?? '').trim();
+  const branch = (plan.frontmatter.get('branch') ?? '').trim();
+  const baseCommit = (plan.frontmatter.get('base_commit') ?? '').trim();
+  const base = (plan.frontmatter.get('base') ?? '').trim();
   if (branch === '' || baseCommit === '' || base === '') {
     return fail({
       kind: 'not-ready',
-      message: `spec "${slug}" is missing branch/base/base_commit metadata; approve it first`,
+      message: `plan "${slug}" is missing branch/base/base_commit metadata; approve it first`,
     });
   }
 
@@ -333,7 +335,7 @@ async function checkReady(
   if (current !== branch) {
     return fail({
       kind: 'not-ready',
-      message: `spec "${slug}" lives on branch ${branch} but ${current || 'no branch'} is checked out`,
+      message: `plan "${slug}" lives on branch ${branch} but ${current || 'no branch'} is checked out`,
     });
   }
 
@@ -346,22 +348,31 @@ async function checkReady(
 
 /** The pr-writer's Brief context: where to read and what the PR targets. */
 export function prContext(input: {
-  specDir: string;
+  location: DocumentLocation;
   diffPath: string;
   base: string;
   branch: string;
 }): string {
+  const layout = input.location.kind === 'plan'
+    ? [
+        `The plan is \`${input.location.documentPath}\`; its Endstate, What needs changing and Limitations & constraints sections and its phase list describe the work.`,
+        `Each phase's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<phase-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
+      ]
+    : [
+        // Legacy: preserve the original spec.md overview and todos/ artifact layout.
+        `The spec is \`${input.location.documentPath}\`; its OVERVIEW and todo list describe the work.`,
+        `Each todo's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<todo-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
+      ];
   return [
-    `The spec is \`${path.join(input.specDir, 'spec.md')}\`; its OVERVIEW and todo list describe the work.`,
-    `Each todo's plan and execution summaries live in its own folder: \`${path.join(input.specDir, 'todos')}/<todo-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
+    ...layout,
     `The cumulative diff of branch \`${input.branch}\` against base \`${input.base}\` is at \`${input.diffPath}\`.`,
     'Draft the pull request from these; the extension pushes the branch and opens the PR itself.',
   ].join('\n\n');
 }
 
-function countPrStarts(specsDir: string, slug: string): number {
+function countPrStarts(baitonDir: string, slug: string): number {
   let count = 0;
-  for (const entry of readSpecJournal(specsDir, slug)) {
+  for (const entry of readPlanJournal(baitonDir, slug)) {
     if (entry.stage === 'pr') {
       count += 1;
     }

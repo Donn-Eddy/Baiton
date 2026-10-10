@@ -9,7 +9,7 @@ import { createRunQueue, parseResponse, serializeAsk } from '../src/engine';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine';
-import type { ResultWatcher, ResultWatcherFactory, RunQueueDeps, SpecStore } from '../src/engine';
+import type { ResultWatcher, ResultWatcherFactory, RunQueueDeps, PlanStore } from '../src/engine';
 import { parsePlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
@@ -235,7 +235,7 @@ describe('run queue ask watcher wiring', () => {
       diffAgainstWorkingTree: async () => '', log: async () => '', resetWorkingTree: async () => ok(undefined),
       findCommitByRunId: async () => undefined, push: async () => undefined, remoteUrl: async () => '',
     };
-    const specStore: SpecStore = {
+    const specStore: PlanStore = {
       currentState: async () => 'pending', readSpec: async () => parsePlan('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Phase\n'),
       readArtifact: async () => undefined, latestExecuteCommit: async () => undefined, isApproved: async () => true,
       isBlocked: async () => false, inputRevMatches: async () => true, inputRev: async () => 'rev', writeState: async () => true,

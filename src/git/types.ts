@@ -61,7 +61,8 @@ export interface GitService {
   status(): Promise<GitStatus>;
   /**
    * Treat the tree as clean if and only if every change is confined to
-   * `.baiton/specs/<slug>/` (Req 16.1).
+   * the resolved document folder under `.baiton/plans/` or legacy
+   * `.baiton/specs/` (Req 16.1).
    */
   isCleanExceptSpecFolder(slug: string): Promise<boolean>;
   /** Fetch the configured remote (Req 16.3). */

@@ -11,6 +11,7 @@
  * 15.6).
  */
 import { execFile } from 'child_process';
+import * as path from 'path';
 import { Result, err, ok } from '../model/result';
 import {
   GitChange,
@@ -19,9 +20,7 @@ import {
   GitWorktree,
   GitWorktreeService,
 } from './types';
-
-/** The relative directory that scopes a spec's own changes (Req 16.1). */
-const SPEC_ROOT = '.baiton/specs';
+import { resolveDocument } from '../storage/documentLocation';
 
 /** Outcome of a single git invocation. */
 interface GitRun {
@@ -46,7 +45,7 @@ class ShellGitService implements GitWorktreeService {
   async status(): Promise<GitStatus> {
     // `--untracked-files=all` lists each untracked file individually. Without
     // it, git collapses a fully-untracked directory to its shallowest parent
-    // (e.g. a brand-new `.baiton/specs/<slug>/` reports as `.baiton/`), which
+    // (e.g. a brand-new `.baiton/plans/<slug>/` reports as `.baiton/`), which
     // would defeat the clean-except-spec-folder prefix check (Req 16.1).
     const out = await this.runOrThrow(['status', '--porcelain', '--untracked-files=all']);
     const changes = parsePorcelain(out);
@@ -55,7 +54,7 @@ class ShellGitService implements GitWorktreeService {
 
   async isCleanExceptSpecFolder(slug: string): Promise<boolean> {
     const { changes } = await this.status();
-    const prefix = `${SPEC_ROOT}/${slug}/`;
+    const prefix = `${resolveDocument(path.join(this.repoRoot, '.baiton'), slug).pathspec}/`;
     return changes.every((change) => change.path.startsWith(prefix));
   }
 

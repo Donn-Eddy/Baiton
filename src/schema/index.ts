@@ -4,12 +4,13 @@
  *
  * The extension validates a Sub_Agent's `result.json` against the schema for
  * the stage that produced it and, on success, persists the artifact under the
- * spec at the stage's defined path. A `findings` verdict with an empty findings
+ * document at the stage's defined path. A `findings` verdict with an empty findings
  * list is invalid for both review stages (enforced inside the schemas, Req
  * 12.9).
  */
 import Ajv, { type ErrorObject, type ValidateFunction } from 'ajv';
 import type { Stage } from '../model/stage';
+import type { DocumentKind } from '../model/parser';
 import { Result, err, ok } from '../model/result';
 import {
   executeSchema,
@@ -203,47 +204,46 @@ export function stageArtifactIsNumbered(stage: Stage): boolean {
 }
 
 /**
- * The spec-relative persistence path for a stage's artifact.
+ * The plan-relative persistence path for a stage's artifact.
  *
- * The four todo-level stages persist under a per-todo folder so one todo's
- * artifacts can never overwrite another's: `todos/<todoId>/plan.md`,
- * `todos/<todoId>/plan-review-<n>.md`, `todos/<todoId>/execute-<n>.md`,
- * `todos/<todoId>/review-<n>.md` (Req 24.3). The two spec-scoped stages ignore
- * the todo id and stay at the spec root: `plan-draft` → `spec.md`, `pr` →
+ * Phase stages persist under `phases/<phaseId>/` for plans and the legacy
+ * `todos/<phaseId>/` layout for Legacy documents (Req 24.3). The plan-scoped
+ * stages ignore the phase id and stay at the document root: `plan-draft` →
+ * `plan.md` (or Legacy `spec.md`), `pr` →
  * `pr.md`.
  *
- * `investigate` is run-scoped rather than spec-scoped: its `finding.md` is
- * relative to the run directory, not to any spec, and like the unnumbered
- * spec-scoped stages it ignores both the todo id and the index.
+ * `investigate` is run-scoped: its `finding.md` is relative to the run
+ * directory, and it ignores both the phase id and the index.
  *
- * Omitting the todo id for a todo-level stage throws, as does omitting the
+ * Omitting the phase id for a phase-level stage throws, as does omitting the
  * round/attempt index `n` for a numbered stage: neither artifact has a
  * well-defined location without it. The separator is always `/`; callers join
  * the result onto an absolute directory with `path.join`, which normalises it.
  */
 export function persistencePathForStage(
   stage: Stage,
-  todoId?: string,
+  phaseId?: string,
   n?: number,
+  kind: DocumentKind = 'plan',
 ): string {
   switch (stage) {
     case 'plan-draft':
-      // The plan draft still persists to spec.md; document paths move in a later storage change.
-      return 'spec.md';
+      // Legacy documents retain spec.md; plans use plan.md.
+      return kind === 'plan' ? 'plan.md' : 'spec.md';
     case 'plan':
-      return `${todoArtifactDir(stage, todoId)}/plan.md`;
+      return `${phaseArtifactDir(stage, phaseId, kind)}/plan.md`;
     case 'plan-review':
-      return `${todoArtifactDir(stage, todoId)}/plan-review-${requireIndex(stage, n)}.md`;
+      return `${phaseArtifactDir(stage, phaseId, kind)}/plan-review-${requireIndex(stage, n)}.md`;
     case 'execute':
-      return `${todoArtifactDir(stage, todoId)}/execute-${requireIndex(stage, n)}.md`;
+      return `${phaseArtifactDir(stage, phaseId, kind)}/execute-${requireIndex(stage, n)}.md`;
     case 'review':
-      return `${todoArtifactDir(stage, todoId)}/review-${requireIndex(stage, n)}.md`;
+      return `${phaseArtifactDir(stage, phaseId, kind)}/review-${requireIndex(stage, n)}.md`;
     case 'pr':
-      // The PR draft persists once per spec, at the spec root (Req 8 "PR").
+      // The PR draft persists once per document, at its root (Req 8 "PR").
       return 'pr.md';
     case 'investigate':
       // An investigate run persists one finding, at the root of its run
-      // directory; it is run-scoped, so the todo id and index are unused.
+      // directory; it is run-scoped, so the phase id and index are unused.
       return 'finding.md';
     default:
       return assertNever(stage);
@@ -251,28 +251,29 @@ export function persistencePathForStage(
 }
 
 /**
- * A todo id is part of a filesystem path, so it must be a single, plain path
- * segment. Ids come from the spec (`T` plus digits), but the path is built from
+ * A phase id is part of a filesystem path, so it must be a single, plain path
+ * segment. Ids come from the document, but the path is built from
  * file data, so the shape is enforced here rather than assumed.
  */
-const TODO_ID_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const PHASE_ID_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 /**
- * The spec-relative directory holding one todo's artifacts, validated as a
- * single path segment so a malformed id can never escape the spec folder.
+ * The plan-relative directory holding one phase's artifacts, validated as a
+ * single path segment so a malformed id can never escape the document folder.
  */
-function todoArtifactDir(stage: Stage, todoId: string | undefined): string {
+function phaseArtifactDir(stage: Stage, phaseId: string | undefined, kind: DocumentKind): string {
   if (
-    todoId === undefined ||
-    !TODO_ID_SEGMENT.test(todoId) ||
-    todoId === '.' ||
-    todoId === '..'
+    phaseId === undefined ||
+    !PHASE_ID_SEGMENT.test(phaseId) ||
+    phaseId === '.' ||
+    phaseId === '..'
   ) {
     throw new Error(
-      `stage "${stage}" persists a per-todo artifact and requires a plain todo id, got ${String(todoId)}`,
+      `stage "${stage}" persists a phase artifact and requires a plain phase id, got ${String(phaseId)}`,
     );
   }
-  return `todos/${todoId}`;
+  // Legacy documents keep the todos/<id>/ layout for compatibility.
+  return `${kind === 'plan' ? 'phases' : 'todos'}/${phaseId}`;
 }
 
 /** Validate and return the 1-based index a numbered stage artifact requires. */

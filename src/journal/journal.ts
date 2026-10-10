@@ -19,6 +19,7 @@ import {
   readFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
+import { resolveDocument, phaseArtifactDir } from '../storage/documentLocation';
 import {
   CompletionRecord,
   JournalEntry,
@@ -30,41 +31,42 @@ import {
 import { Stage, toStage } from '../model/stage';
 import { PhaseState, isPhaseState } from '../model/phaseState';
 
-/** File name of every run journal (spec-level and per-todo). */
+/** File name of every run journal (document-level and per-phase). */
 export const JOURNAL_FILE = 'runs.jsonl';
 
-/** Spec-level journal: plan-draft, pr and legacy todo entries. */
-export function specJournalPathFor(specsDir: string, slug: string): string {
-  return join(specsDir, slug, JOURNAL_FILE);
+/** Plan-level journal: plan-draft, PR and legacy phase entries. */
+export function planJournalPathFor(baitonDir: string, slug: string): string {
+  return join(resolveDocument(baitonDir, slug).dir, JOURNAL_FILE);
 }
 
-/** Per-todo journal `<specsDir>/<slug>/todos/<todoId>/runs.jsonl`. */
-export function todoJournalPathFor(
-  specsDir: string,
+/** Per-phase journal in `phases/<id>/` (Legacy documents use `todos/<id>/`). */
+export function phaseJournalPathFor(
+  baitonDir: string,
   slug: string,
-  todoId: string,
+  phaseId: string,
 ): string {
-  return join(specsDir, slug, 'todos', todoId, JOURNAL_FILE);
+  return join(phaseArtifactDir(resolveDocument(baitonDir, slug), phaseId), JOURNAL_FILE);
 }
 
 /**
- * Every journal file of a spec: the spec-level path first (always included;
- * parsing tolerates a missing file), then each existing per-todo journal in
- * sorted todo-id order.
+ * Every journal file of a plan: its document-level path first (always
+ * included; parsing tolerates a missing file), then each existing per-phase
+ * journal in sorted phase-id order.
  */
-export function specJournalPaths(specsDir: string, slug: string): string[] {
-  const paths = [specJournalPathFor(specsDir, slug)];
+export function planJournalPaths(baitonDir: string, slug: string): string[] {
+  const location = resolveDocument(baitonDir, slug);
+  const paths = [planJournalPathFor(baitonDir, slug)];
   let ids: string[] = [];
   try {
-    ids = readdirSync(join(specsDir, slug, 'todos'), { withFileTypes: true })
+    ids = readdirSync(location.artifactsDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .sort();
   } catch {
-    // No todos/ directory (or unreadable): only the spec-level journal.
+    // No artifacts directory (or unreadable): only the document-level journal.
   }
   for (const id of ids) {
-    const p = todoJournalPathFor(specsDir, slug, id);
+    const p = phaseJournalPathFor(baitonDir, slug, id);
     if (existsSync(p)) {
       paths.push(p);
     }
@@ -165,21 +167,21 @@ export function parseJournal(path: string): JournalEntry[] {
 }
 
 /**
- * Reads a spec's merged journal: the spec-level `runs.jsonl` followed by every
- * `todos/<id>/runs.jsonl` (see {@link specJournalPaths}), merged through one
+ * Reads a plan's merged journal: the document-level `runs.jsonl` followed by
+ * every phase journal (see {@link planJournalPaths}), merged through one
  * shared run-id map so a completion in a later file still attaches to a start
  * recorded in an earlier one.
  *
- * Ordering: the spec-level file first, then per-todo files in sorted todo-id
- * order. Legacy spec-level entries for a todo therefore precede that todo's
- * per-todo entries (chronological per todo); cross-todo interleaving is NOT
+ * Ordering: the document-level file first, then per-phase files in sorted id
+ * order. Legacy document-level entries for a phase therefore precede that
+ * phase's artifact-folder entries; cross-phase interleaving is NOT
  * preserved, so callers must not rely on global order. Unreadable files are
  * skipped.
  */
-export function readSpecJournal(specsDir: string, slug: string): JournalEntry[] {
+export function readPlanJournal(baitonDir: string, slug: string): JournalEntry[] {
   const byRunId = new Map<string, JournalEntry>();
   const order: string[] = [];
-  for (const file of specJournalPaths(specsDir, slug)) {
+  for (const file of planJournalPaths(baitonDir, slug)) {
     try {
       if (existsSync(file)) {
         mergeRecords(readFileSync(file, 'utf8'), byRunId, order);

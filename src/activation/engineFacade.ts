@@ -50,7 +50,7 @@ import type {
   RunPipelineRequest,
   RunQueue,
   RunQueueDeps,
-  SpecBranchWriter,
+  PlanBranchWriter,
   TransitionAction,
 } from '../engine';
 import { createQueueWorktreeSeam, createRunQueue } from '../engine';
@@ -66,10 +66,10 @@ import type {
 import type { Adapter } from '../adapter';
 import {
   latestStart,
-  readSpecJournal,
+  readPlanJournal,
   resumableSessionId,
-  specJournalPathFor,
-  todoJournalPathFor,
+  planJournalPathFor,
+  phaseJournalPathFor,
   JournalEntry,
 } from '../journal';
 
@@ -134,7 +134,7 @@ function actionForStage(stage: Stage): TransitionAction | undefined {
  */
 export function dispatchTrigger(
   queue: RunQueue,
-  specsDir: string,
+  baitonDir: string,
   trigger: EngineTrigger,
   adapterForRole: AdapterForRole,
 ): Promise<DispatchResult> {
@@ -163,7 +163,7 @@ export function dispatchTrigger(
     });
   }
 
-  const entries = readSpecJournal(specsDir, trigger.slug);
+  const entries = readPlanJournal(baitonDir, trigger.slug);
   const priorStarts = countStageStarts(entries, trigger.todoId, trigger.stage);
   const attempt = priorStarts + 1;
   const role = STAGE_ROLE[trigger.stage];
@@ -219,11 +219,11 @@ export type TodoQueuesDeps = Omit<
   | 'isExternallyBusy'
   | 'git'
 > & {
-  specsDir: string;
+  baitonDir: string;
   /** Git service over the main checkout. */
   git: GitWorktreeService;
   /** The one writer shared with the spec store so per-slug writes serialize. */
-  specWriter: SpecBranchWriter;
+  specWriter: PlanBranchWriter;
   worktrees?: QueueWorktreeSeam;
 };
 
@@ -245,7 +245,7 @@ export interface TodoQueues {
  * their own worktrees, outside the repository lock.
  */
 export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
-  const { specsDir, specWriter, worktrees, ...rest } = deps;
+  const { baitonDir, specWriter, worktrees, ...rest } = deps;
   const seam =
     worktrees ??
     createQueueWorktreeSeam({
@@ -267,9 +267,9 @@ export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
         todoId,
         worktrees: seam,
         specWriter,
-        journalPath: specJournalPathFor(specsDir, slug),
-        journalPathFor: (id) => todoJournalPathFor(specsDir, slug, id),
-        readJournal: () => readSpecJournal(specsDir, slug),
+        journalPath: planJournalPathFor(baitonDir, slug),
+        journalPathFor: (id) => phaseJournalPathFor(baitonDir, slug, id),
+        readJournal: () => readPlanJournal(baitonDir, slug),
       });
       queues.set(key, { slug, queue });
       return queue;
@@ -325,7 +325,7 @@ export function createStageLock(holders: {
  */
 export function createRunQueueSeam(
   queueFor: (slug: string, todoId: string) => RunQueue,
-  specsDir: string,
+  baitonDir: string,
   adapterForRole: AdapterForRole,
 ): RunQueueSeam {
   const inFlight = new Set<string>();
@@ -341,7 +341,7 @@ export function createRunQueueSeam(
       try {
         result = await dispatchTrigger(
           queue,
-          specsDir,
+          baitonDir,
           {
             kind: 'stage',
             slug: req.slug,

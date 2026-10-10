@@ -3,9 +3,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { recoverJournal, HOST_EXITED_NOTE, type ProcessControl } from '../src/engine/recovery';
-import type { SpecStore } from '../src/engine/runQueue';
+import type { PlanStore } from '../src/engine/runQueue';
 import type { GitService } from '../src/git';
-import { appendCompletion, appendStart, specJournalPathFor, todoJournalPathFor } from '../src/journal';
+import { appendCompletion, appendStart, planJournalPathFor, phaseJournalPathFor } from '../src/journal';
 import type { PhaseState } from '../src/model/phaseState';
 
 /**
@@ -48,7 +48,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
   };
 
   /** A spec store recording every writeState call. */
-  function makeRecordingSpecStore(): Pick<SpecStore, 'writeState'> & {
+  function makeRecordingSpecStore(): Pick<PlanStore, 'writeState'> & {
     calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }>;
   } {
     const calls: Array<{ slug: string; todoId: string; state: PhaseState; note?: string }> = [];
@@ -137,25 +137,25 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
   it('reconciles result-less entries from the spec-level and per-todo journals, ignoring completed ones', async () => {
     const specsDir = path.join(tmpDir, 'specs');
     const base = { stage: 'execute' as const, attempt: 1, startHead: 'h', inputRev: 'r' };
-    appendStart(specJournalPathFor(specsDir, 'demo'), {
+    appendStart(planJournalPathFor(path.dirname(specsDir), 'demo'), {
       ...base,
       runId: 'r1',
       todoId: 'T01',
       fromState: 'planned',
     });
-    appendStart(todoJournalPathFor(specsDir, 'demo', 'T02'), {
+    appendStart(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T02'), {
       ...base,
       runId: 'r2',
       todoId: 'T02',
       fromState: 'executed',
     });
-    appendStart(todoJournalPathFor(specsDir, 'demo', 'T03'), {
+    appendStart(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T03'), {
       ...base,
       runId: 'r3',
       todoId: 'T03',
       fromState: 'planned',
     });
-    appendCompletion(todoJournalPathFor(specsDir, 'demo', 'T03'), {
+    appendCompletion(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T03'), {
       runId: 'r3',
       result: 'completed',
     });
@@ -163,7 +163,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     const specStore = makeRecordingSpecStore();
     const outcomes = await recoverJournal({
       slug: 'demo',
-      specsDir,
+    baitonDir: path.dirname(specsDir),
       git: noCommitGit,
       process: noLiveProcess,
       specStore,

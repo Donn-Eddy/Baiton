@@ -5,9 +5,9 @@
  *
  * This is the thin `vscode` glue over the host-free tree model. On each refresh
  * it:
- *   1. runs {@link listSpecs} — the only new `fs` reach — to read each present
+ *   1. runs {@link listPlans} — the only new `fs` reach — to read each present
  *      `.baiton/specs/<slug>/spec.md` in ascending slug order (Req 2.1, 6.5);
- *   2. obtains each spec's approval fact from the {@link SpecStore} (never
+ *   2. obtains each spec's approval fact from the {@link PlanStore} (never
  *      recomputed here, Req 2.4);
  *   3. builds the ordered nodes with {@link buildPlanTree}, reusing the pure
  *      `parsePlan`/`validatePlan`/`isBlocked` cores (Req 18.1);
@@ -26,8 +26,8 @@
  * `package.json` (task 14.1) hide them under Restricted Mode (Req 5, 5.6, 5.7).
  */
 import * as vscode from 'vscode';
-import * as path from 'path';
-import type { SpecStore } from '../engine';
+import { resolveDocument } from '../storage/documentLocation';
+import type { PlanStore } from '../engine';
 import {
   buildPlanTree,
   type PlanNode,
@@ -37,8 +37,8 @@ import {
 } from '../model/treeModel';
 import { phaseContextValue } from '../model/phaseActions';
 import { planContextValue } from '../model/planActions';
-import { readSpecJournal, type JournalEntry } from '../journal';
-import { listSpecs, listTodoPlans } from './specLister';
+import { readPlanJournal, type JournalEntry } from '../journal';
+import { listPlans, listPhasePlans } from './planLister';
 import type { Surface } from './surface';
 
 /**
@@ -126,8 +126,8 @@ export class SpecExplorer
    *                      until the Chat_View lands (task 12.1).
    */
   constructor(
-    private readonly specsDir: string,
-    private readonly specStore: SpecStore,
+    private readonly baitonDir: string,
+    private readonly specStore: PlanStore,
     private readonly surface: Surface,
     private readonly restricted: boolean,
     private readonly setActiveSpec?: SetActiveSpec,
@@ -157,7 +157,7 @@ export class SpecExplorer
 
     // The watcher fires on create/change/delete under the specs tree; each
     // event schedules a single coalesced refresh (Req 6.1, 6.2, 6.4).
-    const pattern = new vscode.RelativePattern(this.specsDir, '**');
+    const pattern = new vscode.RelativePattern(this.baitonDir, '{plans,specs}/**');
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
     watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
@@ -231,7 +231,7 @@ export class SpecExplorer
    */
   private async refresh(): Promise<void> {
     const seq = ++this.refreshSeq;
-    const listed = await listSpecs(this.specsDir);
+    const listed = await listPlans(this.baitonDir);
     const inputs = await Promise.all(
       listed.map(async (spec) => ({
         slug: spec.slug,
@@ -241,9 +241,9 @@ export class SpecExplorer
         approved: await this.approvalFor(spec.slug),
         // Phase ids with a recorded Session_Id, from the spec's own journal
         // (Req 4.4); a spec with no journals reads back as no entries.
-        sessions: sessionSet(readSpecJournal(this.specsDir, spec.slug)),
+        sessions: sessionSet(readPlanJournal(this.baitonDir, spec.slug)),
         // Phase ids whose plan is on file, which gates the View plan action.
-        plans: await listTodoPlans(this.specsDir, spec.slug),
+        plans: await listPhasePlans(this.baitonDir, spec.slug),
       })),
     );
     if (seq !== this.refreshSeq) {
@@ -358,7 +358,7 @@ export class SpecExplorer
    * unchanged (Req 2.7).
    */
   private async openSpec(slug: string): Promise<void> {
-    const specPath = path.join(this.specsDir, slug, 'spec.md');
+    const specPath = resolveDocument(this.baitonDir, slug).documentPath;
     try {
       const doc = await vscode.workspace.openTextDocument(specPath);
       await vscode.window.showTextDocument(doc, { preview: false });

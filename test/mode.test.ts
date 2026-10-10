@@ -178,23 +178,32 @@ describe('run modes and the investigate stage', () => {
 
   describe('existing stages unchanged', () => {
     it('keeps every pre-existing persistence path', () => {
-      assert.strictEqual(persistencePathForStage('plan-draft'), 'spec.md');
+      assert.strictEqual(persistencePathForStage('plan-draft'), 'plan.md');
+      assert.strictEqual(persistencePathForStage('plan-draft', undefined, undefined, 'legacy-spec'), 'spec.md');
       assert.strictEqual(persistencePathForStage('pr'), 'pr.md');
       assert.strictEqual(
         persistencePathForStage('plan', 'T01'),
-        'todos/T01/plan.md',
+        'phases/T01/plan.md',
       );
       assert.strictEqual(
         persistencePathForStage('plan-review', 'T01', 2),
-        'todos/T01/plan-review-2.md',
+        'phases/T01/plan-review-2.md',
       );
       assert.strictEqual(
         persistencePathForStage('execute', 'T01', 3),
-        'todos/T01/execute-3.md',
+        'phases/T01/execute-3.md',
       );
       assert.strictEqual(
         persistencePathForStage('review', 'T01', 1),
-        'todos/T01/review-1.md',
+        'phases/T01/review-1.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('plan', 'T01', undefined, 'legacy-spec'),
+        'todos/T01/plan.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('execute', 'T01', 3, 'legacy-spec'),
+        'todos/T01/execute-3.md',
       );
     });
 

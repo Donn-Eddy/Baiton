@@ -7,7 +7,7 @@ import {
   createRunQueue,
   type RunQueueDeps,
   type ResultWatcherFactory,
-  type SpecStore,
+  type PlanStore,
 } from '../src/engine/runQueue';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
@@ -19,9 +19,9 @@ import type { Role } from '../src/model/role';
 import {
   appendCompletion,
   appendStart,
-  readSpecJournal,
-  specJournalPathFor,
-  todoJournalPathFor,
+  readPlanJournal,
+  planJournalPathFor,
+  phaseJournalPathFor,
 } from '../src/journal';
 import { ok } from '../src/model/result';
 
@@ -131,7 +131,7 @@ function makeGit(): GitService {
 }
 
 /** A spec store that keeps every `execute` transition legal, regardless of history. */
-const specStore: SpecStore = {
+const specStore: PlanStore = {
   currentState: async () => 'planned',
   // Every todo has a plan on file, so the Execute brief can be assembled; the
   // spec itself is not needed for what this test observes.
@@ -197,7 +197,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const first = await dispatchTrigger(
       queue,
-      specsDir,
+      path.dirname(specsDir),
       { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -206,7 +206,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const second = await dispatchTrigger(
       queue,
-      specsDir,
+      path.dirname(specsDir),
       { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -251,7 +251,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const result = await dispatchTrigger(
       queue,
-      specsDir,
+      path.dirname(specsDir),
       { kind: 'stage', slug: 'demo', todoId: 't2', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -327,11 +327,11 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const trigger = { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' } as const;
 
-    const first = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    const first = await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     assert.strictEqual(first.ok, true, `first execute should succeed: ${JSON.stringify(first)}`);
     await flush();
 
-    const second = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    const second = await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     assert.strictEqual(second.ok, true, `second execute should succeed: ${JSON.stringify(second)}`);
     await flush();
 
@@ -372,7 +372,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const result = await dispatchTrigger(
       queue,
-      specsDir,
+      path.dirname(specsDir),
       { kind: 'stage', slug: 'demo', todoId: 't3', stage: 'execute' },
       adapterForRole,
     );
@@ -401,9 +401,9 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     const { queue, terminalHost, adapterForRole } = makeQueue(adapter);
     const trigger = { kind: 'stage', slug: 'demo', todoId: 't5', stage: 'execute' } as const;
 
-    await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
-    await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
 
     const journal = fs.readFileSync(journalPath, 'utf8');
@@ -425,9 +425,9 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const trigger = { kind: 'stage', slug: 'demo', todoId: 't4', stage: 'execute' } as const;
 
-    await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
-    await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
     await flush();
 
     assert.strictEqual(terminalHost.launches.length, 2);
@@ -467,9 +467,9 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
       specStore,
-      journalPath: specJournalPathFor(specsDir, 'demo'),
-      journalPathFor: (id) => todoJournalPathFor(specsDir, 'demo', id),
-      readJournal: () => readSpecJournal(specsDir, 'demo'),
+      journalPath: planJournalPathFor(path.dirname(specsDir), 'demo'),
+      journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), 'demo', id),
+      readJournal: () => readPlanJournal(path.dirname(specsDir), 'demo'),
       modelForRole: (_role: Role) => ({ model: 'test-model' }),
       report: () => {},
       newSessionId: () => `session-${sessionCounter++}`,
@@ -480,20 +480,20 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
   it('journals to todos/<id>/runs.jsonl and resumes on the second execute', async () => {
     const { queue, terminalHost, adapterForRole } = makeQueue();
     const trigger = { kind: 'stage', slug: 'demo', todoId: 't1', stage: 'execute' } as const;
-    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
     await flush();
-    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
     await flush();
 
     assert.deepStrictEqual(terminalHost.launches[1].shellArgs.slice(0, 2), ['--resume', 'session-0']);
-    const todoFile = todoJournalPathFor(specsDir, 'demo', 't1');
+    const todoFile = phaseJournalPathFor(path.dirname(specsDir), 'demo', 't1');
     assert.ok(fs.existsSync(todoFile));
-    assert.ok(!fs.existsSync(specJournalPathFor(specsDir, 'demo')));
-    assert.strictEqual(readSpecJournal(specsDir, 'demo').length, 2);
+    assert.ok(!fs.existsSync(planJournalPathFor(path.dirname(specsDir), 'demo')));
+    assert.strictEqual(readPlanJournal(path.dirname(specsDir), 'demo').length, 2);
   });
 
   it('resumes a session recorded in a legacy spec-level journal', async () => {
-    appendStart(specJournalPathFor(specsDir, 'demo'), {
+    appendStart(planJournalPathFor(path.dirname(specsDir), 'demo'), {
       runId: 'run-legacy',
       todoId: 't6',
       stage: 'execute',
@@ -504,11 +504,11 @@ describe('engine facade: per-todo journals (sub-agent chats)', () => {
     });
     const { queue, terminalHost, adapterForRole } = makeQueue();
     const trigger = { kind: 'stage', slug: 'demo', todoId: 't6', stage: 'execute' } as const;
-    assert.strictEqual((await dispatchTrigger(queue, specsDir, trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
     await flush();
 
     assert.deepStrictEqual(terminalHost.launches[0].shellArgs.slice(0, 2), ['--resume', 'legacy-session']);
-    const entries = readSpecJournal(specsDir, 'demo').filter((e) => e.todoId === 't6');
+    const entries = readPlanJournal(path.dirname(specsDir), 'demo').filter((e) => e.todoId === 't6');
     assert.strictEqual(entries.length, 2);
     assert.strictEqual(entries[1].attempt, 2);
   });

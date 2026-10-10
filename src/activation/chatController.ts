@@ -156,7 +156,8 @@ import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from
 import { CONTEXT_SUMMARY_PREFIX } from '../orchestrator/transcriptReader';
 import type { CompactionMarker } from '../orchestrator/chatTranscript';
 import type { ContextBudget } from '../orchestrator/toolLoop';
-import { listSpecs } from './specLister';
+import { listPlans } from './planLister';
+import { resolveDocument } from '../storage/documentLocation';
 
 /** The conversation-selector id of the Workspace_Conversation. */
 export const WORKSPACE_CONVERSATION_ID = 'workspace';
@@ -1880,7 +1881,7 @@ export class ChatController {
    * present `.baiton/specs/<slug>/spec.md` in ascending slug order (Req 7.1).
    */
   private async buildConversationItems(): Promise<ConversationItem[]> {
-    const listed = await listSpecs(this.deps.specsDir);
+    const listed = await listPlans(this.deps.baitonDir);
     const items: ConversationItem[] = [
       { id: WORKSPACE_CONVERSATION_ID, label: 'Workspace' },
     ];
@@ -1892,7 +1893,7 @@ export class ChatController {
 
   /** Re-read a spec's `spec.md`, or `undefined` when it is missing/unreadable (Req 11.7). */
   private async readSpec(slug: string): Promise<string | undefined> {
-    const specFile = path.join(this.deps.specsDir, slug, 'spec.md');
+    const specFile = resolveDocument(this.deps.baitonDir, slug).documentPath;
     try {
       return await readFile(specFile, 'utf8');
     } catch {

@@ -89,6 +89,13 @@ describe('git service against a temp repo (Task 8.2)', () => {
       assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
     });
 
+    it('is true when the only change is inside a plan document folder', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      writeFile(repo, '.baiton/plans/my-slug/plan.md', '# PHASES\n');
+      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+    });
+
     it('is true for multiple changes all confined to the spec folder', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
