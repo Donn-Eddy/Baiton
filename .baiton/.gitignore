@@ -4,6 +4,9 @@
 /chat/
 /runs/
 /worktrees/
+plans/*/chat/
+plans/*/runs.jsonl
+# Legacy specs/ documents.
 specs/*/chat.jsonl
 specs/*/chat/
 specs/*/runs.jsonl
