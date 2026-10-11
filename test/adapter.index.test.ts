@@ -42,7 +42,7 @@ function snap(
 }
 
 /**
- * Unit tests for agentCapabilities() exported from src/adapter/index.ts (config-panel T10).
+ * Unit tests for agentCapabilities exported from src/adapter/index.ts .
  *
  * Verifies that the adapter capability catalogue:
  * - shares its key set with createAdapterRegistry().ids and AGENT_BINARY (drift guard);
@@ -138,8 +138,8 @@ describe('agentCapabilities', () => {
 });
 
 /**
- * The probe-derived ask-relay selection (chat-interventions-auto-mode T18,
- * T21, T22): claude (argv-installed hook), antigravity (launcher-written
+ * The probe-derived ask-relay selection (chat-interventions-auto-mode):
+ * claude (argv-installed hook), antigravity (launcher-written
  * run-dir `hooks.json`) and codex (argv-installed `PermissionRequest` hook)
  * have a verified native hook; opencode — and any unknown agent id — take
  * the config-driven fallback.
@@ -167,13 +167,13 @@ describe('askRelayKind selection', () => {
 });
 
 /**
- * The snapshot overlay (model-selector-refresh T03): `agentCapabilities(table)`
+ * The snapshot overlay (`agentCapabilities(table)`)
  * overlays the refreshed per-source lists onto the curated builtin table —
- * antigravity included since codex-opencode-dropdown-fix T04 —
+ * antigravity included after codex-opencode-dropdown-fix —
  * `claude-sonnet-5` always remains selectable for
  * claude, an empty refreshed list never wipes a curated one, and staleness
  * metadata is carried through. The no-argument path stays byte-identical to
- * the pre-T03 behaviour (no metadata keys, fresh non-aliased arrays).
+ * the previous behavior (no metadata keys, fresh non-aliased arrays).
  */
 describe('agentCapabilities snapshot overlay', () => {
   it('no argument returns the builtin table with no optional metadata keys', () => {
@@ -352,7 +352,7 @@ describe('agentCapabilities snapshot overlay', () => {
     assert.strictEqual(antigravity.staleReason, 'agy models failed');
 
     // The curated per-family detail survives a failed refresh, as a fresh copy
-    // (codex-opencode-dropdown-fix T06).
+ // .
     assert.deepStrictEqual(
       antigravity.modelEntries?.map((entry) => entry.id),
       Object.keys(ANTIGRAVITY_MODELS),
@@ -390,8 +390,8 @@ describe('agentCapabilities snapshot overlay', () => {
 });
 
 /**
- * The agent→source mapping (model-selector-refresh T03, widened by
- * codex-opencode-dropdown-fix T04): every agent is mapped — antigravity's
+ * The agent→source mapping (model-selector-refresh, widened by
+ * codex-opencode-dropdown-fix ): every agent is mapped — antigravity's
  * source is `agy models` — and every value is a valid {@link CatalogSourceId}.
  */
 describe('AGENT_CATALOG_SOURCE', () => {
@@ -415,9 +415,9 @@ describe('AGENT_CATALOG_SOURCE', () => {
 });
 
 /**
- * The `Adapter.discoverModels` seam (model-selector-refresh T03): still
+ * The `Adapter.discoverModels` seam : still
  * optional on the interface, but every shipped adapter now implements it —
- * antigravity included (codex-opencode-dropdown-fix T04).
+ * antigravity included .
  */
 describe('discoverModels seam', () => {
   it('every adapter implements discoverModels', () => {
@@ -429,7 +429,7 @@ describe('discoverModels seam', () => {
 });
 
 /**
- * The capability bridges (model-selector-refresh T03):
+ * The capability bridges :
  * `capabilitiesFromEntries` builds capabilities from rich per-model entries,
  * `capabilitiesToCatalogFetch` rounds them back to a `CatalogFetch`.
  */

@@ -10,7 +10,7 @@ import { SUPPORTED_VERSION } from '../src/config/types';
 /**
  * Feature: baiton-first-pass, Property 25: Generated frontmatter always records version 1
  *
- * For any spec/config the extension generates, the recorded version is exactly
+ * For any plan/config the extension generates, the recorded version is exactly
  * 1. The extension records `version: 1` in both its configuration schema and
  * its generated frontmatter output (Req 23.5).
  *
@@ -18,15 +18,15 @@ import { SUPPORTED_VERSION } from '../src/config/types';
  *
  * The extension generates two kinds of versioned artifacts:
  *   1. the default `config.json` (this task), and
- *   2. the `create_spec` tool's `spec.md` frontmatter (task 13.2).
+ * Legacy: existing document frontmatter.
  *
  * The `create_spec` tool is not built yet, so this test covers the currently
  * generated versioned artifact: the default configuration. `defaultConfig()`
  * takes no varying input, so `fast-check` is used to drive many independent,
  * repeated generations (and incidental interleaving) and assert the invariant
  * holds on every one — the recorded `version` is exactly `SUPPORTED_VERSION`,
- * which itself is `1`. Coverage of `create_spec`'s spec frontmatter is deferred
- * to when task 13.2 introduces that generator.
+ * which itself is `1`. Coverage of `create_spec`'s plan frontmatter is deferred
+ * to a later migration that introduced that generator.
  */
 
 describe('generated frontmatter version (property)', () => {

@@ -4,7 +4,7 @@ import { buildBrief } from '../src/engine/brief';
 import { INVESTIGATE_INSTRUCTION, roleInstructions } from '../src/engine/roleInstructions';
 
 /**
- * Unit tests for the per-mode Brief context assembler for spec-less runs
+ * Unit tests for the per-mode Brief context assembler for plan-less runs
  * (`bug`, `quick`, `refactor`, `investigate`) and the stage-selected investigate
  * role instructions wired into {@link buildBrief}.
  *
@@ -15,8 +15,8 @@ import { INVESTIGATE_INSTRUCTION, roleInstructions } from '../src/engine/roleIns
  * execution summary and the execute commit; `investigate` carries only the
  * question and the files, with no mode framing at all.
  *
- * Nothing this module emits may mention `spec.md` or the spec tree — a
- * spec-less run has no spec to read.
+ * Legacy: Nothing this module emits may mention `spec.md` or the spec tree — a
+ * plan-less run has no plan to read.
  */
 
 const STATEMENT_MARK = 'STATEMENTMARK';
@@ -25,8 +25,8 @@ const PLAN_MARK = 'PLANMARK';
 const REVIEW_MARK = 'REVIEWMARK';
 const EXEC_MARK = 'EXECMARK';
 
-const SPEC_FILE = 'spec' + '.md';
-const SPEC_DIR = '.baiton/' + 'specs';
+const LEGACY_DOCUMENT_FILE = 'spec' + '.md';
+const LEGACY_DOCUMENTS_DIR = '.baiton/' + 'specs';
 
 /** A valid input, overridable per case. */
 function base(over: Partial<RunContextInput> = {}): RunContextInput {
@@ -253,12 +253,12 @@ describe('buildRunContext', () => {
       }
     });
 
-    it('never mentions the spec file or the spec tree', () => {
+    it('never mentions the plan file or the plan tree', () => {
       for (const stage of stages) {
         for (const mode of modes) {
           const text = buildRunContext(base({ stage, mode }));
-          assert.ok(!text.includes(SPEC_FILE), `${stage}/${mode} does not name ${SPEC_FILE}`);
-          assert.ok(!text.includes(SPEC_DIR), `${stage}/${mode} does not name ${SPEC_DIR}`);
+          assert.ok(!text.includes(LEGACY_DOCUMENT_FILE), `${stage}/${mode} does not name ${LEGACY_DOCUMENT_FILE}`);
+          assert.ok(!text.includes(LEGACY_DOCUMENTS_DIR), `${stage}/${mode} does not name ${LEGACY_DOCUMENTS_DIR}`);
         }
       }
     });

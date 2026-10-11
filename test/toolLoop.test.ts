@@ -11,7 +11,7 @@ import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 
 /**
  * Unit tests for the host-side tool loop mechanics and round-bound resolution
- * (Task 6.3). These exercise the concrete behaviors the design pins down for
+ * These exercise the concrete behaviors the design pins down for
  * `runToolLoop` and `resolveRoundBound`, driving the loop through injected seams
  * with no VS Code host:
  *

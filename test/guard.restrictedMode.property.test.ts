@@ -5,7 +5,7 @@ import * as os from 'os';
 import {
   guardTool,
   IdempotencyStore,
-  ORCHESTRATOR_PHASES,
+  CONVERSATION_STEPS,
   Tool,
   ToolContext,
   ToolResult,
@@ -66,7 +66,7 @@ function makeTool(
     description: 'fake tool for the restricted-mode guard harness',
     mutating,
     dispatch,
-    phases: [...ORCHESTRATOR_PHASES],
+    steps: [...CONVERSATION_STEPS],
     schema: {},
     async run(_args: unknown, _tc: ToolContext): Promise<ToolResult> {
       ran = true;
@@ -200,7 +200,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
         {},
         'key-1',
         makeCtx(true),
-        tool.phases[0]!,
+        tool.steps[0]!,
       );
       assert.strictEqual(restricted.ok, false, `${tool.name} must refuse under Restricted Mode`);
       if (!restricted.ok) {
@@ -215,7 +215,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
         {},
         'key-2',
         makeCtx(false),
-        tool.phases[0]!,
+        tool.steps[0]!,
       );
       if (!trusted.ok) {
         assert.doesNotMatch(

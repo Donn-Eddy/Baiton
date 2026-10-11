@@ -9,7 +9,7 @@ import type { UsageToolId } from '../src/usage/model';
 import type { UsageReader, UsageReadContext, UsageTimer } from '../src/usage/usageService';
 
 /**
- * Unit tests for the Usage WebviewView glue (spec first-party-usage, todo T10),
+ * Unit tests for the Usage WebviewView glue,
  * run host-free through `vscodeLoader.mjs` and `vscodeFake.mjs`.
  */
 
@@ -199,7 +199,7 @@ function setup(opts: { trusted?: boolean; focusRejects?: boolean; hold?: boolean
 
 const total = (h: Harness) => Object.values(h.calls).reduce((a, b) => a + b, 0);
 
-describe('Usage view glue (first-party-usage T10)', () => {
+describe('Usage view glue ', () => {
   before(async () => {
     const root = process.cwd();
     register(pathToFileURL(join(root, 'test', 'fixtures', 'vscodeLoader.mjs')).href, pathToFileURL(join(root, '/')).href);

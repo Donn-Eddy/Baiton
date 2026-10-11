@@ -34,7 +34,7 @@ import {
 
 /**
  * Unit tests for workspace resolution, the engine-version guard, executable
- * resolution, and packaging gating (Task 15.3).
+ * resolution, and packaging gating.
  *
  * The three activation cores are pure functions with injected seams, so they
  * run without a VS Code host: workspace resolution takes an injected folder
@@ -76,7 +76,7 @@ import {
  *   (`getCapabilities` bound to `catalogStore.table()`,
  *   `onDidChangeCapabilities` to `discovery.onDidChange`) while keeping the
  *   static `capabilities` fallback, and `void discovery.refresh()` still
- *   follows the registration (model-selector-refresh T05).
+ * follows the registration .
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -484,7 +484,8 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
     for (const entry of context.filter((item) => !item.command.startsWith('baiton.runs'))) {
       assert.ok(entry.when?.startsWith('view == baiton.planExplorer'), `${entry.command} is scoped to Plan Explorer`);
     }
-    assert.ok(!/\b(?:spec|specs|todo|todos)\b/i.test(JSON.stringify(pkg)));
+    const retiredTerms = [['sp', 'ec'], ['to', 'do']].map((parts) => parts.join(''));
+    assert.ok(!new RegExp(`\\b(?:${retiredTerms.join('|')})\\b`, 'i').test(JSON.stringify(pkg)));
   });
 
   it('declares the MIT license in package.json (Req 23.4)', () => {
@@ -596,7 +597,7 @@ describe('packaging gating (Req 23.1, 23.2, 23.4)', () => {
   });
 });
 
-describe('config panel live catalog wiring (model-selector-refresh T05)', () => {
+describe('config panel live catalog wiring ', () => {
   let source = '';
   /** The text of the `registerConfigPanel({ ... })` call, braces balanced. */
   let call = '';

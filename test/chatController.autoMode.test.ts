@@ -1,6 +1,6 @@
 /**
- * Unit tests for the Chat controller's Auto-mode flow (spec "Chat
- * Interventions", todo T11).
+ * Unit tests for the Chat controller's Auto-mode flow (plan "Chat
+ * Interventions", phase ).
  *
  * This suite imports {@link ChatController} statically with no
  * `test/fixtures/vscodeLoader.mjs` hook, proving that the controller carries no
@@ -160,7 +160,6 @@ describe('ChatController auto mode', () => {
   let webview: FakeWebview;
   let client: FakeModelClient;
   let baitonDir: string;
-  let specsDir: string;
   let askRegistry: PendingAskRegistry;
   let seam: InterventionSeam;
   let controller: ChatController;
@@ -189,7 +188,6 @@ describe('ChatController auto mode', () => {
   function buildHarness(options: { askKind?: 'permission' | 'confirm'; persistedAuto?: boolean } = {}): void {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-auto-'));
     baitonDir = path.join(tmp, '.baiton');
-    specsDir = path.join(tmp, '.baiton', 'specs');
     cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
 
     webview = new FakeWebview();
@@ -211,7 +209,7 @@ describe('ChatController auto mode', () => {
     });
 
     const request: InterventionRequest = options.askKind === 'confirm'
-      ? { kind: 'confirm', prompt: 'Approve spec "x"?', detail: 'This creates its branch.' }
+      ? { kind: 'confirm', prompt: 'Approve plan "x"?', detail: 'This creates its branch.' }
       : PERMISSION_ASK;
 
     const fakeRegistry = {
@@ -250,7 +248,6 @@ describe('ChatController auto mode', () => {
       toolsFor: () => [],
       guardContext: () => ({}) as GuardContext,
       baitonDir,
-      specsDir,
       roundBound: () => 4,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
       triggerFix: () => {},

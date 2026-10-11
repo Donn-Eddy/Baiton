@@ -63,7 +63,7 @@ describe('webview protocol reducer', () => {
   it('setConversations sets the selector entries', () => {
     const items: ConversationItem[] = [
       { id: 'workspace', label: 'Workspace' },
-      { id: 'my-spec', label: 'my-spec' },
+      { id: 'my-plan', label: 'my-plan' },
     ];
     const next = reduce(initialWebviewState(), { type: 'setConversations', items });
 
@@ -75,10 +75,10 @@ describe('webview protocol reducer', () => {
   it('setActive sets the active conversation id', () => {
     const next = reduce(initialWebviewState(), {
       type: 'setActive',
-      conversationId: 'my-spec',
+      conversationId: 'my-plan',
     });
 
-    assert.strictEqual(next.activeId, 'my-spec');
+    assert.strictEqual(next.activeId, 'my-plan');
   });
 
   it('setSessions sets the session list', () => {
@@ -467,7 +467,7 @@ describe('updateTool', () => {
 
 describe('interventions', () => {
   const ask = (over: Partial<InterventionView> = {}): InterventionView => ({
-    id: 'a1', kind: 'confirm', prompt: 'Approve the spec?', status: 'pending', ...over,
+    id: 'a1', kind: 'confirm', prompt: 'Approve the plan?', status: 'pending', ...over,
   });
 
   it('showIntervention appends a system record with the prompt and the card, and clears empty', () => {
@@ -479,7 +479,7 @@ describe('interventions', () => {
     const next = reduce(state, { type: 'showIntervention', intervention: card });
 
     assert.deepStrictEqual(next.records, [
-      { role: 'system', content: 'Approve the spec?', intervention: card },
+      { role: 'system', content: 'Approve the plan?', intervention: card },
     ]);
     assert.strictEqual(next.empty, undefined);
   });
@@ -489,12 +489,12 @@ describe('interventions', () => {
     const first = reduce(state, { type: 'showIntervention', intervention: ask() });
     const repost = reduce(first, {
       type: 'showIntervention',
-      intervention: ask({ prompt: 'Approve the spec? (again)' }),
+      intervention: ask({ prompt: 'Approve the plan? (again)' }),
     });
 
     assert.strictEqual(repost.records.length, 1);
-    assert.strictEqual(repost.records[0].intervention?.prompt, 'Approve the spec? (again)');
-    assert.strictEqual(repost.records[0].content, 'Approve the spec? (again)');
+    assert.strictEqual(repost.records[0].intervention?.prompt, 'Approve the plan? (again)');
+    assert.strictEqual(repost.records[0].content, 'Approve the plan? (again)');
   });
 
   it('showIntervention finalizes a trailing streaming record first', () => {
@@ -502,7 +502,7 @@ describe('interventions', () => {
     const next = reduce(streaming, { type: 'showIntervention', intervention: ask() });
     assert.deepStrictEqual(next.records, [
       { role: 'assistant', content: 'thinking', streaming: false },
-      { role: 'system', content: 'Approve the spec?', intervention: ask() },
+      { role: 'system', content: 'Approve the plan?', intervention: ask() },
     ]);
   });
 

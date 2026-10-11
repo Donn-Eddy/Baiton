@@ -19,8 +19,8 @@ import { ROLES } from '../src/model';
 import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
 
 /**
- * Unit tests for the Config Panel host-free core (spec "Config Panel",
- * config-panel T03): the form mapping (`formFromConfig`/`formFromDocument`),
+ * Unit tests for the Config Panel host-free core (plan "Config Panel",
+ * config-panel ): the form mapping (`formFromConfig`/`formFromDocument`),
  * validation (`validateConfigForm`), the dropdown option sets
  * (`configFormOptions`), the merge back into a raw document
  * (`applyFormToDocument`), and the round trips between them.
@@ -29,7 +29,7 @@ import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
  * the module under test.
  */
 
-describe('config panel core (config-panel T03)', () => {
+describe('config panel core ', () => {
   const AGENTS = createAdapterRegistry().ids;
   const CAPABILITIES = agentCapabilities();
   const OPTIONS: ConfigFormOptions = { agents: AGENTS, byAgent: CAPABILITIES };
@@ -535,7 +535,7 @@ describe('config panel core (config-panel T03)', () => {
     });
   });
 
-  describe('stale metadata and agentStaleness (model-selector-refresh T08)', () => {
+ describe('stale metadata and agentStaleness ', () => {
     const FETCHED_AT = '2026-01-02T03:04:05.000Z';
 
     it('configFormOptions copies source/stale/staleReason/fetchedAt alongside models/efforts/modelLink', () => {
@@ -638,7 +638,7 @@ describe('config panel core (config-panel T03)', () => {
     });
   });
 
-  describe('configFormOptions modelEntries (codex-opencode-dropdown-fix T06)', () => {
+ describe('configFormOptions modelEntries ', () => {
     /** A capability whose entries carry `provider`, built through a typed variable so tsc accepts it. */
     function richCapability(): AgentFormCapability {
       const entries: {

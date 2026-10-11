@@ -12,7 +12,7 @@ import type { LiveRunStage, RunPipelineEvent } from '../src/engine/runPipeline';
 import type { Surface } from '../src/activation/surface';
 
 /**
- * Unit tests for the Runs view glue (design "dispatch modes", todo T16):
+ * Unit tests for the Runs view glue :
  *
  * - `RUNS_VIEW_ID` and the three `baiton.runs.*` commands match what
  *   `package.json` contributes, including the `view/item/context` `when` clauses
@@ -280,7 +280,7 @@ function readPkg(): {
   return JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
 }
 
-describe('Runs view (design "dispatch modes", todo T16)', () => {
+describe('Runs view ', () => {
   before(async () => {
     const root = process.cwd();
     register(

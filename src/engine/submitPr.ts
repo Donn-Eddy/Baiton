@@ -41,7 +41,7 @@ import { awaitStageResult, type RunOutcome } from './resultFlow';
 import type { ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
-/** The journal `todoId` a PR run is recorded under; no phase carries this id. */
+/** The phase id used to record a PR run in the journal. */
 export const PR_PHASE_ID = 'PR';
 
 /** The cumulative diff file written into the run directory for the writer. */
@@ -189,7 +189,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
   const terminalPid = await resolvePid(terminal);
   appendStart(journalPath, {
     runId,
-    todoId: PR_PHASE_ID,
+    phaseId: PR_PHASE_ID,
     stage: 'pr',
     attempt,
     startHead,
@@ -339,7 +339,7 @@ async function checkReady(
     });
   }
 
-  if (!(await safe(() => deps.git.isCleanExceptSpecFolder(slug), false))) {
+  if (!(await safe(() => deps.git.isCleanExceptPlanFolder(slug), false))) {
     return fail({ kind: 'dirty-tree', message: 'a clean working tree is required to submit a PR' });
   }
 
@@ -353,18 +353,9 @@ export function prContext(input: {
   base: string;
   branch: string;
 }): string {
-  const layout = input.location.kind === 'plan'
-    ? [
-        `The plan is \`${input.location.documentPath}\`; its Endstate, What needs changing and Limitations & constraints sections and its phase list describe the work.`,
-        `Each phase's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<phase-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
-      ]
-    : [
-        // Legacy: preserve the original spec.md overview and todos/ artifact layout.
-        `The spec is \`${input.location.documentPath}\`; its OVERVIEW and phase list describe the work.`,
-        `Each phase's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<phase-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
-      ];
   return [
-    ...layout,
+    `The plan document is \`${input.location.documentPath}\`; its preamble and phase list describe the work.`,
+    `Each phase's plan and execution summaries live in its own folder: \`${input.location.artifactsDir}/<phase-id>/plan.md\` and \`execute-<n>.md\` beside it.`,
     `The cumulative diff of branch \`${input.branch}\` against base \`${input.base}\` is at \`${input.diffPath}\`.`,
     'Draft the pull request from these; the extension pushes the branch and opens the PR itself.',
   ].join('\n\n');

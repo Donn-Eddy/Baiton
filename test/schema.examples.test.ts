@@ -95,7 +95,8 @@ describe('stage result schema examples (unit)', () => {
       assert.ok(isErr(result));
     });
 
-    it('rejects the legacy overview and todos shape', () => {
+    it('rejects the legacy overview and phases shape', () => {
+      // Legacy plan-draft result shape used the overview/todos keys.
       assert.ok(isErr(validatePlanDraftResult({ overview: 'x', todos: [] })));
     });
 

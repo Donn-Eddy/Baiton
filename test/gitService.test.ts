@@ -7,14 +7,14 @@ import { createGitService } from '../src/git/gitService';
 import { isErr, isOk } from '../src/model/result';
 
 /**
- * Unit tests for the git service against a real temporary repository (Task 8.2).
+ * Unit tests for the git service against a real temporary repository.
  *
  * Each test creates a throwaway git repo under `os.tmpdir()`, initializes it
  * with a committed baseline and a local `user.name`/`user.email` so commits
  * succeed without touching global config, then drives the {@link createGitService}
  * seam through the behaviors the design pins down:
  *
- * - clean-except-spec-folder detection (Req 16.1)
+ * - clean-except-plan-folder detection (Req 16.1)
  * - base-commit resolution of a branch to a sha (Req 16.3)
  * - branch creation + checkout (Req 16.5)
  * - commit with a `Run-Id:` trailer + find-by-Run-Id (Req 17.4, 21.5)
@@ -24,7 +24,7 @@ import { isErr, isOk } from '../src/model/result';
  * - branch delete, merged and unmerged, with and without force
  * - `branchHead` resolving a ref or reporting undefined for a missing one
  * - `merge` as a real merge commit, and its aborted conflict/unknown-branch paths
- * - whole-tree `isClean`, distinct from the spec-scoped clean check
+ * - whole-tree `isClean`, distinct from the plan-scoped clean check
  * - `commitPaths` committing only the named paths (with trailers) and leaving
  *   other staged/unstaged changes alone
  * - `listBranches` filtering local branches by an arbitrary prefix
@@ -63,7 +63,7 @@ function makeRepo(): string {
   return repo;
 }
 
-describe('git service against a temp repo (Task 8.2)', () => {
+describe('git service against a temp repo', () => {
   const repos: string[] = [];
 
   /** Register a fresh repo for automatic cleanup. */
@@ -80,53 +80,53 @@ describe('git service against a temp repo (Task 8.2)', () => {
     }
   });
 
-  describe('isCleanExceptSpecFolder (Req 16.1)', () => {
-    it('is true when the only change is inside .baiton/specs/<slug>/', async () => {
+  describe('isCleanExceptPlanFolder (Req 16.1)', () => {
+    it('is true when the only change is inside .baiton/plans/<slug>/', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
 
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), true);
     });
 
     it('is true when the only change is inside a plan document folder', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       writeFile(repo, '.baiton/plans/my-slug/plan.md', '# PHASES\n');
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), true);
     });
 
-    it('is true for multiple changes all confined to the spec folder', async () => {
+    it('is true for multiple changes all confined to the plan folder', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
       writeFile(repo, '.baiton/specs/my-slug/runs.jsonl', '{}\n');
 
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), true);
     });
 
-    it('is false when a change lies outside the spec folder', async () => {
+    it('is false when a change lies outside the plan folder', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
       writeFile(repo, 'src/other.ts', 'export const x = 1;\n');
 
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), false);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), false);
     });
 
-    it('is false when the change is in a different spec slug', async () => {
+    it('is false when the change is in a different plan slug', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       writeFile(repo, '.baiton/specs/other-slug/spec.md', '# OVERVIEW\n');
 
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), false);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), false);
     });
 
     it('is true (vacuously) when the tree has no changes at all', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
 
-      assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+      assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), true);
       const status = await git$.status();
       assert.strictEqual(status.clean, true);
       assert.deepStrictEqual(status.changes, []);
@@ -153,13 +153,13 @@ describe('git service against a temp repo (Task 8.2)', () => {
     });
   });
 
-  describe('createSpecBranch + checkout (Req 16.5)', () => {
+  describe('createPlanBranch + checkout (Req 16.5)', () => {
     it('creates a branch at the base commit and checks it out', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       const base = await git$.resolveBaseCommit('main');
 
-      await git$.createSpecBranch('baiton/my-slug', base);
+      await git$.createPlanBranch('baiton/my-slug', base);
       await git$.checkout('baiton/my-slug');
 
       assert.strictEqual(await git$.currentBranch(), 'baiton/my-slug');
@@ -169,13 +169,14 @@ describe('git service against a temp repo (Task 8.2)', () => {
   });
 
   describe('commit with Run-Id trailer + findCommitByRunId (Req 17.4, 21.5)', () => {
+    // Legacy spec fixture: commit lookup is independent of the document root.
     it('commits with a Run-Id trailer and finds it by run id', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       const runId = 'run-2024-abcdef';
 
       writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
-      const sha = await git$.commit('spec(my-slug): T01 execute attempt 1', {
+      const sha = await git$.commit('plan(my-slug): P01 execute attempt 1', {
         'Run-Id': runId,
       });
 
@@ -205,7 +206,7 @@ describe('git service against a temp repo (Task 8.2)', () => {
       const git$ = createGitService(repo);
 
       writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
-      await git$.commit('spec(my-slug): T01 execute attempt 1', {
+      await git$.commit('plan(my-slug): P01 execute attempt 1', {
         'Run-Id': 'run-longer-id',
       });
 
@@ -218,11 +219,11 @@ describe('git service against a temp repo (Task 8.2)', () => {
       const git$ = createGitService(repo);
 
       writeFile(repo, '.baiton/specs/my-slug/a.md', 'a\n');
-      await git$.commit('spec(my-slug): T01 execute attempt 1', {
+      await git$.commit('plan(my-slug): P01 execute attempt 1', {
         'Run-Id': 'run-aaa',
       });
       writeFile(repo, '.baiton/specs/my-slug/b.md', 'b\n');
-      const shaB = await git$.commit('spec(my-slug): T02 execute attempt 1', {
+      const shaB = await git$.commit('plan(my-slug): P02 execute attempt 1', {
         'Run-Id': 'run-bbb',
       });
 
@@ -339,7 +340,7 @@ describe('git service against a temp repo (Task 8.2)', () => {
       const repo = newRepo();
       const git$ = createGitService(repo);
       const base = await git$.resolveBaseCommit('main');
-      await git$.createSpecBranch('taken', base);
+      await git$.createPlanBranch('taken', base);
 
       // `-b`, not `-B`: a collision must fail loudly rather than reset the branch.
       await assert.rejects(() => git$.addWorktree(newWorktreePath(), 'taken', base));
@@ -541,12 +542,12 @@ describe('git service against a temp repo (Task 8.2)', () => {
         assert.strictEqual(await git$.isClean(), false);
       });
 
-      it('is false where isCleanExceptSpecFolder is true (they are different checks)', async () => {
+      it('is false where isCleanExceptPlanFolder is true (they are different checks)', async () => {
         const repo = newRepo();
         const git$ = createGitService(repo);
         writeFile(repo, '.baiton/specs/my-slug/spec.md', '# OVERVIEW\n');
 
-        assert.strictEqual(await git$.isCleanExceptSpecFolder('my-slug'), true);
+        assert.strictEqual(await git$.isCleanExceptPlanFolder('my-slug'), true);
         assert.strictEqual(await git$.isClean(), false);
       });
     });
@@ -564,7 +565,7 @@ describe('git service against a temp repo (Task 8.2)', () => {
       writeFile(repo, '.baiton/specs/s/spec.md', 'spec\n');
       fs.rmSync(path.join(repo, '.baiton/specs/s/old.md'));
 
-      const sha = await git$.commitPaths(['.baiton/specs/s'], 'spec(s): T01 state', { 'Run-Id': 'r1' });
+      const sha = await git$.commitPaths(['.baiton/specs/s'], 'plan(s): P01 state', { 'Run-Id': 'r1' });
 
       assert.strictEqual(sha, git(repo, 'rev-parse', 'HEAD').trim());
       const shown = git(repo, 'show', '--name-status', '--format=', 'HEAD')
@@ -588,7 +589,7 @@ describe('git service against a temp repo (Task 8.2)', () => {
       git(repo, 'add', 'other.txt');
       writeFile(repo, '.baiton/specs/s/spec.md', 'spec\n');
 
-      await git$.commitPaths(['.baiton/specs/s'], 'spec(s): state');
+      await git$.commitPaths(['.baiton/specs/s'], 'plan(s): state');
 
       assert.strictEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').trim(), '.baiton/specs/s/spec.md');
       assert.strictEqual(git(repo, 'diff', '--cached', '--name-only').trim(), 'other.txt');
@@ -608,6 +609,7 @@ describe('git service against a temp repo (Task 8.2)', () => {
   });
 
   describe('listBranches', () => {
+    // Legacy branches keep the baiton-todo namespace for existing documents.
     it('lists local branches by prefix, sorted, and nothing for an unknown prefix', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);

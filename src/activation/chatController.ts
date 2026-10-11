@@ -13,7 +13,7 @@
  * Responsibilities:
  *  - own the chat sessions of each conversation scope through the host-free
  *    {@link SessionStore}: workspace sessions live at `.baiton/chat/<id>.jsonl`
- *    and each plan stores sessions under the legacy `.baiton/specs/<slug>/chat/<id>.jsonl` (Req 8.1), with
+ *    and each plan stores sessions under `.baiton/plans/<slug>/chat/<id>.jsonl` (legacy documents resolve to `.baiton/specs/<slug>/chat/<id>.jsonl`), with
  *    the pre-sessions `chat.jsonl` migrated into that layout on start;
  *  - load it through {@link readTranscript} on open/reopen/window-reload and
  *    render its records in order (Req 8.6, 8.8);
@@ -140,7 +140,7 @@ import type {
   InterventionView,
   ModelClient,
   ModelSelection,
-  OrchestratorPhase,
+  ConversationStep,
   ProviderGroup,
   ProviderId,
   PermissionRequest,
@@ -301,11 +301,11 @@ export interface ChatControllerDeps {
   registry: ToolRegistry;
   /**
    * The assembled tool definitions to advertise to the model for one
-   * orchestrator phase (Req 10.3, 11.1). The controller derives the phase from
+   * conversation step (Req 10.3, 11.1). The controller derives the step from
    * the conversation on every send, so a conversation gathering requirements
    * and one driving an approved plan see different tools.
    */
-  toolsFor(phase: OrchestratorPhase): ToolSpec[];
+  toolsFor(step: ConversationStep): ToolSpec[];
   /** Builds the guard context for a tool call (repo, legacy session root, restricted mode). */
   guardContext(): GuardContext;
   /**
@@ -319,8 +319,6 @@ export interface ChatControllerDeps {
   askRegistry?: PendingAskRegistry;
   /** Absolute `.baiton/` directory: `<baitonDir>/chat/` holds workspace sessions. */
   baitonDir: string;
-  /** Legacy chat-session root (.baiton/specs/): SessionStore keeps a plan's chat sessions under <specsDir>/<slug>/chat/. */
-  specsDir: string;
   /** Reads the configured Round_Bound; resolved through {@link resolveRoundBound}. */
   roundBound(): unknown;
   /**
@@ -518,7 +516,7 @@ export class ChatController {
     this.deps = deps;
     this.sessions =
       deps.sessionStore ??
-      new SessionStore({ baitonDir: deps.baitonDir, specsDir: deps.specsDir });
+      new SessionStore({ baitonDir: deps.baitonDir });
     this.asks =
       deps.askRegistry ??
       new PendingAskRegistry({
@@ -557,7 +555,7 @@ export class ChatController {
     const scopeKey = key.slice(0, i);
     const sessionId = key.slice(i + 1);
     return {
-      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'spec', slug: scopeKey } /* legacy persisted scope kind */,
+      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'plan', slug: scopeKey },
       sessionId,
     };
   }
@@ -1371,7 +1369,7 @@ export class ChatController {
     args: string,
     callId: string,
     signal: AbortSignal,
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     scope: SessionScope,
     key: string,
   ): Promise<ToolResult> {
@@ -1379,10 +1377,10 @@ export class ChatController {
       return { ok: false, error: 'the run was stopped before the tool call' };
     }
     const parsed = parseArgs(args);
-    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), phase, 'top', {
+    return this.deps.registry.call(name, parsed, callId, this.deps.guardContext(), step, 'top', {
       sessionKey: key,
       depth: 0,
-      phase,
+      step,
       kind: scope,
       signal,
     });
@@ -1395,7 +1393,7 @@ export class ChatController {
    */
   private async buildPrompt(slug: string | undefined, mode: RunMode): Promise<string> {
     const kind: ConversationKind =
-      slug === undefined ? { kind: 'workspace' } : { kind: 'spec', slug } /* legacy persisted scope kind */;
+      slug === undefined ? { kind: 'workspace' } : { kind: 'plan', slug };
     if (slug === undefined) {
       return buildSystemPrompt(kind, undefined, mode);
     }
@@ -1408,11 +1406,11 @@ export class ChatController {
    * from the same plan document the prompt is built from. A plan-less workspace
    * conversation is `run`; the plan branch deliberately passes no mode.
    */
-  private async stepForConversation(slug: string | undefined): Promise<OrchestratorPhase> {
+  private async stepForConversation(slug: string | undefined): Promise<ConversationStep> {
     if (slug === undefined) {
       return conversationStepFor({ kind: 'workspace' }, undefined, this.effectiveMode());
     }
-    return conversationStepFor({ kind: 'spec', slug } /* legacy persisted scope kind */, await this.readPlanDocument(slug));
+    return conversationStepFor({ kind: 'plan', slug }, await this.readPlanDocument(slug));
   }
 
   // --- transcript / rendering ----------------------------------------------
@@ -1865,7 +1863,7 @@ export class ChatController {
   private activeScope(): SessionScope {
     return this.activePlan === undefined
       ? { kind: 'workspace' }
-      : { kind: 'spec', slug: this.activePlan } /* legacy persisted scope kind */;
+      : { kind: 'plan', slug: this.activePlan };
   }
 
   /** The selector id for the active conversation (Req 7.7). */

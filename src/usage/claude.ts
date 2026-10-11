@@ -1,6 +1,6 @@
 /**
- * Host-free Claude Code usage reader for the Usage view (spec first-party-usage,
- * todo T04). Imports only './model' and './usageService': no editor-host API,
+ * Host-free Claude Code usage reader for the Usage view. Imports only './model'
+ * and './usageService': no editor-host API,
  * no Node built-in module, no import of the claude adapter. Every effect
  * (running `claude`, reading the stored login, an HTTP request) goes through an
  * injected seam and happens only inside the returned reader.

@@ -1,5 +1,5 @@
 /**
- * The end-to-end suite for model-selector-refresh (T15).
+ * The end-to-end suite for model-selector-refresh .
  *
  * Every other suite in this area pins one unit. This one wires the REAL
  * modules the way the host wires them and asserts the whole chain:
@@ -127,7 +127,7 @@ import type { ProviderGroup } from '../src/orchestrator/webviewProtocol';
 import { ok, err, isOk, type Result } from '../src/model/result';
 import type { CopilotVscodeApi } from '../src/orchestrator/copilotClient';
 
-describe('model selector refresh (T15 end to end)', () => {
+describe('model selector refresh ', () => {
   // --- shared harness --------------------------------------------------------
 
   /** The parsed models.dev fixture the whole suite drives the feed from. */
@@ -476,7 +476,7 @@ describe('model selector refresh (T15 end to end)', () => {
             ? ok<ModelsDevFeed, string>(fixtureFeed())
             : err<string, ModelsDevFeed>('models.dev request failed: ETIMEDOUT');
         },
-        // T02: the default reader would read the developer's real
+        // The default reader would read the developer's real
         // ~/.claude/cache/model-catalog and make these claude expectations
         // machine-dependent, so the catalog is served from
         // test/fixtures/claudeModelCatalog.sample.json instead.
@@ -2184,7 +2184,6 @@ describe('model selector refresh (T15 end to end)', () => {
         toolsFor: () => [],
         guardContext: () => ({}) as GuardContext,
         baitonDir: path.join(dir, '.baiton'),
-        specsDir: path.join(dir, '.baiton', 'specs'),
         roundBound: () => 4,
         config: { getEndpoint: () => undefined, getModel: () => undefined },
         triggerFix: () => undefined,
@@ -2235,7 +2234,7 @@ describe('model selector refresh (T15 end to end)', () => {
     // --- Half B: that very message through media/chat.js ---------------------
     //
     // The loader below is duplicated from test/chatView.providers.test.ts rather
-    // than extracted: T15's file list is this test plus README.md, and the T09
+    // than extracted: each test file owns its small harness, and the
     // suite set the same precedent for self-contained view harnesses. Each copy
     // is trimmed to the surface this leg actually exercises. The fake DOM
     // (`FakeEl`/`FakeClassList`) lives in the shared harness region above,
@@ -2693,7 +2692,7 @@ describe('model selector refresh (T15 end to end)', () => {
      *
      * A trimmed copy of `loadConfigView()` in test/configPanel.view.test.ts, for
      * the same reason leg 4's chat loader is a trimmed copy of
-     * test/chatView.providers.test.ts: this todo's file list is this test plus
+     * test/chatView.providers.test.ts: this phase's file list is this test plus
      * README.md, and each copy covers only the surface its own leg exercises.
      */
     function loadConfigView(): ConfigView {

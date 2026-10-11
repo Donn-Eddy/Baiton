@@ -32,8 +32,8 @@ import {
  * appear exactly in the drive step.
  */
 
-// 'spec' is the legacy persisted conversation kind.
-const PLAN: ConversationKind = { kind: 'spec', slug: 'my-plan' };
+// Plan conversations use the canonical plan scope kind.
+const PLAN: ConversationKind = { kind: 'plan', slug: 'my-plan' };
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
 
 /** The statuses that mean the plan is being driven (Req 11.1). */
@@ -84,6 +84,7 @@ const planDocumentContentArb: fc.Arbitrary<string> = fc
     others: fc.array(otherKeyArb, { maxLength: 3 }),
     body: fc.array(
       fc.constantFrom(
+        // Legacy document candidates preserve the OVERVIEW/TODOS and T## form.
         '# OVERVIEW',
         '',
         'Some prose about the work.',

@@ -137,7 +137,7 @@ export function codexEffortFlags(effort: string | undefined): string[] {
   return ['--config', `${CODEX_EFFORT_CONFIG_KEY}=${effort}`];
 }
 
-// --- `codex app-server` model discovery (model-selector-refresh T05) ---------
+// --- `codex app-server` model discovery ---------
 
 /** The app-server subcommand the discovery handshake spawns: exactly `codex app-server` (no other flag; never `exec`). */
 export const CODEX_APP_SERVER_SUBCOMMAND = 'app-server';

@@ -1,6 +1,6 @@
 /**
- * Host-free Codex usage reader for the Usage view (spec first-party-usage,
- * todo T03). Imports only './model' and './usageService': no editor-host API,
+ * Host-free Codex usage reader for the Usage view. Imports only './model' and
+ * './usageService': no editor-host API,
  * no Node built-in module, no import of the codex adapter. Every effect (spawning
  * `codex app-server`, reading a rollout file or auth.json, an HTTP request)
  * goes through an injected seam and happens only inside the returned reader.

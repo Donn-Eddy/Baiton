@@ -46,13 +46,13 @@ class ShellGitService implements GitWorktreeService {
     // `--untracked-files=all` lists each untracked file individually. Without
     // it, git collapses a fully-untracked directory to its shallowest parent
     // (e.g. a brand-new `.baiton/plans/<slug>/` reports as `.baiton/`), which
-    // would defeat the clean-except-spec-folder prefix check (Req 16.1).
+    // would defeat the clean-except-plan-folder prefix check (Req 16.1).
     const out = await this.runOrThrow(['status', '--porcelain', '--untracked-files=all']);
     const changes = parsePorcelain(out);
     return { clean: changes.length === 0, changes };
   }
 
-  async isCleanExceptSpecFolder(slug: string): Promise<boolean> {
+  async isCleanExceptPlanFolder(slug: string): Promise<boolean> {
     const { changes } = await this.status();
     const prefix = `${resolveDocument(path.join(this.repoRoot, '.baiton'), slug).pathspec}/`;
     return changes.every((change) => change.path.startsWith(prefix));
@@ -67,7 +67,7 @@ class ShellGitService implements GitWorktreeService {
     return out.trim();
   }
 
-  async createSpecBranch(branch: string, fromCommit: string): Promise<void> {
+  async createPlanBranch(branch: string, fromCommit: string): Promise<void> {
     await this.runOrThrow(['branch', branch, fromCommit]);
   }
 
@@ -209,7 +209,7 @@ class ShellGitService implements GitWorktreeService {
     // `add -A -- <paths>` stages new files and deletions under the paths only.
     await this.runOrThrow(['add', '-A', '--', ...paths]);
     // A pathspec on `commit` means `--only`: the commit records exactly these
-    // paths and ignores anything else already staged, so a central spec-folder
+    // paths and ignores anything else already staged, so a central plan-folder
     // commit can never sweep unrelated changes.
     await this.runOrThrow(['commit', '-m', withTrailers(message, trailers), '--only', '--', ...paths]);
     return this.head();
@@ -325,7 +325,7 @@ const HEADS_PREFIX = 'refs/heads/';
 /**
  * The path a porcelain entry refers to. Rename/copy entries are `old -> new`;
  * the destination is what now exists in the tree, so it is the path that must
- * be inside the spec folder for the tree to count as clean-except-spec (Req
+ * be inside the plan folder for the tree to count as clean-except-plan (Req
  * 16.1).
  */
 function destinationPath(rest: string): string {

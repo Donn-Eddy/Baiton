@@ -26,8 +26,8 @@ import type { Role } from '../src/model/role';
  * Feature: baiton-first-pass, Property 17: At most one running stage and
  * single-trigger dispatch
  *
- * For any interleaving of dispatches a single queue (one per todo when wired per
- * (slug, todo); queues of different todos run concurrently) SHALL run at most one
+ * For any interleaving of dispatches a single queue (one per phase when wired per
+ * (slug, phase); queues of different phases run concurrently) SHALL run at most one
  * stage at a time: `isRunning()` is true while a stage is in flight and never
  * more than one stage is instrumented as concurrently in flight (Req 10.3,
  * 10.4, 20.1). A dispatch issued while a stage runs is appended to the FIFO and
@@ -41,7 +41,7 @@ import type { Role } from '../src/model/role';
  * The queue is built over fully stubbed dependencies. A controllable
  * terminal host + result-watcher factory make each stage's completion
  * test-driven: a stage does not finish until the test emits a valid result
- * (or `stop()` disposes its terminal). The spec store returns states that make
+ * (or `stop()` disposes its terminal). The plan store returns states that make
  * the `execute` transition legal, the adapter probe is ok, git is a no-op
  * stub, and the journal path is a temp file cleaned up after each case.
  */
@@ -217,14 +217,14 @@ function makeRig(journalPath: string): Rig {
   // A git stub: clean tree, stable HEAD/branch (no drift), successful reset.
   const git = {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async () => 'commitsha',
     head: async () => 'HEAD0',
-    currentBranch: async () => 'spec-branch',
+    currentBranch: async () => 'plan-branch',
     diff: async () => '',
     diffAgainstWorkingTree: async () => '',
     log: async () => '',
@@ -234,12 +234,12 @@ function makeRig(journalPath: string): Rig {
     remoteUrl: async () => '',
   } satisfies GitService;
 
-  // A spec store that keeps the `execute` transition legal: the todo is
-  // `planned`, the spec is approved, unblocked, and the input rev matches.
+  // A plan store that keeps the `execute` transition legal: the phase is
+  // `planned`, the plan is approved, unblocked, and the input rev matches.
   const planStore: PlanStore = {
     currentState: async () => 'planned',
     readPlan: async () => undefined,
-    readArtifact: async () => '# Plan T01\n',
+    readArtifact: async () => '# Plan P01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
@@ -274,11 +274,11 @@ function makeRig(journalPath: string): Rig {
   return { deps, stages, peakInFlight: () => peak };
 }
 
-/** Build an `execute` dispatch request with a per-index todo/attempt. */
+/** Build an `execute` dispatch request with a per-index phase/attempt. */
 function executeRequest(index: number): RunRequest {
   return {
     slug: 'demo',
-    phaseId: `todo-${index}`,
+    phaseId: `phase-${index}`,
     action: 'execute',
     role: 'executor',
     attempt: index + 1,
@@ -296,7 +296,7 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-runqueue-'));
-    // The artifact writer targets .baiton/specs/<slug>/; ensure it exists so a
+    // Legacy: The artifact writer targets .baiton/specs/<slug>/; ensure it exists so a
     // completed execute result can persist without error.
     fs.mkdirSync(path.join(tmpDir, '.baiton', 'specs', 'demo'), {
       recursive: true,
@@ -465,19 +465,19 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
     );
   });
 
-  /** A fake per-todo worktree seam whose git is the rig's stub git. */
+  /** A fake per-phase worktree seam whose git is the rig's stub git. */
   function fakeSeam(rig: Rig): QueueWorktreeSeam {
     return {
-      ensure: async (slug, todoId) =>
+      ensure: async (slug, phaseId) =>
         ok({
-          dir: path.join(tmpDir, '.baiton', 'worktrees', slug, todoId),
+          dir: path.join(tmpDir, '.baiton', 'worktrees', slug, phaseId),
           git: rig.deps.git,
         }),
       unlanded: async () => [],
     };
   }
 
-  it('runs the stages of distinct todos concurrently, one queue per todo, completing in any order', async () => {
+  it('runs the stages of distinct phases concurrently, one queue per phase, completing in any order', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 2, max: 4 }).chain((n) =>
@@ -493,7 +493,7 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
           const rig = makeRig(path.join(tmpDir, 'runs.jsonl'));
           const seam = fakeSeam(rig);
           const queues = Array.from({ length: n }, (_, i) =>
-            createRunQueue({ ...rig.deps, slug: 'demo', phaseId: `todo-${i}`, worktrees: seam }),
+            createRunQueue({ ...rig.deps, slug: 'demo', phaseId: `phase-${i}`, worktrees: seam }),
           );
           const results = queues.map((q, i) => q.dispatch(executeRequest(i)));
           await flush();
@@ -521,15 +521,15 @@ describe('run queue serialization + single-trigger dispatch (property harness)',
     );
   });
 
-  it('refuses a request for another todo as illegal-transition without launching', async () => {
+  it('refuses a request for another phase as illegal-transition without launching', async () => {
     const rig = makeRig(path.join(tmpDir, 'runs.jsonl'));
     const queue = createRunQueue({
       ...rig.deps,
       slug: 'demo',
-      phaseId: 'T01',
+      phaseId: 'P01',
       worktrees: fakeSeam(rig),
     });
-    const r = await queue.dispatch({ ...executeRequest(0), phaseId: 'T02' });
+    const r = await queue.dispatch({ ...executeRequest(0), phaseId: 'P02' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(!r.ok && r.error.kind, 'illegal-transition');
     assert.strictEqual(rig.stages.length, 0);

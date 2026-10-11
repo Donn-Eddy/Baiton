@@ -15,7 +15,7 @@ import { loadConfigMirror } from './configPanel.mirror.test';
  * Feature: config-panel, Property: the browser mirror validates identically to the TS core
  */
 
-describe('config panel mirror properties (config-panel T09)', () => {
+describe('config panel mirror properties ', () => {
   const mirror = loadConfigMirror();
 
   const roleEntryArb: fc.Arbitrary<RoleFormEntry> = fc.record({

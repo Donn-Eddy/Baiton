@@ -60,7 +60,7 @@ function updateOverviewTool(services: ToolServices): Tool {
     name: 'update_overview',
     description: "Rewrite a plan's preamble (Endstate, What needs changing, Limitations & constraints; or a legacy spec's OVERVIEW), leaving frontmatter and phases untouched.",
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' }, text: { type: 'string' } },
@@ -86,7 +86,7 @@ function updateOverviewTool(services: ToolServices): Tool {
           ok: false,
           error: loaded.kind === 'plan'
             ? `plan "${slug}" has no preamble/PHASES structure to update`
-            : `plan "${slug}" has no OVERVIEW/TODOS structure to update`,
+            : `plan "${slug}" has no preamble/PHASES (or legacy OVERVIEW/TODOS) structure to update`,
         };
       }
       const write = await writeAndCommit(services, loaded.absolute, rewritten, slug, slug, 'update overview');
@@ -108,7 +108,7 @@ function addPhaseTool(services: ToolServices): Tool {
     name: 'add_phase',
     description: 'Append a new pending phase line to a plan with an id (P## for a plan, T## for a legacy spec), title and optional hints.',
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: {
@@ -162,7 +162,7 @@ function editPhaseTool(services: ToolServices): Tool {
     name: 'edit_phase',
     description: "Rewrite a phase's title and hints, preserving its state; refuses protected states.",
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: {
@@ -221,7 +221,7 @@ function removePhaseTool(services: ToolServices): Tool {
     name: 'remove_phase',
     description: 'Delete a phase line from a plan; refuses when the phase is in a protected state.',
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' }, id: { type: 'string' } },
@@ -342,7 +342,7 @@ function renderPhaseLine(
 
 /**
  * Replace the legacy OVERVIEW section body (between `# OVERVIEW` and the next header)
- * with `text`, leaving frontmatter, the header lines and the TODOS section
+ * with `text`, leaving frontmatter, the header lines and the phase section
  * untouched. Returns undefined when there is no OVERVIEW header to update.
  */
 function replaceOverview(content: string, text: string): string | undefined {
@@ -351,7 +351,7 @@ function replaceOverview(content: string, text: string): string | undefined {
   if (overviewIdx === -1) {
     return undefined;
   }
-  // The section body runs until the next `#` header (typically `# TODOS`).
+  // Legacy: the old section body runs until the next `#` header (typically `# TODOS`).
   let end = lines.length;
   for (let i = overviewIdx + 1; i < lines.length; i++) {
     if (/^#+\s+/.test(lines[i])) {
@@ -392,6 +392,7 @@ function replacePreamble(content: string, text: string): string | undefined {
 /** Append a phase line to the kind's phase section; TODOS is legacy. */
 function appendPhaseLine(content: string, phaseLine: string, kind: DocumentKind): string {
   const lines = content.split('\n');
+  // Legacy: retain the old item section name for existing documents.
   const section = kind === 'plan' ? 'PHASES' : 'TODOS';
   const sectionIdx = lines.findIndex((line) => isHeader(line, section));
   if (sectionIdx === -1) {

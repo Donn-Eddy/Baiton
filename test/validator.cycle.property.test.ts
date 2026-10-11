@@ -20,7 +20,7 @@ import { DocumentKind, parsePlan, validatePlan, PlanError } from '../src/model';
  * excluded from the generated graph: no self-loops, no edges to missing
  * targets, no duplicate ids, all states/ids valid. Those are separate error
  * classes and would muddy the iff we are asserting here.
- * The rendered OVERVIEW/TODOS/T## documents are explicit legacy-spec fixtures.
+ * The rendered OVERVIEW/phases/T## documents are explicit legacy-plan fixtures.
  */
 
 /** A distinct id per node index, using the document kind's prefix. */
@@ -117,7 +117,7 @@ function nodesOnCycles(graph: Graph): Set<number> {
  * with a valid state and id; its `after` group lists the ids it points to. No
  * self-loop or missing target is ever produced, so the ONLY structural issue
  * such a document can carry is a dependency cycle. The legacy branch explicitly
- * retains OVERVIEW/TODOS/T## as a legacy-spec fixture.
+ * retains OVERVIEW/phases/T## as a legacy-plan fixture.
  */
 function renderDocument(graph: Graph, kind: DocumentKind): string {
   const lines: string[] = kind === 'plan'

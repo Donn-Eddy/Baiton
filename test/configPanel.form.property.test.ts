@@ -13,7 +13,7 @@ import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
  * fields of a {@link ConfigForm} iff each is within its closed range —
  * `plan_review_rounds` 0..10, `exec_attempts` 1..10, `stall_notice_minutes`
  * 1..1440 — mirroring loadConfig's Property 24 on the form side. This is what
- * keeps `media/config.js` (T09) honest against the same bounds. Pure: no
+ * keeps `media/config.js` honest against the same bounds. Pure: no
  * filesystem access inside the loop.
  */
 
@@ -37,7 +37,7 @@ function limitArb(field: keyof Limits): fc.Arbitrary<number> {
   );
 }
 
-describe('config panel form properties (config-panel T03)', () => {
+describe('config panel form properties ', () => {
   const AGENTS = createAdapterRegistry().ids;
   const OPTIONS = { agents: AGENTS, byAgent: agentCapabilities() };
 

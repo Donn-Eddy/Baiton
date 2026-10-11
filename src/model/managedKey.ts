@@ -1,6 +1,6 @@
 /**
  * A frontmatter key the extension is allowed to write. Every other byte of a
- * spec file is owned by the user or the orchestrator; the serializer touches
+ * plan document is owned by the user or the orchestrator; the serializer touches
  * only state boxes and these keys (Requirement 6.1).
  */
 export type ManagedKey =

@@ -1,5 +1,5 @@
 /**
- * A fake `vscode` module for host-free unit tests (Task 13.3, config-panel T11).
+ * A fake `vscode` module for host-free unit tests .
  *
  * The extension source imports `vscode` as a bare specifier, but there is no
  * requireable `vscode` runtime outside a running VS Code host. `vscodeLoader.mjs`

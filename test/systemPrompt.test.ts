@@ -11,7 +11,7 @@ import {
 } from '../src/orchestrator/systemPrompt';
 
 /**
- * Unit tests for the system-prompt builder (Task 3.2).
+ * Unit tests for the system-prompt builder.
  *
  * `buildSystemPrompt` is a host-free pure core (no `vscode` import), so these
  * tests exercise it directly. They assert the section-7 role text and
@@ -39,8 +39,8 @@ import {
  */
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
-// 'spec' is the legacy persisted conversation kind.
-const PLAN: ConversationKind = { kind: 'spec', slug: 'my-plan' };
+// 'plan' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'plan', slug: 'my-plan' };
 
 /** A plan document with the given frontmatter `status`. */
 function planWithStatus(status: string): string {
@@ -70,7 +70,7 @@ function planWithStatus(status: string): string {
   ].join('\n');
 }
 
-/** A legacy spec document with the given frontmatter `status`. */
+/** A legacy plan document with the given frontmatter `status`. */
 function legacySpecWithStatus(status: string): string {
   return [
     '---',
@@ -212,7 +212,7 @@ describe('buildSystemPrompt', () => {
       }
     });
 
-    it('describes plan P ids and legacy spec T ids', () => {
+    it('describes plan P ids and legacy plan T ids', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
       assert.match(prompt, /`P`.*two or more digits/i);
       assert.match(prompt, /legacy spec[^\n]*`T` ids/i);
@@ -385,7 +385,7 @@ describe('buildSystemPrompt', () => {
       }
     });
 
-    it('conversationStepFor is drive for an approved legacy spec document too', () => {
+    it('conversationStepFor is drive for an approved legacy plan document too', () => {
       assert.strictEqual(conversationStepFor(PLAN, APPROVED_LEGACY_SPEC), 'drive');
       assert.ok(buildSystemPrompt(PLAN, APPROVED_LEGACY_SPEC).includes(DRIVE_TEXT));
     });

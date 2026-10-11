@@ -1,6 +1,6 @@
 /**
- * Unit tests for the host-free Chat controller's intervention flow (spec
- * "Chat Interventions", todo T07).
+ * Unit tests for the host-free Chat controller's intervention flow (plan
+ * "Chat Interventions", phase ).
  *
  * This suite imports {@link ChatController} statically with no
  * `test/fixtures/vscodeLoader.mjs` hook, proving that the controller carries no
@@ -174,7 +174,6 @@ describe('ChatController interventions', () => {
   let webview: FakeWebview;
   let client: FakeModelClient;
   let baitonDir: string;
-  let specsDir: string;
   let askRegistry: PendingAskRegistry;
   let seam: InterventionSeam;
   let controller: ChatController;
@@ -189,7 +188,6 @@ describe('ChatController interventions', () => {
   function buildHarness(): void {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-'));
     baitonDir = path.join(tmp, '.baiton');
-    specsDir = path.join(tmp, '.baiton', 'specs');
     cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
 
     webview = new FakeWebview();
@@ -212,13 +210,13 @@ describe('ChatController interventions', () => {
       call: async (): Promise<{ ok: true; data: string } | { ok: false; error: string }> => {
         const answer = await seam.ask({
           kind: 'confirm',
-          prompt: 'Approve spec "x"?',
+          prompt: 'Approve plan "x"?',
           detail: 'This creates its branch.',
         });
         observed.push(answer);
         return answer.kind === 'approved'
           ? { ok: true, data: 'approved' }
-          : { ok: false, error: 'approval of spec "x" was declined; the spec is unchanged' };
+          : { ok: false, error: 'approval of plan "x" was declined; the plan is unchanged' };
       },
     } as unknown as ToolRegistry;
 
@@ -234,7 +232,6 @@ describe('ChatController interventions', () => {
       toolsFor: () => [],
       guardContext: () => ({}) as GuardContext,
       baitonDir,
-      specsDir,
       roundBound: () => 4,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
       triggerFix: (action, provider) => {
@@ -299,7 +296,7 @@ describe('ChatController interventions', () => {
     assert.ok(card.id.length > 0);
     assert.strictEqual(card.kind, 'confirm');
     assert.strictEqual(card.status, 'pending');
-    assert.strictEqual(card.prompt, 'Approve spec "x"?');
+    assert.strictEqual(card.prompt, 'Approve plan "x"?');
     assert.strictEqual(card.detail, 'This creates its branch.');
     // The loop is blocked on the ask: no tool result yet, and no render of the
     // finished loop beyond the one start() posted.
@@ -363,7 +360,7 @@ describe('ChatController interventions', () => {
     assert.strictEqual(interventionRecords.length, 1);
     const record = interventionRecords[0];
     assert.strictEqual(record.role, 'system');
-    assert.strictEqual(record.content, 'Approve spec "x"?');
+    assert.strictEqual(record.content, 'Approve plan "x"?');
     assert.strictEqual(record.intervention!.status, 'resolved');
     assert.deepStrictEqual(record.intervention!.answer, { kind: 'approved' });
 
@@ -476,14 +473,14 @@ describe('ChatController interventions', () => {
     await awaitRunEnd(3);
 
     const messages = client.requests[client.requests.length - 1];
-    const barePrompt = messages.filter((m) => m.content === 'Approve spec "x"?');
+    const barePrompt = messages.filter((m) => m.content === 'Approve plan "x"?');
     assert.strictEqual(barePrompt.length, 0, 'the bare prompt must not be a history message');
     const projected = messages.filter(
       (m) => m.role === 'assistant' && m.content.startsWith('[intervention] '),
     );
     assert.strictEqual(projected.length, 1);
     assert.ok(projected[0].content.includes('Decision: approved'));
-    assert.ok(projected[0].content.includes('[intervention] Approve spec "x"?'));
+    assert.ok(projected[0].content.includes('[intervention] Approve plan "x"?'));
   });
 
   it('replays a reloaded conversation with each tool message directly after its call', async () => {
@@ -501,7 +498,7 @@ describe('ChatController interventions', () => {
     assert.ok(callIdx >= 0, 'the assistant tool_calls entry is replayed');
     assert.strictEqual(messages[callIdx + 1].role, 'tool');
     assert.strictEqual(messages[callIdx + 1].tool_call_id, 'c1');
-    const cardIdx = messages.findIndex((m) => m.content.startsWith('[intervention] Approve spec "x"?'));
+    const cardIdx = messages.findIndex((m) => m.content.startsWith('[intervention] Approve plan "x"?'));
     assert.ok(cardIdx > callIdx + 1, 'the card follows the tool message');
     messages.forEach((m, i) => {
       if (m.role !== 'tool') {
@@ -727,7 +724,6 @@ describe('ChatController interventions', () => {
         toolsFor: () => [],
         guardContext: () => ({}) as GuardContext,
         baitonDir,
-        specsDir,
         roundBound: () => 4,
         config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
         triggerFix: () => {},

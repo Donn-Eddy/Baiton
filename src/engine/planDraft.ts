@@ -233,7 +233,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       appendStart(journalPath, {
         runId,
         // A plan draft has no individual phase yet, so its slug is the journal subject.
-        todoId: req.slug,
+        phaseId: req.slug,
         stage: PLAN_DRAFT_STAGE,
         attempt: 1,
         startHead: '',

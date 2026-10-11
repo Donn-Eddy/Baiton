@@ -122,11 +122,11 @@ describe('run modes and the investigate stage', () => {
     it('persists one unnumbered finding.md, whatever the call shape', () => {
       assert.strictEqual(persistencePathForStage('investigate'), 'finding.md');
       assert.strictEqual(
-        persistencePathForStage('investigate', 'T01'),
+        persistencePathForStage('investigate', 'P01'),
         'finding.md',
       );
       assert.strictEqual(
-        persistencePathForStage('investigate', 'T01', 3),
+        persistencePathForStage('investigate', 'P01', 3),
         'finding.md',
       );
       assert.strictEqual(stageArtifactIsNumbered('investigate'), false);
@@ -182,20 +182,20 @@ describe('run modes and the investigate stage', () => {
       assert.strictEqual(persistencePathForStage('plan-draft', undefined, undefined, 'legacy-spec'), 'spec.md');
       assert.strictEqual(persistencePathForStage('pr'), 'pr.md');
       assert.strictEqual(
-        persistencePathForStage('plan', 'T01'),
-        'phases/T01/plan.md',
+        persistencePathForStage('plan', 'P01'),
+        'phases/P01/plan.md',
       );
       assert.strictEqual(
-        persistencePathForStage('plan-review', 'T01', 2),
-        'phases/T01/plan-review-2.md',
+        persistencePathForStage('plan-review', 'P01', 2),
+        'phases/P01/plan-review-2.md',
       );
       assert.strictEqual(
-        persistencePathForStage('execute', 'T01', 3),
-        'phases/T01/execute-3.md',
+        persistencePathForStage('execute', 'P01', 3),
+        'phases/P01/execute-3.md',
       );
       assert.strictEqual(
-        persistencePathForStage('review', 'T01', 1),
-        'phases/T01/review-1.md',
+        persistencePathForStage('review', 'P01', 1),
+        'phases/P01/review-1.md',
       );
       assert.strictEqual(
         persistencePathForStage('plan', 'T01', undefined, 'legacy-spec'),

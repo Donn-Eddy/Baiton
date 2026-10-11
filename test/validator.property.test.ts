@@ -22,7 +22,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
  * base is asserted valid. Then, for the invalid half, inject exactly one
  * malformed construct into that base and assert the validator reports at least
  * one error while leaving the raw text byte-for-byte unchanged.
- * The generated OVERVIEW/TODOS/T## documents are legacy fixtures; a separate
+ * The generated OVERVIEW/phases/T## documents are legacy fixtures; a separate
  * prefix mutation property covers both document kinds.
  */
 
@@ -74,7 +74,7 @@ const baseDocumentArb: fc.Arbitrary<{ kind: DocumentKind; ids: string[]; phases:
   fc
     .record({
       kind: fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
-      preamble: fmValueArb.filter((value) => !/^#+\s+(PHASES|TODOS|OVERVIEW)\s*$/.test(value)),
+      preamble: fmValueArb.filter((value) => !/^#+\s+(PHASES|phases|OVERVIEW)\s*$/.test(value)),
     })
     .chain(({ kind, preamble }) =>
       fc.uniqueArray(idArb(kind), { minLength: 1, maxLength: 6 }).chain((ids) =>

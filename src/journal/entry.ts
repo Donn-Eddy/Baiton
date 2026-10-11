@@ -34,7 +34,7 @@ export type RunResultKind =
  */
 export interface JournalEntry {
   runId: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
   attempt: number;
   startHead: string;
@@ -73,12 +73,13 @@ export interface PrCompletion {
 
 /**
  * The record appended when a stage starts (Req 21.1): the run id, phase id
- * (serialized in the existing `todoId` field), stage,
+ * (serialized under the legacy `todoId` wire key), stage,
  * attempt, starting HEAD, input rev, and terminal process id.
  */
 export interface StartRecord {
   type: 'start';
   runId: string;
+  /** Legacy wire key: the phase id is serialized as `todoId` so existing journals still parse. */
   todoId: string;
   stage: Stage;
   attempt: number;

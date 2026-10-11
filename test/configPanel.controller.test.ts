@@ -1,6 +1,6 @@
 /**
- * Unit tests for the host-free Config Panel controller (spec "Config Panel",
- * config-panel todo T05).
+ * Unit tests for the host-free Config Panel controller (plan "Config Panel",
+ * config-panel phase ).
  *
  * This suite imports {@link ConfigPanelController} statically with no
  * `test/fixtures/vscodeLoader.mjs` hook, proving that the controller carries no
@@ -30,7 +30,7 @@
  *    note; an `applyConfig` that throws still yields `saved` (never `saveFailed`)
  *    with a note and a logged line; wiring a real `createConfigRefresh` over a
  *    fake target updates target.config.roles.<role>.model with no notes.
- * 8. `notifyExternalChange` (T07):
+ * 8. `notifyExternalChange` :
  *    - external edit with different bytes -> exactly one `externalChange` with new token;
  *    - self-write (save or accepted reset) -> no `externalChange` posted;
  *    - identical rewrite -> no message;
@@ -38,7 +38,7 @@
  *      `loadFailed { kind: 'absent', canReset: true }`;
  *    - stale token after external edit without reload -> `save` yields `saveFailed { reason: 'conflict' }`;
  *    - after `dispose()`, `notifyExternalChange` posts nothing.
- * 9. Live capabilities (model-selector-refresh T08): `getCapabilities` read per load,
+ * 9. Live capabilities : `getCapabilities` read per load,
  *    the `capabilities` / `agentCapabilities()` fallbacks, exactly one `optionsChanged`
  *    (and no second `loaded`) per capability change, per-agent stale propagation, a
  *    configured model dropped by a refresh still listed and still saveable, `start()`
@@ -91,7 +91,7 @@ class RecordingWebview implements ConfigPanelWebview {
   }
 }
 
-describe('ConfigPanelController (config-panel T05)', () => {
+describe('ConfigPanelController ', () => {
   const dirs: string[] = [];
 
   function newDir(): string {
@@ -578,7 +578,7 @@ describe('ConfigPanelController (config-panel T05)', () => {
     assert.strictEqual(target.config.roles.executor.model, 'claude-3-sonnet-custom');
   });
 
-  describe('8. notifyExternalChange (T07)', () => {
+ describe('8. notifyExternalChange ', () => {
     it('external edit with different bytes -> posts externalChange carrying the new token', async () => {
       const dir = newDir();
       const text = defaultConfigJson();
@@ -812,7 +812,7 @@ describe('ConfigPanelController (config-panel T05)', () => {
     });
   });
 
-  describe('9. live capabilities and optionsChanged (model-selector-refresh T08)', () => {
+ describe('9. live capabilities and optionsChanged ', () => {
     /**
      * A host-free stand-in for the pair the activation layer wires to
      * `agentCapabilities(store.table())` and `discovery.onDidChange(...)`.
@@ -1070,7 +1070,7 @@ describe('ConfigPanelController (config-panel T05)', () => {
       return webview;
     }
 
-    /** The live capability table for the modelEntries cases (codex-opencode-dropdown-fix T06). */
+ /** The live capability table for the modelEntries cases . */
     function listedSource() {
       return makeCapabilitySource({
         claude: {

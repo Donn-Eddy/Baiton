@@ -62,10 +62,7 @@ describe('SessionStore properties', () => {
           const root = mkdtempSync(path.join(os.tmpdir(), 'baiton-session-prop-'));
           try {
             const baitonDir = path.join(root, '.baiton');
-            const store = new SessionStore({
-              baitonDir,
-              specsDir: path.join(baitonDir, 'specs'),
-            });
+            const store = new SessionStore({ baitonDir });
             mkdirSync(store.dirFor(scope), { recursive: true });
             for (const session of sessions) {
               // Records are appended in timestamp order, as the recorder writes them.
@@ -131,7 +128,7 @@ describe('SessionStore properties', () => {
           const root = mkdtempSync(path.join(os.tmpdir(), 'baiton-session-tree-'));
           try {
             const baitonDir = path.join(root, '.baiton');
-            const store = new SessionStore({ baitonDir, specsDir: path.join(baitonDir, 'specs') });
+            const store = new SessionStore({ baitonDir });
             const written: string[] = [];
             const write = (id: string, records: GenRecord[]): void => {
               const file = store.pathFor(scope, id);

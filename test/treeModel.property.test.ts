@@ -163,7 +163,7 @@ const legacyDocumentFixtureArb: fc.Arbitrary<LegacyDocumentFixture> = fc
     }));
   });
 
-/** Renders a LegacyDocumentFixture. Legacy ids are assigned as T00, T01, ... */
+/** Renders a LegacyDocumentFixture. Legacy ids are assigned as, ... */
 function renderLegacyDocument(fixture: LegacyDocumentFixture): string {
   const lines: string[] = [];
 

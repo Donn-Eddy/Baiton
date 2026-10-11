@@ -18,7 +18,7 @@ import {
 import { runBranchFor, runWorktreeDirFor } from '../src/engine/runStore';
 
 /**
- * Unit tests for the run worktree lifecycle (T06), driven against real temporary
+ * Unit tests for the run worktree lifecycle, driven against real temporary
  * git repositories:
  *
  * - `createRunWorktree` creating `.baiton/worktrees/<id>/` on `baiton/<mode>/<id>`
@@ -67,7 +67,7 @@ function makeRepo(): string {
   return repo;
 }
 
-describe('run worktree lifecycle (T06)', () => {
+describe('run worktree lifecycle ', () => {
   const repos: string[] = [];
 
   /** Register a fresh repo for automatic cleanup. */

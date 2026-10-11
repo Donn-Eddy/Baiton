@@ -17,8 +17,8 @@ import { applyFormToDocument, formFromDocument, validateConfigForm } from '../sr
 import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
 
 /**
- * Unit tests for the Config Panel document I/O (spec "Config Panel",
- * config-panel T03): reading and classifying `config.json`
+ * Unit tests for the Config Panel document I/O (plan "Config Panel",
+ * config-panel ): reading and classifying `config.json`
  * (`readConfigDocument`), the lightweight token read (`readConfigToken`), the
  * conflict-guarded write (`writeConfigDocument`), and an end-to-end path
  * through the host-free core down to `loadConfig`.
@@ -27,7 +27,7 @@ import { agentCapabilities, createAdapterRegistry } from '../src/adapter';
  * the role of `.baiton/`, following the style of test/config.test.ts.
  */
 
-describe('config panel document I/O (config-panel T03)', () => {
+describe('config panel document I/O ', () => {
   const dirs: string[] = [];
 
   /** Allocate a fresh temp directory registered for cleanup. */
@@ -76,7 +76,7 @@ describe('config panel document I/O (config-panel T03)', () => {
 
     it('reports "unparseable" for a parsed non-object root', async () => {
       // Deliberately diverges from loadConfig, which reports a non-object root
-      // as missing-section: root (T02's documented decision); T05 must not
+ // as missing-section: root ; must not
       // expect a missing-section here.
       for (const text of ['[]', 'null', '42', '"text"']) {
         const dir = newDir();
@@ -289,7 +289,7 @@ describe('config panel document I/O (config-panel T03)', () => {
     });
   });
 
-  describe('end-to-end through the core (the T05 path, without a VS Code host)', () => {
+ describe('end-to-end through the core ', () => {
     it('a form that validates yields a document loadConfig accepts, with edits applied and unmanaged keys intact', async () => {
       const dir = newDir();
       const seed = JSON.parse(defaultConfigJson());

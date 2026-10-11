@@ -14,7 +14,7 @@ import { artifactPathFor } from '../src/engine/resultFlow';
 
 /**
  * Unit tests for the brief writer, the launcher's initial prompt, and the
- * result-watcher completion flow (task 10.4).
+ * result-watcher completion flow.
  *
  * These cover the parts of the stage engine that have observable structure
  * without a VS Code host: the fixed section ordering of the Brief (schema and
@@ -93,7 +93,7 @@ class FakeResultWatcher implements ResultWatcher {
 
 /** A conformant execute result the schema accepts. */
 const VALID_EXECUTE_RESULT = JSON.stringify({
-  summary: 'implemented the todo',
+  summary: 'implemented the phase',
   files_changed: ['src/a.ts'],
   commands_run: ['npm test'],
   notes: [],
@@ -160,7 +160,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'plan',
         role: 'planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Phase\n\nT01 do the thing.',
+        context: '## Phase\n\nP01 do the thing.',
         askRelay: { agent: 'antigravity', relay },
       });
 
@@ -184,7 +184,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'plan' as const,
         role: 'planner' as const,
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Phase\n\nT01 do the thing.',
+        context: '## Phase\n\nP01 do the thing.',
       };
       const without = buildBrief(base);
       const withField = buildBrief({ ...base, askRelay: undefined });
@@ -222,7 +222,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.match(text, /read-only/i);
       assert.match(text, /never assign an id/i);
       assert.ok(text.includes('P01'), 'brief explains the assigned id form');
-      assert.ok(!text.includes('T01'), 'brief does not use legacy todo ids');
+      assert.ok(!/\bT\d{2,}\b/.test(text), 'brief does not use legacy phase ids');
       assert.match(text, /1-based positions/i);
       assert.match(text, /`files` lists/);
     });
@@ -282,7 +282,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
         stage: 'execute',
         role: 'executor',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
-        context: '## Phase\n\nT01 do the thing.',
+        context: '## Phase\n\nP01 do the thing.',
       });
 
     it('states the result-file requirement in the Role section, before the Context', () => {
@@ -334,9 +334,9 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       const outcomePromise = awaitStageResult(
         {
           workspaceRoot: '/repo',
-          slug: 'my-spec',
+          slug: 'my-plan',
           stage: 'execute',
-          todoId: 'T01',
+          phaseId: 'P01',
           index: 1,
           terminal,
           watcher,
@@ -354,7 +354,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       assert.strictEqual(written.length, 1, 'the artifact was persisted once');
       assert.strictEqual(
         written[0].path,
-        artifactPathFor('/repo', 'my-spec', 'execute', 'T01', 1),
+        artifactPathFor('/repo', 'my-plan', 'execute', 'P01', 1),
         'artifact persisted at the numbered execute stage path',
       );
       assert.strictEqual(terminal.disposeCount, 1, 'terminal disposed on a valid result');
@@ -371,9 +371,9 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       const outcomePromise = awaitStageResult(
         {
           workspaceRoot: '/repo',
-          slug: 'my-spec',
+          slug: 'my-plan',
           stage: 'execute',
-          todoId: 'T01',
+          phaseId: 'P01',
           index: 1,
           terminal,
           watcher,
@@ -422,9 +422,9 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       const outcomePromise = awaitStageResult(
         {
           workspaceRoot: '/repo',
-          slug: 'my-spec',
+          slug: 'my-plan',
           stage: 'execute',
-          todoId: 'T01',
+          phaseId: 'P01',
           index: 1,
           terminal,
           watcher,

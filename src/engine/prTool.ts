@@ -15,7 +15,7 @@ import * as path from 'path';
 
 /** An existing or newly created pull/merge request. */
 export interface PullRequest {
-  /** The request's web URL; recorded as the spec's `pr:` frontmatter value. */
+  /** The request's web URL; recorded as the plan's `pr:` frontmatter value. */
   url: string;
   /** The request number (GitHub) or iid (GitLab) when the tool reports it. */
   number?: number;

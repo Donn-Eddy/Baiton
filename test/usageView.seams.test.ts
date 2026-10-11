@@ -12,7 +12,7 @@ import {
 } from '../src/activation/usageViewSeams';
 import { UsageService, createUsageReaders } from '../src/usage';
 
-/** Temp-dir tests of the real Node seams (spec first-party-usage, todo T10). */
+/** Temp-dir tests of the real Node seams . */
 
 const noAbort = () => new AbortController().signal;
 
@@ -29,7 +29,7 @@ function tree(dir: string): string[] {
   return out.sort();
 }
 
-describe('Usage view Node seams (first-party-usage T10)', () => {
+describe('Usage view Node seams ', () => {
   const dirs: string[] = [];
   const tmp = (): string => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-usage-'));

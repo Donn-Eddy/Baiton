@@ -97,10 +97,10 @@ export interface ToolContext {
  * Each tool declares its conversation phases, so the tool surface advertised
  * to the model and the surface the registry will run match the current job.
  */
-export type OrchestratorPhase = 'gather' | 'drive' | 'run';
+export type ConversationStep = 'gather' | 'drive' | 'run';
 
 /** All three orchestrator phases, for iteration in assembly and tests. */
-export const ORCHESTRATOR_PHASES: readonly OrchestratorPhase[] = ['gather', 'drive', 'run'] as const;
+export const CONVERSATION_STEPS: readonly ConversationStep[] = ['gather', 'drive', 'run'] as const;
 
 /** Who is asking for the tool surface: a top-level chat, or a sub-agent chat a parent spawned. A sub-agent sees only the read tools, ask_user, run (drive phase) and the two spawn tools; only a top-level chat finishes a plan. */
 export type ToolSurface = 'top' | 'subagent';
@@ -110,7 +110,7 @@ export const TOOL_SURFACES: readonly ToolSurface[] = ['top', 'subagent'] as cons
 export interface ToolCaller {
   sessionKey: string;
   depth: number;
-  phase: OrchestratorPhase;
+  step: ConversationStep;
   kind: ConversationKind;
   signal: AbortSignal;
 }
@@ -126,7 +126,7 @@ export interface ToolCaller {
  *                itself.
  * - `concurrent` — whether the tool loop may run this call in parallel with
  *                adjacent concurrent-flagged calls of the same completion.
- * - `phases`   — the orchestrator phases this tool is part of (Req 11.1). A
+   * - `steps`    — the conversation steps this tool is part of (Req 11.1). A
  *                tool is neither advertised nor runnable outside them.
  * - `schema`   — JSON Schema for the tool's arguments (validated elsewhere in
  *                the registry; carried here to match the design interface).
@@ -155,7 +155,7 @@ export interface Tool {
    * (Req 11.1). The registry refuses a call whose phase is not listed here
    * before the tool's `run` is reached.
    */
-  phases: readonly OrchestratorPhase[];
+  steps: readonly ConversationStep[];
   /**
    * Whether a sub-agent chat may see and call this tool (in the phases it lists). Unset means top-level only, so a new tool never leaks onto the sub-agent surface by default. Read tools are sub-agent tools by origin (the registry marks them), so they do not set it.
    */
@@ -367,6 +367,7 @@ export class GuardContext {
         error: {
           kind: 'outside-documents',
           requested,
+          // Legacy: specs/ remains protected while existing documents are supported.
           message: `mutating tool target is outside .baiton/plans/ and .baiton/specs/: ${requested}`,
         },
       };

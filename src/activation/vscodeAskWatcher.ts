@@ -26,7 +26,7 @@ export interface AskRoute {
   registry: PendingAskRegistry;
   /**
    * Present one routed ask. `context` is the run's trusted identity (the
-   * queue's adapter id, role and run id, plus the spec slug and todo id) and
+   * queue's adapter id, role and run id, plus the plan slug and phase id) and
    * is what the Auto-mode gate keys its allow-list and task context on.
    */
   present(ask: Intervention, context: AutoModeRunContext): void | Promise<void>;

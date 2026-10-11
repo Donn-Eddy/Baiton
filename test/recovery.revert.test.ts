@@ -12,7 +12,7 @@ import type { PhaseState } from '../src/model/phaseState';
  * Unit tests for crash recovery's revert-on-`fromState` behaviour (Req 1.3;
  * design "Recovery"). Host-free: a fake git seam (no `Run-Id` commit ever
  * landed, so every entry falls into the "no commit landed" branch), a fake
- * process seam (no live pids to kill), and a fake spec store recording every
+ * process seam (no live pids to kill), and a fake plan store recording every
  * `writeState` call.
  *
  * Covers one entry that records `fromState` (reverted to that state with
@@ -47,7 +47,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     },
   };
 
-  /** A spec store recording every writeState call. */
+  /** A plan store recording every writeState call. */
   function makeRecordingSpecStore(): Pick<PlanStore, 'writeState'> & {
     calls: Array<{ slug: string; phaseId: string; state: PhaseState; note?: string }>;
   } {
@@ -64,7 +64,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
   it('reverts a fromState-carrying entry to its From_State with `host exited` (action reverted-state)', async () => {
     appendStart(journalPath, {
       runId: 'run-with-fromstate',
-      todoId: 'T01',
+      phaseId: 'T01',
       stage: 'execute',
       attempt: 1,
       startHead: 'head0',
@@ -101,7 +101,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
   it('marks a legacy entry without fromState `failed` with `host exited` (action marked-failed)', async () => {
     appendStart(journalPath, {
       runId: 'run-legacy',
-      todoId: 'T02',
+      phaseId: 'T02',
       stage: 'execute',
       attempt: 1,
       startHead: 'head0',
@@ -134,28 +134,28 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     });
   });
 
-  it('reconciles result-less entries from the spec-level and per-todo journals, ignoring completed ones', async () => {
-    const specsDir = path.join(tmpDir, 'specs');
+  it('reconciles result-less entries from the plan-level and per-phase journals, ignoring completed ones', async () => {
+    const legacySpecsDir = path.join(tmpDir, 'specs');
     const base = { stage: 'execute' as const, attempt: 1, startHead: 'h', inputRev: 'r' };
-    appendStart(planJournalPathFor(path.dirname(specsDir), 'demo'), {
+    appendStart(planJournalPathFor(path.dirname(legacySpecsDir), 'demo'), {
       ...base,
       runId: 'r1',
-      todoId: 'T01',
+      phaseId: 'T01',
       fromState: 'planned',
     });
-    appendStart(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T02'), {
+    appendStart(phaseJournalPathFor(path.dirname(legacySpecsDir), 'demo', 'T02'), {
       ...base,
       runId: 'r2',
-      todoId: 'T02',
+      phaseId: 'T02',
       fromState: 'executed',
     });
-    appendStart(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T03'), {
+    appendStart(phaseJournalPathFor(path.dirname(legacySpecsDir), 'demo', 'T03'), {
       ...base,
       runId: 'r3',
-      todoId: 'T03',
+      phaseId: 'T03',
       fromState: 'planned',
     });
-    appendCompletion(phaseJournalPathFor(path.dirname(specsDir), 'demo', 'T03'), {
+    appendCompletion(phaseJournalPathFor(path.dirname(legacySpecsDir), 'demo', 'T03'), {
       runId: 'r3',
       result: 'completed',
     });
@@ -163,7 +163,7 @@ describe('recovery: revert to fromState on the no-commit-landed branch (Req 1.3)
     const planStore = makeRecordingSpecStore();
     const outcomes = await recoverJournal({
       slug: 'demo',
-    baitonDir: path.dirname(specsDir),
+    baitonDir: path.dirname(legacySpecsDir),
       git: noCommitGit,
       process: noLiveProcess,
       planStore,

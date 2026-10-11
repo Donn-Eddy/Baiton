@@ -17,7 +17,7 @@
  * 7. A `setMode` while the chat is busy is refused.
  * 8. A `setMode` while a run is in flight is refused.
  * 9. The mode decides the phase, the tool surface and the system prompt.
- * 10. A plan conversation ignores a non-spec mode entirely.
+ * 10. A plan conversation ignores a non-plan mode entirely.
  * 11. Run activity is mirrored, without duplicate posts.
  * 12. A completed run appends its completion note; a failed one also logs.
  * 13. The promote card dispatches through the ordinary run confirm card.
@@ -50,7 +50,7 @@ import type {
   GuardContext,
   HostToWebview,
   ModelClient,
-  OrchestratorPhase,
+  ConversationStep,
   StartRunOutcome,
   StartRunRequest,
   ToolRegistry,
@@ -142,11 +142,11 @@ describe('ChatController conversation mode', () => {
   let webview: FakeWebview;
   let client: FakeModelClient;
   let baitonDir: string;
-  let specsDir: string;
+  let legacySpecsDir: string;
   let controller: ChatController;
   let runs: FakeRuns;
-  /** The phases `toolsFor` was asked for, in call order. */
-  let phases: OrchestratorPhase[];
+  /** The conversation steps `toolsFor` was asked for, in call order. */
+  let steps: ConversationStep[];
   /** Every `set` call the fake mode memory received. */
   let modeSets: RunMode[];
   /** Every dispatch the run-pipeline seam received. */
@@ -170,14 +170,14 @@ describe('ChatController conversation mode', () => {
   function buildHarness(options: HarnessOptions = {}): void {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-mode-'));
     baitonDir = path.join(tmp, '.baiton');
-    specsDir = path.join(tmp, '.baiton', 'specs');
-    fs.mkdirSync(specsDir, { recursive: true });
+    legacySpecsDir = path.join(tmp, '.baiton', 'specs');
+    fs.mkdirSync(legacySpecsDir, { recursive: true });
     cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
 
     webview = new FakeWebview();
     client = new FakeModelClient();
     runs = new FakeRuns();
-    phases = [];
+    steps = [];
     modeSets = [];
     startCalls = [];
     startOutcome = { kind: 'started', runId: 'run-b1', branch: 'baiton/bug/run-b1' };
@@ -199,7 +199,7 @@ describe('ChatController conversation mode', () => {
         _args: unknown,
         _id: string,
         _ctx: unknown,
-        _phase: unknown,
+        _step: unknown,
         surface?: unknown,
         caller?: unknown,
       ): Promise<{ ok: true; data: string }> => {
@@ -212,13 +212,12 @@ describe('ChatController conversation mode', () => {
       webview,
       client,
       registry,
-      toolsFor: (phase) => {
-        phases.push(phase);
+      toolsFor: (step) => {
+        steps.push(step);
         return [];
       },
       guardContext: () => ({ restricted: options.restricted === true }) as GuardContext,
       baitonDir,
-      specsDir,
       roundBound: () => 4,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
       triggerFix: () => {},
@@ -368,14 +367,14 @@ describe('ChatController conversation mode', () => {
   });
 
   it('loads a legacy stored mode as plan', async () => {
-    // Legacy stored mode compatibility: persisted 'spec' maps to plan.
+    // Legacy stored mode compatibility: persisted 'plan' maps to plan.
     buildHarness({ storedMode: 'spec' });
     await started();
     assert.strictEqual(webview.all('setMode')[0].mode, 'plan');
 
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['gather']);
+    assert.deepStrictEqual(steps, ['gather']);
     assert.strictEqual(client.requests[0][0].content, buildSystemPrompt({ kind: 'workspace' }));
   });
 
@@ -383,13 +382,13 @@ describe('ChatController conversation mode', () => {
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['run']);
+    assert.deepStrictEqual(steps, ['run']);
     const prompt = client.requests[0][0].content;
     assert.strictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }, undefined, 'default'));
     assert.notStrictEqual(prompt, buildSystemPrompt({ kind: 'workspace' }));
   });
 
-  it('top-level tool calls carry the top surface and a depth-0 caller with the derived phase', async () => {
+  it('top-level tool calls carry the top surface and a depth-0 caller with the derived conversation step', async () => {
     client.queue.push(
       { content: '', tool_calls: [{ id: 'c1', name: 'any_tool', arguments: '{}' }] },
       { content: 'done', tool_calls: [] },
@@ -397,18 +396,18 @@ describe('ChatController conversation mode', () => {
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => toolCalls.length === 1, 'the tool call');
-    assert.deepStrictEqual(phases, ['run']);
+    assert.deepStrictEqual(steps, ['run']);
     assert.strictEqual(toolCalls[0].surface, 'top');
-    const caller = toolCalls[0].caller as { phase: string; depth: number; sessionKey: string };
-    assert.strictEqual(caller.phase, phases[0]);
+    const caller = toolCalls[0].caller as { step: string; depth: number; sessionKey: string };
+    assert.strictEqual(caller.step, steps[0]);
     assert.strictEqual(caller.depth, 0);
     assert.ok(caller.sessionKey.startsWith('workspace/'));
   });
 
   it('a plan conversation stays pinned to Phased Plan from a Default workspace', async () => {
     const content = '---\nstatus: draft\n---\n# Alpha\n';
-    fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
-    fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
+    fs.mkdirSync(path.join(legacySpecsDir, 'alpha'), { recursive: true });
+    fs.writeFileSync(path.join(legacySpecsDir, 'alpha', 'spec.md'), content);
     await started();
     assert.strictEqual(webview.all('setMode')[0].mode, 'default');
 
@@ -420,10 +419,10 @@ describe('ChatController conversation mode', () => {
 
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['gather']);
+    assert.deepStrictEqual(steps, ['gather']);
     assert.strictEqual(
       client.requests[0][0].content,
-      buildSystemPrompt({ kind: 'spec', slug: 'alpha' }, content),
+      buildSystemPrompt({ kind: 'plan', slug: 'alpha' }, content),
     );
 
     controller.setActivePlan(undefined);
@@ -446,10 +445,10 @@ describe('ChatController conversation mode', () => {
     await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the Phased Plan paint');
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the plan completion');
-    assert.deepStrictEqual(phases, ['gather']);
+    assert.deepStrictEqual(steps, ['gather']);
     assert.strictEqual(
       client.requests[0][0].content,
-      buildSystemPrompt({ kind: 'spec', slug: 'beta' }, content),
+      buildSystemPrompt({ kind: 'plan', slug: 'beta' }, content),
     );
   });
 
@@ -480,8 +479,8 @@ describe('ChatController conversation mode', () => {
 
   it('pins a plan conversation to Plan and repaints the remembered mode on return', async () => {
     buildHarness({ storedMode: 'bug' });
-    fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
-    fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), '---\nstatus: draft\n---\n# Alpha\n');
+    fs.mkdirSync(path.join(legacySpecsDir, 'alpha'), { recursive: true });
+    fs.writeFileSync(path.join(legacySpecsDir, 'alpha', 'spec.md'), '---\nstatus: draft\n---\n# Alpha\n');
     await started();
 
     controller.setActivePlan('alpha');
@@ -529,7 +528,7 @@ describe('ChatController conversation mode', () => {
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['run']);
+    assert.deepStrictEqual(steps, ['run']);
     assert.strictEqual(
       client.requests[0][0].content,
       buildSystemPrompt({ kind: 'workspace' }, undefined, 'bug'),
@@ -539,25 +538,25 @@ describe('ChatController conversation mode', () => {
     await started();
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['gather']);
+    assert.deepStrictEqual(steps, ['gather']);
     assert.strictEqual(client.requests[0][0].content, buildSystemPrompt({ kind: 'workspace' }));
   });
 
   it('ignores a non-plan mode on a plan conversation', async () => {
     buildHarness({ storedMode: 'quick' });
     const content = '---\nstatus: approved\n---\n# Alpha\n';
-    fs.mkdirSync(path.join(specsDir, 'alpha'), { recursive: true });
-    fs.writeFileSync(path.join(specsDir, 'alpha', 'spec.md'), content);
+    fs.mkdirSync(path.join(legacySpecsDir, 'alpha'), { recursive: true });
+    fs.writeFileSync(path.join(legacySpecsDir, 'alpha', 'spec.md'), content);
     await started();
     controller.setActivePlan('alpha');
     await waitFor(() => webview.last('setMode')?.mode === 'plan', 'the pinned Plan paint');
 
     await webview.send({ type: 'sendText', text: 'go' });
     await waitFor(() => client.requests.length >= 1, 'the completion');
-    assert.deepStrictEqual(phases, ['drive']);
+    assert.deepStrictEqual(steps, ['drive']);
     assert.strictEqual(
       client.requests[0][0].content,
-      buildSystemPrompt({ kind: 'spec', slug: 'alpha' }, content),
+      buildSystemPrompt({ kind: 'plan', slug: 'alpha' }, content),
     );
   });
 

@@ -2,8 +2,8 @@
  * Session store unit tests.
  *
  * The store is the host-free core behind the Chat_View's per-scope chat
- * sessions: workspace sessions at `.baiton/chat/<id>.jsonl`, spec sessions at
- * `.baiton/specs/<slug>/chat/<id>.jsonl`, with all metadata derived from the
+ * sessions: workspace sessions at `.baiton/chat/<id>.jsonl`, plan sessions at
+ * `.baiton/plans/<slug>/chat/<id>.jsonl`, with all metadata derived from the
  * transcript files themselves. These run against real directories under
  * `os.tmpdir()`, so the filesystem behaviour is exercised, not mocked.
  */
@@ -21,14 +21,18 @@ import {
 
 describe('SessionStore', () => {
   const workspace: SessionScope = { kind: 'workspace' };
-  const spec: SessionScope = { kind: 'spec', slug: 'my-spec' };
+  const planScope: SessionScope = { kind: 'plan', slug: 'my-plan' };
+  const legacyPlanScope: SessionScope = { kind: 'plan', slug: 'my-legacy-plan' };
 
   /** A fresh temp `.baiton` layout plus a store over it. */
-  function newStore(): { store: SessionStore; baitonDir: string; specsDir: string } {
+  function newStore(): { store: SessionStore; baitonDir: string; legacySpecsDir: string } {
     const baitonDir = path.join(mkdtempSync(path.join(os.tmpdir(), 'baiton-sessions-')), '.baiton');
-    const specsDir = path.join(baitonDir, 'specs');
-    mkdirSync(specsDir, { recursive: true });
-    return { store: new SessionStore({ baitonDir, specsDir }), baitonDir, specsDir };
+    const legacySpecsDir = path.join(baitonDir, 'specs');
+    mkdirSync(path.join(baitonDir, 'plans', 'my-plan'), { recursive: true });
+    mkdirSync(path.join(legacySpecsDir, 'my-legacy-plan'), { recursive: true });
+    writeFileSync(path.join(baitonDir, 'plans', 'my-plan', 'plan.md'), '# PHASES\n', 'utf8');
+    writeFileSync(path.join(legacySpecsDir, 'my-legacy-plan', 'spec.md'), '# OVERVIEW\n\n# TODOS\n', 'utf8');
+    return { store: new SessionStore({ baitonDir }), baitonDir, legacySpecsDir };
   }
 
   /** Write a session transcript file directly, with one record per entry. */
@@ -47,7 +51,7 @@ describe('SessionStore', () => {
   it('lists nothing when the scope has no session folder', async () => {
     const { store } = newStore();
     assert.deepStrictEqual(await store.list(workspace), []);
-    assert.deepStrictEqual(await store.list(spec), []);
+    assert.deepStrictEqual(await store.list(planScope), []);
   });
 
   it('lists sessions newest first by updatedAt', async () => {
@@ -78,26 +82,39 @@ describe('SessionStore', () => {
     writeSession(store, workspace, 'w1', [
       { ts: '2026-09-01T10:00:00.000Z', role: 'user', content: 'workspace one' },
     ]);
-    writeSession(store, spec, 's1', [
-      { ts: '2026-09-01T11:00:00.000Z', role: 'user', content: 'spec one' },
+    writeSession(store, planScope, 's1', [
+      { ts: '2026-09-01T11:00:00.000Z', role: 'user', content: 'plan one' },
     ]);
 
     assert.deepStrictEqual((await store.list(workspace)).map((m) => m.id), ['w1']);
-    assert.deepStrictEqual((await store.list(spec)).map((m) => m.id), ['s1']);
+    assert.deepStrictEqual((await store.list(planScope)).map((m) => m.id), ['s1']);
   });
 
   it('pathFor places sessions under the scope folder and create allocates an id without a file', () => {
-    const { store, baitonDir, specsDir } = newStore();
+    const { store, baitonDir } = newStore();
     const id = store.create(workspace);
 
     assert.match(id, /^\d{8}-\d{6}-[0-9a-z]{4}$/);
     assert.strictEqual(store.pathFor(workspace, id), path.join(baitonDir, 'chat', `${id}.jsonl`));
     assert.strictEqual(
-      store.pathFor(spec, 'abc'),
-      path.join(specsDir, 'my-spec', 'chat', 'abc.jsonl'),
+      store.pathFor(planScope, 'abc'),
+      path.join(baitonDir, 'plans', 'my-plan', 'chat', 'abc.jsonl'),
     );
     // Persistence begins at the first append: nothing was written.
     assert.strictEqual(existsSync(store.pathFor(workspace, id)), false);
+  });
+
+  it('routes plan and legacy document sessions to their resolved roots', () => {
+    const { store, baitonDir } = newStore();
+    assert.strictEqual(store.dirFor(planScope), path.join(baitonDir, 'plans', 'my-plan', 'chat'));
+    assert.strictEqual(
+      store.dirFor(legacyPlanScope),
+      path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat'),
+    );
+    assert.strictEqual(
+      store.legacyPathFor(legacyPlanScope),
+      path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat.jsonl'),
+    );
   });
 
   it('create allocates distinct ids', () => {
@@ -235,22 +252,22 @@ describe('SessionStore', () => {
 
     it('is a no-op when there is no legacy transcript, and idempotent on a second run', async () => {
       const { store } = newStore();
-      assert.strictEqual(await store.migrateLegacy(spec), undefined);
+      assert.strictEqual(await store.migrateLegacy(planScope), undefined);
 
-      const legacy = store.legacyPathFor(spec);
+      const legacy = store.legacyPathFor(planScope);
       mkdirSync(path.dirname(legacy), { recursive: true });
       writeFileSync(
         legacy,
-        `${JSON.stringify({ ts: '2026-09-02T08:00:00.000Z', role: 'user', content: 'spec legacy' })}\n`,
+        `${JSON.stringify({ ts: '2026-09-02T08:00:00.000Z', role: 'user', content: 'plan legacy' })}\n`,
         'utf8',
       );
 
-      const first = await store.migrateLegacy(spec);
-      const second = await store.migrateLegacy(spec);
+      const first = await store.migrateLegacy(planScope);
+      const second = await store.migrateLegacy(planScope);
 
       assert.ok(first);
       assert.strictEqual(second, undefined);
-      assert.deepStrictEqual((await store.list(spec)).map((m) => m.id), [first]);
+      assert.deepStrictEqual((await store.list(planScope)).map((m) => m.id), [first]);
     });
   });
 
@@ -258,14 +275,14 @@ describe('SessionStore', () => {
     const rec = (ts: string, content = 'task') => [{ ts, role: 'user', content }];
 
     it('pathFor nests children and leaves top-level paths unchanged', () => {
-      const { store, baitonDir, specsDir } = newStore();
+      const { store, baitonDir } = newStore();
       assert.strictEqual(
         store.pathFor(workspace, 'p/c'),
         path.join(baitonDir, 'chat', 'p.children', 'c.jsonl'),
       );
       assert.strictEqual(
-        store.pathFor(spec, 'p/c/g'),
-        path.join(specsDir, 'my-spec', 'chat', 'p.children', 'c.children', 'g.jsonl'),
+        store.pathFor(planScope, 'p/c/g'),
+        path.join(baitonDir, 'plans', 'my-plan', 'chat', 'p.children', 'c.children', 'g.jsonl'),
       );
       assert.strictEqual(store.pathFor(workspace, 'p'), path.join(baitonDir, 'chat', 'p.jsonl'));
     });
@@ -365,8 +382,8 @@ describe('SessionStore', () => {
     });
   });
 
-  it('scopeId names the workspace scope and each spec by slug', () => {
+  it('scopeId names the workspace scope and each plan by slug', () => {
     assert.strictEqual(scopeId(workspace), 'workspace');
-    assert.strictEqual(scopeId(spec), 'my-spec');
+    assert.strictEqual(scopeId(planScope), 'my-plan');
   });
 });

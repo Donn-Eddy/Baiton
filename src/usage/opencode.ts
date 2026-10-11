@@ -1,6 +1,6 @@
 /**
- * Host-free OpenCode Go usage reader for the Usage view (spec first-party-usage,
- * todo T06). Imports only './model' and './usageService': no editor-host API,
+ * Host-free OpenCode Go usage reader for the Usage view. Imports only './model'
+ * and './usageService': no editor-host API,
  * no Node built-in module, no import of the opencode adapter. Every effect
  * (reading the stored login, one HTTPS GET) goes through an injected seam and
  * happens only inside the returned reader.

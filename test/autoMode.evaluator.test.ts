@@ -16,7 +16,7 @@ import type {
 } from '../src/orchestrator/modelClient';
 
 /**
- * Unit tests for the auto-mode stage-(b) risk evaluator (T10): the
+ * Unit tests for the auto-mode stage-(b) risk evaluator : the
  * risk-evaluation prompt, its deterministic message builder, the defensive
  * reply parser, the injected-client call, and the `decideAsk` composition of
  * the allow-list gate and the model evaluator.

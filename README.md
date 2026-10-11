@@ -1,11 +1,11 @@
 # Baiton
 
-Spec-driven development with heterogeneous coding CLI agents. Baiton is an
-open-source VS Code extension: a chat orchestrator authors and drives spec
-files, and the editor renders those specs and their todos. A conversation also
-runs in one of six **modes** — Default, Spec, Bug, Quick, Refactor and
+Phased-plan development with heterogeneous coding CLI agents. Baiton is an
+open-source VS Code extension: a chat orchestrator authors and drives plan
+files, and the editor renders those plans and their phases. A conversation also
+runs in one of six **modes** — Default, Phased Plan, Bug, Quick Fix, Refactor and
 Investigate. A Workspace conversation starts in Default, which recommends one of
-the other five, and the non-Spec modes dispatch spec-less runs, each on its own
+the other five, and the non-Plan modes dispatch plan-less runs, each on its own
 branch and worktree.
 
 ## The Baiton views
@@ -13,13 +13,13 @@ branch and worktree.
 Baiton contributes two view containers, one on each side of the window:
 
 - the **activity bar** container (the `$(rocket)` icon, titled **Baiton**),
-  holding the **Spec Explorer**, the **Runs** view, the collapsed **Usage**
+  holding the **Plan Explorer**, the **Runs** view, the collapsed **Usage**
   section and the collapsed **Configuration** section;
 - the **secondary side bar** container (the `$(comment-discussion)` icon,
   titled **Baiton Chat**), holding the **Chat** view. If the secondary side bar
   is hidden, run **View: Toggle Secondary Side Bar** to reveal it.
 
-Specs therefore sit on one side of the editor and the chat on the other, with
+Plans therefore sit on one side of the editor and the chat on the other, with
 no manual dragging. If you dragged the Chat view somewhere yourself in an
 earlier version, VS Code remembers that placement and keeps it; run
 **View: Reset View Locations** once to put both views back where Baiton
@@ -27,28 +27,28 @@ contributes them.
 
 The views:
 
-- **Spec Explorer** — a tree listing each `.baiton/specs/<slug>/spec.md` in the
-  repository. Every spec shows its slug, its frontmatter `status` (or an
+- **Plan Explorer** — a tree listing each `.baiton/plans/<slug>/plan.md` in the
+  repository. Every plan shows its slug, its frontmatter `status` (or an
   unset-status indication), and an approved marker when it has been approved.
-  Under a valid spec you get one node per todo with its id, title, state and a
-  blocked marker; under an invalid spec you get one node per validation error
-  with its reason and 1-based line number. Each todo node carries inline
-  actions for whichever of **Plan**, **Execute**, **Review**, **Re-plan** and
-  **Stop** are legal for its current state, plus **View** when the todo is
+  Under a valid plan you get one node per phase with its id, title, state and a
+  blocked marker; under an invalid plan you get one node per validation error
+  with its reason and 1-based line number. Each phase node carries inline
+  actions for whichever of **Plan Phase**, **Execute Phase**, **Review Phase**,
+  **Re-plan Phase** and **Stop Running Stage** are legal for its current state, plus **View** when the phase is
   running or has a recorded sub-agent session and **View plan** once it has
-  been planned; the CodeLens over the todo in `spec.md` shows the same
+  been planned; the CodeLens over the phase in `plan.md` shows the same
   state-gated set. **View** reveals the running stage's terminal, or, once it
   has finished, opens a new terminal resuming its sub-agent session. **View
-  plan** opens the todo's plan (`.baiton/specs/<slug>/todos/<id>/plan.md`),
+  plan** opens the phase's plan (`.baiton/plans/<slug>/phases/<id>/plan.md`),
   which you can edit before running Execute — the executor is briefed from the
-  file as it stands at launch. **Stop** cancels a running stage or, on a todo that
+  file as it stands at launch. **Stop** cancels a running stage or, on a phase that
   is not running, reverts it from `planning`, `executing` or `reviewing` back
-  to the state its current stage started from. Each spec root carries an
-  **Approve** action. These actions are hidden while the workspace is in
+  to the state its current stage started from. Each plan root carries an
+  **Approve Plan** action. These actions are hidden while the workspace is in
   Restricted Mode. The tree refreshes automatically when files under
-  `.baiton/specs/**` change.
+  either document root change.
 
-- **Runs** — a tree of the spec-less runs a non-Spec conversation dispatched,
+- **Runs** — a tree of the plan-less runs a non-Plan conversation dispatched,
   split into **Active** and **Complete**, with **Cancel**, **View diff** and
   **Merge** as its item actions. See **The Runs view** below.
 
@@ -72,51 +72,51 @@ The views:
   why. Nothing is written. See [Usage view (per-tool probe findings)](#usage-view-per-tool-probe-findings).
 
 - **Chat** — a webview hosting the orchestrator conversations: one Workspace
-  conversation for creating new specs, plus one conversation per spec. Selecting
-  a spec in the Spec Explorer (or opening its `spec.md`) switches the chat to
-  that spec's conversation. Each tool the orchestrator calls appears as a
+  conversation for creating new plans, plus one conversation per plan. Selecting
+  a plan in the Plan Explorer (or opening its `plan.md`) switches the chat to
+  that plan's conversation. Each tool the orchestrator calls appears as a
   collapsed one-line row — the tool name, its first argument and a status dot —
   that you can expand to see the arguments and the result.
 
 ### What the orchestrator does
 
-In a **Spec** conversation the orchestrator has exactly two jobs:
+In a **Phased Plan** conversation the orchestrator has exactly two jobs:
 
-1. **Create a spec** — ask you clarifying questions until you agree on what the
-   work is, then hand the agreed requirements to the spec writer with
-   `draft_spec`.
-2. **Drive an approved spec** — dispatch each stage with `run` until every todo
+1. **Create a plan** — ask you clarifying questions until you agree on what the
+   work is, then hand the agreed requirements to the plan writer with
+   `draft_plan`.
+2. **Drive an approved plan** — dispatch each stage with `run` until every phase
    is done, then `submit_pr`.
 
-In a non-Spec conversation it has one job instead — **start a run**: understand
+In a non-Plan conversation it has one job instead — **start a run**: understand
 the work, then dispatch it with `start_run` or `investigate` (see
 **Conversation modes** below).
 
-It writes no specs, no plans and no code, and it reviews nothing: the agent
+It writes no plans, no phases and no code, and it reviews nothing: the agent
 configured for each role does that work when the orchestrator dispatches it.
 When a tool refuses, the orchestrator quotes the refusal to you and stops
 rather than diagnosing it or trying another route.
 
 Its tools follow the job it is doing, so it can only act within it:
 
-| tools | creating a spec | driving a spec | in a run |
+| tools | creating a plan | driving a plan | in a run |
 |---|---|---|---|
-| `list_specs`, `read_spec`, `git_status` | yes | yes | yes |
+| `list_plans`, `read_plan`, `git_status` | yes | yes | yes |
 | `ask_user` | yes | yes | yes |
 | `list_files`, `read_file`, `search`, `git_diff`, `git_log` | yes | no | yes |
-| `update_overview`, `add_todo`, `edit_todo`, `remove_todo` | yes | yes | no |
-| `draft_spec` | yes | no | no |
-| `approve_spec` | yes | yes (re-approve) | no |
-| `run`, `submit_pr` | no | yes | no |
+| `update_overview`, `add_phase`, `edit_phase`, `remove_phase` | yes | yes | no |
+| `draft_plan` | yes | no | no |
+| `approve_plan` | yes | yes (re-approve) | no |
+| `run`, `land_phase`, `submit_pr` | no | yes | no |
 | `start_run`, `investigate` | no | no | yes |
 
-The spec tools keep the phases they always had, so they are simply unavailable
-in a non-Spec conversation; and because `start_run` and `investigate` are
+The plan tools are unavailable in a non-Plan conversation; and because
+`start_run` and `investigate` are
 dispatch tools, the guard's Restricted-Mode rule disables them exactly as it
 disables every other dispatch tool.
 
-`ask_user` joins `list_specs`, `read_spec` and `git_status` as a tool that is
-available in all three phases. Where a point needs your answer, the orchestrator
+`ask_user` joins `list_plans`, `read_plan` and `git_status` as a tool that is
+available in all three conversation steps. Where a point needs your answer, the orchestrator
 calls `ask_user(question, options?, allow_free_text?, placeholder?)` instead of
 ending its turn with a question: the question appears as an inline card in the
 conversation and the call blocks until you answer it, so your answer comes back
@@ -131,11 +131,13 @@ instruction that tells the model this is what it receives in its system prompt
 (`ASK_USER_TEXT` in `src/orchestrator/systemPrompt.ts`). See
 **Interventions in chat** below for the cards themselves.
 
-A spec conversation counts as "creating" while its frontmatter `status` is
-`draft`, and as "driving" from `approved` onwards. A non-Spec conversation is in
-the `run` phase throughout. There is no tool for reading a stage's artifacts:
+A plan conversation counts as "creating" while its frontmatter `status` is
+`draft`, and as "driving" from `approved` onwards. Conversation steps are
+`gather`, `drive` and `run` (`ConversationStep`); these describe the chat's
+current job, while a plan phase is one item in the plan. A non-Plan conversation
+uses the `run` step throughout. There is no tool for reading a stage's artifacts:
 the plan and the review write-ups are for you, through **View plan** and the
-todo's folder under `.baiton/specs/<slug>/todos/<id>/` — or, for a run,
+phase's folder under `.baiton/plans/<slug>/phases/<id>/` — or, for a run,
 `plan.md`, `review-<n>.md` and `finding.md` under `.baiton/runs/<run-id>/` — not
 for the orchestrator to second-guess.
 
@@ -143,26 +145,26 @@ for the orchestrator to second-guess.
 
 A conversation runs in one of six modes, which decides the pipeline a dispatch
 from it runs. The composer's Mode control shows them by these labels, and the
-ids are `default | spec | bug | quick | refactor | investigate` (`RunMode` in
+ids are `default | plan | bug | quick | refactor | investigate` (`RunMode` in
 `src/model/mode.ts`, listed in this order by `RUN_MODES`):
 
 - **Default** — the mode a Workspace conversation starts in: it recommends one
   of the five modes below and dispatches the one you pick. It is never itself a
   run.
-- **Spec** — the unchanged spec flow: gather requirements → `draft_spec` →
-  approve → one `run` per todo, writing under `.baiton/specs/`.
+- **Phased Plan** — gather requirements → `draft_plan` → `approve_plan` → one
+  `run` per phase, writing under `.baiton/plans/`.
 - **Bug** — a defect with a reproduction.
-- **Quick** — one small, self-contained change.
+- **Quick Fix** — one small, self-contained change.
 - **Refactor** — a behaviour-preserving restructure.
 - **Investigate** — a question to be answered rather than work to be done.
 
 `DEFAULT_MODE` is `default`: the Workspace conversation starts in Default, and
-an absent or unknown stored value falls back to it. A spec conversation does
-not follow it — it is always Spec, exactly as before. **Bug**, **Quick** and **Refactor** share ONE spec-less
+an absent or unknown stored value falls back to it. A plan conversation does
+not follow it — it is always Phased Plan, exactly as before. **Bug**, **Quick Fix** and **Refactor** share ONE plan-less
 plan → execute → review pipeline that differs only in the framing handed to the
 planner and the executor; **Investigate** is a read-only dispatch ending in a
-written finding. No non-Spec mode reads or writes anything under
-`.baiton/specs/` (`isSpecless(mode)` in `src/model/mode.ts`).
+written finding. No non-Plan mode reads or writes anything under
+`.baiton/plans/` (`isPlanless(mode)` in `src/model/mode.ts`).
 
 **The Mode control** is a `<select>` in the composer's control row immediately
 left of the **Auto** toggle (`#mode-select` in `media/chat.html`, `renderMode` in
@@ -172,11 +174,11 @@ host echoes `setMode` back (`src/orchestrator/webviewProtocol.ts` carries
 `setMode` in both directions plus the host→webview `setRunActive` flag;
 `media/protocol.js` mirrors the reducer and a shared-fixture parity test pins
 the two together). It is disabled while the chat is busy, while a run is in
-flight (`setRunActive`), and on a spec conversation, which is pinned to Spec
+flight (`setRunActive`), and on a plan conversation, which is pinned to Phased Plan
 because the mode is a property of the Workspace conversation. Its three tooltips
 are, verbatim:
 
-- "A spec conversation always runs the Spec pipeline."
+- "A plan conversation always runs the Phased Plan pipeline."
 - "A run is in flight; the mode cannot change until it finishes."
 - "Conversation mode: the pipeline a dispatch from this chat runs."
 
@@ -185,7 +187,7 @@ The selection is remembered per workspace in VS Code's `workspaceState` under
 `settings.json` — the same arrangement as `baiton.chat.autoMode` and
 `baiton.orchestrator.selection`.
 
-In a non-Spec conversation `OrchestratorPhase` is `run`, and the flow follows
+In a non-Plan conversation `ConversationStep` is `run`, and the flow follows
 one beat list per mode (`RUN_FLOW_TEXT` in `src/orchestrator/systemPrompt.ts`):
 inspect the repository with the read tools, state the work in one line, name the
 files it most likely touches, then call the run tool and tell you it has
@@ -203,7 +205,7 @@ with an `ask_user` card whose options are the five modes, its recommendation
 first, with a typed answer allowed. It dispatches only what you pick, with the
 tools that already exist: `start_run` with `mode` `bug`, `quick` or `refactor`,
 or `investigate`; that tool's own confirm card still decides whether the work
-starts. Picking **Spec** dispatches nothing — change the Mode control to Spec
+starts. Picking **Phased Plan** dispatches nothing — change the Mode control to Phased Plan
 and send the request again — and a decline or a typed answer dispatches
 nothing either. A run started from Default carries the picked mode in its run
 id and branch, while its manifest records `composerMode: default` and
@@ -232,14 +234,14 @@ you were last in is restored on the next window reload.
 Transcripts are stored per session, one append-only JSONL file each:
 
 - `.baiton/chat/<id>.jsonl` — Workspace conversation sessions.
-- `.baiton/specs/<slug>/chat/<id>.jsonl` — a spec conversation's sessions.
+- `.baiton/plans/<slug>/chat/<id>.jsonl` — a plan conversation's sessions.
 
 There is no index file: each session's title and timestamps are derived from
 its transcript. A transcript from before sessions existed (`.baiton/chat.jsonl`
-or `.baiton/specs/<slug>/chat.jsonl`) is migrated into the new layout as one
+or `.baiton/plans/<slug>/chat.jsonl`) is migrated into the new layout as one
 session the first time the view opens that conversation, and an empty one is
 removed. All of these paths are covered by `.baiton/.gitignore`, which also
-excludes `/runs/` and `/worktrees/` — everything a spec-less run owns.
+excludes `/runs/` and `/worktrees/` — everything a plan-less run owns.
 
 ### Interventions in chat
 
@@ -249,9 +251,9 @@ kinds:
 
 - **question** — the orchestrator asking you something, through its `ask_user`
   tool (see **What the orchestrator does** above);
-- **confirm** — a confirmation, such as the one `draft_spec` and `approve_spec`
+- **confirm** — a confirmation, such as the one `draft_plan` and `approve_plan`
   raise before they act, or the run card `start_run` and `investigate` raise (see
-  **Spec-less runs** below);
+  **Plan-less runs** below);
 - **permission** — a sub-agent harness ask relayed out of a running stage,
   carrying the agent id, the tool name and the tool arguments.
 
@@ -267,7 +269,7 @@ badge when Auto mode decided it rather than you, and the one-line rationale —
 for an escalated ask, the one plain sentence saying what you approved.
 
 A card lands on the conversation the ask belongs to. A relayed harness ask is
-routed to the spec conversation of the run it came from, switching the view
+routed to the plan conversation of the run it came from, switching the view
 there if needed (`ChatController.scopeForAsk`), so you answer it in the context
 the run was launched from.
 
@@ -285,47 +287,49 @@ answer (`ChatController.onStop` → `declinePendingAsks` /
 back instead of hanging. A declined `ask_user` comes back to the model as a
 refusal; a declined permission ask is written back to the run as a denial.
 
-### Creating a spec
+### Creating a plan
 
-The orchestrator gathers the requirements; a configured coding agent writes the
-spec.
+The orchestrator gathers and agrees the requirements; the configured
+`plan-writer` role produces the phase list.
 
 1. Describe the work in the Workspace conversation. The orchestrator reads the
-   repository and asks clarifying questions, one at a time.
-2. It writes a short **requirements document** — the goal, the constraints, the
-   acceptance criteria and the files of interest — and revises it until you
-   agree to it. It never proposes the todo list itself.
-3. Once you agree it calls `draft_spec`, which raises a **confirm** card inline
-   in the conversation to confirm the requirements — an in-place answer, not a
-   modal dialog; declining it leaves the repository untouched — and then
-   launches the **spec writer**: the agent configured for the `spec-writer`
-   role in `.baiton/config.json`. That agent studies the repository read-only
-   and returns an OVERVIEW plus a dependency-ordered todo list; the extension
-   assigns the `T##` ids, renders `.baiton/specs/<slug>/spec.md`, and commits it.
-4. Watch the draft in its terminal while it runs. When it finishes, a note lands
-   in the Workspace conversation and the new spec appears in the Spec Explorer
-   and in the conversation selector.
+   repository, asks clarifying questions and restates the agreement as
+   **Endstate**, **What needs changing**, and **Limitations & constraints**.
+   It revises those sections until you agree and never proposes the phase list.
+2. `draft_plan(slug, request)` asks for confirmation, then launches the
+   `plan-writer` role. It returns endstate, changes, constraints and a
+   dependency-ordered phase list. The extension numbers phases `P01`, `P02`,
+   ... and commits `.baiton/plans/<slug>/plan.md` with a
+   `plan(<slug>): ...` commit message.
+3. The document has frontmatter followed by the three preamble sections and
+   `# PHASES`, for example `- [pending] P01 Add a greeting function`. The new
+   plan appears in Plan Explorer and the conversation selector.
 
-Only one stage runs per repository, so a spec draft, a todo stage and a
-spec-less run's stage never run at the same time. A `spec-writer` entry missing
+Only one stage runs per repository, so a plan draft, a phase stage and a
+plan-less run's stage never run at the same time. A `plan-writer` entry missing
 from an existing `.baiton/config.json` is filled in from the `planner` entry. After the draft
-lands you can refine it in chat with `update_overview`, `add_todo`, `edit_todo`
-and `remove_todo`.
+lands you can refine it in chat with `update_overview`, `add_phase`, `edit_phase`
+and `remove_phase`.
 
-### Driving a spec
+### Driving a plan
 
-Once a spec is approved, its chat conversation drives it one todo at a time.
-The orchestrator dispatches the next legal stage for the todo's current state —
+Once a plan is approved, its chat conversation drives it one phase at a time.
+Approval creates `baiton/<slug>` from the resolved base commit. Each phase runs
+plan, execute and review on its own worktree branch
+`baiton-phase/<slug>/<id>`. `land_phase` merges the phase branch into the plan
+branch with a `plan(<slug>): land <id>` commit. After every phase is done and
+landed, `submit_pr` pushes the plan branch and records the pull request.
+The orchestrator dispatches the next legal stage for the phase's current state —
 `pending` → `plan`, `planned` → `execute`, `executed` → `review`, and `execute`
-again when a review sends the todo back — and each `run` blocks until that
+again when a review sends the phase back — and each `run` blocks until that
 stage reaches a terminal outcome, so there is nothing to poll. `plan-review` is
 not a stage it can trigger: it runs inside the plan stage's own review rounds.
-When every todo is `done`, the orchestrator offers `submit_pr`. You can still
-run any stage yourself from the Spec Explorer.
+When every phase is `done`, the orchestrator offers `submit_pr`. You can still
+run any stage yourself from the Plan Explorer.
 
-### Spec-less runs (Bug, Quick, Refactor)
+### Plan-less runs (Bug, Quick Fix, Refactor)
 
-In a **Bug**, **Quick** or **Refactor** conversation the orchestrator dispatches
+In a **Bug**, **Quick Fix** or **Refactor** conversation the orchestrator dispatches
 with `start_run(mode, statement, files, reproduction?)`, whose `mode` is
 restricted to `bug | quick | refactor`; the read-only mode dispatches with
 `investigate(question, files)`. Every argument is validated BEFORE the card is
@@ -371,7 +375,7 @@ with no commits (`no-base-head`: make an initial commit first).
 - `.baiton/runs/<run-id>/runs.jsonl` — the run's journal.
 - `.baiton/runs/<run-id>/plan.md`, `execute-<n>.md`, `review-<n>.md` and
   `finding.md` — the rendered stage artifacts, always in the run directory and
-  never under a spec.
+  never under a plan.
 
 Each stage LAUNCH gets its own sibling directory named `<run-id>.<stage>.<n>`
 holding that launch's brief, result and `asks/` files — which is why a run id may
@@ -397,12 +401,12 @@ disposes the running stage's terminal and records `cancelled`, and deliberately
 LEAVES the worktree and the branch in place for inspection.
 
 The one-stage-per-repository guarantee holds both ways: a run refuses with
-`busy` while a spec queue or the spec draft has a stage in flight, and a running
-run makes the spec queue externally busy.
+`busy` while a plan queue or the plan draft has a stage in flight, and a running
+run makes the plan queue externally busy.
 
 ### The Runs view
 
-`baiton.runsView`, titled **Runs**, sits beside the Spec Explorer in the
+`baiton.runsView`, titled **Runs**, sits beside the Plan Explorer in the
 activity-bar container. It has exactly two groups, **Active** first then
 **Complete**, and both are always present even when empty, so the view never
 loses a heading (`src/model/runTreeModel.ts`, `src/activation/runsExplorer.ts`).
@@ -483,17 +487,17 @@ the controller offers a **promote card** — once per run id
 found: \<finding\>", then `Files: …` (or `Files: (none named)`), then
 `Next steps: …` when the finding named any, then "Start a run from this
 finding?". The three options are **Start a Bug run** ("Plan, fix and review the
-defect on its own branch."), **Start a Quick run** ("Plan, make and review the
+defect on its own branch."), **Start a Quick Fix run** ("Plan, make and review the
 small change on its own branch.") and **Dismiss** ("Keep the finding only.").
 
-Choosing Bug or Quick raises the ORDINARY run confirm card, with the finding as
+Choosing Bug or Quick Fix raises the ORDINARY run confirm card, with the finding as
 the work statement and the branch the investigation started from as the target
 branch (`promoteRunConfirm`), so a promoted run reads identically to a
 model-dispatched one. Only an approval dispatches: a dismissal, a decline or a
 typed answer writes nothing and dispatches nothing. In Restricted Mode no card is
 offered and a note stands in for it ("Restricted Mode: the finding of
 `<run-id>` was not offered as a run."). `PROMOTE_MODES` is exactly `bug` and
-`quick` — a finding is never promoted straight to Refactor or Spec.
+`quick` — a finding is never promoted straight to Refactor or Plan.
 
 ### Auto mode
 
@@ -561,7 +565,7 @@ an audit trace you can read. Its default is off.
   clear (scripts, package commands, mutating commands, unknown tools) goes to
   the orchestrator model (`evaluateAsk` / `RISK_EVALUATION_PROMPT`), which
   judges the action's **effect**, not the role's remit. It is told the
-  workspace root, the run directory, the spec and todo (id and title), and
+  workspace root, the run directory, the plan and phase (id and title), and
   the body of every script the command names (`.py`, `.sh`, `.js`, `.ts`,
   `.mjs`, `.cjs`, `.rb`, `.pl`), read by the host only when the script
   resolves inside the workspace, capped at 6 KB each and fenced as untrusted
@@ -602,6 +606,12 @@ an audit trace you can read. Its default is off.
 Which asks can reach these cards at all depends on the per-adapter relay,
 documented in **Harness ask relay (per-adapter probe findings)** below.
 
+### Legacy specs
+
+Existing `.baiton/specs/<slug>/spec.md` documents with `# OVERVIEW`, `# TODOS`, `T##` ids and `todos/<id>/` artifacts remain supported for listing, validation and runs. Their phase branches keep the `baiton-todo/<slug>/<id>` namespace.
+
+For compatibility, a `roles.spec-writer` key in `config.json` is read as `plan-writer`; an explicit `plan-writer` entry takes precedence when both are present. A persisted mode `spec` loads as `plan`. When a slug exists under both document roots, `.baiton/plans/` takes precedence. New documents are written under `.baiton/plans/`; nothing new is written under `.baiton/specs/`.
+
 ### Providers and models
 
 The orchestrator chat talks to one inference provider at a time, chosen per
@@ -621,7 +631,7 @@ one client per provider and delegates each completion to the active one is
 `ProviderRouter` in `src/activation/providerRouter.ts`. Switching providers
 changes the model used by the chat, by the tool loop and by Auto mode's
 stage-(b) evaluator at once, and changes nothing on disk: transcripts
-(`.baiton/chat/<id>.jsonl`, `.baiton/specs/<slug>/chat/<id>.jsonl`) are
+(`.baiton/chat/<id>.jsonl`, `.baiton/plans/<slug>/chat/<id>.jsonl`) are
 untouched by a switch.
 
 | Provider | Id | API key | Models (builtin / offline fallback) |
@@ -763,9 +773,9 @@ the whole conversation.
 
 ### The config panel
 
-The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Spec Explorer and the Runs view. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
+The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Plan Explorer and the Runs view. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
 
-- **Managed fields** — edits the six role entries (`spec-writer`, `planner`,
+- **Managed fields** — edits the six role entries (`plan-writer`, `planner`,
   `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
   populated from installed adapters; a **per-agent model dropdown populated from
   the refreshed per-agent list** — Codex, Claude, OpenCode and Antigravity alike,
@@ -950,7 +960,7 @@ always-present "Other…" escape still accepts a model the lists do not name.
 
 ### Harness ask relay (per-adapter probe findings)
 
-A launched stage's `.baiton/runs/<launch-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the stage stays paused until the answer file appears. The `<launch-id>` is the id the stage was launched under: a spec run's own run id, or, for a spec-less run, the launch directory `<run-id>.<stage>.<n>` described in **Spec-less runs** above — the run's own `.baiton/runs/<run-id>/` directory holds the manifest and artifacts, not the asks. These asks are what become **permission** intervention cards in the conversation the stage was launched from (see **Interventions in chat**), answered in place in the chat, with Auto mode applied to them when it is on; the stage stays paused until the response file appears, and **Stop** — or a run that ends — declines any ask still pending, so nothing hangs.
+A launched stage's `.baiton/runs/<launch-id>/asks/<ask-id>.json` is a harness ask and `<ask-id>.response.json` is the answer written back into it; the stage stays paused until the answer file appears. The `<launch-id>` is the id the stage was launched under: a plan run's own run id, or, for a plan-less run, the launch directory `<run-id>.<stage>.<n>` described in **Plan-less runs** above — the run's own `.baiton/runs/<run-id>/` directory holds the manifest and artifacts, not the asks. These asks are what become **permission** intervention cards in the conversation the stage was launched from (see **Interventions in chat**), answered in place in the chat, with Auto mode applied to them when it is on; the stage stays paused until the response file appears, and **Stop** — or a run that ends — declines any ask still pending, so nothing hangs.
 
 - **claude findings** (probed `claude --version 2.1.278`):
   - `--settings` accepts an inline JSON string as well as a file path (`<file-or-json>` in `claude --help`), and a `-p` run started with an inline hooks JSON launched cleanly and installed the hook — verified by the probe.
@@ -1091,32 +1101,17 @@ The Usage view reads each first-party tool's remaining usage through the real me
 
 ## Commands
 
-- **Baiton: Open Chat** (`baiton.openChat`) — reveals the Baiton container and
-  moves keyboard focus to the Chat view.
-- **Baiton: Open Config Panel** (`baiton.openConfigPanel`) — reveals the Baiton
-  container and moves keyboard focus to the Configuration view.
-- **Baiton: Refresh Usage** (`baiton.usage.refresh`) — re-reads every tool now;
-  also the refresh button in the Usage view title. If the view has never been
-  expanded it reveals it (which performs the first read).
-- **Baiton: Set Provider API Key** (`baiton.setProviderApiKey`) — picks one of
-  the keyed providers, then sets or clears its API key with a masked input,
-  stored in VS Code SecretStorage under `baiton.orchestrator.key.<provider>`.
-- **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) — an
-  alias for **Baiton: Set Provider API Key**, kept so existing key bindings
-  keep working.
-- **Baiton: Set Provider Endpoint** (`baiton.setProviderEndpoint`) — picks a
-  provider that needs an endpoint (or already has one set), then sets or
-  clears its base URL in `baiton.orchestrator.endpoints`.
-- **Baiton: Cancel Run** (`baiton.runs.cancel`) — disposes the terminal of the
-  stage in flight for the selected run; its worktree and branch are kept.
-- **Baiton: View Run Diff** (`baiton.runs.viewDiff`) — opens the run branch's
-  diff against the commit it started from (`<base commit>..<branch>`).
-- **Baiton: Merge Run** (`baiton.runs.merge`) — merges a passed run's branch into
-  the branch it started from, then removes the worktree and deletes the branch.
-
-The three run commands are Runs-view item actions rather than palette entries:
-each is contributed with `"when": "false"` under `commandPalette`, and cancel and
-merge additionally require `!baiton.restricted`.
+- **Baiton: Approve Plan** (`baiton.approve`) — approve the selected plan and
+  create its plan branch.
+- **Baiton: Plan Phase** (`baiton.plan`) — plan the selected phase.
+- **Baiton: Execute Phase** (`baiton.execute`) — execute the selected phase.
+- **Baiton: Review Phase** (`baiton.review`) — review the selected phase.
+- **Baiton: Re-plan Phase** (`baiton.replan`) — plan the selected phase again.
+- **Baiton: Stop Running Stage** (`baiton.stop`) — stop or revert the selected
+  phase's running stage.
+- **Baiton: Submit PR** (`baiton.submitPr`) — submit the completed plan.
+- **Baiton: Show PR** (`baiton.showPr`) — open the plan's recorded pull request.
+- **Baiton: View Plan** (`baiton.viewPlan`) — open the selected phase's plan.
 
 ## Settings
 

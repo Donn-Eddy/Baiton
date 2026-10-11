@@ -6,7 +6,8 @@
  * prefer the plans root when a slug exists in both locations. Refreshes derive
  * the tree from disk, approval state, plan journals, and phase plans.
  *
- * A watcher over `{plans,specs}/**` coalesces filesystem changes; `specs` is
+ * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
+ * `specs` root is
  * the legacy document root. Root clicks open the resolved plan document and
  * update the active plan. Inline actions use the existing command arguments
  * and are hidden in Restricted Mode through package.json context clauses.
@@ -140,6 +141,7 @@ export class PlanExplorer
 
     // The watcher observes both document roots; specs is the legacy root; each
     // event schedules a single coalesced refresh (Req 6.1, 6.2, 6.4).
+    // Legacy: watch the former specs/ root so existing documents stay visible.
     const pattern = new vscode.RelativePattern(this.baitonDir, '{plans,specs}/**');
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
@@ -369,8 +371,8 @@ function sessionSet(entries: JournalEntry[]): Set<string> {
   const sessions = new Set<string>();
   for (const entry of entries) {
     if (entry.sessionId !== undefined) {
-      // JournalEntry.todoId is a persisted field name.
-      sessions.add(entry.todoId); // legacy journal field name
+      // JournalEntry.phaseId is a persisted field name.
+      sessions.add(entry.phaseId); // legacy journal field name
     }
   }
   return sessions;

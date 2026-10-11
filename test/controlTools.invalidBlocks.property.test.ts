@@ -29,17 +29,18 @@ import { Stage } from '../src/model/stage';
  * Strategy: generate a clean, acyclic base document, then inject exactly one
  * malformed construct so `validatePlan` reports it invalid. Drive `run` through
  * the real tool registry against a temp repo, using a run-queue seam that throws
- * if it is ever dispatched into. Because the gate reads and validates the spec
- * before touching the queue, an invalid spec must produce an error result with
+ * if it is ever dispatched into. Because the gate reads and validates the plan
+ * before touching the queue, an invalid plan must produce an error result with
  * the queue never called, for every stage. The valid half asserts the same
- * harness dispatches when the spec is clean, proving the gate is not a
+ * harness dispatches when the plan is clean, proving the gate is not a
  * blanket refusal.
  */
 
-// --- Spec generators (shared shape with the validator property test) -------
+// --- plan generators (shared shape with the validator property test) -------
 
 /** A legacy phase id: `T` followed by two or more decimal digits (Req 3.3). */
-const idArb: fc.Arbitrary<string> = fc
+// Legacy spec fixture generator: invalid documents retain the old T## grammar.
+const legacyPhaseIdArb: fc.Arbitrary<string> = fc
   .integer({ min: 0, max: 999999 })
   .map((n) => 'T' + String(n).padStart(2, '0'));
 
@@ -54,15 +55,15 @@ const fmValueArb: fc.Arbitrary<string> = fc
   .string({ maxLength: 20 })
   .map((s) => s.replace(/[\n\r]/g, '').trim());
 
-interface CleanTodo {
+interface LegacyPhase {
   id: string;
   state: PhaseState;
   title: string;
   after: string[];
 }
 
-/** Renders a clean todo to a grammar-conformant line. */
-function renderTodo(t: CleanTodo): string {
+/** Renders a clean phase to a grammar-conformant line. */
+function renderLegacyPhase(t: LegacyPhase): string {
   let line = `- [${t.state}] ${t.id} ${t.title}`;
   if (t.after.length > 0) {
     line += ` (after ${t.after.join(',')})`;
@@ -71,12 +72,12 @@ function renderTodo(t: CleanTodo): string {
 }
 
 /**
- * A clean base spec: unique ids, known states, `after` targets restricted to
+ * A clean base plan: unique ids, known states, `after` targets restricted to
  * strictly-earlier ids (present, non-self, acyclic), no conflict markers.
  */
-const baseSpecArb: fc.Arbitrary<{ ids: string[]; todos: CleanTodo[]; overview: string }> = fc
+const legacyDocumentArb: fc.Arbitrary<{ ids: string[]; phases: LegacyPhase[]; overview: string }> = fc
   .record({
-    ids: fc.uniqueArray(idArb, { minLength: 1, maxLength: 6 }),
+    ids: fc.uniqueArray(legacyPhaseIdArb, { minLength: 1, maxLength: 6 }),
     overview: fmValueArb,
   })
   .chain(({ ids, overview }) =>
@@ -93,12 +94,12 @@ const baseSpecArb: fc.Arbitrary<{ ids: string[]; todos: CleanTodo[]; overview: s
       .map((parts) => ({
         overview,
         ids,
-        todos: parts.map((p, i) => ({ id: ids[i], ...p })),
+        phases: parts.map((p, i) => ({ id: ids[i], ...p })),
       })),
   );
 
-/** Assembles full spec text from a base spec's todos and overview. */
-function renderSpec(overview: string, todoLines: string[]): string {
+/** Assembles full plan text from a base plan's phases and overview. */
+function renderLegacyDocument(overview: string, phaseLines: string[]): string {
   return [
     '---',
     'version: 1',
@@ -111,11 +112,11 @@ function renderSpec(overview: string, todoLines: string[]): string {
     '',
     '# TODOS',
     '',
-    ...todoLines,
+    ...phaseLines,
   ].join('\n');
 }
 
-/** The malformed constructs, each of which makes the spec invalid (Req 4). */
+/** The malformed constructs, each of which makes the plan invalid (Req 4). */
 const INJECTIONS = [
   'grammar',
   'duplicate',
@@ -126,48 +127,48 @@ const INJECTIONS = [
   'cycle',
 ] as const;
 
-/** Produces spec text with exactly one malformed construct injected. */
+/** Produces plan text with exactly one malformed construct injected. */
 function injectMalformed(
-  base: { ids: string[]; todos: CleanTodo[]; overview: string },
+  base: { ids: string[]; phases: LegacyPhase[]; overview: string },
   kind: (typeof INJECTIONS)[number],
   seed: number,
 ): string {
-  const todos = base.todos.map(renderTodo);
-  const pick = base.todos.length > 0 ? seed % base.todos.length : 0;
+  const phases = base.phases.map(renderLegacyPhase);
+  const pick = base.phases.length > 0 ? seed % base.phases.length : 0;
 
   switch (kind) {
     case 'grammar':
-      todos.splice(pick, 0, '- [pending] notanid missing digits');
-      return renderSpec(base.overview, todos);
+      phases.splice(pick, 0, '- [pending] notanid missing digits');
+      return renderLegacyDocument(base.overview, phases);
     case 'duplicate':
-      todos.push(`- [pending] ${base.todos[pick].id} a duplicate id`);
-      return renderSpec(base.overview, todos);
+      phases.push(`- [pending] ${base.phases[pick].id} a duplicate id`);
+      return renderLegacyDocument(base.overview, phases);
     case 'unknown-state': {
-      const t = base.todos[pick];
-      todos[pick] = `- [bogusstate] ${t.id} ${t.title}`;
-      return renderSpec(base.overview, todos);
+      const t = base.phases[pick];
+      phases[pick] = `- [bogusstate] ${t.id} ${t.title}`;
+      return renderLegacyDocument(base.overview, phases);
     }
     case 'missing-after': {
-      const t = base.todos[pick];
+      const t = base.phases[pick];
       const absent = pickAbsentId(base.ids, seed);
-      todos[pick] = `- [${t.state}] ${t.id} ${t.title} (after ${absent})`;
-      return renderSpec(base.overview, todos);
+      phases[pick] = `- [${t.state}] ${t.id} ${t.title} (after ${absent})`;
+      return renderLegacyDocument(base.overview, phases);
     }
     case 'self-after': {
-      const t = base.todos[pick];
-      todos[pick] = `- [${t.state}] ${t.id} ${t.title} (after ${t.id})`;
-      return renderSpec(base.overview, todos);
+      const t = base.phases[pick];
+      phases[pick] = `- [${t.state}] ${t.id} ${t.title} (after ${t.id})`;
+      return renderLegacyDocument(base.overview, phases);
     }
     case 'conflict': {
       const marker = ['<<<<<<< HEAD', '=======', '>>>>>>> branch'][seed % 3];
-      todos.splice(pick, 0, marker);
-      return renderSpec(base.overview, todos);
+      phases.splice(pick, 0, marker);
+      return renderLegacyDocument(base.overview, phases);
     }
     case 'cycle': {
-      // Two mutually-dependent todos form a cycle (Req 4.7).
-      todos.push('- [pending] T900001 first of a cycle (after T900002)');
-      todos.push('- [pending] T900002 second of a cycle (after T900001)');
-      return renderSpec(base.overview, todos);
+      // Two mutually-dependent phases form a cycle (Req 4.7).
+      phases.push('- [pending] T900001 first of a cycle (after T900002)');
+      phases.push('- [pending] T900002 second of a cycle (after T900001)');
+      return renderLegacyDocument(base.overview, phases);
     }
     default:
       throw new Error(`unknown injection kind: ${kind}`);
@@ -192,10 +193,10 @@ function pickAbsentId(ids: string[], seed: number): string {
 function benignGit(): GitService {
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async () => undefined,
+    createPlanBranch: async () => undefined,
     checkout: async () => undefined,
     commit: async () => 'a'.repeat(40),
     head: async () => 'a'.repeat(40),
@@ -250,16 +251,16 @@ function makeGuard(repoRoot: string): GuardContext {
 }
 
 /** Legacy: write a spec.md for `slug` under the temp repo. */
-function writeSpec(repoRoot: string, slug: string, content: string): void {
-  const specDir = path.join(repoRoot, '.baiton', 'specs', slug);
-  fs.mkdirSync(specDir, { recursive: true });
-  fs.writeFileSync(path.join(specDir, 'spec.md'), content, 'utf8');
+function writeLegacySpec(repoRoot: string, slug: string, content: string): void {
+  const legacySpecsDir = path.join(repoRoot, '.baiton', 'specs', slug);
+  fs.mkdirSync(legacySpecsDir, { recursive: true });
+  fs.writeFileSync(path.join(legacySpecsDir, 'spec.md'), content, 'utf8');
 }
 
 /** Every stage the `run` tool accepts. */
 const STAGES: Stage[] = ['plan', 'execute', 'review'];
 
-describe('invalid specs block every stage (property, Task 11.8)', () => {
+describe('invalid plans block every stage (property)', () => {
   const repos: string[] = [];
 
   function newRepo(): string {
@@ -275,27 +276,27 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
     }
   });
 
-  // Feature: baiton-first-pass, Property 5: Invalid specs block every stage
-  it('refuses to dispatch any stage while the spec is invalid, never touching the queue', async () => {
+  // Feature: baiton-first-pass, Property 5: Invalid plans block every stage
+  it('refuses to dispatch any stage while the plan is invalid, never touching the queue', async () => {
     await fc.assert(
       fc.asyncProperty(
-        baseSpecArb,
+        legacyDocumentArb,
         fc.constantFrom(...INJECTIONS),
         fc.integer({ min: 0, max: 100000 }),
         fc.constantFrom(...STAGES),
         async (base, kind, seed, stage) => {
           const raw = injectMalformed(base, kind, seed);
 
-          // Precondition: the injected spec really is invalid.
+          // Precondition: the injected plan really is invalid.
           fc.pre(validatePlan(parsePlan(raw), raw).length > 0);
 
           const repo = newRepo();
           const slug = 'sample';
-          writeSpec(repo, slug, raw);
+          writeLegacySpec(repo, slug, raw);
 
           const queue = spyingQueue();
           const registry = createToolRegistry(makeServices(repo, queue));
-          const phase = base.todos[seed % base.todos.length].id;
+          const phase = base.phases[seed % base.phases.length].id;
 
           const result = await registry.call(
             'run',
@@ -309,20 +310,20 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
           assert.strictEqual(
             result.ok,
             false,
-            `invalid spec must not dispatch stage "${stage}"\n---\n${raw}`,
+            `invalid document must not dispatch stage "${stage}"\n---\n${raw}`,
           );
           if (!result.ok) {
             assert.match(
               result.error,
               /invalid/i,
-              'the refusal surfaces that the spec is invalid',
+              'the refusal surfaces that the document is invalid',
             );
           }
           // ...and the run queue was never reached for any stage (Req 4.9).
           assert.strictEqual(
             queue.calls.length,
             0,
-            'an invalid spec must never reach the run queue',
+            'an invalid document must never reach the run queue',
           );
         },
       ),
@@ -330,28 +331,28 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
     );
   });
 
-  // Positive control: the same gate lets a clean spec through, so it is not a
+  // Positive control: the same gate lets a clean plan through, so it is not a
   // blanket refusal.
-  // Feature: baiton-first-pass, Property 5: Invalid specs block every stage
-  it('allows dispatch for a clean, valid spec (positive control)', async () => {
+  // Feature: baiton-first-pass, Property 5: Invalid plans block every stage
+  it('allows dispatch for a clean, valid plan (positive control)', async () => {
     await fc.assert(
       fc.asyncProperty(
-        baseSpecArb,
+        legacyDocumentArb,
         fc.integer({ min: 0, max: 100000 }),
         fc.constantFrom(...STAGES),
         async (base, seed, stage) => {
-          const raw = renderSpec(base.overview, base.todos.map(renderTodo));
+          const raw = renderLegacyDocument(base.overview, base.phases.map(renderLegacyPhase));
 
-          // Precondition: the base spec is valid.
+          // Precondition: the base plan is valid.
           fc.pre(validatePlan(parsePlan(raw), raw).length === 0);
 
           const repo = newRepo();
           const slug = 'sample';
-          writeSpec(repo, slug, raw);
+          writeLegacySpec(repo, slug, raw);
 
           const queue = spyingQueue();
           const registry = createToolRegistry(makeServices(repo, queue));
-          const phase = base.todos[seed % base.todos.length].id;
+          const phase = base.phases[seed % base.phases.length].id;
 
           const result = await registry.call(
             'run',
@@ -361,16 +362,16 @@ describe('invalid specs block every stage (property, Task 11.8)', () => {
             'drive',
           );
 
-          // A valid spec reaches the queue and the dispatch succeeds.
+          // A valid plan reaches the queue and the dispatch succeeds.
           assert.strictEqual(
             result.ok,
             true,
-            `a valid spec must dispatch stage "${stage}"\n---\n${raw}`,
+            `a valid document must dispatch stage "${stage}"\n---\n${raw}`,
           );
           assert.strictEqual(
             queue.calls.length,
             1,
-            'a valid spec dispatches exactly once',
+            'a valid document dispatches exactly once',
           );
         },
       ),

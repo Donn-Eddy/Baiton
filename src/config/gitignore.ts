@@ -35,8 +35,11 @@ export const GITIGNORE_CONTENTS = [
   'plans/*/chat/',
   'plans/*/runs.jsonl',
   '# Legacy specs/ documents.',
+  // Legacy: preserve chat and journal files created under the former root.
   'specs/*/chat.jsonl',
+  // Legacy: keep the former per-document chat directory ignored.
   'specs/*/chat/',
+  // Legacy: keep the former per-document journal ignored.
   'specs/*/runs.jsonl',
   '',
 ].join('\n');

@@ -36,7 +36,7 @@ import type { NewRunInput, RunStore } from '../src/engine/runStore';
  * Everything here runs against a real temp directory with an injected clock, so
  * the manifest's shape, its classified failures, the launch-id composition and
  * the run-dir artifact writer are exercised exactly as the run pipeline will use
- * them — without a VS Code host, a spec, or a sub-agent.
+ * them — without a VS Code host, a plan, or a sub-agent.
  */
 
 /** A controllable ISO clock: each read returns the current `value`. */
@@ -103,7 +103,7 @@ describe('runStore', () => {
       assert.deepStrictEqual(complete, ['done', 'failed', 'cancelled', 'answered', 'merged']);
     });
 
-    it('lists the four run stages and rejects the spec-only ones', () => {
+    it('lists the four run stages and rejects the plan-only ones', () => {
       assert.deepStrictEqual(RUN_STAGES, ['plan', 'execute', 'review', 'investigate']);
       for (const stage of RUN_STAGES) {
         assert.ok(isRunStage(stage), `${stage} should be a run stage`);
@@ -340,7 +340,8 @@ describe('runStore', () => {
       assert.ok(parseRunManifest(text).ok);
     });
 
-    it('normalizes legacy composerMode spec to plan', () => {
+    it('normalizes legacy composerMode plan to plan', () => {
+      // Legacy persisted mode: the old "spec" value loads as "plan".
       const base = validManifest();
       const text = JSON.stringify({ ...base, composerMode: 'spec' }, null, 2) + '\n';
       writeRaw('r1', text);
@@ -534,7 +535,7 @@ describe('runStore', () => {
       assert.throws(() => runArtifactPathFor(root, 'r1', 'execute'));
     });
 
-    it('ignores the spec-relative path it is handed', () => {
+    it('ignores the plan-relative path it is handed', () => {
       const target = runArtifactWriter(root, 'r1', 'execute', 2);
       assert.strictEqual(target.path, runArtifactPathFor(root, 'r1', 'execute', 2));
 

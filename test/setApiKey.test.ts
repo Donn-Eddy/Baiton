@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 /**
  * Unit tests for the `Baiton: Set Orchestrator API Key` command handler
- * (Task 13.3; design "Set API Key").
+ * (design "Set API Key").
  *
  * `setOrchestratorApiKey` is `vscode` glue: it prompts with a masked input box
  * and persists the trimmed value to an injected `SecretStorage`. There is no
@@ -231,7 +231,7 @@ function asMemento(fake: FakeMemento): import('vscode').Memento {
   return fake as unknown as import('vscode').Memento;
 }
 
-describe('setOrchestratorApiKey (Task 13.3)', () => {
+describe('setOrchestratorApiKey', () => {
   before(async () => {
     // Register the hook that redirects `vscode` to the in-repo fake, then load
     // the handler so its `import * as vscode` resolves to the fake. Mocha runs

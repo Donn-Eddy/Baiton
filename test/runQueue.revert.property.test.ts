@@ -32,10 +32,10 @@ import { ok } from '../src/model/result';
  * `planned`/`executed`/`failed`, Review from `executed`) and every outcome a
  * launched stage can settle on:
  *
- * - `closed` (the terminal closed before a result) writes the todo back to
+ * - `closed` (the terminal closed before a result) writes the phase back to
  *   `Transition.from` with a `closed (exit <code>)` / `closed (no exit code)`
  *   note (Req 1.1, 1.4).
- * - `cancelled` (Stop while running) writes the todo back to `Transition.from`
+ * - `cancelled` (Stop while running) writes the phase back to `Transition.from`
  *   with a `cancelled` note (Req 1.1, 2.1).
  * - `completed` never reverts: no revert write is made.
  *
@@ -137,7 +137,7 @@ interface Rig {
 }
 
 const SLUG = 'demo';
-const TODO_ID = 'T01';
+const PHASE_ID = 'P01';
 
 /**
  * Build a fully-stubbed rig for one scenario over a temp journal path.
@@ -253,10 +253,10 @@ function makeRig(
 
   const git: GitService = {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async () => 'commitsha',
     head: async () => 'HEAD0',
@@ -277,7 +277,7 @@ function makeRig(
   const planStore: PlanStore = {
     currentState: async () => scenario.from,
     readPlan: async () => undefined,
-    readArtifact: async () => '# Plan T01\n',
+    readArtifact: async () => '# Plan P01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
@@ -343,7 +343,7 @@ describe('run queue revert on non-completion (property harness)', () => {
 
           const req: RunRequest = {
             slug: SLUG,
-            phaseId: TODO_ID,
+            phaseId: PHASE_ID,
             action: scenario.action,
             role: scenario.role,
             attempt: 1,
@@ -356,7 +356,7 @@ describe('run queue revert on non-completion (property harness)', () => {
           // The stage is live: currentRun() reports it (Req 3.6).
           const live = queue.currentRun();
           assert.ok(live !== undefined, 'currentRun() is defined while the stage runs');
-          assert.strictEqual(live?.phaseId, TODO_ID);
+          assert.strictEqual(live?.phaseId, PHASE_ID);
           assert.strictEqual(live?.slug, SLUG);
           assert.strictEqual(typeof live?.sessionId, 'string');
 
@@ -411,7 +411,7 @@ describe('run queue revert on non-completion (property harness)', () => {
           assert.ok(rig.writes.length >= 1, 'at least the revert write was made');
           const write = rig.writes[rig.writes.length - 1];
           assert.strictEqual(write.slug, SLUG);
-          assert.strictEqual(write.phaseId, TODO_ID);
+          assert.strictEqual(write.phaseId, PHASE_ID);
           assert.strictEqual(
             write.state,
             scenario.from,
@@ -460,7 +460,7 @@ describe('run queue closed-without-result hint', () => {
 
     const resultPromise = queue.dispatch({
       slug: SLUG,
-      phaseId: TODO_ID,
+      phaseId: PHASE_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,
@@ -489,7 +489,7 @@ describe('run queue closed-without-result hint', () => {
   it('appends the permission hint when the run wrote no result.json', async () => {
     const message = await closedMessage(false);
     assert.ok(
-      message.startsWith(`stage closed (exit 0); "${TODO_ID}" reverted to "${scenario.from}"`),
+      message.startsWith(`stage closed (exit 0); "${PHASE_ID}" reverted to "${scenario.from}"`),
       `the existing refusal prefix must survive: ${message}`,
     );
     assert.ok(message.endsWith(MISSING_RESULT_HINT), `expected the hint: ${message}`);
@@ -499,7 +499,7 @@ describe('run queue closed-without-result hint', () => {
   it('omits the hint when the result file is on disk', async () => {
     const message = await closedMessage(true);
     assert.ok(
-      message.startsWith(`stage closed (exit 0); "${TODO_ID}" reverted to "${scenario.from}"`),
+      message.startsWith(`stage closed (exit 0); "${PHASE_ID}" reverted to "${scenario.from}"`),
       `the existing refusal prefix must survive: ${message}`,
     );
     assert.ok(!message.includes(MISSING_RESULT_HINT), `did not expect the hint: ${message}`);
@@ -548,7 +548,7 @@ describe('run queue execute closed-without-result with a dirty tree', () => {
 
     const resultPromise = queue.dispatch({
       slug: SLUG,
-      phaseId: TODO_ID,
+      phaseId: PHASE_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,
@@ -579,7 +579,7 @@ describe('run queue execute closed-without-result with a dirty tree', () => {
     );
 
     assert.ok(
-      message.startsWith(`stage closed (exit 0); "${TODO_ID}" reverted to "${scenario.from}"`),
+      message.startsWith(`stage closed (exit 0); "${PHASE_ID}" reverted to "${scenario.from}"`),
       `the existing refusal prefix must survive: ${message}`,
     );
     assert.ok(message.endsWith(PRESERVED_CHANGES_HINT), `expected the preserved hint: ${message}`);
@@ -603,7 +603,7 @@ describe('run queue execute closed-without-result with a dirty tree', () => {
 });
 
 /**
- * Worktree mode: the stage runs in the todo's worktree, so the reset, the
+ * Worktree mode: the stage runs in the phase's worktree, so the reset, the
  * preserved-changes evidence and the revert bookkeeping all use the worktree's
  * git, and no stage outcome ever removes the worktree (the seam has no removal).
  */
@@ -634,7 +634,7 @@ describe('run queue revert in worktree mode', () => {
   }> {
     let wtResets = 0;
     let ensured = 0;
-    const wtDir = path.join(tmpDir, '.baiton', 'worktrees', SLUG, TODO_ID);
+    const wtDir = path.join(tmpDir, '.baiton', 'worktrees', SLUG, PHASE_ID);
     const rig = makeRig(path.join(tmpDir, 'runs.jsonl'), scenario, {
       // The main checkout must never be consulted for the working-tree evidence.
       diffAgainstWorkingTree: async () => 'diff --git a/main b/main\n+main\n',
@@ -657,10 +657,10 @@ describe('run queue revert in worktree mode', () => {
       },
       unlanded: async () => [],
     };
-    const queue = createRunQueue({ ...rig.deps, slug: SLUG, phaseId: TODO_ID, worktrees });
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, phaseId: PHASE_ID, worktrees });
     const pending = queue.dispatch({
       slug: SLUG,
-      phaseId: TODO_ID,
+      phaseId: PHASE_ID,
       action: scenario.action,
       role: scenario.role,
       attempt: 1,

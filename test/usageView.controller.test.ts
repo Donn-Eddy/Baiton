@@ -73,7 +73,7 @@ function okFor(tool: UsageToolId, detail = 'fake'): UsageReading {
   );
 }
 
-describe('UsageViewController (first-party-usage T08)', () => {
+describe('UsageViewController ', () => {
   let web: RecordingWebview;
   let timer: FakeTimer;
   let calls: Record<string, number>;

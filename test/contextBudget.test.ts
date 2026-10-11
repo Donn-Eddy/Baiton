@@ -88,7 +88,7 @@ describe('orchestrator/contextBudget', () => {
       assert.ok(estimateMessages(withCall) - estimateMessages(user) >= estimateTokens(args));
     });
 
-    it('counts each tool spec', () => {
+    it('counts each tool plan', () => {
       const tools: ToolSpec[] = [
         { name: 'a', description: 'first tool', parameters: { type: 'object' } },
         { name: 'b', description: 'second tool', parameters: { type: 'object', properties: {} } },
