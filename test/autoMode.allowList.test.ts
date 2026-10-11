@@ -41,7 +41,7 @@ import {
 import type { PermissionRequest } from '../src/orchestrator/interventions';
 
 /**
- * Unit tests for the auto-mode allow-lists (T09): the profile-derived
+ * Unit tests for the auto-mode allow-lists : the profile-derived
  * fallback, the claude/opencode derivations, the per-agent lookup, and the
  * pure deterministic first gate.
  *

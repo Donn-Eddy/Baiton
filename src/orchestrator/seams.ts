@@ -8,21 +8,21 @@
  * rather than by importing `vscode` directly. The activation layer supplies
  * real implementations backed by the VS Code API; a test supplies stubs.
  *
- * - {@link ConfirmSeam} — the UI confirmation `approve_spec` requires before it
- *   changes anything (Req 10.1); a decline/cancel leaves the spec unchanged
+ * - {@link ConfirmSeam} — the UI confirmation `approve_plan` requires before it
+ *   changes anything (Req 10.1); a decline/cancel leaves the plan unchanged
  *   (Req 10.2). This is now the narrow yes/no adapter over `InterventionSeam` in
  *   `./interventions` (built with `confirmSeamFrom`); hosts should prefer the
  *   intervention seam for new asks.
  * - {@link RunQueueSeam} — the run queues the `run` tool dispatches into
- *   (Req 10.3–10.5), backed by per-todo queues, one per (slug, todo). Each
- *   todo's stages run in its own worktree, and different todos run
+ *   (Req 10.3–10.5), backed by per-phase queues, one per (slug, phase). Each
+ *   phase's stages run in its own worktree, and different phases run
  *   concurrently. The stage engine owns the real queues; the tool only asks
  *   for one stage and reports what it answers.
- * - {@link LandTodoSeam} — the seam `land_todo` merges a done todo's branch into
- *   its spec branch through; the engine serializes it with state commits.
+ * - {@link LandPhaseSeam} — the seam `land_phase` merges a done phase's branch
+ *   into its plan branch through; the engine serializes it with state commits.
  * - {@link SubAgentSeam} — the seam `spawn_subagent` and `send_to_subagent` go
  *   through; the sub-agent runner creates the child chat and runs its turns.
- * - {@link RunPipelineSeam} — the spec-less run pipeline the `start_run` and
+ * - {@link RunPipelineSeam} — the plan-less run pipeline the `start_run` and
  *   `investigate` dispatch tools start a run through. The stage engine owns the
  *   real pipeline; the tools only ask it to start a run and report what it
  *   answers.
@@ -35,7 +35,7 @@ import type { ToolCaller } from './guard';
 import { Stage } from '../model/stage';
 
 /**
- * A yes/no confirmation prompt shown to the user. `approve_spec` calls this
+ * A yes/no confirmation prompt shown to the user. `approve_plan` calls this
  * before performing any git or frontmatter change and proceeds only on an
  * affirmative answer (Req 10.1, 10.2).
  *
@@ -59,16 +59,16 @@ export interface ConfirmSeam {
  */
 export interface RunDispatchRequest {
   slug: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
 }
 
 /**
  * The answer the run queue gives the `run` tool. The queue either accepts the
  * dispatch (`dispatched`), refuses because a stage is already running (or
- * being dispatched) for this todo (`busy`, Req 10.4), or refuses because the
+ * being dispatched) for this phase (`busy`, Req 10.4), or refuses because the
  * requested stage is not allowed (`illegal`, Req 10.5) — an illegal transition
- * for the todo's current state, or another queue reason such as deps-unlanded,
+ * for the phase's current state, or another queue reason such as deps-unlanded,
  * carried in `reason`. The tool maps
  * this answer to a {@link ToolResult}; it never inspects queue internals.
  */
@@ -78,36 +78,36 @@ export type RunDispatchOutcome =
   | { kind: 'illegal'; reason: string };
 
 /**
- * The per-todo run queue seam (Req 10.3–10.5, 20). The stage
+ * The per-phase run queue seam (Req 10.3–10.5, 20). The stage
  * engine implements this; the `run` tool depends only on `dispatch`.
  */
 export interface RunQueueSeam {
   /**
    * Dispatch exactly one stage. Returns `dispatched` with a run id when the
    * queue was idle and the transition is legal, `busy` when a stage is already
-   * running for this todo, or `illegal` when the stage is not allowed from the todo's current
+   * running for this phase, or `illegal` when the stage is not allowed from the phase's current
    * state.
    */
   dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome>;
 }
 
-/** One request to land a done todo's branch into its spec branch. */
-export interface LandTodoRequest {
+/** One request to land a done phase's branch into its plan branch. */
+export interface LandPhaseRequest {
   slug: string;
-  todoId: string;
+  phaseId: string;
 }
 
 /**
- * What the land seam answers `land_todo`. `landed` carries the spec branch's head after the merge (`noop` when the branch was already contained, `cleanup` any non-fatal worktree/branch removal warnings); `already-landed` means no todo branch exists; `refused` carries the named reason (wrong branch checked out, dirty tree, conflict, a stage still running, a git failure).
+ * What the land seam answers `land_phase`. `landed` carries the plan branch's head after the merge (`noop` when the branch was already contained, `cleanup` any non-fatal worktree/branch removal warnings); `already-landed` means no phase branch exists; `refused` carries the named reason (wrong branch checked out, dirty tree, conflict, a stage still running, a git failure).
  */
-export type LandTodoOutcome =
+export type LandPhaseOutcome =
   | { kind: 'landed'; commit: string; noop: boolean; cleanup: readonly string[] }
   | { kind: 'already-landed' }
   | { kind: 'refused'; reason: string };
 
-/** The seam `land_todo` lands through; the engine serializes it with state commits via the spec-branch writer. */
-export interface LandTodoSeam {
-  land(req: LandTodoRequest): Promise<LandTodoOutcome>;
+/** The seam `land_phase` lands through; the engine serializes it with state commits via the plan-branch writer. */
+export interface LandPhaseSeam {
+  land(req: LandPhaseRequest): Promise<LandPhaseOutcome>;
 }
 
 /** The deepest a sub-agent may nest: a top-level chat is depth 0, its sub-agent 1, that sub-agent's sub-agent 2. A caller already at this depth cannot spawn. */
@@ -129,39 +129,39 @@ export interface SubAgentSeam {
   send(req: SendToSubAgentRequest): Promise<SendToSubAgentOutcome>;
 }
 
-/** One request to draft a spec from an agreed requirements document. */
-export interface DraftSpecRequest {
-  /** The slug the new spec will be created under. */
+/** One request to draft a plan from an agreed request. */
+export interface DraftPlanRequest {
+  /** The slug the new plan will be created under. */
   slug: string;
-  /** The requirements document the orchestrator assembled with the user. */
+  /** The agreed request the orchestrator assembled with the user. */
   requirements: string;
 }
 
 /**
- * The answer the spec-draft runner gives the `draft_spec` tool. `started`
+ * The answer the plan-draft runner gives the `draft_plan` tool. `started`
  * carries the run id so the model can tell the user where to watch; `busy`
- * means a spec-less run (or another draft) is in flight; `refused` carries the
+ * means a plan-less run (or another draft) is in flight; `refused` carries the
  * reason the draft never launched (a duplicate slug, a failed adapter probe, a
  * failed launch).
  */
-export type DraftSpecOutcome =
+export type DraftPlanOutcome =
   | { kind: 'started'; runId: string }
   | { kind: 'busy' }
   | { kind: 'refused'; reason: string };
 
 /**
- * The spec-draft runner seam the `draft_spec` tool dispatches into. The stage
- * engine implements it (`createSpecDraftRunner`); the tool only asks it to
+ * The plan-draft runner seam the `draft_plan` tool dispatches into. The stage
+ * engine implements it (`createPlanDraftRunner`); the tool only asks it to
  * start a draft and reports what it answers. It resolves as soon as the
  * sub-agent is running, so the chat turn is never blocked on the draft.
  */
-export interface DraftSpecSeam {
-  draft(req: DraftSpecRequest): Promise<DraftSpecOutcome>;
+export interface DraftPlanSeam {
+  draft(req: DraftPlanRequest): Promise<DraftPlanOutcome>;
 }
 
-/** One confirmed spec-less dispatch from a run-mode conversation. */
+/** One confirmed plan-less dispatch from a run-mode conversation. */
 export interface StartRunRequest {
-  /** The mode the run executes as; never 'spec'. */
+  /** The mode the run executes as; never plan. */
   mode: RunMode;
   /** The one-line statement of the work (or the question, for investigate). */
   statement: string;
@@ -175,7 +175,7 @@ export interface StartRunRequest {
  * The answer the run pipeline gives `start_run`/`investigate`. `started`
  * carries the run id (and the branch the run was created on, when the host
  * knows it) so the model can tell the user where to watch; `busy` means the
- * spec draft or another spec-less run is in flight; `refused` carries the reason the run never launched.
+ * plan draft or another plan-less run is in flight; `refused` carries the reason the run never launched.
  */
 export type StartRunOutcome =
   | { kind: 'started'; runId: string; branch?: string }
@@ -183,7 +183,7 @@ export type StartRunOutcome =
   | { kind: 'refused'; reason: string };
 
 /**
- * The spec-less run pipeline seam the dispatch tools start a run through. The
+ * The plan-less run pipeline seam the dispatch tools start a run through. The
  * stage engine implements it over `createRunPipeline(...).start`; the tools
  * only ask it to start a run and report what it answers. It resolves as soon
  * as the run is launched, so the chat turn is never blocked on the run.

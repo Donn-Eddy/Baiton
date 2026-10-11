@@ -1,8 +1,8 @@
 /**
- * The per-mode Brief context assembler for spec-less runs (`bug`, `quick`,
+ * The per-mode Brief context assembler for plan-less runs (`bug`, `quick`,
  * `refactor`, `investigate`).
  *
- * A spec-less run has no OVERVIEW and no todo line, so the context is built
+ * A plan-less run has no OVERVIEW and no phase line, so the context is built
  * from the run manifest instead: the statement, the files the run starts from,
  * its branch, and the artifacts of the stages that came before. Which sections
  * a stage emits:
@@ -21,8 +21,8 @@
  * `# Behaviour preservation` section naming the verify command for `refactor`,
  * and nothing for `quick` (its statement and files are already in `# Run`).
  *
- * This module never reads or names anything under `.baiton/specs/`: a spec-less
- * run has no spec to read.
+ * This module never reads or names anything under a plan document folder: a plan-less
+ * run has no plan to read.
  *
  * Pure: every artifact is passed in by the caller, so it performs no `fs` or
  * `vscode` access. Both imports are type-only and erased at compile time, which
@@ -40,7 +40,7 @@ import type { RunStage } from './runStore';
 export interface RunContextInput {
   /** The stage whose context is being assembled; selects the sections. */
   stage: RunStage;
-  /** The run's mode; never 'spec'. Selects the mode framing sections. */
+  /** The run's mode; never 'plan'. Selects the mode framing sections. */
   mode: RunMode;
   /** The one-line statement of the work (for investigate: the question). */
   statement: string;
@@ -67,7 +67,7 @@ export interface RunContextInput {
 }
 
 /**
- * Assemble the Brief context for one spec-less run stage as Markdown. Pure; the
+ * Assemble the Brief context for one plan-less run stage as Markdown. Pure; the
  * caller supplies every artifact. Sections are emitted in a fixed order per
  * stage and artifacts are embedded verbatim — they are the source of truth
  * downstream and are never parsed back.
@@ -130,7 +130,7 @@ function modeSections(input: RunContextInput): string[] {
     case 'refactor':
       return [behaviourPreservationSection(input)];
     default:
-      // 'quick', 'investigate', 'spec' — and any mode added later, which emits
+      // 'quick', 'investigate', 'plan' — and any mode added later, which emits
       // no framing rather than breaking the build here.
       return [];
   }

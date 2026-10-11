@@ -56,7 +56,7 @@ const repeatArb: fc.Arbitrary<number> = fc.integer({ min: 1, max: 5 });
 function makeCtx(): GuardContext {
   return new GuardContext({
     repoRoot: path.resolve('/tmp/baiton-guard-idempotency'),
-    specsDir: path.resolve('/tmp/baiton-guard-idempotency/.baiton/specs'),
+    baitonDir: path.resolve('/tmp/baiton-guard-idempotency/.baiton'),
     restricted: false,
   });
 }
@@ -76,7 +76,7 @@ function makeCountingTool(statePath: string): {
     name: 'fake_mutating',
     description: 'fake mutating tool for the idempotency harness',
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {},
     async run(args: unknown, _tc: ToolContext): Promise<ToolResult> {
       runs += 1;

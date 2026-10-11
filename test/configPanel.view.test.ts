@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 
 /**
- * Unit tests for the Config Panel WebviewView and reveal command (spec "Config Panel",
- * config-panel todo T11).
+ * Unit tests for the Config Panel WebviewView and reveal command (plan "Config Panel",
+ * config-panel phase ).
  *
  * Exercises the VS Code glue without a running host by redirecting `vscode`
  * to `test/fixtures/vscodeFake.mjs` via `vscodeLoader.mjs`.
@@ -79,7 +79,7 @@ function makeFakeWebviewView(): FakeWebviewViewInstance {
   };
 }
 
-describe('Config Panel view and reveal command (spec "Config Panel", todo T11)', () => {
+describe('Config Panel view and reveal command ', () => {
   before(async () => {
     const root = process.cwd();
     const loaderUrl = pathToFileURL(
@@ -347,7 +347,7 @@ describe('Config Panel view and reveal command (spec "Config Panel", todo T11)',
 
 /* ------------------------------------------------------------------------- *
  * Fake-DOM suite for the out-of-band option refresh (model-selector-refresh
- * T09). media/config.js is a plain script that neither tsc nor eslint sees, so
+ * ). media/config.js is a plain script that neither tsc nor eslint sees, so
  * it is executed inside a `vm` sandbox over a hand-rolled minimal DOM — the
  * same pattern as `loadChatView()` in test/chatView.providers.test.ts. This
  * suite is deliberately self-contained: it never imports `vscode` and does not
@@ -599,7 +599,7 @@ type ViewHostMessage = import('../src/config/configPanel').ConfigPanelHostToWebv
 
 /** ROLES, duplicated so this suite needs no `vscode`-tainted import. */
 const VIEW_ROLES = [
-  'spec-writer',
+  'plan-writer',
   'planner',
   'plan-reviewer',
   'executor',
@@ -786,7 +786,7 @@ function capsOptions(
   return { agents: [...agents], byAgent };
 }
 
-describe('config panel webview options refresh (model-selector-refresh T09)', () => {
+describe('config panel webview options refresh ', () => {
   function loadedView(
     options: ViewConfigFormOptions = viewOptions(),
     form: ViewConfigForm = viewForm(),
@@ -978,7 +978,7 @@ describe('config panel webview options refresh (model-selector-refresh T09)', ()
   });
 });
 
-describe('config panel webview per-model options (codex-opencode-dropdown-fix T07)', () => {
+describe('config panel webview per-model options ', () => {
   function loadedView(options: ViewConfigFormOptions, form: ViewConfigForm): ConfigView {
     const view = loadConfigView();
     view.send({ type: 'loaded', form, token: 'tok-1', options });

@@ -1,5 +1,5 @@
 /**
- * The `Baiton: Open Config Panel` command handler (spec "Config Panel", config-panel todo T11).
+ * The `Baiton: Open Config Panel` command handler.
  *
  * This is thin `vscode` glue that reveals the Baiton container and moves
  * keyboard focus to the Configuration view using only stable VS Code APIs. VS Code

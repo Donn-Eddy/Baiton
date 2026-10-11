@@ -59,8 +59,8 @@ export interface ContextBudget {
  *                   the model's tool-call id, used as the idempotency key (Req 9.2),
  *                   and `signal` lets an in-flight tool observe an abort.
  * - `isConcurrent`— whether a tool may run in parallel with its concurrent neighbours.
- * - `systemPrompt`— builds the system prompt; called each round so a spec
- *                   conversation re-reads its `spec.md` per round (Req 11.6).
+ * - `systemPrompt`— builds the system prompt; called each round so a plan
+ *                   conversation re-reads its document per round (Req 11.6).
  * - `append`      — persists one message to the conversation transcript.
  * - `roundBound`  — the resolved maximum number of completions (Req 9.6).
  * - `signal`      — aborts the loop via the caller's `AbortController` (Req 14.6).

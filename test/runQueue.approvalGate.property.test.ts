@@ -8,32 +8,32 @@ import {
   type QueueWorktreeSeam,
   type RunQueueDeps,
   type RunRequest,
-  type SpecStore,
+  type PlanStore,
   type ResultWatcherFactory,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Role } from '../src/model/role';
 import { approvalHash } from '../src/model/hash';
-import { parseSpec, ParsedSpec } from '../src/model/parser';
+import { parsePlan, ParsedPlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 /**
  * Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
  *
- * For any spec whose current Approval_Hash is not byte-equal to its recorded
+ * For any plan whose current Approval_Hash is not byte-equal to its recorded
  * `approved_rev` (including unset/empty), the extension refuses to run the
- * Execute and Review stages; only a spec whose recorded `approved_rev` matches
+ * Execute and Review stages; only a plan whose recorded `approved_rev` matches
  * the current Approval_Hash may proceed.
  *
  * Validates: Requirements 5.3, 5.4
  *
  * Two complementary properties are asserted:
  *
- *  (A) At the run-queue level, through the `SpecStore.isApproved` seam that
+ *  (A) At the run-queue level, through the `PlanStore.isApproved` seam that
  *      `checkGuards` consults before launching Execute (src/engine/runQueue.ts,
  *      `cleanTreeAndInputRev` guard). With `isApproved` returning false — the
  *      exact predicate for "approved_rev != current Approval_Hash, or unset" —
@@ -44,7 +44,7 @@ import { ok } from '../src/model/result';
  *
  *  (B) At the Approval_Hash level, the gate predicate itself: the extension is
  *      approved iff `approved_rev` is non-empty AND byte-equal to the current
- *      Approval_Hash. Generating a spec, computing its hash, and tampering with
+ *      Approval_Hash. Generating a plan, computing its hash, and tampering with
  *      or clearing `approved_rev` makes the predicate false; only the exact,
  *      non-empty hash makes it true.
  */
@@ -139,14 +139,14 @@ const okAdapter: Adapter = {
 function makeGit(): GitService {
   return {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async () => 'commit-sha',
     head: async () => 'head-sha',
-    currentBranch: async () => 'spec/branch',
+    currentBranch: async () => 'plan/branch',
     diff: async () => '',
     diffAgainstWorkingTree: async () => '',
     log: async () => '',
@@ -158,22 +158,22 @@ function makeGit(): GitService {
 }
 
 /**
- * Build a SpecStore whose approval verdict is fixed and whose other Execute
+ * Build a PlanStore whose approval verdict is fixed and whose other Execute
  * guards (blocked, input-rev) are satisfied, so `isApproved` is the only gate
  * under test. Records every state write for assertions.
  */
-function makeSpecStore(opts: {
-  state: TodoState;
+function makePlanStore(opts: {
+  state: PhaseState;
   approved: boolean;
-}): SpecStore & { writes: TodoState[] } {
-  const writes: TodoState[] = [];
+}): PlanStore & { writes: PhaseState[] } {
+  const writes: PhaseState[] = [];
   return {
     writes,
     currentState: async () => opts.state,
     // A plan is always on file, so the approval gate is the only thing that can
     // refuse an Execute dispatch here.
-    readSpec: async () => undefined,
-    readArtifact: async () => '# Plan T01\n',
+    readPlan: async () => undefined,
+    readArtifact: async () => '# Plan P01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => opts.approved,
     isBlocked: async () => false,
@@ -186,9 +186,9 @@ function makeSpecStore(opts: {
   };
 }
 
-/** Assemble RunQueueDeps around the given SpecStore and host doubles. */
+/** Assemble RunQueueDeps around the given PlanStore and host doubles. */
 function makeDeps(
-  specStore: SpecStore,
+  planStore: PlanStore,
   terminalHost: TerminalHost,
   watcherFactory: ResultWatcherFactory,
   workspaceRoot: string,
@@ -199,14 +199,14 @@ function makeDeps(
     git: makeGit(),
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath: path.join(workspaceRoot, '.baiton', 'specs', 's', 'runs.jsonl'),
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
   };
 }
 
 /**
- * Create a temp workspace with the `.baiton/specs/s/` folder so the queue's
+ * Legacy: Create a temp workspace with the `.baiton/specs/s/` folder so the queue's
  * result flow can persist an execute artifact and the journal can be appended
  * without any missing-directory failure interfering with the gate under test.
  */
@@ -216,15 +216,15 @@ function makeWorkspace(): string {
   return root;
 }
 
-/** An execute request (todo state is fixed by the SpecStore double). */
+/** An execute request (phase state is fixed by the PlanStore double). */
 function executeRequest(): RunRequest {
-  return { slug: 's', todoId: 'T01', action: 'execute', role: 'executor', attempt: 1, resume: false };
+  return { slug: 's', phaseId: 'T01', action: 'execute', role: 'executor', attempt: 1, resume: false };
 }
 
 // --- Generators ------------------------------------------------------------
 
-/** The todo states from which Execute is a legal transition (transitions.ts). */
-const executeLegalStateArb: fc.Arbitrary<TodoState> = fc.constantFrom<TodoState>(
+/** The phase states from which Execute is a legal transition (transitions.ts). */
+const executeLegalStateArb: fc.Arbitrary<PhaseState> = fc.constantFrom<PhaseState>(
   'planned',
   'executed',
   'failed',
@@ -244,12 +244,12 @@ describe('run queue approval gate (property)', () => {
   });
 
   // Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
-  it('refuses Execute with not-approved whenever the spec is not approved', async () => {
+  it('refuses Execute with not-approved whenever the plan is not approved', async () => {
     await fc.assert(
       fc.asyncProperty(executeLegalStateArb, async (state) => {
-        const specStore = makeSpecStore({ state, approved: false });
+        const planStore = makePlanStore({ state, approved: false });
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const queue = createRunQueue(deps);
 
         const result = await queue.dispatch(executeRequest());
@@ -265,19 +265,19 @@ describe('run queue approval gate (property)', () => {
         }
         // No terminal was launched and no running/terminal state was written.
         assert.strictEqual(terminalHost.created.length, 0, 'no stage may launch when unapproved');
-        assert.deepStrictEqual(specStore.writes, [], 'no state write on an approval refusal');
+        assert.deepStrictEqual(planStore.writes, [], 'no state write on an approval refusal');
       }),
       { numRuns: 100 },
     );
   });
 
   // Feature: baiton-first-pass, Property 8: Approval mismatch gates execution stages
-  it('passes the approval gate and launches Execute when the spec is approved', async () => {
+  it('passes the approval gate and launches Execute when the plan is approved', async () => {
     await fc.assert(
       fc.asyncProperty(executeLegalStateArb, async (state) => {
-        const specStore = makeSpecStore({ state, approved: true });
+        const planStore = makePlanStore({ state, approved: true });
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const queue = createRunQueue(deps);
 
         const result = await queue.dispatch(executeRequest());
@@ -291,7 +291,7 @@ describe('run queue approval gate (property)', () => {
         assert.ok(terminalHost.created.length >= 1, 'an approved Execute must launch a stage');
         // The running (`executing`) and terminal (`executed`) states were written.
         assert.ok(
-          specStore.writes.includes('executing'),
+          planStore.writes.includes('executing'),
           'approved Execute writes the running state',
         );
       }),
@@ -314,9 +314,9 @@ describe('run queue unknown-agent refusal', () => {
   });
 
   it('refuses a dispatch with unknown-agent when adapterForRole returns undefined, without probing or launching', async () => {
-    const specStore = makeSpecStore({ state: 'planned', approved: true });
+    const planStore = makePlanStore({ state: 'planned', approved: true });
     const terminalHost = makeTerminalHost();
-    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
     const queue = createRunQueue({ ...deps, adapterForRole: () => undefined });
 
     const result = await queue.dispatch(executeRequest());
@@ -327,7 +327,7 @@ describe('run queue unknown-agent refusal', () => {
     }
     assert.strictEqual(terminalHost.created.length, 0, 'no terminal is created for an unknown agent');
     assert.strictEqual(
-      specStore.writes.filter((s) => s === 'executing').length,
+      planStore.writes.filter((s) => s === 'executing').length,
       0,
       'no running state is written for an unknown agent',
     );
@@ -367,15 +367,15 @@ describe('run queue worktree mode guards', () => {
       [true, false],
       [false, true],
     ] as const) {
-      const specStore = makeSpecStore({ state: 'planned', approved: true });
+      const planStore = makePlanStore({ state: 'planned', approved: true });
       const terminalHost = makeTerminalHost();
-      const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
-      const wtGit: GitService = { ...makeGit(), isCleanExceptSpecFolder: async () => wtClean };
+      const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+      const wtGit: GitService = { ...makeGit(), isCleanExceptPlanFolder: async () => wtClean };
       const queue = createRunQueue({
         ...deps,
-        git: { ...makeGit(), isCleanExceptSpecFolder: async () => mainClean },
+        git: { ...makeGit(), isCleanExceptPlanFolder: async () => mainClean },
         slug: 's',
-        todoId: 'T01',
+        phaseId: 'T01',
         worktrees: seam(wtGit, []),
       });
       const result = await queue.dispatch(executeRequest());
@@ -389,30 +389,30 @@ describe('run queue worktree mode guards', () => {
     }
   });
 
-  /** A spec whose T06 depends on `after` (a subset of T01..T05). */
-  function specWithAfter(after: readonly string[]): ParsedSpec {
+  // Legacy spec fixture: the dependency ids below use the preserved T## form.
+  function legacyDocumentWithAfter(after: readonly string[]): ParsedPlan {
     const lines = ['---', 'title: sample', '---', '# OVERVIEW', 'o', '# TODOS'];
     for (const id of ['T01', 'T02', 'T03', 'T04', 'T05']) {
       lines.push(`- [done] ${id} dep`);
     }
     lines.push(`- [pending] T06 target${after.length > 0 ? ` (after ${after.join(',')})` : ''}`);
-    return parseSpec(lines.join('\n'));
+    return parsePlan(lines.join('\n'));
   }
 
-  const idsArb = fc.subarray(['T01', 'T02', 'T03', 'T04', 'T05']);
+  const legacyDependencyIdsArb = fc.subarray(['T01', 'T02', 'T03', 'T04', 'T05']);
 
   it('refuses Plan with deps-unlanded iff an after dependency is unlanded, before creating a worktree', async () => {
     await fc.assert(
-      fc.asyncProperty(idsArb, idsArb, async (after, unlanded) => {
-        const base = makeSpecStore({ state: 'pending', approved: true });
-        const specStore = { ...base, readSpec: async () => specWithAfter(after) };
+      fc.asyncProperty(legacyDependencyIdsArb, legacyDependencyIdsArb, async (after, unlanded) => {
+        const base = makePlanStore({ state: 'pending', approved: true });
+        const planStore = { ...base, readPlan: async () => legacyDocumentWithAfter(after) };
         const terminalHost = makeTerminalHost();
-        const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+        const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
         const wt = seam(makeGit(), unlanded);
-        const queue = createRunQueue({ ...deps, slug: 's', todoId: 'T06', worktrees: wt });
+        const queue = createRunQueue({ ...deps, slug: 's', phaseId: 'T06', worktrees: wt });
         const req: RunRequest = {
           slug: 's',
-          todoId: 'T06',
+          phaseId: 'T06',
           action: 'plan',
           role: 'planner',
           attempt: 1,
@@ -441,14 +441,14 @@ describe('run queue worktree mode guards', () => {
   });
 
   it('never fires the deps-unlanded guard without a worktree seam', async () => {
-    const base = makeSpecStore({ state: 'pending', approved: true });
-    const specStore = { ...base, readSpec: async () => specWithAfter(['T01']) };
+    const base = makePlanStore({ state: 'pending', approved: true });
+    const planStore = { ...base, readPlan: async () => legacyDocumentWithAfter(['T01']) };
     const terminalHost = makeTerminalHost();
-    const deps = makeDeps(specStore, terminalHost, makeCompletingWatcherFactory(), workspace);
+    const deps = makeDeps(planStore, terminalHost, makeCompletingWatcherFactory(), workspace);
     const queue = createRunQueue(deps);
     const dispatched = queue.dispatch({
       slug: 's',
-      todoId: 'T06',
+      phaseId: 'T06',
       action: 'plan',
       role: 'planner',
       attempt: 1,
@@ -466,7 +466,7 @@ describe('run queue worktree mode guards', () => {
 // --- Property (B): approval-hash gate predicate ----------------------------
 
 /**
- * The gate predicate the extension applies for Execute/Review: the spec is
+ * The gate predicate the extension applies for Execute/Review: the plan is
  * approved iff its recorded `approved_rev` is a non-empty string byte-equal to
  * the current Approval_Hash (Req 5.3, 5.4).
  */
@@ -474,8 +474,8 @@ function isApprovedPredicate(currentHash: string, approvedRev: string | undefine
   return typeof approvedRev === 'string' && approvedRev.length > 0 && approvedRev === currentHash;
 }
 
-/** Render a minimal parseable spec with one todo whose title is the seed. */
-function renderSpec(overview: string, title: string): string {
+/** Render a minimal parseable plan with one phase whose title is the seed. */
+function renderLegacyDocument(overview: string, title: string): string {
   return [
     '---',
     'title: sample',
@@ -508,8 +508,8 @@ describe('approval-hash gate predicate (property)', () => {
           'flip',
         ),
         (overview, title, tamper) => {
-          const spec: ParsedSpec = parseSpec(renderSpec(overview, title));
-          const currentHash = approvalHash(spec);
+          const parsedPlan: ParsedPlan = parsePlan(renderLegacyDocument(overview, title));
+          const currentHash = approvalHash(parsedPlan);
 
           let approvedRev: string | undefined;
           switch (tamper) {
@@ -546,8 +546,8 @@ describe('approval-hash gate predicate (property)', () => {
   it('is true only for the exact, non-empty current hash', () => {
     fc.assert(
       fc.property(cleanTextArb, cleanTextArb, (overview, title) => {
-        const spec: ParsedSpec = parseSpec(renderSpec(overview, title));
-        const currentHash = approvalHash(spec);
+        const parsedPlan: ParsedPlan = parsePlan(renderLegacyDocument(overview, title));
+        const currentHash = approvalHash(parsedPlan);
         assert.strictEqual(
           isApprovedPredicate(currentHash, currentHash),
           true,

@@ -9,7 +9,7 @@ import { TranscriptRecord } from '../src/orchestrator/chatTranscript';
 import { toRenderRecords, type InterventionView } from '../src/orchestrator/webviewProtocol';
 
 /**
- * Unit tests for the transcript reader's tolerance behavior (Task 1.3).
+ * Unit tests for the transcript reader's tolerance behavior.
  *
  * These run against real `chat.jsonl` files written under `os.tmpdir()`, so the
  * reader exercises its real Node `fs` path without a VS Code host. Each test
@@ -23,7 +23,7 @@ import { toRenderRecords, type InterventionView } from '../src/orchestrator/webv
  *   dropped, so a reloaded conversation never opens with an orphan `tool`
  *   message that the endpoint would reject (Req 8.5).
  */
-describe('transcript reader tolerance (Task 1.3)', () => {
+describe('transcript reader tolerance', () => {
   const dirs: string[] = [];
 
   /** Allocate a fresh temp directory registered for cleanup. */
@@ -220,7 +220,7 @@ describe('transcript reader tolerance (Task 1.3)', () => {
   });
 });
 
-describe('intervention records (Task T03)', () => {
+describe('intervention records ', () => {
   const dirs: string[] = [];
 
   /** Allocate a fresh temp directory registered for cleanup. */
@@ -291,7 +291,7 @@ describe('intervention records (Task T03)', () => {
       const view: InterventionView = {
         id: 'a1',
         kind: 'confirm',
-        prompt: 'Approve the spec?',
+        prompt: 'Approve the plan?',
         status: 'resolved',
         answer: { kind: 'approved' },
         rationale: 'matched the allow-list',
@@ -300,7 +300,7 @@ describe('intervention records (Task T03)', () => {
       const card: TranscriptRecord = {
         ts: '2024-01-01T00:00:01.000Z',
         role: 'system',
-        content: 'Approve the spec?',
+        content: 'Approve the plan?',
         intervention: view,
       };
       const file = writeTranscript(`${line(user)}\n${line(card)}\n`);
@@ -414,16 +414,16 @@ describe('intervention records (Task T03)', () => {
       ts: '2024-01-01T00:00:01.000Z',
       role: 'assistant',
       content: '',
-      tool_calls: [{ id: 'call_ok', name: 'approve_spec', arguments: '{}' }],
+      tool_calls: [{ id: 'call_ok', name: 'approve_plan', arguments: '{}' }],
     };
     const card: TranscriptRecord = {
       ts: '2024-01-01T00:00:02.000Z',
       role: 'system',
-      content: 'Approve the spec?',
+      content: 'Approve the plan?',
       intervention: {
         id: 'a1',
         kind: 'confirm',
-        prompt: 'Approve the spec?',
+        prompt: 'Approve the plan?',
         status: 'resolved',
         answer: { kind: 'approved' },
       },

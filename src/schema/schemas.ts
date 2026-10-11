@@ -18,22 +18,24 @@ import type {
   PlanReviewResult,
   PrResult,
   ReviewResult,
-  SpecDraftResult,
+  PlanDraftResult,
 } from './types';
 
 /**
- * Spec_Draft stage schema: the OVERVIEW prose plus a dependency-ordered todo
- * list. Each todo carries a title and, optionally, the 1-based positions of the
- * earlier todos it depends on and the files it starts from. Strict, like every
- * other stage schema — an unknown property is rejected.
+ * Plan_Draft stage schema: the Endstate, What needs changing, and Limitations
+ * & constraints prose sections plus a dependency-ordered phase list. Each phase
+ * carries a title and, optionally, the 1-based positions of earlier phases it
+ * depends on and the files it starts from. Unknown properties are rejected.
  */
-export const specDraftSchema: JSONSchemaType<SpecDraftResult> = {
+export const planDraftSchema: JSONSchemaType<PlanDraftResult> = {
   type: 'object',
   additionalProperties: false,
-  required: ['overview', 'todos'],
+  required: ['endstate', 'changes', 'constraints', 'phases'],
   properties: {
-    overview: { type: 'string' },
-    todos: {
+    endstate: { type: 'string', minLength: 1 },
+    changes: { type: 'string', minLength: 1 },
+    constraints: { type: 'string', minLength: 1 },
+    phases: {
       type: 'array',
       items: {
         type: 'object',

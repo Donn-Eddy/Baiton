@@ -22,7 +22,7 @@ import { Config, RoleConfig, SUPPORTED_VERSION } from './types';
 export function defaultConfig(): Config {
   const roles = {} as Record<Role, RoleConfig>;
   const roleList: readonly Role[] = [
-    'spec-writer',
+    'plan-writer',
     'planner',
     'plan-reviewer',
     'executor',

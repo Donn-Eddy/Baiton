@@ -23,7 +23,7 @@
  * stays enabled while busy, and posts `setAutoMode`, and — immediately left of
  * that toggle — a Mode select that reflects `state.mode`, posts `setMode`,
  * repaints only on the host's echo, and (in contrast to the Auto toggle) is
- * disabled while `state.busy`, while `state.runActive`, or on a spec
+ * disabled while `state.busy`, while `state.runActive`, or on a plan
  * conversation. The composer also carries
  * the provider-first model selection: a provider select followed by a model
  * select. Only the configured providers the host posts arrive, in host order
@@ -90,18 +90,18 @@
   const MAX_INPUT_CHARS = 100000;
 
   // Mirrors RUN_MODES in src/model/mode.ts, in the same order (default first,
-  // then spec). This is a plain browser script and cannot import it, so the list
+  // then plan). This is a plain browser script and cannot import it, so the list
   // and its labels are kept in sync by hand.
   const MODE_OPTIONS = [
     { id: 'default', label: 'Default' },
-    { id: 'spec', label: 'Spec' },
+    { id: 'plan', label: 'Phased Plan' },
     { id: 'bug', label: 'Bug' },
-    { id: 'quick', label: 'Quick' },
+    { id: 'quick', label: 'Quick Fix' },
     { id: 'refactor', label: 'Refactor' },
     { id: 'investigate', label: 'Investigate' },
   ];
   // Mirrors WORKSPACE_CONVERSATION_ID in src/activation/chatController.ts; any
-  // other non-empty conversation id is a spec slug.
+  // other non-empty conversation id is a plan slug.
   const WORKSPACE_CONVERSATION_ID = 'workspace';
 
   // ----- State -----------------------------------------------------------
@@ -1335,8 +1335,8 @@
     autoBtn.disabled = false;
   }
 
-  /** Whether the active conversation is a spec conversation (always Spec). */
-  function isSpecConversation() {
+  /** Whether the active conversation is a plan conversation (always Phased Plan). */
+  function isPlanConversation() {
     return state.activeId !== '' && state.activeId !== WORKSPACE_CONVERSATION_ID;
   }
 
@@ -1344,8 +1344,8 @@
    * The Mode select is a pure projection of `state.mode`: the change handler
    * never writes it, it posts `setMode` and the view repaints when the host
    * echoes `setMode` back through the reducer. Unlike the Auto toggle it is
-   * disabled while busy, while a run is in flight, and on a spec conversation
-   * (which always runs the Spec pipeline).
+   * disabled while busy, while a run is in flight, and on a plan conversation
+   * (which always runs the Phased Plan pipeline).
    */
   function renderMode() {
     // The option list is static, so it is built exactly once: rebuilding it on
@@ -1359,17 +1359,17 @@
         modeSelect.appendChild(opt);
       });
     }
-    // A spec conversation is always Spec: shown pinned, whatever state.mode says.
-    const pinned = isSpecConversation();
-    modeSelect.value = pinned ? 'spec' : state.mode;
+    // A plan conversation is always Phased Plan: shown pinned, whatever state.mode says.
+    const pinned = isPlanConversation();
+    modeSelect.value = pinned ? 'plan' : state.mode;
     if (!modeSelect.value) {
       // An unknown mode matches no option and leaves the value empty; fall back
-      // to Spec (not DEFAULT_MODE) rather than showing a blank control.
-      modeSelect.value = 'spec';
+      // to Plan (not DEFAULT_MODE) rather than showing a blank control.
+      modeSelect.value = 'plan';
     }
     modeSelect.disabled = state.busy || state.runActive === true || pinned || state.readOnly === true;
     modeSelect.title = pinned
-      ? 'A spec conversation always runs the Spec pipeline.'
+      ? 'A plan conversation always runs the Phased Plan pipeline.'
       : state.runActive === true
         ? 'A run is in flight; the mode cannot change until it finishes.'
         : 'Conversation mode: the pipeline a dispatch from this chat runs.';

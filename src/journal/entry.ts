@@ -13,7 +13,7 @@
  * (design notes the PR journal fields as an unused seam).
  */
 import { Stage } from '../model/stage';
-import { TodoState } from '../model/todoState';
+import { PhaseState } from '../model/phaseState';
 
 /**
  * The terminal result kind a run can record on completion. Mirrors the stage
@@ -34,14 +34,14 @@ export type RunResultKind =
  */
 export interface JournalEntry {
   runId: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
   attempt: number;
   startHead: string;
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch; absent on entries written before this field existed. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /**
    * The session id Baiton pre-assigned at launch. Only meaningful for a CLI
    * whose `Adapter.acceptsSessionId` is true (claude); other CLIs ignore it and
@@ -72,12 +72,14 @@ export interface PrCompletion {
 }
 
 /**
- * The record appended when a stage starts (Req 21.1): the run id, todo, stage,
+ * The record appended when a stage starts (Req 21.1): the run id, phase id
+ * (serialized under the legacy `todoId` wire key), stage,
  * attempt, starting HEAD, input rev, and terminal process id.
  */
 export interface StartRecord {
   type: 'start';
   runId: string;
+  /** Legacy wire key: the phase id is serialized as `todoId` so existing journals still parse. */
   todoId: string;
   stage: Stage;
   attempt: number;
@@ -85,7 +87,7 @@ export interface StartRecord {
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch; written only when supplied. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /** The Claude `--session-id` UUID; written only when supplied. */
   sessionId?: string;
 }

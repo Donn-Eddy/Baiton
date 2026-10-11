@@ -10,7 +10,7 @@
  * relative, forward-slash paths.
  *
  * The walker enumerates regular files under a root, skipping the `.git`
- * directory (never a spec concern) and following no symlinked directories, so a
+ * directory (never a plan concern) and following no symlinked directories, so a
  * symlink cannot be used to walk outside the tree. Per-file containment is
  * still re-checked by the guard when a tool resolves a specific path.
  */

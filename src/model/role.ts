@@ -4,7 +4,7 @@
  * carried for the deferred PR stage and is unused in the first pass.
  */
 export type Role =
-  | 'spec-writer'
+  | 'plan-writer'
   | 'planner'
   | 'plan-reviewer'
   | 'executor'
@@ -13,7 +13,7 @@ export type Role =
 
 /** All roles named in the config `roles` mapping (Requirement 2.2). */
 export const ROLES: readonly Role[] = [
-  'spec-writer',
+  'plan-writer',
   'planner',
   'plan-reviewer',
   'executor',

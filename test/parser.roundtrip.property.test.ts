@@ -1,46 +1,44 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
-import { parseSpec, ParsedSpec, Todo } from '../src/model/parser';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { DocumentKind, parsePlan, ParsedPlan, Phase } from '../src/model/parser';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
- * Feature: baiton-first-pass, Property 1: Spec parse/serialize round trip —
- * For any valid spec model (frontmatter, overview prose, and a list of
- * well-formed todos with arbitrary titles, states, after and files hints),
+ * Feature: baiton-first-pass, Property 1: Document parse/serialize round trip —
+ * For any valid document model (frontmatter, preamble prose, and a list of
+ * well-formed phases with arbitrary titles, states, after and files hints),
  * serializing it to text and parsing that text back SHALL produce an equivalent
- * model, and all non-todo prose lines SHALL be preserved unchanged.
+ * model, and all non-phase prose lines SHALL be preserved unchanged.
  *
  * Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.8
  *
- * Since a dedicated full-spec serializer is not yet built (only the
+ * Since a dedicated full-document serializer is not yet built (only the
  * minimal-edit writers of task 4 are planned), this test carries a small,
- * test-local canonical renderer that emits the exact shape `parseSpec`
- * consumes: a `---`-fenced flat frontmatter block, a `# OVERVIEW` section, and
- * a `# TODOS` section whose todo lines read `- [state] id title (hints)`. The
- * renderer is the inverse the property asserts against; it is intentionally not
- * production code.
+ * test-local canonical renderer for both document kinds. The legacy branch
+ * Legacy: intentionally keeps `# OVERVIEW`, `# TODOS` and T ids as documented fixtures.
  */
 
-/** The model a generated spec is rendered from and parsed back into. */
-interface SpecModel {
+/** The model a generated document is rendered from and parsed back into. */
+interface DocumentModel {
+  kind: DocumentKind;
   frontmatter: [string, string][];
-  overviewLines: string[];
-  todos: TodoModel[];
+  preambleLines: string[];
+  phases: PhaseModel[];
 }
 
-interface TodoModel {
+interface PhaseModel {
   id: string;
-  state: TodoState;
+  state: PhaseState;
   title: string;
   after: string[];
   files: string[];
 }
 
 /**
- * Renders a {@link SpecModel} to canonical spec text. This is the serialize
- * half of the round trip; `parseSpec` is the parse half.
+ * Renders a {@link DocumentModel} to canonical document text. This is the serialize
+ * half of the round trip; `parsePlan` is the parse half.
  */
-function renderSpec(model: SpecModel): string {
+function renderDocument(model: DocumentModel): string {
   const lines: string[] = [];
 
   // Frontmatter: `---`-fenced flat `key: value`, one key per line (Req 3.1).
@@ -50,23 +48,28 @@ function renderSpec(model: SpecModel): string {
   }
   lines.push('---');
 
-  // OVERVIEW section (Req 3.1). Prose lines are preserved verbatim (Req 3.8).
-  lines.push('# OVERVIEW');
-  for (const l of model.overviewLines) {
-    lines.push(l);
+  if (model.kind === 'legacy-spec') {
+    lines.push('# OVERVIEW');
+    lines.push(...model.preambleLines);
+    lines.push('# TODOS');
+  } else {
+    lines.push('## Endstate');
+    lines.push(...model.preambleLines);
+    lines.push('## What needs changing');
+    lines.push('Change the requested behavior.');
+    lines.push('## Limitations & constraints');
+    lines.push('');
+    lines.push('# PHASES');
   }
-
-  // TODOS section (Req 3.1) with one `- [state] id title (hints)` line each.
-  lines.push('# TODOS');
-  for (const t of model.todos) {
-    lines.push(renderTodoLine(t));
+  for (const t of model.phases) {
+    lines.push(renderPhaseLine(t));
   }
 
   return lines.join('\n');
 }
 
-/** Renders one todo line: `- [state] id title` with an optional hint group. */
-function renderTodoLine(t: TodoModel): string {
+/** Renders one phase line: `- [state] id title` with an optional hint group. */
+function renderPhaseLine(t: PhaseModel): string {
   let line = `- [${t.state}] ${t.id} ${t.title}`;
   const groups: string[] = [];
   if (t.after.length > 0) {
@@ -84,13 +87,13 @@ function renderTodoLine(t: TodoModel): string {
 
 // --- Generators ------------------------------------------------------------
 
-/** A todo id: `T` followed by two or more decimal digits (Req 3.3). */
-const idArb: fc.Arbitrary<string> = fc
+/** A phase id uses the document prefix (`P`, or legacy `T`) and two or more digits (Req 3.3). */
+const idArb = (kind: DocumentKind): fc.Arbitrary<string> => fc
   .integer({ min: 0, max: 999999 })
-  .map((n) => 'T' + String(n).padStart(2, '0'));
+  .map((n) => (kind === 'plan' ? 'P' : 'T') + String(n).padStart(2, '0'));
 
 /**
- * A todo title that survives the round trip: non-empty, single line, trimmed,
+ * A phase title that survives the round trip: non-empty, single line, trimmed,
  * and free of the characters the hint/section grammar reserves. Excluding `(`,
  * `)`, and `;` keeps the title from ever being mistaken for (or colliding with)
  * a trailing hint group; Property 2 covers the deliberate non-hint-paren case.
@@ -118,9 +121,9 @@ const fmValueArb: fc.Arbitrary<string> = fc
   .map((s) => s.replace(/[\n\r]/g, '').trim());
 
 /**
- * An overview prose line that cannot be mistaken for a section header or a
+ * A preamble prose line that cannot be mistaken for a section header or a
  * frontmatter fence. Blank lines are allowed. Property 3.8 preservation is
- * asserted by comparing the joined overview text exactly.
+ * asserted by comparing the joined preamble text exactly.
  */
 const overviewLineArb: fc.Arbitrary<string> = fc
   .string({ maxLength: 40 })
@@ -128,29 +131,30 @@ const overviewLineArb: fc.Arbitrary<string> = fc
   .filter((s) => s.trim() !== '---' && !/^#+\s/.test(s));
 
 /**
- * A full spec model. Todo ids are made unique so the model has a well-defined
- * set of todos; `after` targets are drawn from the generated ids so the graph
- * references only present todos (parse equivalence, not validity, is the
+ * A full document model. Phase ids are made unique so the model has a well-defined
+ * set of phases; `after` targets are drawn from the generated ids so the graph
+ * references only present phases (parse equivalence, not validity, is the
  * concern here).
  */
-const specModelArb: fc.Arbitrary<SpecModel> = fc
+const documentModelArb: fc.Arbitrary<DocumentModel> = fc
   .record({
+    kind: fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
     frontmatter: fc.uniqueArray(fc.tuple(fmKeyArb, fmValueArb), {
       maxLength: 6,
       selector: ([k]) => k,
     }),
-    overviewLines: fc.array(overviewLineArb, { maxLength: 6 }),
-    ids: fc.uniqueArray(idArb, { minLength: 0, maxLength: 6 }),
+    preambleLines: fc.array(overviewLineArb, { maxLength: 6 }),
   })
-  .chain(({ frontmatter, overviewLines, ids }) => {
-    const todoArb =
+  .chain(({ kind, frontmatter, preambleLines }) =>
+    fc.uniqueArray(idArb(kind), { minLength: 0, maxLength: 6 }).chain((ids) => {
+    const phaseArb =
       ids.length === 0
-        ? fc.constant<TodoModel[]>([])
+        ? fc.constant<PhaseModel[]>([])
         : fc.tuple(
             ...ids.map((id) =>
               fc
                 .record({
-                  state: fc.constantFrom<TodoState>(...TODO_STATES),
+                  state: fc.constantFrom<PhaseState>(...PHASE_STATES),
                   title: titleArb,
                   after: fc.subarray(ids),
                   files: fc.array(pathArb, { maxLength: 4 }),
@@ -159,20 +163,23 @@ const specModelArb: fc.Arbitrary<SpecModel> = fc
             )
           );
     return fc.record({
+      kind: fc.constant(kind),
       frontmatter: fc.constant(frontmatter),
-      overviewLines: fc.constant(overviewLines),
-      todos: todoArb,
+      preambleLines: fc.constant(preambleLines),
+      phases: phaseArb,
     });
-  });
+    }),
+  );
 
 // --- Property --------------------------------------------------------------
 
 describe('parser round trip (property)', () => {
   it('Property 1: render then parse yields an equivalent model and preserves prose', () => {
     fc.assert(
-      fc.property(specModelArb, (model) => {
-        const text = renderSpec(model);
-        const parsed: ParsedSpec = parseSpec(text);
+      fc.property(documentModelArb, (model) => {
+        const text = renderDocument(model);
+        const parsed: ParsedPlan = parsePlan(text);
+        assert.strictEqual(parsed.kind, model.kind, 'document kind');
 
         // Frontmatter equivalence: every key/value round trips (Req 3.1).
         assert.strictEqual(
@@ -184,23 +191,32 @@ describe('parser round trip (property)', () => {
           assert.strictEqual(parsed.frontmatter.get(key), value, `frontmatter ${key}`);
         }
 
-        // Overview prose preserved unchanged, line for line (Req 3.8).
+        // The complete preamble is preserved unchanged for either document kind.
         assert.strictEqual(
-          parsed.overview,
-          model.overviewLines.join('\n'),
-          'overview prose'
+          parsed.preamble,
+          model.kind === 'legacy-spec'
+            ? model.preambleLines.join('\n')
+            : [
+                '## Endstate',
+                ...model.preambleLines,
+                '## What needs changing',
+                'Change the requested behavior.',
+                '## Limitations & constraints',
+                '',
+              ].join('\n'),
+          'preamble text'
         );
 
-        // Todo equivalence: id, state, title, after and files (Req 3.2–3.6).
-        assert.strictEqual(parsed.todos.length, model.todos.length, 'todo count');
-        for (let i = 0; i < model.todos.length; i++) {
-          const expected = model.todos[i];
-          const actual: Todo = parsed.todos[i];
-          assert.strictEqual(actual.id, expected.id, 'todo id');
-          assert.strictEqual(actual.state, expected.state, 'todo state');
-          assert.strictEqual(actual.title, expected.title, 'todo title');
-          assert.deepStrictEqual(actual.after, expected.after, 'todo after');
-          assert.deepStrictEqual(actual.files, expected.files, 'todo files');
+        // Phase equivalence: id, state, title, after and files (Req 3.2–3.6).
+        assert.strictEqual(parsed.phases.length, model.phases.length, 'phase count');
+        for (let i = 0; i < model.phases.length; i++) {
+          const expected = model.phases[i];
+          const actual: Phase = parsed.phases[i];
+          assert.strictEqual(actual.id, expected.id, 'phase id');
+          assert.strictEqual(actual.state, expected.state, 'phase state');
+          assert.strictEqual(actual.title, expected.title, 'phase title');
+          assert.deepStrictEqual(actual.after, expected.after, 'phase after');
+          assert.deepStrictEqual(actual.files, expected.files, 'phase files');
         }
       }),
       { numRuns: 200 }

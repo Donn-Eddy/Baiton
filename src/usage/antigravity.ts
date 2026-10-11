@@ -1,6 +1,6 @@
 /**
- * Host-free Antigravity usage reader for the Usage view (spec first-party-usage,
- * todo T05). Imports only './model' and './usageService': no editor-host API,
+ * Host-free Antigravity usage reader for the Usage view. Imports only './model'
+ * and './usageService': no editor-host API,
  * no Node built-in module, no import of the antigravity adapter. Every effect
  * (running `agy`) goes through an injected seam and happens only inside the
  * returned reader.

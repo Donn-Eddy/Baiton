@@ -26,7 +26,7 @@ import type { RunsCommandDeps, RunsPipelineFacts } from '../src/activation/runsE
 
 /**
  * End-to-end tests for the three `baiton.runs.*` commands (design "dispatch
- * modes", todo T17), driven against REAL temporary git repositories, a real
+ * modes"), driven against REAL temporary git repositories, a real
  * `RunStore` and a real `GitService`.
  *
  * `test/runsExplorer.test.ts` drives the same handlers through a stubbed git, so
@@ -241,7 +241,7 @@ function makeDeps(
   return harness;
 }
 
-describe('run commands (design "dispatch modes", todo T17)', () => {
+describe('run commands (design "dispatch modes")', () => {
   type RunsExplorerModule = typeof import('../src/activation/runsExplorer');
   let mod: RunsExplorerModule;
 
@@ -520,7 +520,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
   // --- cancel against the real pipeline ------------------------------------
 
   /** A real pipeline over `repo`, with only the agent boundary stubbed. */
-  function realPipeline(repo: string, store: RunStore, runId: string, isSpecBusy?: () => boolean) {
+  function realPipeline(repo: string, store: RunStore, runId: string, isPlanBusy?: () => boolean) {
     const terminalHost = new StubTerminalHost();
     const watcherFactory = new StubWatcherFactory();
     const pipeline = createRunPipeline({
@@ -535,7 +535,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
       newRunId: () => runId,
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
       report: () => {},
-      ...(isSpecBusy !== undefined ? { isSpecBusy } : {}),
+      ...(isPlanBusy !== undefined ? { isPlanBusy } : {}),
     });
     return { pipeline, terminalHost, watcherFactory };
   }
@@ -632,7 +632,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
     await started.completed;
   });
 
-  describe('repository lock after per-todo queues (sub-agent-chats T05)', () => {
+  describe('repository lock after per-phase queues', () => {
     const startBug = (real: ReturnType<typeof realPipeline>) =>
       real.pipeline.start({
         mode: 'bug',
@@ -643,7 +643,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
         reproduction: 'Call count() with an empty list.',
       });
 
-    it('refuses a spec-less run only while the spec draft runs', async () => {
+    it('refuses a plan-less run only while the plan draft runs', async () => {
       const { createStageLock } = await import('../src/activation/engineFacade');
       const repo = newRepo();
       const runId = 'bug-20260101-000000-lck1';
@@ -652,7 +652,7 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
       // eslint-disable-next-line prefer-const
       let real: ReturnType<typeof realPipeline>;
       const lock = createStageLock({
-        specDraftRunning: () => draftRunning,
+        planDraftRunning: () => draftRunning,
         runRunning: () => real.pipeline.isRunning(),
       });
       real = realPipeline(repo, store, runId, () => lock.runPipelineBusy());
@@ -676,33 +676,33 @@ describe('run commands (design "dispatch modes", todo T17)', () => {
       await started.completed;
     });
 
-    it('makes the spec draft busy while a spec-less run runs, and free once it settles', async () => {
+    it('makes the plan draft busy while a plan-less run runs, and free once it settles', async () => {
       const { createStageLock } = await import('../src/activation/engineFacade');
       const repo = newRepo();
       const store = createRunStore({ workspaceRoot: repo });
       // eslint-disable-next-line prefer-const
       let real: ReturnType<typeof realPipeline>;
       const lock = createStageLock({
-        specDraftRunning: () => false,
+        planDraftRunning: () => false,
         runRunning: () => real.pipeline.isRunning(),
       });
       real = realPipeline(repo, store, 'bug-20260101-000000-lck2', () => lock.runPipelineBusy());
-      assert.strictEqual(lock.specDraftBusy(), false);
+      assert.strictEqual(lock.planDraftBusy(), false);
 
       const started = await startBugRun(real);
-      assert.strictEqual(lock.specDraftBusy(), true);
+      assert.strictEqual(lock.planDraftBusy(), true);
 
       assert.strictEqual(real.pipeline.cancel(), true);
       real.watcherFactory.watchers[0].emitClose(undefined);
       await started.completed;
-      assert.strictEqual(lock.specDraftBusy(), false);
+      assert.strictEqual(lock.planDraftBusy(), false);
     });
 
-    it('has no input for todo queues: an idle spec draft never blocks a run', async () => {
+    it('an idle plan draft never blocks a run', async () => {
       const { createStageLock } = await import('../src/activation/engineFacade');
-      const lock = createStageLock({ specDraftRunning: () => false, runRunning: () => false });
+      const lock = createStageLock({ planDraftRunning: () => false, runRunning: () => false });
       assert.strictEqual(lock.runPipelineBusy(), false);
-      assert.strictEqual(lock.specDraftBusy(), false);
+      assert.strictEqual(lock.planDraftBusy(), false);
     });
   });
 });

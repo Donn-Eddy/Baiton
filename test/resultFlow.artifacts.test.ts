@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   artifactPathFor,
@@ -16,7 +18,7 @@ import type {
 } from '../src/schema';
 
 /**
- * Unit tests for the per-todo artifact paths and the per-stage Markdown
+ * Unit tests for the per-phase artifact paths and the per-stage Markdown
  * renderers (Requirement 24.3).
  *
  * The persisted `.md` artifact is what the next stage's Brief carries verbatim,
@@ -58,52 +60,61 @@ const PLAN_REVIEW: PlanReviewResult = {
   findings: [{ severity: 'should', text: 'Name the test file.' }],
 };
 
-describe('artifactPathFor (per-todo isolation, Req 24.3)', () => {
-  it('puts each todo-level artifact under its own todo folder', () => {
-    const base = path.join('/repo', '.baiton', 'specs', 'demo', 'todos');
+describe('artifactPathFor (per-phase isolation, Req 24.3)', () => {
+  let workspaceRoot: string;
+  beforeEach(() => { workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-artifact-path-')); });
+  afterEach(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+
+  it('defaults to the plans phases folder when no document exists', () => {
+    const base = path.join(workspaceRoot, '.baiton', 'plans', 'demo', 'phases');
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'plan', 'T06'),
-      path.join(base, 'T06', 'plan.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan', 'P06'),
+      path.join(base, 'P06', 'plan.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'execute', 'T06', 2),
-      path.join(base, 'T06', 'execute-2.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P06', 2),
+      path.join(base, 'P06', 'execute-2.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'review', 'T06', 1),
-      path.join(base, 'T06', 'review-1.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'review', 'P06', 1),
+      path.join(base, 'P06', 'review-1.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'plan-review', 'T06', 1),
-      path.join(base, 'T06', 'plan-review-1.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan-review', 'P06', 1),
+      path.join(base, 'P06', 'plan-review-1.md'),
     );
+    assert.strictEqual(artifactPathFor(workspaceRoot, 'demo', 'plan-draft'), path.join(workspaceRoot, '.baiton', 'plans', 'demo', 'plan.md'));
   });
 
-  it('never lets one todo overwrite another at the same attempt', () => {
+  it('never lets one phase overwrite another at the same attempt', () => {
     assert.notStrictEqual(
-      artifactPathFor('/repo', 'demo', 'execute', 'T05', 1),
-      artifactPathFor('/repo', 'demo', 'execute', 'T06', 1),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P05', 1),
+      artifactPathFor(workspaceRoot, 'demo', 'execute', 'P06', 1),
     );
   });
 
-  it('keeps the spec-scoped stages at the spec root, ignoring the todo id', () => {
-    const specDir = path.join('/repo', '.baiton', 'specs', 'demo');
+  it('resolves legacy documents to their phases layout', () => {
+    // Legacy spec fixture: artifacts stay under specs/<slug>/todos/<id>/.
+    const legacySpecsDir = path.join(workspaceRoot, '.baiton', 'specs', 'demo');
+    fs.mkdirSync(legacySpecsDir, { recursive: true });
+    fs.writeFileSync(path.join(legacySpecsDir, 'spec.md'), '# OVERVIEW\nLegacy.\n');
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'spec-draft', 'T06'),
-      path.join(specDir, 'spec.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'plan-draft', 'T06'),
+      path.join(legacySpecsDir, 'spec.md'),
     );
     assert.strictEqual(
-      artifactPathFor('/repo', 'demo', 'pr'),
-      path.join(specDir, 'pr.md'),
+      artifactPathFor(workspaceRoot, 'demo', 'pr'),
+      path.join(legacySpecsDir, 'pr.md'),
     );
+    assert.strictEqual(artifactPathFor(workspaceRoot, 'demo', 'plan', 'T06'), path.join(legacySpecsDir, 'todos', 'T06', 'plan.md'));
   });
 });
 
 describe('stage artifact renderers', () => {
   it('renders the plan as steps with details and files, then risks and acceptance', () => {
-    const md = renderPlanArtifact('T06', PLAN);
+    const md = renderPlanArtifact('P06', PLAN);
 
-    assert.ok(md.startsWith('# Plan T06'), 'the plan names its todo in the heading');
+    assert.ok(md.startsWith('# Plan P06'), 'the plan names its phase in the heading');
     assert.ok(md.includes('## Steps'));
     assert.ok(md.includes('1. Add the greeting function'), 'steps are a numbered list');
     assert.ok(md.includes('2. Cover it'));
@@ -119,9 +130,9 @@ describe('stage artifact renderers', () => {
   });
 
   it('renders the execution summary, files, commands and notes as sections', () => {
-    const md = renderExecuteArtifact('T06', EXECUTE);
+    const md = renderExecuteArtifact('P06', EXECUTE);
 
-    assert.ok(md.startsWith('# Execute T06'));
+    assert.ok(md.startsWith('# Execute P06'));
     assert.ok(md.includes('## Summary'));
     assert.ok(md.includes('Added greet() and its test.'));
     assert.ok(md.includes('## Files changed'));
@@ -133,9 +144,9 @@ describe('stage artifact renderers', () => {
   });
 
   it('renders the review verdict, located findings and the test outcome', () => {
-    const md = renderReviewArtifact('T06', REVIEW);
+    const md = renderReviewArtifact('P06', REVIEW);
 
-    assert.ok(md.startsWith('# Review T06'));
+    assert.ok(md.startsWith('# Review P06'));
     assert.ok(md.includes('Verdict: **findings**'));
     assert.ok(md.includes('**must**'), 'a finding carries its severity');
     assert.ok(md.includes('`src/greeting.ts`:3'), 'a finding carries its location');
@@ -146,7 +157,7 @@ describe('stage artifact renderers', () => {
   });
 
   it('renders a passing review with an explicit empty findings list', () => {
-    const md = renderReviewArtifact('T06', {
+    const md = renderReviewArtifact('P06', {
       verdict: 'pass',
       findings: [],
       tests: { ran: true, passed: true, output_tail: '' },
@@ -157,36 +168,36 @@ describe('stage artifact renderers', () => {
   });
 
   it('renders the plan review verdict and findings', () => {
-    const md = renderPlanReviewArtifact('T06', PLAN_REVIEW);
+    const md = renderPlanReviewArtifact('P06', PLAN_REVIEW);
 
-    assert.ok(md.startsWith('# Plan review T06'));
+    assert.ok(md.startsWith('# Plan review P06'));
     assert.ok(md.includes('Verdict: **findings**'));
     assert.ok(md.includes('**should**'));
     assert.ok(md.includes('Name the test file.'));
   });
 
-  it('dispatches each stage to its renderer and keeps JSON for the spec-scoped stages', () => {
-    assert.strictEqual(renderArtifact('plan', PLAN, 'T06'), renderPlanArtifact('T06', PLAN));
+  it('dispatches each stage to its renderer and keeps JSON for the plan-scoped stages', () => {
+    assert.strictEqual(renderArtifact('plan', PLAN, 'P06'), renderPlanArtifact('P06', PLAN));
     assert.strictEqual(
-      renderArtifact('execute', EXECUTE, 'T06'),
-      renderExecuteArtifact('T06', EXECUTE),
+      renderArtifact('execute', EXECUTE, 'P06'),
+      renderExecuteArtifact('P06', EXECUTE),
     );
     assert.strictEqual(
-      renderArtifact('review', REVIEW, 'T06'),
-      renderReviewArtifact('T06', REVIEW),
+      renderArtifact('review', REVIEW, 'P06'),
+      renderReviewArtifact('P06', REVIEW),
     );
     assert.strictEqual(
-      renderArtifact('plan-review', PLAN_REVIEW, 'T06'),
-      renderPlanReviewArtifact('T06', PLAN_REVIEW),
+      renderArtifact('plan-review', PLAN_REVIEW, 'P06'),
+      renderPlanReviewArtifact('P06', PLAN_REVIEW),
     );
 
     // The PR draft has its own file rendered by the submit flow; the generic
     // artifact keeps the structured result verbatim.
     const pr = renderArtifact('pr', { title: 't', body: 'b' });
-    assert.ok(pr.includes('```json'), 'the spec-scoped stages keep the JSON form');
+    assert.ok(pr.includes('```json'), 'the plan-scoped stages keep the JSON form');
   });
 
   it('is pure: rendering twice yields the same text', () => {
-    assert.strictEqual(renderPlanArtifact('T06', PLAN), renderPlanArtifact('T06', PLAN));
+    assert.strictEqual(renderPlanArtifact('P06', PLAN), renderPlanArtifact('P06', PLAN));
   });
 });

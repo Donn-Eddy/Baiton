@@ -1,5 +1,5 @@
 /**
- * The spec-less run pipeline (host-free core).
+ * The plan-less run pipeline (host-free core).
  *
  * One confirmed dispatch from the chat's run tool becomes one run here. `bug`,
  * `quick` and `refactor` drive plan -> execute -> review in the run's OWN
@@ -21,14 +21,14 @@
  *     (to record the base branch and head) and reports its finding through the
  *     `onFinding` sink.
  *
- * Nothing here ever reads or writes anything under `.baiton/specs/`: a spec-less
- * run has no spec and no todo, so the run id stands in for a todo id everywhere
- * the spec pipeline would use one (the journal's `todoId`, `awaitStageResult`'s
- * `todoId`).
+ * Nothing here ever reads or writes anything under a plan document folder: a plan-less
+ * run has no plan and no phase, so the run id stands in for a phase id everywhere
+ * the plan pipeline would use one (the journal's `phaseId`, `awaitStageResult`'s
+ * `phaseId`).
  *
  * It holds the one-stage-per-repository lock from both sides, exactly as
- * `specDraft.ts` does: `start()` refuses `busy` while a spec queue or the
- * spec-draft runner has a stage in flight (`isSpecBusy`), and `isRunning()` is
+ * `planDraft.ts` does: `start()` refuses `busy` while a phase queue or the
+ * plan-draft runner has a stage in flight (`isPlanBusy`), and `isRunning()` is
  * what activation feeds back to `RunQueueDeps.isExternallyBusy` (Req 20.1).
  *
  * Every expected failure is a returned value, never a throw, and everything
@@ -41,7 +41,7 @@ import { readFileSync } from 'fs';
 
 import type { Adapter } from '../adapter';
 import type { Role } from '../model/role';
-import { type RunMode, isSpecless } from '../model/mode';
+import { type RunMode, isPlanless } from '../model/mode';
 import type { GitWorktreeService } from '../git/types';
 import type { InvestigateResult } from '../schema';
 import { appendCompletion, appendStart, type RunResultKind } from '../journal';
@@ -81,7 +81,7 @@ export const DEFAULT_EXEC_ATTEMPTS = 3;
 
 /**
  * The commit message one execute attempt lands under, the analogue of the
- * queue's `spec(<slug>): <todoId> execute attempt <n>`.
+ * queue's `plan(<slug>): <phaseId> execute attempt <n>`.
  */
 export function runExecuteCommitMessage(mode: RunMode, runId: string, attempt: number): string {
   return `${mode}(${runId}): execute attempt ${attempt}`;
@@ -97,7 +97,7 @@ export const RUN_ID_TRAILER = 'Run-Id';
 
 /** One confirmed dispatch from the chat's run tool. */
 export interface RunPipelineRequest {
-  /** The mode the run executes as; never 'spec' or 'default'. */
+  /** The mode the run executes as; never 'plan' or 'default'. */
   mode: RunMode;
   /** What the composer's Mode select said when the run was confirmed (may be 'default'). */
   composerMode: RunMode;
@@ -198,7 +198,7 @@ export interface RunPipeline {
   start(req: RunPipelineRequest): Promise<RunPipelineStart>;
   /** Cancel the in-flight run; returns false when idle. Leaves the worktree and branch in place. */
   cancel(): boolean;
-  /** Whether a run is in flight (the spec queue and the spec draft consult this). */
+  /** Whether a run is in flight (the plan queue and the plan draft consult this). */
   isRunning(): boolean;
   /** The stage currently in flight, or undefined when idle. */
   currentStage(): LiveRunStage | undefined;
@@ -225,8 +225,8 @@ export interface RunPipelineDeps {
   execAttempts?: () => number;
   /** `git.verify`, for the refactor brief's behaviour-preservation section. */
   verify?: () => string | undefined;
-  /** True while a spec queue or the spec-draft runner has a stage in flight. */
-  isSpecBusy?: () => boolean;
+  /** True while a plan queue or the plan-draft runner has a stage in flight. */
+  isPlanBusy?: () => boolean;
   /** Factory for a git service bound to the run's worktree; injected for tests. */
   createService?: (dir: string) => GitWorktreeService;
   newRunId?: (mode: RunMode) => string;
@@ -316,26 +316,26 @@ class DefaultRunPipeline implements RunPipeline {
   }
 
   async start(req: RunPipelineRequest): Promise<RunPipelineStart> {
-    // 1. Mode. Neither 'spec' nor 'default' is ever a run. Belt and braces:
-    //    a run pipeline for a spec conversation would write under
-    //    `.baiton/specs/`, and 'default' is spec-less per `isSpecless` but only
+    // 1. Mode. Neither 'plan' nor 'default' is ever a run. Belt and braces:
+    //    a run pipeline for a plan conversation would write under
+    //    a plan document folder, and 'default' is plan-less per `isPlanless` but only
     //    recommends a concrete mode.
-    if (req.mode === 'spec' || !isSpecless(req.mode)) {
+    if (req.mode === 'plan' || !isPlanless(req.mode)) {
       return refuse({
         kind: 'invalid-mode',
-        message: 'mode "spec" has no run pipeline: a spec conversation dispatches draft_spec',
+        message: 'mode "plan" has no run pipeline: a plan conversation dispatches draft_plan',
       });
     }
     if (req.mode === 'default') {
       return refuse({
         kind: 'invalid-mode',
         message:
-          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a spec conversation dispatches draft_spec',
+          'mode "default" has no run pipeline: Default recommends a mode and dispatches it with start_run or investigate, or a plan conversation dispatches draft_plan',
       });
     }
 
     // 2. One stage per repository, from both directions (Req 20.1).
-    if (this.activeRunId !== undefined || this.deps.isSpecBusy?.() === true) {
+    if (this.activeRunId !== undefined || this.deps.isPlanBusy?.() === true) {
       return refuse({
         kind: 'busy',
         message: 'a stage is already running for this repository; try again after it finishes',
@@ -743,7 +743,7 @@ class DefaultRunPipeline implements RunPipeline {
     }
 
     // 3. The brief's context, assembled from the manifest and the run's own
-    //    artifacts — never from a spec.
+    //    artifacts — never from a plan.
     const verify = this.deps.verify?.();
     const briefContext = buildRunContext({
       stage,
@@ -816,15 +816,15 @@ class DefaultRunPipeline implements RunPipeline {
     }
     const { terminal, resultPath, relay } = launched.value;
 
-    // 6. Journal the start. The run id stands in for `todoId` exactly as
-    //    `specDraft.ts` passes the spec slug, and `inputRev` is empty because a
+    // 6. Journal the start. The run id stands in for `phaseId` exactly as
+    //    `planDraft.ts` passes the plan slug, and `inputRev` is empty because a
     //    run has no plan input rev. The run directory already exists — the
     //    manifest was written there — so the append has somewhere to go.
     const journalPath = runJournalPathFor(this.deps.workspaceRoot, runId);
     const terminalPid = await resolvePid(terminal);
     appendStart(journalPath, {
       runId: launchId,
-      todoId: runId,
+      phaseId: runId,
       stage,
       attempt,
       startHead,
@@ -848,7 +848,7 @@ class DefaultRunPipeline implements RunPipeline {
       try {
         askWatcher = this.deps.askWatcherFactory.create({
           slug: runId,
-          todoId: runId,
+          phaseId: runId,
           runId: launchId,
           agent: adapter.id,
           role,
@@ -859,8 +859,8 @@ class DefaultRunPipeline implements RunPipeline {
       }
     }
 
-    // 8. Await the outcome. `slug`/`workspaceRoot`/`todoId` only feed the
-    //    spec-relative `artifactPath` that `awaitStageResult` composes and puts
+    // 8. Await the outcome. `slug`/`workspaceRoot`/`phaseId` only feed the
+    //    plan-relative `artifactPath` that `awaitStageResult` composes and puts
     //    on the outcome; nothing is written there, because `target.write`
     //    ignores its path argument and writes into the run directory instead.
     const isNumbered = stage === 'execute' || stage === 'review';
@@ -877,7 +877,7 @@ class DefaultRunPipeline implements RunPipeline {
           workspaceRoot: input.cwd ?? this.deps.workspaceRoot,
           slug: runId,
           stage,
-          todoId: runId,
+          phaseId: runId,
           ...(isNumbered ? { index: attempt } : {}),
           terminal,
           watcher,

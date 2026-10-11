@@ -1,5 +1,5 @@
 /**
- * Live configuration hot-reload (Requirement 22.7, 22.8; spec "Config Panel", todo T08).
+ * Live configuration hot-reload for the Config Panel (Requirement 22.7, 22.8).
  *
  * Provides {@link createConfigRefresh}, the host-free supplier for the Config Panel
  * controller's `ApplyConfig` seam. When the user saves in the panel, the newly validated
@@ -12,9 +12,9 @@
  *   adapter instances, so only the role -> agent lookup had to become lazy, not the
  *   registry itself.
  * - Limits block (`limits`): validated but has no consumer in the running extension yet.
- * - SpecExplorer (`src/activation/specExplorer.ts:126-150`): derives all tree state from
- *   the filesystem (`spec.md`) plus the `restricted` flag, reading no config.
- * - Model and effort option lists (model-selector-refresh T08): refreshed lists reach the
+ * - PlanExplorer (`src/activation/planExplorer.ts`): derives all tree state from the plan
+ *   documents plus the `restricted` flag, reading no config.
+ * - Model and effort option lists: refreshed lists reach the
  *   Config Panel through `ConfigPanelController.refreshOptions()` and the `optionsChanged`
  *   message, driven by `onDidChangeCapabilities` from the discovery service — not through
  *   `ApplyConfig`. A catalog refresh is not a save, and a save is not a catalog refresh, so

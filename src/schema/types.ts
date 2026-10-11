@@ -7,26 +7,30 @@
  * the compile-time view the rest of the codebase programs against.
  */
 
-/** One todo the spec writer proposes, in dependency order. */
-export interface SpecDraftTodo {
-  /** The todo title — a title only; never a lifecycle state (Req 9.7). */
+/** One phase the plan writer proposes, in dependency order. */
+export interface PlanDraftPhase {
+  /** The phase title — a title only; never a lifecycle state. */
   title: string;
   /**
-   * The 1-based positions, in this same list, of the todos this one depends on.
-   * Positions (not ids) because the writer does not assign ids; the extension
-   * maps each position to the `T##` id it assigns.
+   * The 1-based positions, in this same list, of the phases this one depends
+   * on. Positions (not ids) because the writer does not assign ids; the
+   * extension maps each position to the `P##` id it assigns.
    */
   after?: string[];
-  /** Repository-relative files this todo is expected to start from. */
+  /** Repository-relative files this phase is expected to start from. */
   files?: string[];
 }
 
-/** The spec writer's structured output (Spec_Draft stage). */
-export interface SpecDraftResult {
-  /** The spec's OVERVIEW prose. */
-  overview: string;
-  /** The dependency-ordered todo list. */
-  todos: SpecDraftTodo[];
+/** The plan writer's structured output (Plan_Draft stage). */
+export interface PlanDraftResult {
+  /** Prose for the plan's Endstate section. */
+  endstate: string;
+  /** Prose for the What needs changing section. */
+  changes: string;
+  /** Prose for the Limitations & constraints section. */
+  constraints: string;
+  /** The dependency-ordered phase list. */
+  phases: PlanDraftPhase[];
 }
 
 /** A single planned step in a {@link PlanResult}. */
@@ -45,7 +49,7 @@ export interface PlanResult {
   steps: PlanStep[];
   /** Known risks the plan carries. */
   risks: string[];
-  /** Acceptance checks that define "done" for the todo. */
+  /** Acceptance checks that define "done" for the phase. */
   acceptance: string[];
 }
 
@@ -144,7 +148,7 @@ export interface InvestigateResult {
 }
 
 export type StageResult =
-  | SpecDraftResult
+  | PlanDraftResult
   | PlanResult
   | PlanReviewResult
   | ExecuteResult

@@ -7,33 +7,33 @@ import * as path from 'path';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
 import type { GitWorktreeService } from '../src/git';
-import { createSpecBranchWriter, type SpecBranchWriter } from '../src/engine/specBranchWriter';
-import { landTodoWorktree, todoBranchFor, todoWorktreeDirFor, unlandedTodos } from '../src/engine/todoWorktree';
+import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
+import { landPhaseWorktree, phaseBranchFor, phaseWorktreeDirFor, unlandedPhases } from '../src/engine/phaseWorktree';
 import { submitPr } from '../src/engine/submitPr';
 import type { PrTool } from '../src/engine/prTool';
 import { createRunPipeline } from '../src/engine/runPipeline';
 import { createRunStore } from '../src/engine/runStore';
-import { createSpecDraftRunner } from '../src/engine/specDraft';
+import { createPlanDraftRunner } from '../src/engine/planDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
-import { createSpecStore } from '../src/activation/specStore';
+import { createPlanStore } from '../src/activation/planStore';
 import {
   createRunQueueSeam,
   createStageLock,
-  createTodoQueues,
-  type TodoQueues,
+  createPhaseQueues,
+  type PhaseQueues,
 } from '../src/activation/engineFacade';
-import { parseJournal, todoJournalPathFor } from '../src/journal';
-import { parseSpec } from '../src/model/parser';
+import { parseJournal, phaseJournalPathFor } from '../src/journal';
+import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
 import type { Role } from '../src/model/role';
-import type { SpecStore } from '../src/engine/runQueue';
+import type { PlanStore } from '../src/engine/runQueue';
 import { createToolRegistry, type ToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
 import type { SubmitPrOutcome, ToolServices } from '../src/orchestrator/toolServices';
-import type { LandTodoSeam } from '../src/orchestrator/seams';
+import type { LandPhaseSeam } from '../src/orchestrator/seams';
 import { systemClock } from '../src/orchestrator/seams';
 import { SessionStore, type SessionScope } from '../src/orchestrator/sessionStore';
 import { SubAgentRunner, chatSessionKey } from '../src/orchestrator/subAgent';
@@ -48,20 +48,20 @@ import type {
 } from '../src/orchestrator/modelClient';
 
 /**
- * End-to-end test of sub-agent chats driving todos in parallel worktrees (T13).
+ * Legacy spec fixture: end-to-end test of sub-agent chats driving phases in parallel worktrees.
  *
  * Everything below the agent boundary is real: a real temporary git repository,
- * the real git service, spec-branch writer, spec store, per-todo run queues,
+ * the real git service, plan-branch writer, plan store, per-phase run queues,
  * run-queue seam, tool registry, sub-agent runner, session store, tool loop,
- * `submitPr` and `landTodoWorktree`. Only the agent boundary (adapter, terminal
+ * `submitPr` and `landPhaseWorktree`. Only the agent boundary (adapter, terminal
  * host, result watcher) and the model client are stubbed.
  *
  * What it pins: a parent chat spawns two sub-agents in one completion; each
- * drives its own todo through plan, execute and review via `run`, the two todos
+ * drives its own phase through plan, execute and review via `run`, the two phases
  * in flight at once (a per-stage barrier fails the test when the stages are
  * serialised) in separate worktrees without losing a state write; `submit_pr`
- * refuses while todos are unlanded; `land_todo` lands both; and a spec-less
- * bug run and the spec draft still work while a todo stage is in flight.
+ * refuses while phases are unlanded; `land_phase` lands both; and a plan-less
+ * bug run and the plan draft still work while a phase stage is in flight.
  */
 
 // ---------------------------------------------------------------------------
@@ -83,10 +83,10 @@ function readRepoFile(root: string, rel: string): string {
 }
 
 /** Must not contain -plan-/-execute-/-review-: the barrier parses run ids. */
-const SLUG = 'twin-todos';
-const SPEC_REL = `.baiton/specs/${SLUG}/spec.md`;
+const SLUG = 'twin-phases';
+const LEGACY_SPEC_REL = `.baiton/specs/${SLUG}/spec.md`;
 
-function initialSpec(): string {
+function initialLegacySpec(): string {
   return [
     '---',
     'version: 1',
@@ -117,33 +117,33 @@ function makeRepo(): string {
   git(repo, 'checkout', '-q', '-b', 'main');
   writeRepoFile(repo, 'src/one.ts', 'export const one = 0;\n');
   writeRepoFile(repo, 'src/two.ts', 'export const two = 0;\n');
-  // Load-bearing: ignores runs/, worktrees/, specs/*/chat/ and specs/*/runs.jsonl.
+  // Load-bearing: ignores runs/, worktrees/, plans/*/chat/ and plans/*/runs.jsonl.
   writeRepoFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
-  writeRepoFile(repo, SPEC_REL, initialSpec());
+  writeRepoFile(repo, LEGACY_SPEC_REL, initialLegacySpec());
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'initial commit');
   return repo;
 }
 
-async function approveSpec(g: GitWorktreeService, repo: string): Promise<void> {
+async function approvePlan(g: GitWorktreeService, repo: string): Promise<void> {
   const baseCommit = await g.resolveBaseCommit('main');
   const branch = `baiton/${SLUG}`;
-  await g.createSpecBranch(branch, baseCommit);
+  await g.createPlanBranch(branch, baseCommit);
   await g.checkout(branch);
-  const specAbs = path.join(repo, SPEC_REL);
-  let content = fs.readFileSync(specAbs, 'utf8');
+  const legacySpecAbs = path.join(repo, LEGACY_SPEC_REL);
+  let content = fs.readFileSync(legacySpecAbs, 'utf8');
   content = setKey(content, 'base_commit', baseCommit);
   content = setKey(content, 'branch', branch);
   content = setKey(content, 'status', 'approved');
-  content = setKey(content, 'approved_rev', approvalHash(parseSpec(content)));
-  fs.writeFileSync(specAbs, content, 'utf8');
-  await g.commit(`spec(${SLUG}): approve`);
+  content = setKey(content, 'approved_rev', approvalHash(parsePlan(content)));
+  fs.writeFileSync(legacySpecAbs, content, 'utf8');
+  await g.commit(`plan(${SLUG}): approve`);
 }
 
 function setKey(content: string, key: string, value: string): string {
   const lines = content.split('\n');
   if (lines[0]?.trim() !== '---') {
-    throw new Error('spec has no frontmatter');
+    throw new Error('document has no frontmatter');
   }
   for (let i = 1; i < lines.length; i++) {
     if (lines[i].trim() === '---') {
@@ -249,26 +249,26 @@ class DrivenWatcherFactory implements ResultWatcherFactory {
   }
 }
 
-type TodoName = 'T01' | 'T02';
+type LegacyPhaseId = 'T01' | 'T02';
 type StageName = 'plan' | 'execute' | 'review';
 
-const TODO_FILE: Record<TodoName, { file: string; contents: string }> = {
+const LEGACY_PHASE_FILES: Record<LegacyPhaseId, { file: string; contents: string }> = {
   T01: { file: 'src/one.ts', contents: 'export const one = 1;\n' },
   T02: { file: 'src/two.ts', contents: 'export const two = 2;\n' },
 };
 
-function stageBody(todo: TodoName, stage: StageName): string {
-  const { file } = TODO_FILE[todo];
+function stageBody(phase: LegacyPhaseId, stage: StageName): string {
+  const { file } = LEGACY_PHASE_FILES[phase];
   switch (stage) {
     case 'plan':
       return JSON.stringify({
-        steps: [{ title: `Implement ${todo}`, detail: 'write the module', files: [file] }],
+        steps: [{ title: `Implement ${phase}`, detail: 'write the module', files: [file] }],
         risks: [],
         acceptance: ['the module exists'],
       });
     case 'execute':
       return JSON.stringify({
-        summary: `implemented ${todo}`,
+        summary: `implemented ${phase}`,
         files_changed: [file],
         commands_run: ['npm test'],
         notes: [],
@@ -283,7 +283,7 @@ function stageBody(todo: TodoName, stage: StageName): string {
 }
 
 interface PendingStage {
-  todo: TodoName;
+  phase: LegacyPhaseId;
   stage: StageName;
   runId: string;
   resultPath: string;
@@ -293,13 +293,13 @@ interface PendingStage {
 
 /**
  * The stubbed sub-agent. A stage's result is withheld until `expected` stages of
- * the same kind are in flight, so two todos that are serialised instead of
+ * the same kind are in flight, so two phases that are serialised instead of
  * running concurrently never reach the barrier; a 3s fallback releases a lone
  * stage and records it in `releasedAlone` so that regression fails with a clear
  * assertion rather than a mocha timeout.
  */
 class BarrierFactory implements ResultWatcherFactory {
-  public readonly created: Array<{ todo: TodoName; stage: StageName; runId: string; resultPath: string }> = [];
+  public readonly created: Array<{ phase: LegacyPhaseId; stage: StageName; runId: string; resultPath: string }> = [];
   public readonly releasedAlone: string[] = [];
   public inFlight = 0;
   public maxInFlight = 0;
@@ -309,13 +309,13 @@ class BarrierFactory implements ResultWatcherFactory {
 
   constructor(private readonly expected: number) {}
 
-  /** Withhold the next `todo`/`stage` result until {@link release} is called. */
-  hold(todo: TodoName, stage: StageName): void {
-    this.holds.add(`${todo}.${stage}`);
+  /** Withhold the next `phase`/`stage` result until {@link release} is called. */
+  hold(phase: LegacyPhaseId, stage: StageName): void {
+    this.holds.add(`${phase}.${stage}`);
   }
 
-  release(todo: TodoName, stage: StageName): void {
-    const key = `${todo}.${stage}`;
+  release(phase: LegacyPhaseId, stage: StageName): void {
+    const key = `${phase}.${stage}`;
     this.holds.delete(key);
     const entry = this.held.get(key);
     if (entry !== undefined) {
@@ -325,19 +325,19 @@ class BarrierFactory implements ResultWatcherFactory {
   }
 
   create(input: { slug: string; runId: string; resultPath: string; terminal: HostTerminal }): ResultWatcher {
-    const m = /^twin-todos-(T\d+)-(plan|execute|review)-/.exec(input.runId);
+    const m = /^twin-phases-(T\d+)-(plan|execute|review)-/.exec(input.runId);
     if (m === null) {
       throw new Error(`BarrierFactory cannot parse run id "${input.runId}"`);
     }
-    const todo = m[1] as TodoName;
+    const phase = m[1] as LegacyPhaseId;
     const stage = m[2] as StageName;
     const watcher = new StubResultWatcher();
-    const entry: PendingStage = { todo, stage, runId: input.runId, resultPath: input.resultPath, watcher, released: false };
-    this.created.push({ todo, stage, runId: input.runId, resultPath: input.resultPath });
+    const entry: PendingStage = { phase, stage, runId: input.runId, resultPath: input.resultPath, watcher, released: false };
+    this.created.push({ phase, stage, runId: input.runId, resultPath: input.resultPath });
     this.inFlight += 1;
     this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
 
-    const key = `${todo}.${stage}`;
+    const key = `${phase}.${stage}`;
     if (this.holds.has(key)) {
       this.held.set(key, entry);
       return watcher;
@@ -368,11 +368,11 @@ class BarrierFactory implements ResultWatcherFactory {
     }
     entry.released = true;
     if (entry.stage === 'execute') {
-      // The stage runs in the todo's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
+      // The stage runs in the phase's worktree: `<worktree>/.baiton/runs/<run-id>/result.json`.
       const root = path.resolve(path.dirname(entry.resultPath), '..', '..', '..');
-      writeRepoFile(root, TODO_FILE[entry.todo].file, TODO_FILE[entry.todo].contents);
+      writeRepoFile(root, LEGACY_PHASE_FILES[entry.phase].file, LEGACY_PHASE_FILES[entry.phase].contents);
     }
-    const body = stageBody(entry.todo, entry.stage);
+    const body = stageBody(entry.phase, entry.stage);
     fs.mkdirSync(path.dirname(entry.resultPath), { recursive: true });
     fs.writeFileSync(entry.resultPath, body, 'utf8');
     this.inFlight -= 1;
@@ -400,10 +400,10 @@ function calls(...list: Array<{ id: string; name: string; args: unknown }>): Com
   };
 }
 
-function subScript(todo: TodoName): Script {
+function subScript(phase: LegacyPhaseId): Script {
   const run = (stage: StageName): CompletionResult =>
-    calls({ id: `${todo}-${stage}`, name: 'run', args: { slug: SLUG, todo, stage } });
-  return [run('plan'), run('execute'), run('review'), reply(`${todo} is done`)];
+    calls({ id: `${phase}-${stage}`, name: 'run', args: { slug: SLUG, phase, stage } });
+  return [run('plan'), run('execute'), run('review'), reply(`${phase} is done`)];
 }
 
 class ScriptedClient implements ModelClient {
@@ -425,9 +425,9 @@ class ScriptedClient implements ModelClient {
       const first = req.messages.find((m) => m.role === 'user');
       const m = first === undefined ? null : /T0[12]/.exec(first.content);
       if (m === null) {
-        throw new Error(`ScriptedClient: no script for session "${id}" and its first user message names no todo`);
+        throw new Error(`ScriptedClient: no script for session "${id}" and its first user message names no phase`);
       }
-      script = subScript(m[0] as TodoName);
+      script = subScript(m[0] as LegacyPhaseId);
       this.scripts.set(id, script);
     }
     const next = script.shift();
@@ -444,12 +444,12 @@ class ScriptedClient implements ModelClient {
 
 interface Harness {
   repo: string;
-  specsDir: string;
+  legacySpecsDir: string;
   baitonDir: string;
   git: GitWorktreeService;
-  writer: SpecBranchWriter;
-  store: SpecStore;
-  queues: TodoQueues;
+  writer: PlanBranchWriter;
+  store: PlanStore;
+  queues: PhaseQueues;
   registry: ToolRegistry;
   runner: SubAgentRunner;
   sessions: SessionStore;
@@ -463,18 +463,18 @@ interface Harness {
 }
 
 function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
-  const specsDir = path.join(repo, '.baiton', 'specs');
+  const legacySpecsDir = path.join(repo, '.baiton', 'specs');
   const baitonDir = path.join(repo, '.baiton');
   const gitService = createGitService(repo);
-  const writer = createSpecBranchWriter({ specsDir, git: gitService });
-  const store = createSpecStore(specsDir, gitService, writer);
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(legacySpecsDir), git: gitService });
+  const store = createPlanStore(path.dirname(legacySpecsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
-  const queues = createTodoQueues({
+  const queues = createPhaseQueues({
     workspaceRoot: repo,
-    specsDir,
+    baitonDir: path.dirname(legacySpecsDir),
     git: gitService,
-    specWriter: writer,
-    specStore: store,
+    planWriter: writer,
+    planStore: store,
     terminalHost,
     watcherFactory: factory,
     adapterForRole: () => new StubAdapter(),
@@ -484,16 +484,16 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
   const confirmCalls: string[] = [];
   const prCalls: string[] = [];
 
-  const landTodo: LandTodoSeam = {
-    land: async ({ slug, todoId }) => {
-      if (queues.find(slug, todoId)?.isRunning()) {
-        return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
+  const landPhase: LandPhaseSeam = {
+    land: async ({ slug, phaseId }) => {
+      if (queues.find(slug, phaseId)?.isRunning()) {
+        return { kind: 'refused', reason: `a stage is still running for phase "${phaseId}"` };
       }
       return writer.apply(slug, async () => {
-        if ((await gitService.branchHead(todoBranchFor(slug, todoId))) === undefined) {
+        if ((await gitService.branchHead(phaseBranchFor(slug, phaseId, 'legacy-spec'))) === undefined) {
           return { kind: 'already-landed' as const };
         }
-        const landed = await landTodoWorktree({ workspaceRoot: repo, git: gitService }, { slug, todoId });
+        const landed = await landPhaseWorktree({ workspaceRoot: repo, git: gitService }, { slug, phaseId });
         if (landed.ok) {
           return {
             kind: 'landed' as const,
@@ -523,11 +523,11 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
 
   const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
     if (queues.isRunning(slug)) {
-      return { ok: false, error: `spec "${slug}" already has a run in progress` };
+      return { ok: false, error: `plan "${slug}" already has a run in progress` };
     }
     const result = await submitPr(slug, {
       workspaceRoot: repo,
-      specsDir,
+    baitonDir: path.dirname(legacySpecsDir),
       terminalHost,
       watcherFactory: factory,
       git: gitService,
@@ -535,7 +535,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
       remote: 'origin',
       modelForRole,
       adapterForRole: (role) => (role === 'pr-writer' ? new StubAdapter(false) : new StubAdapter()),
-      unlandedTodos: (s) => unlandedTodos({ git: gitService }, s),
+      unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repo, git: gitService }, s),
     });
     if (result.ok) {
       return { ok: true, url: result.pr.url, reused: result.reused, title: result.title };
@@ -543,9 +543,9 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     return { ok: false, error: result.error.message };
   };
 
-  const sessions = new SessionStore({ baitonDir, specsDir });
-  const scope: SessionScope = { kind: 'spec', slug: SLUG };
-  const guard = new GuardContext({ repoRoot: repo, specsDir, restricted: false });
+  const sessions = new SessionStore({ baitonDir });
+  const scope: SessionScope = { kind: 'plan', slug: SLUG };
+  const guard = new GuardContext({ repoRoot: repo, baitonDir: path.join(repo, '.baiton'), restricted: false });
   const client = new ScriptedClient();
 
   // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
@@ -556,7 +556,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     tools: () => registry,
     guardContext: () => guard,
     roundBound: () => 10,
-    readSpec: async (s) => fs.promises.readFile(path.join(specsDir, s, 'spec.md'), 'utf8'),
+    readPlan: async (s) => fs.promises.readFile(path.join(legacySpecsDir, s, 'spec.md'), 'utf8'),
   });
 
   const services: ToolServices = {
@@ -569,8 +569,8 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
         return true;
       },
     },
-    runQueue: createRunQueueSeam(queues.queueFor, specsDir, () => new StubAdapter()),
-    landTodo,
+    runQueue: createRunQueueSeam(queues.queueFor, path.dirname(legacySpecsDir), () => new StubAdapter()),
+    landPhase,
     submitPr: submitPrForSlug,
     subAgents: runner,
     clock: { now: () => new Date().toISOString() },
@@ -581,7 +581,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
 
   return {
     repo,
-    specsDir,
+    legacySpecsDir,
     baitonDir,
     git: gitService,
     writer,
@@ -601,16 +601,16 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
 }
 
 /**
- * The main checkout holds no change but the tracked per-todo journals. The
+ * The main checkout holds no change but the tracked per-phase journals. The
  * queue appends a stage's completion record after the state commit that ends
- * it, and `specs/*\/runs.jsonl` in the canonical .gitignore does not match
- * `todos/<id>/runs.jsonl`, so the last record of each journal stays uncommitted.
+ * it, and `plans/*\/runs.jsonl` in the canonical .gitignore does not match
+ * `phases/<id>/runs.jsonl`, so the last record of each journal stays uncommitted.
  * Every other path must be clean.
  */
 async function assertOnlyJournalsDirty(g: GitWorktreeService, what: string): Promise<void> {
   const paths = (await g.status()).changes.map((c) => c.path);
   for (const p of paths) {
-    assert.match(p, /^\.baiton\/specs\/twin-todos\/todos\/T0[12]\/runs\.jsonl$/, `${what} has an unexpected change: ${p}`);
+    assert.match(p, /^\.baiton\/specs\/twin-phases\/todos\/T0[12]\/runs\.jsonl$/, `${what} has an unexpected change: ${p}`);
   }
 }
 
@@ -618,7 +618,7 @@ async function assertOnlyJournalsDirty(g: GitWorktreeService, what: string): Pro
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('Integration: sub-agent chats drive two todos in parallel worktrees (T13)', () => {
+describe('Integration: sub-agent chats drive two phases in parallel worktrees ', () => {
   const repos: string[] = [];
 
   afterEach(() => {
@@ -639,32 +639,32 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     return m.content;
   }
 
-  it('drives two todos through plan, execute and review concurrently in separate worktrees, gates submit_pr on landing, and lands both', async function () {
+  it('drives two phases through plan, execute and review concurrently in separate worktrees, gates submit_pr on landing, and lands both', async function () {
     this.timeout(30000);
     const repo = newRepo();
     const factory = new BarrierFactory(2);
     const h = makeHarness(repo, factory);
-    await approveSpec(h.git, repo);
+    await approvePlan(h.git, repo);
 
     // -- The parent chat ------------------------------------------------------
     const parentId = h.sessions.create(h.scope);
     await h.sessions.ensureDir(h.scope);
     const transcript = new ChatTranscript(h.sessions.pathFor(h.scope, parentId), systemClock);
-    const first: ChatMessage = { role: 'user', content: 'Drive twin-todos to a PR.' };
+    const first: ChatMessage = { role: 'user', content: 'Drive twin-phases to a PR.' };
     await transcript.append(first);
     const history: ChatMessage[] = [first];
 
     h.client.register(parentId, [
       calls(
-        { id: 'spawn-1', name: 'spawn_subagent', args: { task: 'Drive todo T01 of twin-todos through plan, execute and review.' } },
-        { id: 'spawn-2', name: 'spawn_subagent', args: { task: 'Drive todo T02 of twin-todos through plan, execute and review.' } },
+        { id: 'spawn-1', name: 'spawn_subagent', args: { task: 'Drive phase T01 of twin-phases through plan, execute and review.' } },
+        { id: 'spawn-2', name: 'spawn_subagent', args: { task: 'Drive phase T02 of twin-phases through plan, execute and review.' } },
       ),
       calls({ id: 'pr-1', name: 'submit_pr', args: { slug: SLUG } }),
       calls(
-        { id: 'land-1', name: 'land_todo', args: { slug: SLUG, todo: 'T01' } },
-        { id: 'land-2', name: 'land_todo', args: { slug: SLUG, todo: 'T02' } },
+        { id: 'land-1', name: 'land_phase', args: { slug: SLUG, phase: 'T01' } },
+        { id: 'land-2', name: 'land_phase', args: { slug: SLUG, phase: 'T02' } },
       ),
-      calls({ id: 'land-3', name: 'land_todo', args: { slug: SLUG, todo: 'T01' } }),
+      calls({ id: 'land-3', name: 'land_phase', args: { slug: SLUG, phase: 'T01' } }),
       calls({ id: 'pr-2', name: 'submit_pr', args: { slug: SLUG } }),
       reply('done'),
     ]);
@@ -678,7 +678,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
         h.registry.call(name, JSON.parse(args || '{}'), callId, h.guard, 'drive', 'top', {
           sessionKey: chatSessionKey(h.scope, parentId),
           depth: 0,
-          phase: 'drive',
+          step: 'drive',
           kind: h.scope,
           signal,
         }),
@@ -691,10 +691,10 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     });
 
     // -- Concurrency ----------------------------------------------------------
-    assert.deepStrictEqual(factory.releasedAlone, [], 'no stage ran alone: both todos reached every barrier together');
+    assert.deepStrictEqual(factory.releasedAlone, [], 'no stage ran alone: both phases reached every barrier together');
     assert.strictEqual(factory.maxInFlight, 2, 'two stages were in flight at once');
     assert.deepStrictEqual(
-      factory.created.map((c) => `${c.todo}.${c.stage}`).sort(),
+      factory.created.map((c) => `${c.phase}.${c.stage}`).sort(),
       ['T01.execute', 'T01.plan', 'T01.review', 'T02.execute', 'T02.plan', 'T02.review'],
     );
 
@@ -729,16 +729,16 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       for (const wanted of ['run', 'spawn_subagent', 'send_to_subagent']) {
         assert.ok(names.includes(wanted), `a sub-agent is offered ${wanted}`);
       }
-      for (const banned of ['land_todo', 'submit_pr', 'approve_spec', 'draft_spec', 'start_run']) {
+      for (const banned of ['land_phase', 'submit_pr', 'approve_plan', 'draft_plan', 'start_run']) {
         assert.ok(!names.includes(banned), `a sub-agent must not be offered ${banned}`);
       }
     }
 
-    // -- submit_pr refuses before landing, land_todo lands both ---------------
+    // -- submit_pr refuses before landing, land_phase lands both ---------------
     const pr1 = toolContent(history, 'pr-1');
     assert.ok(pr1.startsWith('Error:'), pr1);
     assert.ok(pr1.includes('still unlanded: T01, T02'), pr1);
-    assert.ok(pr1.includes('land_todo'), pr1);
+    assert.ok(pr1.includes('land_phase'), pr1);
     assert.ok(h.confirmCalls.length >= 1, 'submit_pr asked for confirmation');
     assert.deepStrictEqual(h.prCalls, [], 'nothing was pushed or created');
 
@@ -756,54 +756,54 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     const pr2 = toolContent(history, 'pr-2');
     assert.ok(pr2.startsWith('Error:'), pr2);
     assert.ok(pr2.includes('probe failed'), pr2);
-    assert.ok(!pr2.includes('unlanded') && !pr2.includes('every todo must be done'), pr2);
+    assert.ok(!pr2.includes('unlanded') && !pr2.includes('every phase must be done'), pr2);
     assert.deepStrictEqual(h.prCalls, [], 'still nothing pushed or created');
 
-    // -- Spec state was not clobbered -----------------------------------------
-    const todos = parseSpec(readRepoFile(repo, SPEC_REL)).todos;
-    assert.deepStrictEqual(todos.map((t) => [t.id, t.state]), [['T01', 'done'], ['T02', 'done']]);
+    // -- plan state was not clobbered -----------------------------------------
+    const phases = parsePlan(readRepoFile(repo, LEGACY_SPEC_REL)).phases;
+    assert.deepStrictEqual(phases.map((t) => [t.id, t.state]), [['T01', 'done'], ['T02', 'done']]);
     assert.strictEqual(await h.store.currentState(SLUG, 'T01'), 'done');
     assert.strictEqual(await h.store.currentState(SLUG, 'T02'), 'done');
 
     const subjects = git(repo, 'log', '--format=%s', `baiton/${SLUG}`).split('\n').filter((s) => s.length > 0);
     for (const id of ['T01', 'T02']) {
       for (const suffix of ['planning', 'planned', 'executed', 'done']) {
-        assert.ok(subjects.includes(`spec(${SLUG}): ${id} ${suffix}`), `missing state commit "${id} ${suffix}"`);
+        assert.ok(subjects.includes(`plan(${SLUG}): ${id} ${suffix}`), `missing state commit "${id} ${suffix}"`);
       }
-      assert.ok(subjects.includes(`spec(${SLUG}): land ${id}`), `missing land commit for ${id}`);
+      assert.ok(subjects.includes(`plan(${SLUG}): land ${id}`), `missing land commit for ${id}`);
     }
     const stateCommits = git(repo, 'log', '--format=%H%x09%s', `baiton/${SLUG}`)
       .split('\n')
-      .filter((l) => /\tspec\(twin-todos\): T0[12] (planning|planned|executing|executed|reviewing|done)$/.test(l));
-    assert.ok(stateCommits.length >= 8, 'the state commits are on the spec branch');
+      .filter((l) => /\tplan\(twin-phases\): T0[12] (planning|planned|executing|executed|reviewing|done)$/.test(l));
+    assert.ok(stateCommits.length >= 8, 'the state commits are on the plan branch');
     for (const line of stateCommits) {
       const sha = line.split('\t')[0];
       const files = git(repo, 'show', '--name-only', '--format=', sha).split('\n').filter((f) => f.length > 0);
       assert.ok(files.length > 0, `state commit ${line} touches something`);
       for (const f of files) {
-        assert.ok(f.startsWith(`.baiton/specs/${SLUG}/`), `state commit "${line}" touched ${f}`);
+        assert.ok(f.startsWith(`.baiton/specs/${SLUG}/`), `legacy state commit "${line}" touched ${f}`);
       }
     }
 
     // -- Worktree isolation ---------------------------------------------------
     for (const id of ['T01', 'T02']) {
       assert.strictEqual(
-        subjects.filter((s) => s === `spec(${SLUG}): ${id} execute attempt 1`).length,
+        subjects.filter((s) => s === `plan(${SLUG}): ${id} execute attempt 1`).length,
         1,
         `${id}'s own execute commit arrived through its merge, exactly once`,
       );
-      assert.ok(!fs.existsSync(todoWorktreeDirFor(repo, SLUG, id)), `${id}'s worktree was removed`);
-      assert.strictEqual(git(repo, 'branch', '--list', todoBranchFor(SLUG, id)).trim(), '', `${id}'s branch was removed`);
+      assert.ok(!fs.existsSync(phaseWorktreeDirFor(repo, SLUG, id)), `${id}'s worktree was removed`);
+      assert.strictEqual(git(repo, 'branch', '--list', phaseBranchFor(SLUG, id, 'legacy-spec')).trim(), '', `${id}'s branch was removed`);
     }
     assert.ok(readRepoFile(repo, 'src/one.ts').includes('export const one = 1;'));
     assert.ok(readRepoFile(repo, 'src/two.ts').includes('export const two = 2;'));
-    assert.deepStrictEqual(await unlandedTodos({ git: h.git }, SLUG), []);
+    assert.deepStrictEqual(await unlandedPhases({ workspaceRoot: repo, git: h.git }, SLUG), []);
     await assertOnlyJournalsDirty(h.git, 'the main checkout');
     assert.strictEqual(await h.git.currentBranch(), `baiton/${SLUG}`);
 
     // -- Journals -------------------------------------------------------------
     for (const id of ['T01', 'T02']) {
-      const journalPath = todoJournalPathFor(h.specsDir, SLUG, id);
+      const journalPath = phaseJournalPathFor(h.baitonDir, SLUG, id);
       const entries = parseJournal(journalPath);
       assert.deepStrictEqual(
         entries.map((e) => [e.stage, e.result]),
@@ -811,29 +811,29 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
         `${id}'s journal holds its own three completed entries`,
       );
       for (const e of entries) {
-        assert.strictEqual(e.todoId, id);
+        assert.strictEqual(e.phaseId, id);
       }
       const tracked = git(repo, 'ls-files', path.relative(repo, journalPath)).trim();
       assert.ok(tracked.length > 0, `${id}'s journal is tracked`);
     }
   });
 
-  it('runs a spec-less bug run and starts a spec draft while a todo stage is in flight', async function () {
+  it('runs a plan-less bug run and starts a plan draft while a phase stage is in flight', async function () {
     this.timeout(30000);
     const repo = newRepo();
     const factory = new BarrierFactory(1);
     factory.hold('T01', 'plan');
     const h = makeHarness(repo, factory);
-    await approveSpec(h.git, repo);
+    await approvePlan(h.git, repo);
 
     const pipelineWatchers = new DrivenWatcherFactory();
     const draftWatchers = new DrivenWatcherFactory();
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
     let runPipeline!: ReturnType<typeof createRunPipeline>;
     // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
-    let draftRunner!: ReturnType<typeof createSpecDraftRunner>;
+    let draftRunner!: ReturnType<typeof createPlanDraftRunner>;
     const lock = createStageLock({
-      specDraftRunning: () => draftRunner.isRunning(),
+      planDraftRunning: () => draftRunner.isRunning(),
       runRunning: () => runPipeline.isRunning(),
     });
     runPipeline = createRunPipeline({
@@ -848,30 +848,29 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
       verify: () => 'npm test',
       newRunId: () => 'bug-20260101-000000-aaaa',
       newSessionId: () => '11111111-1111-4111-8111-111111111111',
-      isSpecBusy: () => lock.runPipelineBusy(),
+      isPlanBusy: () => lock.runPipelineBusy(),
     });
-    draftRunner = createSpecDraftRunner({
+    draftRunner = createPlanDraftRunner({
       workspaceRoot: repo,
-      specsDir: h.specsDir,
       terminalHost: new StubTerminalHost(),
       watcherFactory: draftWatchers,
       services: h.services,
       modelForRole,
       adapterForRole: () => new StubAdapter(),
-      isQueueRunning: () => lock.specDraftBusy(),
+      isQueueRunning: () => lock.planDraftBusy(),
       newRunId: () => 'draft-run-1',
     });
 
-    // A todo stage goes in flight and stays there.
-    const planning = h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T01', stage: 'plan' });
-    await waitUntil(() => factory.created.some((c) => c.todo === 'T01' && c.stage === 'plan'), 'the T01 plan watcher');
+    // A phase stage goes in flight and stays there.
+    const planning = h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T01', stage: 'plan' });
+    await waitUntil(() => factory.created.some((c) => c.phase === 'T01' && c.stage === 'plan'), 'the T01 phase plan watcher');
     assert.strictEqual(h.queues.isRunning(SLUG), true);
-    assert.deepStrictEqual(await h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T01', stage: 'plan' }), { kind: 'busy' });
-    const t02 = await h.services.runQueue.dispatch({ slug: SLUG, todoId: 'T02', stage: 'plan' });
-    assert.strictEqual(t02.kind, 'dispatched', 'another todo is not blocked by it');
+    assert.deepStrictEqual(await h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T01', stage: 'plan' }), { kind: 'busy' });
+    const t02 = await h.services.runQueue.dispatch({ slug: SLUG, phaseId: 'T02', stage: 'plan' });
+    assert.strictEqual(t02.kind, 'dispatched', 'another phase is not blocked by it');
     assert.strictEqual(await h.store.currentState(SLUG, 'T02'), 'planned');
 
-    // A spec-less bug run is not blocked by the in-flight todo stage.
+    // A plan-less bug run is not blocked by the in-flight phase stage.
     const started = await runPipeline.start({
       mode: 'bug',
       composerMode: 'bug',
@@ -884,7 +883,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     if (!started.ok) {
       return;
     }
-    const busyDraft = await draftRunner.start({ slug: 'other-spec', requirements: 'Goal: other.' });
+    const busyDraft = await draftRunner.start({ slug: 'other-plan', requirements: 'Goal: other.' });
     assert.ok(!busyDraft.ok && busyDraft.error.kind === 'busy', 'the draft is refused while the run is in flight');
 
     await waitUntil(() => pipelineWatchers.watchers.length > 0, 'the run plan watcher');
@@ -900,14 +899,14 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     assert.strictEqual(outcome.commits.length, 1);
     assert.strictEqual(git(runWorktree, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'baiton/bug/bug-20260101-000000-aaaa');
     assert.strictEqual(
-      parseSpec(readRepoFile(repo, SPEC_REL)).todos.find((t) => t.id === 'T01')?.state,
+      parsePlan(readRepoFile(repo, LEGACY_SPEC_REL)).phases.find((t) => t.id === 'T01')?.state,
       'planning',
-      'the run did not touch the in-flight todo',
+      'the run did not touch the in-flight phase',
     );
 
-    // With the run finished, the draft starts even though a todo stage is in flight.
-    const draft = await draftRunner.start({ slug: 'other-spec', requirements: 'Goal: other.' });
-    assert.ok(draft.ok, 'a todo stage does not block the spec draft');
+    // With the run finished, the draft starts even though a phase stage is in flight.
+    const draft = await draftRunner.start({ slug: 'other-plan', requirements: 'Goal: other.' });
+    assert.ok(draft.ok, 'a phase stage does not block the plan draft');
     if (!draft.ok) {
       return;
     }
@@ -919,7 +918,7 @@ describe('Integration: sub-agent chats drive two todos in parallel worktrees (T1
     // The held stage finishes and nothing was clobbered.
     factory.release('T01', 'plan');
     assert.deepStrictEqual(await planning, { kind: 'dispatched', runId: 'completed' });
-    const states = parseSpec(readRepoFile(repo, SPEC_REL)).todos.map((t) => [t.id, t.state]);
+    const states = parsePlan(readRepoFile(repo, LEGACY_SPEC_REL)).phases.map((t) => [t.id, t.state]);
     assert.deepStrictEqual(states, [['T01', 'planned'], ['T02', 'planned']]);
     await assertOnlyJournalsDirty(h.git, 'the main checkout');
   });

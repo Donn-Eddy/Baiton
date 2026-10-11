@@ -26,7 +26,7 @@ export interface AskRoute {
   registry: PendingAskRegistry;
   /**
    * Present one routed ask. `context` is the run's trusted identity (the
-   * queue's adapter id, role and run id, plus the spec slug and todo id) and
+   * queue's adapter id, role and run id, plus the plan slug and phase id) and
    * is what the Auto-mode gate keys its allow-list and task context on.
    */
   present(ask: Intervention, context: AutoModeRunContext): void | Promise<void>;
@@ -38,7 +38,7 @@ export interface AskRoute {
 
 interface AskWatcherInput {
   slug: string;
-  todoId: string;
+  phaseId: string;
   runId: string;
   agent: string;
   role: Role;
@@ -53,7 +53,7 @@ class VscodeAskWatcher implements AskWatcher {
   private readonly now: () => string;
   /**
    * The run's trusted identity, computed once and reused for every routed ask:
-   * agent, role and run id key the allow-list; slug and todo id let the host
+   * agent, role and run id key the allow-list; slug and phase id let the host
    * name the task to the Auto-mode risk evaluator.
    */
   private readonly context: AutoModeRunContext;
@@ -67,7 +67,7 @@ class VscodeAskWatcher implements AskWatcher {
       role: input.role,
       runId: input.runId,
       slug: input.slug,
-      todoId: input.todoId,
+      phaseId: input.phaseId,
     };
     // An explicit Uri-based RelativePattern remains correct when VS Code opened
     // a symlinked spelling of the workspace while Baiton uses its canonical path.

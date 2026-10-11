@@ -7,10 +7,10 @@
  * a {@link RunOutcome} exactly once the run reaches a terminal outcome:
  *
  *   - A `result.json` that parses and validates against the stage schema →
- *     persist the artifact at the stage's path under the spec, dispose the
+ *     persist the artifact at the stage's path under the resolved document, dispose the
  *     terminal, and resolve `completed` (Req 12.2, 12.4, 12.5, 24.3).
  *   - A `result.json` that is malformed JSON or fails the schema → keep the
- *     terminal open, leave the todo state unchanged, surface what was invalid,
+ *     terminal open, leave the phase state unchanged, surface what was invalid,
  *     and keep waiting; a rewrite is re-validated by the same watcher (Req
  *     12.3, 12.6, 12.7, 24.4). The outcome does not resolve on an invalid
  *     result — the run stays open for the sub-agent to correct it.
@@ -26,7 +26,7 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import type { Stage } from '../model/stage';
-import type { TodoState } from '../model/todoState';
+import type { PhaseState } from '../model/phaseState';
 import type {
   ExecuteResult,
   InvestigateResult,
@@ -36,6 +36,7 @@ import type {
   StageResult,
 } from '../schema';
 import { persistencePathForStage } from '../schema';
+import { resolveDocument } from '../storage/documentLocation';
 import type { HostTerminal } from './terminalHost';
 import type { ResultWatcher } from './resultWatcher';
 import {
@@ -62,7 +63,7 @@ import {
  *                      produced here.
  * - `control-applied`— a control action (`replan`/`stop`) that launched no
  *                      sub-agent and produced no stage result; it only rewrote
- *                      the todo's lifecycle state to `state`. Produced by the
+ *                      the phase's lifecycle state to `state`. Produced by the
  *                      queue, never by this flow.
  */
 export type RunOutcome =
@@ -70,7 +71,7 @@ export type RunOutcome =
   | { kind: 'invalid_output'; detail: string }
   | { kind: 'closed'; exitCode: number | undefined }
   | { kind: 'cancelled' }
-  | { kind: 'control-applied'; state: TodoState };
+  | { kind: 'control-applied'; state: PhaseState };
 
 /** Persists an artifact's text to an absolute path; the `fs` seam. */
 export type ArtifactWriter = (artifactPath: string, contents: string) => void;
@@ -81,22 +82,22 @@ export type ValidationReporter = (detail: string) => void;
 /** Everything {@link awaitStageResult} needs to run one stage's completion flow. */
 export interface AwaitStageResultInput {
   /**
-   * Absolute path of the workspace root; resolves the spec artifact path. The run
-   * queue passes the MAIN checkout root even when the stage ran in a todo
-   * worktree, so artifacts always land in the main checkout's spec folder; the
+   * Absolute path of the workspace root; resolves the plan artifact path. The run
+   * queue passes the MAIN checkout root even when the stage ran in a phase
+   * worktree, so artifacts always land in the main checkout's document folder; the
    * watcher's result path may be inside a worktree.
    */
   workspaceRoot: string;
-  /** The spec slug whose folder receives the persisted artifact (Req 24.3). */
+  /** The plan slug whose resolved folder receives the artifact (Req 24.3). */
   slug: string;
   /** The stage being awaited; selects the schema and persistence path. */
   stage: Stage;
   /**
-   * The todo whose artifact folder receives the result (`todos/<todoId>/`);
-   * required for the four todo-level stages, ignored by `spec-draft` and `pr`
+   * The phase whose artifact folder receives the result (`phases/<id>/`, or
+   * Legacy documents use `todos/<id>/`; required for phase stages and ignored by `plan-draft` and `pr`
    * (Req 24.3).
    */
-  todoId?: string;
+  phaseId?: string;
   /**
    * The 1-based round/attempt index for numbered artifacts (`plan-review-<n>`,
    * `execute-<n>`, `review-<n>`); ignored for `plan` (Req 24.3).
@@ -122,18 +123,18 @@ export interface AwaitStageResultDeps {
 
 /**
  * Compose the absolute path an accepted stage artifact is persisted to, under
- * the spec folder, from the stage's naming rule (Req 24.3). Exported so the
+ * the resolved document folder, from the stage's naming rule (Req 24.3). Exported so the
  * queue and tests can assert the destination without re-deriving it.
  */
 export function artifactPathFor(
   workspaceRoot: string,
   slug: string,
   stage: Stage,
-  todoId?: string,
+  phaseId?: string,
   index?: number,
 ): string {
-  const relative = persistencePathForStage(stage, todoId, index);
-  return path.join(workspaceRoot, '.baiton', 'specs', slug, relative);
+  const location = resolveDocument(path.join(workspaceRoot, '.baiton'), slug);
+  return path.join(location.dir, persistencePathForStage(stage, phaseId, index, location.kind));
 }
 
 /**
@@ -152,7 +153,7 @@ export function artifactPathFor(
  * each step touches), then the risks and acceptance checks. This is the file the
  * executor's brief carries verbatim, and the file the user edits before Execute.
  */
-export function renderPlanArtifact(todoId: string, plan: PlanResult): string {
+export function renderPlanArtifact(phaseId: string, plan: PlanResult): string {
   const steps = plan.steps.map((step, i) => {
     const detail = indentContinuation(step.detail);
     const files =
@@ -160,7 +161,7 @@ export function renderPlanArtifact(todoId: string, plan: PlanResult): string {
     return `${i + 1}. ${step.title}\n\n${detail}\n\n   Files: ${files}`;
   });
   return [
-    `# Plan ${todoId}`,
+    `# Plan ${phaseId}`,
     '## Steps',
     steps.length > 0 ? steps.join('\n\n') : '(no steps)',
     '## Risks',
@@ -175,12 +176,12 @@ export function renderPlanArtifact(todoId: string, plan: PlanResult): string {
  * raised, each with its severity.
  */
 export function renderPlanReviewArtifact(
-  todoId: string,
+  phaseId: string,
   result: PlanReviewResult,
 ): string {
   const findings = result.findings.map((f) => `- **${f.severity}** — ${f.text}`);
   return [
-    `# Plan review ${todoId}`,
+    `# Plan review ${phaseId}`,
     `Verdict: **${result.verdict}**`,
     '## Findings',
     findings.length > 0 ? findings.join('\n') : '- (none)',
@@ -192,11 +193,11 @@ export function renderPlanReviewArtifact(
  * commands it ran, and its notes. The reviewer's brief carries this verbatim.
  */
 export function renderExecuteArtifact(
-  todoId: string,
+  phaseId: string,
   result: ExecuteResult,
 ): string {
   return [
-    `# Execute ${todoId}`,
+    `# Execute ${phaseId}`,
     '## Summary',
     result.summary,
     '## Files changed',
@@ -213,7 +214,7 @@ export function renderExecuteArtifact(
  * the reviewer reported.
  */
 export function renderReviewArtifact(
-  todoId: string,
+  phaseId: string,
   result: ReviewResult,
 ): string {
   const findings = result.findings.map(
@@ -230,7 +231,7 @@ export function renderReviewArtifact(
     .filter((l) => l !== '')
     .join('\n');
   return [
-    `# Review ${todoId}`,
+    `# Review ${phaseId}`,
     `Verdict: **${result.verdict}**`,
     '## Findings',
     findings.length > 0 ? findings.join('\n') : '- (none)',
@@ -262,17 +263,17 @@ export function renderInvestigateArtifact(
 
 /**
  * Render a validated stage result as the Markdown artifact persisted under the
- * spec. The four todo-level stages get the per-stage renderers above; the two
- * spec-scoped stages (`spec-draft`, `pr`) keep the structured JSON, because
+ * resolved document. Phase stages get the per-stage renderers above; the two
+ * document-scoped stages (`plan-draft`, `pr`) keep the structured JSON, because
  * their callers render their own file from the structured result and only ever
  * consume this as a record of what the sub-agent returned.
  */
 export function renderArtifact(
   stage: Stage,
   structured: StageResult,
-  todoId?: string,
+  phaseId?: string,
 ): string {
-  const id = todoId ?? '';
+  const id = phaseId ?? '';
   switch (stage) {
     case 'plan':
       return renderPlanArtifact(id, structured as PlanResult);
@@ -283,8 +284,7 @@ export function renderArtifact(
     case 'review':
       return renderReviewArtifact(id, structured as ReviewResult);
     case 'investigate':
-      // Run-scoped: the caller passes the run id through the `todoId`
-      // parameter, so `id` is the run id here.
+      // Run-scoped: the caller passes the run id through this identifier.
       return renderInvestigateArtifact(id, structured as InvestigateResult);
     default: {
       const json = JSON.stringify(structured, null, 2);
@@ -354,18 +354,18 @@ export function awaitStageResult(
         return;
       }
 
-      // Valid → persist the artifact under the spec at the stage path, then
+      // Valid → persist the artifact under the resolved document at the stage path, then
       // dispose the terminal (Req 12.4, 12.5, 24.3).
       const artifactPath = artifactPathFor(
         input.workspaceRoot,
         input.slug,
         input.stage,
-        input.todoId,
+        input.phaseId,
         input.index,
       );
       writeArtifact(
         artifactPath,
-        renderArtifact(input.stage, validated.value, input.todoId),
+        renderArtifact(input.stage, validated.value, input.phaseId),
       );
       input.terminal.dispose();
       finish({
@@ -384,9 +384,8 @@ export function awaitStageResult(
 }
 
 /**
- * The default artifact writer: a thin `writeFileSync` shell that first creates
- * the artifact's directory, since a todo-level artifact lands in a per-todo
- * `todos/<todoId>/` folder that may not exist yet (Req 24.3).
+ * The default artifact writer creates the artifact directory first because a
+ * phase artifact folder may not exist yet (Req 24.3).
  */
 function defaultWriteArtifact(artifactPath: string, contents: string): void {
   mkdirSync(path.dirname(artifactPath), { recursive: true });

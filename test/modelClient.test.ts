@@ -24,7 +24,7 @@ import type { ApiLog } from '../src/orchestrator/apiLog';
 
 /**
  * Unit tests for the OpenAI-compatible model client against a local mock HTTP
- * server (Task 12.2). These cover the behaviors the design pins down for the
+ * server. These cover the behaviors the design pins down for the
  * orchestrator model client:
  *
  * - non-streaming path parses `tool_calls` and assistant content (Req 7.1, 7.2)

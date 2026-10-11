@@ -38,8 +38,7 @@ import type {
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 
 /**
- * The single offline, deterministic end-to-end test of the spec-less run
- * pipeline (dispatch modes, T18).
+ * Offline, deterministic end-to-end coverage of the plan-less run pipeline.
  *
  * Everything below the agent boundary is real: a real temporary git repository
  * per case, the real `RunStore`, the real `createRunWorktree`/`mergeRunWorktree`
@@ -49,12 +48,12 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/ada
  * boundary is stubbed: the adapter's probe/launch, the terminal host and the
  * result watcher, which the test drives itself.
  *
- * What it pins: a confirmed Bug run creates its branch and worktree, plans,
+ * What it pins: confirmed Bug and Quick Fix runs create branches and worktrees, plan,
  * executes with a `Run-Id:` commit and reviews, and touches nothing under
- * `.baiton/specs/`; a declined confirm creates nothing; a merge removes the
+ * Legacy: `.baiton/specs/`; a declined confirm creates nothing; a merge removes the
  * worktree and branch and refuses on a moved base or a dirty tree, while a
  * cancel keeps them; an Investigate run commits nothing and yields a finding;
- * and only the spec draft (never a per-todo queue) blocks a spec-less run.
+ * and only the plan draft (never a per-phase queue) blocks a plan-less run.
  */
 
 // ---------------------------------------------------------------------------
@@ -222,6 +221,7 @@ const INVESTIGATE_RESULT = JSON.stringify({
 // ---------------------------------------------------------------------------
 
 const RUN_ID = 'bug-20260101-000000-aaaa';
+const QUICK_RUN_ID = 'quick-20260101-000000-bbbb';
 
 /** Yield to the event loop so the pipeline's pending awaits can run. */
 function flush(): Promise<void> {
@@ -270,7 +270,7 @@ interface Harness {
  */
 function makeHarness(
   repo: string,
-  options: { runId?: string; execAttempts?: number; isSpecBusy?: () => boolean } = {},
+  options: { runId?: string; execAttempts?: number; isPlanBusy?: () => boolean } = {},
 ): Harness {
   const service = createGitService(repo);
   const store = createRunStore({ workspaceRoot: repo });
@@ -292,7 +292,7 @@ function makeHarness(
     adapterForRole: () => adapter,
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
-    ...(options.isSpecBusy !== undefined ? { isSpecBusy: options.isSpecBusy } : {}),
+    ...(options.isPlanBusy !== undefined ? { isPlanBusy: options.isPlanBusy } : {}),
     newRunId: () => options.runId ?? RUN_ID,
     newSessionId: () => '11111111-1111-4111-8111-111111111111',
     onComplete: (o) => outcomes.push(o),
@@ -349,6 +349,17 @@ function bugRequest(overrides: Partial<RunPipelineRequest> = {}): RunPipelineReq
   };
 }
 
+/** A Quick Fix dispatch. */
+function quickRequest(): RunPipelineRequest {
+  return {
+    ...bugRequest(),
+    mode: 'quick',
+    composerMode: 'quick',
+    explicitMode: true,
+    statement: 'make the counter boundary correct',
+  };
+}
+
 /** An `investigate` dispatch. */
 function investigateRequest(): RunPipelineRequest {
   return {
@@ -360,7 +371,7 @@ function investigateRequest(): RunPipelineRequest {
   };
 }
 
-describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
+describe('Integration: plan-less run modes over a temp git repo', () => {
   const repos: string[] = [];
 
   /** A fresh temp repo, registered for automatic cleanup. */
@@ -479,7 +490,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
       }
       const entries = parseJournal(path.join(h.runDir(), 'runs.jsonl'));
       assert.deepStrictEqual(
-        entries.map((e) => [e.runId, e.todoId, e.stage, e.attempt, e.result]),
+        entries.map((e) => [e.runId, e.phaseId, e.stage, e.attempt, e.result]),
         [
           [`${RUN_ID}.plan.1`, RUN_ID, 'plan', 1, 'completed'],
           [`${RUN_ID}.execute.1`, RUN_ID, 'execute', 1, 'completed'],
@@ -494,7 +505,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
       assert.ok(log.includes(`Run-Id: ${RUN_ID}`), log);
       assert.strictEqual(await h.service.findCommitByRunId(RUN_ID), outcome.commits[0]);
 
-      // Isolation: `main`, the main working tree and `.baiton/specs/` are untouched.
+      // Legacy: Isolation: `main`, the main working tree and `.baiton/specs/` are untouched.
       assert.strictEqual(await h.service.branchHead('main'), mainHeadBefore);
       assert.strictEqual((await h.service.status()).clean, true, 'the main checkout stays clean');
       assert.strictEqual(
@@ -505,12 +516,76 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
       assert.strictEqual(
         fs.existsSync(path.join(repo, '.baiton', 'specs')),
         false,
-        'a run must never create anything under .baiton/specs/',
+        'a plan-less run must never create a legacy document root',
       );
+      assert.strictEqual(fs.existsSync(path.join(repo, '.baiton', 'plans')), false);
 
       const kinds = h.events.map((e) => e.kind);
       assert.strictEqual(kinds[0], 'started');
       assert.strictEqual(kinds[kinds.length - 1], 'completed');
+    });
+  });
+
+  describe('a confirmed Quick Fix run', () => {
+    it('writes plan, execute and review artifacts on baiton/quick without creating a plan document', async () => {
+      const repo = newRepo();
+      const h = makeHarness(repo, { runId: QUICK_RUN_ID });
+      const started = await h.pipeline.start(quickRequest());
+      assert.ok(started.ok, 'the Quick Fix run should start');
+      if (!started.ok) return;
+
+      assert.strictEqual(started.manifest.mode, 'quick');
+      assert.strictEqual(started.manifest.branch, `baiton/quick/${QUICK_RUN_ID}`);
+      assert.strictEqual(
+        started.manifest.worktreeDir,
+        `.baiton/worktrees/${QUICK_RUN_ID}`,
+      );
+      assert.strictEqual(
+        git(h.worktreeDir(QUICK_RUN_ID), 'rev-parse', '--abbrev-ref', 'HEAD').trim(),
+        `baiton/quick/${QUICK_RUN_ID}`,
+      );
+
+      await h.settle(0, PLAN_RESULT);
+      await h.waitFor(1);
+      writeFile(h.worktreeDir(QUICK_RUN_ID), 'src/a.ts', 'export const bound = 1;\n');
+      h.watcherFactory.watchers[1].emitResult(EXECUTE_RESULT);
+      await h.settle(2, REVIEW_PASS);
+      const outcome = await started.completed;
+      assert.strictEqual(outcome.state, 'done');
+      assert.deepStrictEqual(outcome.outcome, { kind: 'verdict', verdict: 'pass' });
+
+      const runDir = h.runDir(QUICK_RUN_ID);
+      for (const file of ['plan.md', 'execute-1.md', 'review-1.md', 'run.json', 'runs.jsonl']) {
+        assert.ok(fs.existsSync(path.join(runDir, file)), `${file} is saved in the run directory`);
+      }
+      const executeSubject = git(
+        repo,
+        'log',
+        '-1',
+        '--format=%s',
+        `baiton/quick/${QUICK_RUN_ID}`,
+      ).trim();
+      assert.strictEqual(executeSubject, `quick(${QUICK_RUN_ID}): execute attempt 1`);
+      assert.strictEqual(fs.existsSync(path.join(repo, '.baiton', 'plans')), false);
+      assert.strictEqual(fs.existsSync(path.join(repo, '.baiton', 'specs')), false);
+
+      const allowedRoots = new Set(['runs', 'worktrees']);
+      const documentFiles: string[] = [];
+      const walk = (dir: string, relative = ''): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const childRelative = path.join(relative, entry.name);
+          const child = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(child, childRelative);
+          else if (entry.isFile() && (entry.name === 'plan.md' || entry.name === 'spec.md')) {
+            documentFiles.push(childRelative);
+          }
+        }
+      };
+      const baitonDir = path.join(repo, '.baiton');
+      if (fs.existsSync(baitonDir)) walk(baitonDir);
+      for (const file of documentFiles) {
+        assert.ok(allowedRoots.has(file.split(path.sep)[0]), `${file} is outside runs/worktrees`);
+      }
     });
   });
 
@@ -553,7 +628,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
     function guardFor(repo: string): GuardContext {
       return new GuardContext({
         repoRoot: repo,
-        specsDir: path.join(repo, '.baiton', 'specs'),
+        baitonDir: path.join(repo, '.baiton'),
         restricted: false,
       });
     }
@@ -847,18 +922,18 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
   // -------------------------------------------------------------------------
 
   describe('the repository lock', () => {
-    it('is held against a spec-less run only by the spec draft, and the run holds it against the draft', async () => {
+    it('is held against a plan-less run only by the plan draft, and the run holds it against the draft', async () => {
       const repo = newRepo();
       let drafting = true;
       // eslint-disable-next-line prefer-const -- late-bound to break a construction cycle
       let h!: Harness;
       const lock = createStageLock({
-        specDraftRunning: () => drafting,
+        planDraftRunning: () => drafting,
         runRunning: () => h.pipeline.isRunning(),
       });
-      h = makeHarness(repo, { isSpecBusy: () => lock.runPipelineBusy() });
+      h = makeHarness(repo, { isPlanBusy: () => lock.runPipelineBusy() });
 
-      // While the spec draft runs, a spec-less run is refused and creates nothing.
+      // While the plan draft runs, a plan-less run is refused and creates nothing.
       const refused = await h.pipeline.start(bugRequest());
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
@@ -869,20 +944,20 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
 
       // With the draft finished the run starts, and while it runs the draft is locked out.
       drafting = false;
-      assert.strictEqual(lock.specDraftBusy(), false);
+      assert.strictEqual(lock.planDraftBusy(), false);
       const started = await h.pipeline.start(bugRequest());
       assert.ok(started.ok, 'the run starts once the draft is done');
       if (!started.ok) {
         return;
       }
-      assert.strictEqual(lock.specDraftBusy(), true, 'a running spec-less run blocks the spec draft');
+      assert.strictEqual(lock.planDraftBusy(), true, 'a running plan-less run blocks the plan draft');
 
       await h.waitFor(0);
       assert.strictEqual(h.pipeline.cancel(), true);
       await h.close(0, undefined);
       await started.completed;
       await waitUntil(() => !h.pipeline.isRunning(), 'the run settling after cancel');
-      assert.strictEqual(lock.specDraftBusy(), false, 'the lock is released when the run ends');
+      assert.strictEqual(lock.planDraftBusy(), false, 'the lock is released when the run ends');
     });
   });
 
@@ -959,6 +1034,7 @@ describe('Integration: spec-less run modes over a temp git repo (T18)', () => {
       assert.strictEqual((await h.service.status()).clean, true);
       assert.strictEqual(await h.service.findCommitByRunId(RUN), undefined);
       assert.strictEqual(fs.existsSync(path.join(repo, '.baiton', 'specs')), false);
+      assert.strictEqual(fs.existsSync(path.join(repo, '.baiton', 'plans')), false);
 
       const read = h.store.read(RUN);
       assert.ok(read.ok);

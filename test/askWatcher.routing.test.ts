@@ -9,8 +9,8 @@ import { createRunQueue, parseResponse, serializeAsk } from '../src/engine';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine';
-import type { ResultWatcher, ResultWatcherFactory, RunQueueDeps, SpecStore } from '../src/engine';
-import { parseSpec } from '../src/model/parser';
+import type { ResultWatcher, ResultWatcherFactory, RunQueueDeps, PlanStore } from '../src/engine';
+import { parsePlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 interface WatchFake {
@@ -93,21 +93,21 @@ describe('vscode ask watcher routing', () => {
       decline: (id, reason) => { declined.push({ id, reason }); registry.reject(id, reason); },
       log: (message) => { logs.push(message); },
       now: () => '2026-01-01T00:00:00.000Z',
-    }).create({ slug: 'spec-a', todoId: 'T17', runId: 'run-a', agent: 'claude', role: 'executor', asksDir });
+    }).create({ slug: 'plan-a', phaseId: 'P17', runId: 'run-a', agent: 'claude', role: 'executor', asksDir });
   }
 
   it('carries the run context with every routed ask', async () => {
     writeFileSync(join(asksDir, 'ask-1.json'), serializeAsk({ version: 1, id: 'ask-1', runId: 'run-a', agent: 'claude', kind: 'permission', prompt: 'allow?', tool: 'Bash' }));
     make();
     await waitFor(() => cards.length === 1);
-    assert.deepStrictEqual(contexts[0], { agent: 'claude', role: 'executor', runId: 'run-a', slug: 'spec-a', todoId: 'T17' });
+    assert.deepStrictEqual(contexts[0], { agent: 'claude', role: 'executor', runId: 'run-a', slug: 'plan-a', phaseId: 'P17' });
   });
 
   it('catches up asks, scopes cards, and writes approved responses', async () => {
     writeFileSync(join(asksDir, 'ask-1.json'), serializeAsk({ version: 1, id: 'ask-1', runId: 'run-a', agent: 'claude', kind: 'permission', prompt: 'allow?', tool: 'Bash', args: '{"x":1}', detail: 'run it' }));
     make();
     await waitFor(() => cards.length === 1);
-    assert.deepStrictEqual({ kind: cards[0].kind, scopeId: cards[0].scopeId, agent: (cards[0] as Extract<typeof cards[number], { kind: 'permission' }>).agent }, { kind: 'permission', scopeId: 'spec-a', agent: 'claude' });
+    assert.deepStrictEqual({ kind: cards[0].kind, scopeId: cards[0].scopeId, agent: (cards[0] as Extract<typeof cards[number], { kind: 'permission' }>).agent }, { kind: 'permission', scopeId: 'plan-a', agent: 'claude' });
     registry.resolve(cards[0].id, { kind: 'approved' });
     await waitFor(() => existsSync(join(asksDir, 'ask-1.response.json')));
     assert.strictEqual(responseAt(join(asksDir, 'ask-1.response.json')).decision, 'approve');
@@ -190,8 +190,9 @@ describe('vscode ask watcher routing', () => {
 });
 
 describe('run queue ask watcher wiring', () => {
+  // Legacy fixture: exercise the queue against a document under specs/.
   const slug = 'demo';
-  const todoId = 'T17';
+  const phaseId = 'T17';
   let workspaceRoot: string;
 
   beforeEach(() => {
@@ -229,31 +230,31 @@ describe('run queue ask watcher wiring', () => {
       attach: () => ({ shellPath: 'claude', shellArgs: [] }),
     };
     const git: GitService = {
-      status: async () => ({ clean: true, changes: [] }), isCleanExceptSpecFolder: async () => true,
-      fetch: async () => {}, resolveBaseCommit: async () => 'base', createSpecBranch: async () => {}, checkout: async () => {},
+      status: async () => ({ clean: true, changes: [] }), isCleanExceptPlanFolder: async () => true,
+      fetch: async () => {}, resolveBaseCommit: async () => 'base', createPlanBranch: async () => {}, checkout: async () => {},
       commit: async () => 'commit', head: async () => 'head', currentBranch: async () => 'branch', diff: async () => '',
       diffAgainstWorkingTree: async () => '', log: async () => '', resetWorkingTree: async () => ok(undefined),
       findCommitByRunId: async () => undefined, push: async () => undefined, remoteUrl: async () => '',
     };
-    const specStore: SpecStore = {
-      currentState: async () => 'pending', readSpec: async () => parseSpec('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Todo\n'),
+    const planStore: PlanStore = {
+      currentState: async () => 'pending', readPlan: async () => parsePlan('# OVERVIEW\n\nO\n\n# TODOS\n- [pending] T17 Phase\n'),
       readArtifact: async () => undefined, latestExecuteCommit: async () => undefined, isApproved: async () => true,
       isBlocked: async () => false, inputRevMatches: async () => true, inputRev: async () => 'rev', writeState: async () => true,
     };
     const deps: RunQueueDeps = {
-      workspaceRoot, terminalHost, watcherFactory, git, specStore,
+      workspaceRoot, terminalHost, watcherFactory, git, planStore,
       journalPath: join(workspaceRoot, '.baiton', 'specs', slug, 'runs.jsonl'), modelForRole: () => ({ model: 'm' }),
       adapterForRole: () => adapter, newRunId: () => 'run-1', newSessionId: () => '11111111-1111-1111-1111-111111111111',
       ...(wire ? { askWatcherFactory: { create: (input) => { creates.push(input); return { dispose: () => { disposeCount += 1; } }; } } } : {}),
     };
-    const outcome = await createRunQueue(deps).dispatch({ slug, todoId, action: 'plan', role: 'planner', attempt: 1, resume: false });
+    const outcome = await createRunQueue(deps).dispatch({ slug, phaseId: phaseId, action: 'plan', role: 'planner', attempt: 1, resume: false });
     assert.ok(outcome.ok);
     return { relay, creates, disposes: () => disposeCount };
   }
 
   it('creates and disposes a watcher over the launched relay directory', async () => {
     const result = await dispatch(true);
-    assert.deepStrictEqual(result.creates, [{ slug, todoId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
+    assert.deepStrictEqual(result.creates, [{ slug, phaseId: phaseId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
     assert.strictEqual(result.disposes(), 1);
     assert.ok(result.relay !== undefined);
   });

@@ -4,8 +4,10 @@ import {
   RUN_MODES,
   STAGES,
   isRunMode,
-  isSpecless,
+  isPlanless,
   isStage,
+  toRunMode,
+  toStage,
 } from '../src/model';
 import {
   investigateSchema,
@@ -25,7 +27,7 @@ import { isErr, isOk } from '../src/model/result';
 /**
  * The run-mode vocabulary and the Investigate stage.
  *
- * Pins the `RunMode` union (including the recommend-and-confirm `default` mode) and its `isSpecless` predicate, the wiring of the
+ * Pins the `RunMode` union (including the recommend-and-confirm `default` mode) and its `isPlanless` predicate, the wiring of the
  * `investigate` stage (schema, persistence path, artifact renderer, role), and —
  * as a regression guard — that adding the stage moved nothing about the six
  * stages that already existed.
@@ -39,7 +41,7 @@ describe('run modes and the investigate stage', () => {
     it('lists every mode, default first', () => {
       assert.deepStrictEqual(
         [...RUN_MODES],
-        ['default', 'spec', 'bug', 'quick', 'refactor', 'investigate'],
+        ['default', 'plan', 'bug', 'quick', 'refactor', 'investigate'],
       );
     });
 
@@ -60,15 +62,33 @@ describe('run modes and the investigate stage', () => {
       assert.strictEqual(isRunMode('Default'), false);
     });
 
-    it('treats every mode but spec as spec-less', () => {
-      assert.strictEqual(isSpecless('spec'), false);
-      assert.strictEqual(isSpecless('default'), true);
+    it('treats every mode but plan as plan-less', () => {
+      assert.strictEqual(isPlanless('plan'), false);
+      assert.strictEqual(isPlanless('default'), true);
       for (const mode of RUN_MODES) {
-        if (mode === 'spec') {
+        if (mode === 'plan') {
           continue;
         }
-        assert.strictEqual(isSpecless(mode), true, `isSpecless(${mode})`);
+        assert.strictEqual(isPlanless(mode), true, `isPlanless(${mode})`);
       }
+    });
+
+    it('reads the legacy persisted mode and recognizes every current mode', () => {
+      assert.strictEqual(toRunMode('spec'), 'plan');
+      for (const mode of RUN_MODES) {
+        assert.strictEqual(toRunMode(mode), mode);
+      }
+      assert.strictEqual(toRunMode('nope'), undefined);
+    });
+  });
+
+  describe('toStage', () => {
+    it('reads the legacy journal stage and recognizes every current stage', () => {
+      assert.strictEqual(toStage('spec-draft'), 'plan-draft');
+      for (const stage of STAGES) {
+        assert.strictEqual(toStage(stage), stage);
+      }
+      assert.strictEqual(toStage('nope'), undefined);
     });
   });
 
@@ -83,7 +103,7 @@ describe('run modes and the investigate stage', () => {
       assert.deepStrictEqual(
         [...STAGES],
         [
-          'spec-draft',
+          'plan-draft',
           'plan',
           'plan-review',
           'execute',
@@ -102,11 +122,11 @@ describe('run modes and the investigate stage', () => {
     it('persists one unnumbered finding.md, whatever the call shape', () => {
       assert.strictEqual(persistencePathForStage('investigate'), 'finding.md');
       assert.strictEqual(
-        persistencePathForStage('investigate', 'T01'),
+        persistencePathForStage('investigate', 'P01'),
         'finding.md',
       );
       assert.strictEqual(
-        persistencePathForStage('investigate', 'T01', 3),
+        persistencePathForStage('investigate', 'P01', 3),
         'finding.md',
       );
       assert.strictEqual(stageArtifactIsNumbered('investigate'), false);
@@ -158,30 +178,39 @@ describe('run modes and the investigate stage', () => {
 
   describe('existing stages unchanged', () => {
     it('keeps every pre-existing persistence path', () => {
-      assert.strictEqual(persistencePathForStage('spec-draft'), 'spec.md');
+      assert.strictEqual(persistencePathForStage('plan-draft'), 'plan.md');
+      assert.strictEqual(persistencePathForStage('plan-draft', undefined, undefined, 'legacy-spec'), 'spec.md');
       assert.strictEqual(persistencePathForStage('pr'), 'pr.md');
       assert.strictEqual(
-        persistencePathForStage('plan', 'T01'),
+        persistencePathForStage('plan', 'P01'),
+        'phases/P01/plan.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('plan-review', 'P01', 2),
+        'phases/P01/plan-review-2.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('execute', 'P01', 3),
+        'phases/P01/execute-3.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('review', 'P01', 1),
+        'phases/P01/review-1.md',
+      );
+      assert.strictEqual(
+        persistencePathForStage('plan', 'T01', undefined, 'legacy-spec'),
         'todos/T01/plan.md',
       );
       assert.strictEqual(
-        persistencePathForStage('plan-review', 'T01', 2),
-        'todos/T01/plan-review-2.md',
-      );
-      assert.strictEqual(
-        persistencePathForStage('execute', 'T01', 3),
+        persistencePathForStage('execute', 'T01', 3, 'legacy-spec'),
         'todos/T01/execute-3.md',
-      );
-      assert.strictEqual(
-        persistencePathForStage('review', 'T01', 1),
-        'todos/T01/review-1.md',
       );
     });
 
     it('keeps every pre-existing numbering decision', () => {
       assert.strictEqual(stageArtifactIsNumbered('plan'), false);
       assert.strictEqual(stageArtifactIsNumbered('pr'), false);
-      assert.strictEqual(stageArtifactIsNumbered('spec-draft'), false);
+      assert.strictEqual(stageArtifactIsNumbered('plan-draft'), false);
       assert.strictEqual(stageArtifactIsNumbered('plan-review'), true);
       assert.strictEqual(stageArtifactIsNumbered('execute'), true);
       assert.strictEqual(stageArtifactIsNumbered('review'), true);
@@ -191,7 +220,7 @@ describe('run modes and the investigate stage', () => {
       assert.strictEqual(STAGE_ROLE.plan, 'planner');
       assert.strictEqual(STAGE_ROLE.execute, 'executor');
       assert.strictEqual(STAGE_ROLE.review, 'reviewer');
-      assert.strictEqual(STAGE_ROLE['spec-draft'], 'spec-writer');
+      assert.strictEqual(STAGE_ROLE['plan-draft'], 'plan-writer');
       assert.strictEqual(STAGE_ROLE['plan-review'], 'plan-reviewer');
       assert.strictEqual(STAGE_ROLE.pr, 'pr-writer');
     });

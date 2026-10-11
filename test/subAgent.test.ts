@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { CompletionRequest, CompletionResult, ModelClient, ToolSpec } from '../src/orchestrator/modelClient';
-import type { GuardContext, OrchestratorPhase, Tool, ToolCaller, ToolResult, ToolSurface } from '../src/orchestrator/guard';
+import type { GuardContext, ConversationStep, Tool, ToolCaller, ToolResult, ToolSurface } from '../src/orchestrator/guard';
 import { ok } from '../src/model/result';
 import { SessionStore, type SessionScope } from '../src/orchestrator/sessionStore';
 import { buildSubAgentPrompt } from '../src/orchestrator/systemPrompt';
@@ -92,18 +92,18 @@ class RoutedClient implements ModelClient {
 interface RecordedCall {
   name: string;
   args: Record<string, string>;
-  phase: OrchestratorPhase;
+  phase: ConversationStep;
   surface: ToolSurface;
   caller: ToolCaller | undefined;
 }
 
 class FakeSurface implements SubAgentToolSurface {
-  public assembled: { phase: OrchestratorPhase; surface: ToolSurface }[] = [];
+  public assembled: { phase: ConversationStep; surface: ToolSurface }[] = [];
   public recorded: RecordedCall[] = [];
   public runner!: SubAgentRunner;
   public ask!: (question: string) => Promise<unknown>;
 
-  public assembleFor(phase: OrchestratorPhase, surface: ToolSurface) {
+  public assembleFor(phase: ConversationStep, surface: ToolSurface) {
     this.assembled.push({ phase, surface });
     return ok([
       { name: 'spawn_subagent', description: 'd', parameters: {} },
@@ -120,7 +120,7 @@ class FakeSurface implements SubAgentToolSurface {
     args: unknown,
     _callId: string | undefined,
     _ctx: GuardContext,
-    phase: OrchestratorPhase,
+    phase: ConversationStep,
     surface: ToolSurface,
     caller?: ToolCaller,
   ): Promise<ToolResult> {
@@ -156,7 +156,6 @@ describe('SubAgentRunner', () => {
     let r = 0;
     return new SessionStore({
       baitonDir,
-      specsDir: path.join(baitonDir, 'specs'),
       clock: { now: () => new Date(Date.UTC(2026, 8, 1, 0, 0, t++)).toISOString() },
       random: () => ((r++ * 0.137) % 1),
     });
@@ -169,7 +168,7 @@ describe('SubAgentRunner', () => {
       tools: () => surface,
       guardContext: () => ({}) as GuardContext,
       roundBound: () => 5,
-      readSpec: async () => undefined,
+      readPlan: async () => undefined,
       asks,
       onEvent: (e) => events.push(e),
     });
@@ -187,7 +186,7 @@ describe('SubAgentRunner', () => {
     return {
       sessionKey: 'workspace/P1',
       depth: 0,
-      phase: 'gather',
+      step: 'gather',
       kind: workspace,
       signal: new AbortController().signal,
       ...over,

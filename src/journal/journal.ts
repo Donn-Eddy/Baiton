@@ -19,6 +19,7 @@ import {
   readFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
+import { resolveDocument, phaseArtifactDir } from '../storage/documentLocation';
 import {
   CompletionRecord,
   JournalEntry,
@@ -27,44 +28,45 @@ import {
   RunResultKind,
   StartRecord,
 } from './entry';
-import { Stage, isStage } from '../model/stage';
-import { TodoState, isTodoState } from '../model/todoState';
+import { Stage, toStage } from '../model/stage';
+import { PhaseState, isPhaseState } from '../model/phaseState';
 
-/** File name of every run journal (spec-level and per-todo). */
+/** File name of every run journal (document-level and per-phase). */
 export const JOURNAL_FILE = 'runs.jsonl';
 
-/** Spec-level journal: spec-draft, pr and legacy todo entries. */
-export function specJournalPathFor(specsDir: string, slug: string): string {
-  return join(specsDir, slug, JOURNAL_FILE);
+/** Plan-level journal: plan-draft, PR and legacy phase entries. */
+export function planJournalPathFor(baitonDir: string, slug: string): string {
+  return join(resolveDocument(baitonDir, slug).dir, JOURNAL_FILE);
 }
 
-/** Per-todo journal `<specsDir>/<slug>/todos/<todoId>/runs.jsonl`. */
-export function todoJournalPathFor(
-  specsDir: string,
+/** Per-phase journal in `phases/<id>/` (Legacy documents use `todos/<id>/`). */
+export function phaseJournalPathFor(
+  baitonDir: string,
   slug: string,
-  todoId: string,
+  phaseId: string,
 ): string {
-  return join(specsDir, slug, 'todos', todoId, JOURNAL_FILE);
+  return join(phaseArtifactDir(resolveDocument(baitonDir, slug), phaseId), JOURNAL_FILE);
 }
 
 /**
- * Every journal file of a spec: the spec-level path first (always included;
- * parsing tolerates a missing file), then each existing per-todo journal in
- * sorted todo-id order.
+ * Every journal file of a plan: its document-level path first (always
+ * included; parsing tolerates a missing file), then each existing per-phase
+ * journal in sorted phase-id order.
  */
-export function specJournalPaths(specsDir: string, slug: string): string[] {
-  const paths = [specJournalPathFor(specsDir, slug)];
+export function planJournalPaths(baitonDir: string, slug: string): string[] {
+  const location = resolveDocument(baitonDir, slug);
+  const paths = [planJournalPathFor(baitonDir, slug)];
   let ids: string[] = [];
   try {
-    ids = readdirSync(join(specsDir, slug, 'todos'), { withFileTypes: true })
+    ids = readdirSync(location.artifactsDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .sort();
   } catch {
-    // No todos/ directory (or unreadable): only the spec-level journal.
+    // No artifacts directory (or unreadable): only the document-level journal.
   }
   for (const id of ids) {
-    const p = todoJournalPathFor(specsDir, slug, id);
+    const p = phaseJournalPathFor(baitonDir, slug, id);
     if (existsSync(p)) {
       paths.push(p);
     }
@@ -75,14 +77,14 @@ export function specJournalPaths(specsDir: string, slug: string): string[] {
 /** The start metadata a caller supplies when a stage begins (Req 21.1). */
 export interface StartInput {
   runId: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
   attempt: number;
   startHead: string;
   inputRev: string;
   terminalPid?: number;
   /** Transition.from at launch (Req 1.2); omitted from the line when undefined. */
-  fromState?: TodoState;
+  fromState?: PhaseState;
   /** The Claude `--session-id` UUID (Req 1.2); omitted from the line when undefined. */
   sessionId?: string;
 }
@@ -110,7 +112,9 @@ export function appendStart(path: string, input: StartInput): void {
   const record: StartRecord = {
     type: 'start',
     runId: input.runId,
-    todoId: input.todoId,
+    // Legacy wire key retained so existing journal lines remain unchanged.
+    // Legacy wire key: preserve the field name already stored in run journals.
+    todoId: input.phaseId,
     stage: input.stage,
     attempt: input.attempt,
     startHead: input.startHead,
@@ -165,21 +169,21 @@ export function parseJournal(path: string): JournalEntry[] {
 }
 
 /**
- * Reads a spec's merged journal: the spec-level `runs.jsonl` followed by every
- * `todos/<id>/runs.jsonl` (see {@link specJournalPaths}), merged through one
+ * Reads a plan's merged journal: the document-level `runs.jsonl` followed by
+ * every phase journal (see {@link planJournalPaths}), merged through one
  * shared run-id map so a completion in a later file still attaches to a start
  * recorded in an earlier one.
  *
- * Ordering: the spec-level file first, then per-todo files in sorted todo-id
- * order. Legacy spec-level entries for a todo therefore precede that todo's
- * per-todo entries (chronological per todo); cross-todo interleaving is NOT
+ * Ordering: the document-level file first, then per-phase files in sorted id
+ * order. Legacy document-level entries for a phase therefore precede that
+ * phase's artifact-folder entries; cross-phase interleaving is NOT
  * preserved, so callers must not rely on global order. Unreadable files are
  * skipped.
  */
-export function readSpecJournal(specsDir: string, slug: string): JournalEntry[] {
+export function readPlanJournal(baitonDir: string, slug: string): JournalEntry[] {
   const byRunId = new Map<string, JournalEntry>();
   const order: string[] = [];
-  for (const file of specJournalPaths(specsDir, slug)) {
+  for (const file of planJournalPaths(baitonDir, slug)) {
     try {
       if (existsSync(file)) {
         mergeRecords(readFileSync(file, 'utf8'), byRunId, order);
@@ -219,20 +223,20 @@ function mergeRecords(
 }
 
 /**
- * Returns the last start entry recorded for `todoId` (optionally restricted to
+ * Returns the last start entry recorded for `phaseId` (optionally restricted to
  * one `stage`), or `undefined` if none. Operates on already-parsed entries
  * (Req 1.2, 3.1); callers read the journal once with {@link parseJournal} and
  * pass the result in rather than this function reading the file itself.
  */
 export function latestStart(
   entries: JournalEntry[],
-  todoId: string,
+  phaseId: string,
   stage?: Stage,
 ): JournalEntry | undefined {
   let latest: JournalEntry | undefined;
   for (const entry of entries) {
     if (
-      entry.todoId === todoId &&
+      entry.phaseId === phaseId &&
       (stage === undefined || entry.stage === stage)
     ) {
       latest = entry;
@@ -274,7 +278,9 @@ function appendRecord(path: string, record: JournalRecord): void {
 function startToEntry(record: StartRecord): JournalEntry {
   const entry: JournalEntry = {
     runId: record.runId,
-    todoId: record.todoId,
+    // Legacy wire key: expose this wire field in memory as phaseId.
+    // Legacy wire key: the serialized phase id remains under `todoId`.
+    phaseId: record.todoId,
     stage: record.stage,
     attempt: record.attempt,
     startHead: record.startHead,
@@ -337,11 +343,13 @@ function parseRecord(line: string): JournalRecord | undefined {
 
 /** Validates and narrows a raw object to a StartRecord, or undefined. */
 function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
+  const stage = typeof obj.stage === 'string' ? toStage(obj.stage) : undefined;
   if (
     typeof obj.runId !== 'string' ||
+    // Legacy wire key: existing journal START records carry this field name.
+    // Legacy wire key: parse the id field used by existing start records.
     typeof obj.todoId !== 'string' ||
-    typeof obj.stage !== 'string' ||
-    !isStage(obj.stage) ||
+    stage === undefined ||
     typeof obj.attempt !== 'number' ||
     typeof obj.startHead !== 'string' ||
     typeof obj.inputRev !== 'string'
@@ -351,8 +359,9 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
   const record: StartRecord = {
     type: 'start',
     runId: obj.runId,
+    // Legacy wire key: existing journals serialize their phase id as `todoId`.
     todoId: obj.todoId,
-    stage: obj.stage,
+    stage,
     attempt: obj.attempt,
     startHead: obj.startHead,
     inputRev: obj.inputRev,
@@ -360,7 +369,7 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
   if (typeof obj.terminalPid === 'number') {
     record.terminalPid = obj.terminalPid;
   }
-  if (typeof obj.fromState === 'string' && isTodoState(obj.fromState)) {
+  if (typeof obj.fromState === 'string' && isPhaseState(obj.fromState)) {
     record.fromState = obj.fromState;
   }
   if (typeof obj.sessionId === 'string') {

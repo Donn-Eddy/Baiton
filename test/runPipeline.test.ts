@@ -31,7 +31,7 @@ import type {
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/adapter';
 
 /**
- * Unit tests for the spec-less run pipeline (T07).
+ * Unit tests for the plan-less run pipeline .
  *
  * The agent boundary is stubbed exactly as `test/engine.specDraft.test.ts` and
  * the plan/execute/review integration test stub it — an inert adapter, a
@@ -41,7 +41,7 @@ import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult } from '../src/ada
  * MAIN checkout's `.baiton/runs/<run-id>/`, each stage launches under
  * `<run-id>.<stage>.<n>` with its brief inside the run's worktree, the findings
  * loop re-launches execute, the execute commit carries a `Run-Id:` trailer, and
- * nothing is ever written under `.baiton/specs/`.
+ * Legacy: nothing is ever written under `.baiton/specs/`.
  *
  * The final describe repeats the happy path against a REAL temporary git repo
  * and the real `createRunWorktree`/`createGitService` path, stubbing only the
@@ -191,7 +191,7 @@ class FakeGit implements GitWorktreeService {
   async isClean(): Promise<boolean> {
     return true;
   }
-  async isCleanExceptSpecFolder(): Promise<boolean> {
+  async isCleanExceptPlanFolder(): Promise<boolean> {
     return true;
   }
   async head(): Promise<string> {
@@ -242,7 +242,7 @@ class FakeGit implements GitWorktreeService {
   }
   fetch = boom('fetch');
   resolveBaseCommit = boom('resolveBaseCommit');
-  createSpecBranch = boom('createSpecBranch');
+  createPlanBranch = boom('createPlanBranch');
   checkout = boom('checkout');
   diff = boom('diff');
   diffAgainstWorkingTree = boom('diffAgainstWorkingTree');
@@ -370,7 +370,7 @@ function makeHarness(
     adapterForRole: () => (options.unknownAgent === true ? undefined : adapter),
     execAttempts: () => options.execAttempts ?? 2,
     verify: () => 'npm test',
-    isSpecBusy: () => specBusy,
+    isPlanBusy: () => specBusy,
     createService: () => {
       createServiceCalls += 1;
       return worktreeGit;
@@ -448,7 +448,7 @@ function briefFor(base: string, launchId: string): string {
   return fs.readFileSync(path.join(base, '.baiton', 'runs', launchId, 'brief.md'), 'utf8');
 }
 
-describe('spec-less run pipeline (T07)', () => {
+describe('plan-less run pipeline ', () => {
   const roots: string[] = [];
   const track = (h: Harness): Harness => {
     roots.push(h.root);
@@ -525,7 +525,7 @@ describe('spec-less run pipeline (T07)', () => {
       );
 
       // Artifacts land in the MAIN checkout's run directory, and nothing is
-      // written under `.baiton/specs/`.
+      // Legacy: written under `.baiton/specs/`.
       for (const file of ['plan.md', 'execute-1.md', 'review-1.md']) {
         assert.ok(fs.existsSync(path.join(h.runDir(), file)), `${file} should be persisted`);
       }
@@ -564,7 +564,7 @@ describe('spec-less run pipeline (T07)', () => {
       // with the run id as the subject, and the execute carries its commit.
       const entries = parseJournal(path.join(h.runDir(), 'runs.jsonl'));
       assert.deepStrictEqual(
-        entries.map((e) => [e.runId, e.todoId, e.stage, e.attempt, e.result]),
+        entries.map((e) => [e.runId, e.phaseId, e.stage, e.attempt, e.result]),
         [
           [`${RUN_ID}.plan.1`, RUN_ID, 'plan', 1, 'completed'],
           [`${RUN_ID}.execute.1`, RUN_ID, 'execute', 1, 'completed'],
@@ -795,7 +795,7 @@ describe('spec-less run pipeline (T07)', () => {
       // the manifest's recorded base head rather than a fresh git call.
       const entries = parseJournal(path.join(h.runDir(runId), 'runs.jsonl'));
       assert.deepStrictEqual(
-        entries.map((e) => [e.runId, e.todoId, e.stage, e.attempt, e.result]),
+        entries.map((e) => [e.runId, e.phaseId, e.stage, e.attempt, e.result]),
         [[`${runId}.investigate.1`, runId, 'investigate', 1, 'completed']],
       );
       assert.strictEqual(entries[0].startHead, 'a'.repeat(40));
@@ -981,7 +981,7 @@ describe('spec-less run pipeline (T07)', () => {
   });
 
   describe('refusals', () => {
-    it('refuses busy while a spec stage runs, writing nothing', async () => {
+    it('refuses busy while a plan stage runs, writing nothing', async () => {
       const h = track(makeHarness());
       h.setSpecBusy(true);
 
@@ -1018,13 +1018,13 @@ describe('spec-less run pipeline (T07)', () => {
       assert.strictEqual(h.pipeline.isRunning(), false);
     });
 
-    it('refuses mode "spec"', async () => {
+    it('refuses mode "plan"', async () => {
       const h = track(makeHarness());
-      const refused = await h.pipeline.start(bugRequest({ mode: 'spec' }));
+      const refused = await h.pipeline.start(bugRequest({ mode: 'plan' }));
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
         assert.strictEqual(refused.error.kind, 'invalid-mode');
-        assert.match(refused.error.message, /draft_spec/);
+        assert.match(refused.error.message, /draft_plan/);
       }
       assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));
     });
@@ -1035,7 +1035,7 @@ describe('spec-less run pipeline (T07)', () => {
       assert.strictEqual(refused.ok, false);
       if (!refused.ok) {
         assert.strictEqual(refused.error.kind, 'invalid-mode');
-        assert.match(refused.error.message, /draft_spec/);
+        assert.match(refused.error.message, /draft_plan/);
         assert.match(refused.error.message, /default/);
       }
       assert.ok(!fs.existsSync(path.join(h.root, '.baiton', 'runs')));
@@ -1389,7 +1389,7 @@ describe('spec-less run pipeline (T07)', () => {
       assert.ok(log.includes(`Run-Id: ${RUN_ID}`), log);
       assert.strictEqual(await service.findCommitByRunId(RUN_ID), outcome.commits[0]);
 
-      // `main` is untouched and nothing appeared under `.baiton/specs/`.
+      // Legacy: `main` is untouched and nothing appeared under `.baiton/specs/`.
       assert.strictEqual(await service.branchHead('main'), mainHeadBefore);
       assert.ok(!fs.existsSync(path.join(repo, '.baiton', 'specs')));
       assert.ok(fs.existsSync(path.join(repo, '.baiton', 'runs', RUN_ID, 'plan.md')));

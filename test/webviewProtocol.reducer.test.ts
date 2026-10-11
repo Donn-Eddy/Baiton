@@ -63,7 +63,7 @@ describe('webview protocol reducer', () => {
   it('setConversations sets the selector entries', () => {
     const items: ConversationItem[] = [
       { id: 'workspace', label: 'Workspace' },
-      { id: 'my-spec', label: 'my-spec' },
+      { id: 'my-plan', label: 'my-plan' },
     ];
     const next = reduce(initialWebviewState(), { type: 'setConversations', items });
 
@@ -75,10 +75,10 @@ describe('webview protocol reducer', () => {
   it('setActive sets the active conversation id', () => {
     const next = reduce(initialWebviewState(), {
       type: 'setActive',
-      conversationId: 'my-spec',
+      conversationId: 'my-plan',
     });
 
-    assert.strictEqual(next.activeId, 'my-spec');
+    assert.strictEqual(next.activeId, 'my-plan');
   });
 
   it('setSessions sets the session list', () => {
@@ -260,7 +260,7 @@ describe('toRenderRecords', () => {
 
   it('emits no text bubble for an assistant record that is only tool calls', () => {
     const records: ConversationRecord[] = [
-      { role: 'assistant', content: '   ', tool_calls: [call('c1', 'list_specs', '{}')] },
+      { role: 'assistant', content: '   ', tool_calls: [call('c1', 'list_plans', '{}')] },
       { role: 'tool', content: 'ok', tool_call_id: 'c1' },
     ];
     const out = toRenderRecords(records);
@@ -398,7 +398,7 @@ describe('toRenderRecords', () => {
 
   it('still projects a tool row after an intervention record', () => {
     const records: ConversationRecord[] = [
-      { role: 'assistant', content: '', tool_calls: [call('c1', 'approve_spec', '{}')] },
+      { role: 'assistant', content: '', tool_calls: [call('c1', 'approve_plan', '{}')] },
       { role: 'system', content: 'Approve?', intervention: { id: 'a1', kind: 'confirm', prompt: 'Approve?', status: 'resolved', answer: { kind: 'approved' } } },
       { role: 'tool', content: 'ok', tool_call_id: 'c1' },
     ];
@@ -467,7 +467,7 @@ describe('updateTool', () => {
 
 describe('interventions', () => {
   const ask = (over: Partial<InterventionView> = {}): InterventionView => ({
-    id: 'a1', kind: 'confirm', prompt: 'Approve the spec?', status: 'pending', ...over,
+    id: 'a1', kind: 'confirm', prompt: 'Approve the plan?', status: 'pending', ...over,
   });
 
   it('showIntervention appends a system record with the prompt and the card, and clears empty', () => {
@@ -479,7 +479,7 @@ describe('interventions', () => {
     const next = reduce(state, { type: 'showIntervention', intervention: card });
 
     assert.deepStrictEqual(next.records, [
-      { role: 'system', content: 'Approve the spec?', intervention: card },
+      { role: 'system', content: 'Approve the plan?', intervention: card },
     ]);
     assert.strictEqual(next.empty, undefined);
   });
@@ -489,12 +489,12 @@ describe('interventions', () => {
     const first = reduce(state, { type: 'showIntervention', intervention: ask() });
     const repost = reduce(first, {
       type: 'showIntervention',
-      intervention: ask({ prompt: 'Approve the spec? (again)' }),
+      intervention: ask({ prompt: 'Approve the plan? (again)' }),
     });
 
     assert.strictEqual(repost.records.length, 1);
-    assert.strictEqual(repost.records[0].intervention?.prompt, 'Approve the spec? (again)');
-    assert.strictEqual(repost.records[0].content, 'Approve the spec? (again)');
+    assert.strictEqual(repost.records[0].intervention?.prompt, 'Approve the plan? (again)');
+    assert.strictEqual(repost.records[0].content, 'Approve the plan? (again)');
   });
 
   it('showIntervention finalizes a trailing streaming record first', () => {
@@ -502,7 +502,7 @@ describe('interventions', () => {
     const next = reduce(streaming, { type: 'showIntervention', intervention: ask() });
     assert.deepStrictEqual(next.records, [
       { role: 'assistant', content: 'thinking', streaming: false },
-      { role: 'system', content: 'Approve the spec?', intervention: ask() },
+      { role: 'system', content: 'Approve the plan?', intervention: ask() },
     ]);
   });
 
@@ -886,8 +886,8 @@ describe('conversation mode and run activity', () => {
     { id: 'google', label: 'Google AI Studio', enabled: true, models: [{ id: 'gemini-2.5-pro' }] },
   ];
 
-  it('a fresh state starts in Spec (not DEFAULT_MODE) with no run in flight', () => {
-    assert.strictEqual(initialWebviewState().mode, 'spec');
+  it('a fresh state starts in Plan (not DEFAULT_MODE) with no run in flight', () => {
+    assert.strictEqual(initialWebviewState().mode, 'plan');
     assert.notStrictEqual(initialWebviewState().mode, DEFAULT_MODE, 'the seed is deliberately decoupled from DEFAULT_MODE');
     assert.strictEqual(initialWebviewState().runActive, false);
   });
@@ -906,8 +906,8 @@ describe('conversation mode and run activity', () => {
   it('setMode replaces a previous mode', () => {
     const one = reduce(initialWebviewState(), { type: 'setMode', mode: 'bug' });
     assert.strictEqual(one.mode, 'bug');
-    const two = reduce(one, { type: 'setMode', mode: 'spec' });
-    assert.strictEqual(two.mode, 'spec');
+    const two = reduce(one, { type: 'setMode', mode: 'plan' });
+    assert.strictEqual(two.mode, 'plan');
   });
 
   it('setMode leaves the rest of the state alone', () => {

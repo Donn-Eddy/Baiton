@@ -1,7 +1,7 @@
 {
   "name": "baiton",
   "displayName": "Baiton",
-  "description": "Spec-driven development with heterogeneous coding CLI agents.",
+  "description": "Phased-plan development with heterogeneous coding CLI agents.",
   "version": "0.0.1",
   "license": "MIT",
   "publisher": "baiton",
@@ -38,8 +38,8 @@
     "views": {
       "baiton": [
         {
-          "id": "baiton.specExplorer",
-          "name": "Spec Explorer",
+          "id": "baiton.planExplorer",
+          "name": "Plan Explorer",
           "type": "tree"
         },
         {
@@ -116,27 +116,27 @@
       },
       {
         "command": "baiton.approve",
-        "title": "Approve Spec",
+        "title": "Approve Plan",
         "category": "Baiton"
       },
       {
         "command": "baiton.plan",
-        "title": "Plan Todo",
+        "title": "Plan Phase",
         "category": "Baiton"
       },
       {
         "command": "baiton.execute",
-        "title": "Execute Todo",
+        "title": "Execute Phase",
         "category": "Baiton"
       },
       {
         "command": "baiton.review",
-        "title": "Review Todo",
+        "title": "Review Phase",
         "category": "Baiton"
       },
       {
         "command": "baiton.replan",
-        "title": "Re-plan Todo",
+        "title": "Re-plan Phase",
         "category": "Baiton"
       },
       {
@@ -268,52 +268,52 @@
       "view/item/context": [
         {
           "command": "baiton.view",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bview\\b/ && baiton.activated",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bview\\b/ && baiton.activated",
           "group": "inline@0"
         },
         {
           "command": "baiton.plan",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bplan\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bplan\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@1"
         },
         {
           "command": "baiton.execute",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bexecute\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bexecute\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@2"
         },
         {
           "command": "baiton.review",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\breview\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\breview\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@3"
         },
         {
           "command": "baiton.replan",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\breplan\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\breplan\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@4"
         },
         {
           "command": "baiton.stop",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bstop\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bstop\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@5"
         },
         {
           "command": "baiton.approve",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bapprove\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bapprove\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@1"
         },
         {
           "command": "baiton.submitPr",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bsubmitPr\\b/ && baiton.activated && !baiton.restricted",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bsubmitPr\\b/ && baiton.activated && !baiton.restricted",
           "group": "inline@2"
         },
         {
           "command": "baiton.showPr",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bshowPr\\b/ && baiton.activated",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bshowPr\\b/ && baiton.activated",
           "group": "inline@1"
         },
         {
           "command": "baiton.viewPlan",
-          "when": "view == baiton.specExplorer && viewItem =~ /\\bviewPlan\\b/ && baiton.activated",
+          "when": "view == baiton.planExplorer && viewItem =~ /\\bviewPlan\\b/ && baiton.activated",
           "group": "inline@6"
         },
         {
@@ -366,7 +366,7 @@
         "baiton.git.remote": {
           "type": "string",
           "default": "origin",
-          "description": "The git remote fetched when approving a spec."
+          "description": "The git remote fetched when approving a plan."
         },
         "baiton.pr.toolPath": {
           "type": "string",
@@ -376,7 +376,7 @@
         "baiton.git.base": {
           "type": "string",
           "default": "main",
-          "description": "The default base branch a spec branch is created from."
+          "description": "The default base branch a plan branch is created from."
         },
         "baiton.orchestrator.endpoint": {
           "type": "string",

@@ -77,6 +77,14 @@ describe('GITIGNORE_CONTENTS', () => {
     assert.ok(lines.indexOf('/worktrees/') > lines.indexOf('/runs/'));
   });
 
+  it('ignores plan chat sessions and plan journals while keeping legacy patterns', () => {
+    assert.ok(patterns.includes('plans/*/chat/'));
+    assert.ok(patterns.includes('plans/*/runs.jsonl'));
+    assert.ok(patterns.includes('specs/*/chat.jsonl'));
+    assert.ok(patterns.includes('specs/*/chat/'));
+    assert.ok(patterns.includes('specs/*/runs.jsonl'));
+  });
+
   it('has no duplicate patterns', () => {
     assert.deepStrictEqual(patterns, [...new Set(patterns)]);
   });

@@ -1,9 +1,9 @@
 /**
  * The Runs view tree provider and its three commands (design "dispatch modes",
- * todo T16).
+ * the Runs view).
  *
  * This is the thin `vscode` glue over the host-free run tree model in
- * `src/model/runTreeModel.ts`, modelled on `specExplorer.ts`. On each refresh it
+ * `src/model/runTreeModel.ts`, modelled on the Plan Explorer tree provider. On each refresh it
  * lists the run manifests from the {@link RunStore}, asks the run pipeline which
  * stage (if any) is in flight, and hands both to {@link buildRunTree}, which
  * derives every label, description, tooltip and `contextValue`. NOTHING about
@@ -108,7 +108,7 @@ export class RunsExplorer implements vscode.TreeDataProvider<RunTreeNode>, vscod
    * provider and push it onto their subscriptions.
    *
    * It deliberately does NOT publish the `baiton.restricted` context key the
-   * Runs menus negate: `SpecExplorer.start()` already publishes it, and a second
+   * Runs menus negate: `PlanExplorer.start()` already publishes it, and a second
    * writer of the same key would be redundant.
    */
   public start(): this {

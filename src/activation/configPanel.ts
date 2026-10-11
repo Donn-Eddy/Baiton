@@ -1,5 +1,5 @@
 /**
- * The Config_Panel WebviewView provider (spec "Config Panel", config-panel, todo T11).
+ * The Config_Panel WebviewView provider.
  *
  * This is the thin `vscode` glue that owns the sidebar WebviewView lifecycle
  * and the message channel to and from the browser context. Everything it renders is
@@ -19,7 +19,7 @@
  *    from the controller to the webview and delivers {@link ConfigPanelWebviewToHost}
  *    messages from the webview to the registered handler.
  *
- * Unlike the earlier WebviewPanel implementation (T05), this is a contributed
+ * Unlike the earlier WebviewPanel implementation, this is a contributed
  * `WebviewView` registered once at activation, whose section in the Baiton container
  * is managed by VS Code.
  *
@@ -49,7 +49,7 @@ export const CONFIG_PANEL_REQUIRE_WORKSPACE_MESSAGE =
 /** Static HTML shell filename located under `media/`. */
 const CONFIG_HTML = 'config.html';
 
-/** Coalesce watcher events on .baiton/config.json within this window (T07). */
+/** Coalesce watcher events on .baiton/config.json within this window. */
 export const EXTERNAL_CHANGE_DEBOUNCE_MS = 250;
 
 /**
@@ -204,7 +204,7 @@ export interface RegisterConfigPanelDeps {
   agentIds: readonly string[];
   capabilities?: Readonly<Record<string, AgentCapabilities>>;
   /**
-   * The live capability table and its change event (model-selector-refresh T08).
+   * The live capability table and its change event.
    * Both are optional: a caller passing neither keeps the static behaviour
    * (which is what test/configPanel.view.test.ts does). `src/extension.ts` DOES
    * pass them — it builds the `CatalogStore`/`ModelDiscoveryService` before

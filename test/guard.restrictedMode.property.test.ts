@@ -5,7 +5,7 @@ import * as os from 'os';
 import {
   guardTool,
   IdempotencyStore,
-  ORCHESTRATOR_PHASES,
+  CONVERSATION_STEPS,
   Tool,
   ToolContext,
   ToolResult,
@@ -66,7 +66,7 @@ function makeTool(
     description: 'fake tool for the restricted-mode guard harness',
     mutating,
     dispatch,
-    phases: [...ORCHESTRATOR_PHASES],
+    steps: [...CONVERSATION_STEPS],
     schema: {},
     async run(_args: unknown, _tc: ToolContext): Promise<ToolResult> {
       ran = true;
@@ -80,7 +80,7 @@ function makeTool(
 function makeCtx(restricted: boolean): GuardContext {
   return new GuardContext({
     repoRoot: path.resolve('/tmp/baiton-guard-restricted'),
-    specsDir: path.resolve('/tmp/baiton-guard-restricted/.baiton/specs'),
+    baitonDir: path.resolve('/tmp/baiton-guard-restricted/.baiton'),
     restricted,
   });
 }
@@ -177,7 +177,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
       git,
       confirm: { confirm: boom('confirm') },
       runQueue: { dispatch: boom('runQueue.dispatch') },
-      draftSpec: { draft: boom('draftSpec.draft') },
+      draftPlan: { draft: boom('draftPlan.draft') },
       runPipeline: { start: boom('runPipeline.start') },
       submitPr: boom('submitPr'),
       clock: { now: () => '2024-01-01T00:00:00.000Z' },
@@ -190,7 +190,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
     const dispatchNames = dispatchTools.map((d) => d.name).sort();
     assert.deepStrictEqual(
       dispatchNames,
-      ['draft_spec', 'investigate', 'run', 'start_run'],
+      ['draft_plan', 'investigate', 'run', 'start_run'],
       'every dispatch tool is covered; a new one may not silently drop out',
     );
 
@@ -200,7 +200,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
         {},
         'key-1',
         makeCtx(true),
-        tool.phases[0]!,
+        tool.steps[0]!,
       );
       assert.strictEqual(restricted.ok, false, `${tool.name} must refuse under Restricted Mode`);
       if (!restricted.ok) {
@@ -215,7 +215,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
         {},
         'key-2',
         makeCtx(false),
-        tool.phases[0]!,
+        tool.steps[0]!,
       );
       if (!trusted.ok) {
         assert.doesNotMatch(

@@ -1,12 +1,12 @@
 /**
  * Chat session storage (host-free core).
  *
- * A conversation scope — the Workspace_Conversation or one spec — holds any
+ * A conversation scope — the workspace or one plan — holds any
  * number of independent chat *sessions*, each persisted as its own append-only
  * `<id>.jsonl` transcript:
  *
  * - workspace sessions at `.baiton/chat/<id>.jsonl`
- * - spec sessions at `.baiton/specs/<slug>/chat/<id>.jsonl`
+ * - plan sessions at `.baiton/plans/<slug>/chat/<id>.jsonl` (a legacy spec keeps `.baiton/specs/<slug>/chat/`)
  *
  * There is no index file: every piece of session metadata is derived from the
  * transcript itself, so the folder is the whole model and an externally deleted
@@ -43,10 +43,11 @@ import { mkdir, readdir, readFile, rename, rm, stat, unlink } from 'fs/promises'
 import * as path from 'path';
 import type { ConversationKind } from './systemPrompt';
 import { Clock, systemClock } from './seams';
+import { resolveDocument } from '../storage/documentLocation';
 
 /**
  * Which conversation a session belongs to: the workspace conversation, or one
- * spec's conversation. Reuses the system prompt's conversation discriminator.
+ * plan's conversation. Reuses the system prompt's conversation discriminator.
  */
 export type SessionScope = ConversationKind;
 
@@ -122,8 +123,6 @@ export function scopeId(scope: SessionScope): string {
 export interface SessionStoreOptions {
   /** Absolute `.baiton/` directory. */
   baitonDir: string;
-  /** Absolute `.baiton/specs/` directory. */
-  specsDir: string;
   /** Clock used to allocate session ids; injected for deterministic tests. */
   clock?: Clock;
   /** Random suffix source; injected for deterministic tests. */
@@ -136,13 +135,11 @@ export interface SessionStoreOptions {
  */
 export class SessionStore {
   private readonly baitonDir: string;
-  private readonly specsDir: string;
   private readonly clock: Clock;
   private readonly random: () => number;
 
   constructor(options: SessionStoreOptions) {
     this.baitonDir = options.baitonDir;
-    this.specsDir = options.specsDir;
     this.clock = options.clock ?? systemClock;
     this.random = options.random ?? Math.random;
   }
@@ -151,7 +148,7 @@ export class SessionStore {
   public dirFor(scope: SessionScope): string {
     return scope.kind === 'workspace'
       ? path.join(this.baitonDir, 'chat')
-      : path.join(this.specsDir, scope.slug, 'chat');
+      : path.join(resolveDocument(this.baitonDir, scope.slug).dir, 'chat');
   }
 
   /** The transcript file path of one session in a scope. */
@@ -174,7 +171,7 @@ export class SessionStore {
   public legacyPathFor(scope: SessionScope): string {
     return scope.kind === 'workspace'
       ? path.join(this.baitonDir, 'chat.jsonl')
-      : path.join(this.specsDir, scope.slug, 'chat.jsonl');
+      : path.join(resolveDocument(this.baitonDir, scope.slug).dir, 'chat.jsonl');
   }
 
   /**

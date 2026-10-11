@@ -320,11 +320,11 @@ describe('Tool loop termination (property harness)', () => {
               following.forEach((m, k) => {
                 assert.ok(!answered.has(ids[k]), 'call id answered twice');
                 answered.add(ids[k]);
-                const spec = ids[k];
+                const item = ids[k];
                 if (m.content.startsWith('Error: ')) {
                   assert.strictEqual(m.content, 'Error: boom');
                 } else {
-                  assert.strictEqual(m.content, spec);
+                  assert.strictEqual(m.content, item);
                 }
               });
             } else if (rec.role === 'tool') {

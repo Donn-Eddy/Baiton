@@ -13,9 +13,9 @@ import type { InterventionSeam } from './interventions';
 import {
   Clock,
   ConfirmSeam,
-  DraftSpecSeam,
+  DraftPlanSeam,
   IdGenerator,
-  LandTodoSeam,
+  LandPhaseSeam,
   RunPipelineSeam,
   RunQueueSeam,
   SubAgentSeam,
@@ -25,7 +25,7 @@ import {
 export interface ToolGitSettings {
   /** The git remote to fetch during approval (config `git.remote`). */
   remote: string;
-  /** The default base branch a spec branches from (config `git.base`). */
+  /** The default base branch a plan branches from (config `git.base`). */
   base: string;
 }
 
@@ -33,10 +33,10 @@ export interface ToolGitSettings {
  * The dependency bundle passed to each tool factory.
  *
  * - `repoRoot`  — absolute repository root, matching the guard's `repoRoot`.
- * - `baitonDir` — absolute `.baiton/` directory at the repo root; `specs/` and
- *                 `runs/` live under it.
+ * - `baitonDir` — absolute `.baiton/` directory at the repo root; `plans/`
+ *                 (and legacy `specs/`) and `runs/` live under it.
  * - `git`       — the single git service seam (status/diff/log/approval git).
- * - `confirm`   — the yes/no confirmation seam `approve_spec`, `draft_spec` and
+ * - `confirm`   — the yes/no confirmation seam `approve_plan`, `draft_plan` and
  *                 `submit_pr` gate on (Req 10.1); in the real host it is
  *                 `confirmSeamFrom(interventionSeam)`, so those confirmations
  *                 surface as inline chat cards. `ask_user` asks through the
@@ -44,10 +44,10 @@ export interface ToolGitSettings {
  * - `intervention` — the richer human-in-the-loop seam `ask_user` asks its
  *                 questions through (question / confirm / permission).
  * - `runQueue`  — the serialized run-queue seam `run` dispatches into (Req 10.3).
- * - `draftSpec` — the spec-draft runner seam `draft_spec` dispatches into.
- * - `runPipeline` — the spec-less run pipeline seam `start_run` and
+ * - `draftPlan` — the plan-draft runner seam `draft_plan` dispatches into.
+ * - `runPipeline` — the plan-less run pipeline seam `start_run` and
  *                 `investigate` dispatch into.
- * - `landTodo`  — the seam `land_todo` merges a done todo's branch through.
+ * - `landPhase` — the seam `land_phase` merges a done phase's branch through.
  * - `subAgents` — the seam `spawn_subagent` and `send_to_subagent` go through
  *                 (optional; both tools report unavailable without it).
  * - `clock`     — wall clock for transcript timestamps.
@@ -70,22 +70,22 @@ export interface ToolServices {
   intervention?: InterventionSeam;
   runQueue: RunQueueSeam;
   /**
-   * The spec-draft runner the `draft_spec` tool hands an agreed requirements
-   * document to. Optional so a host that has not wired the stage engine still
-   * builds a registry; `draft_spec` then reports it as unavailable.
+   * The plan-draft runner the `draft_plan` tool hands an agreed request to.
+   * Optional so a host that has not wired the stage engine still builds a
+   * registry; `draft_plan` then reports it as unavailable.
    */
-  draftSpec?: DraftSpecSeam;
+  draftPlan?: DraftPlanSeam;
   /**
-   * The spec-less run pipeline the `start_run` and `investigate` tools dispatch
+   * The plan-less run pipeline the `start_run` and `investigate` tools dispatch
    * into. Optional so a host that has not wired the run pipeline still builds a
    * registry; both tools then report themselves as unavailable and dispatch
    * nothing.
    */
   runPipeline?: RunPipelineSeam;
   /**
-   * The seam `land_todo` merges a done todo's branch into the spec branch through. Optional so a host that has not wired per-todo worktrees still builds a registry; `land_todo` then reports itself unavailable.
+   * The seam `land_phase` merges a done phase's branch into the plan branch through. Optional so a host that has not wired per-phase worktrees still builds a registry; `land_phase` then reports itself unavailable.
    */
-  landTodo?: LandTodoSeam;
+  landPhase?: LandPhaseSeam;
   /**
    * The seam spawn_subagent and send_to_subagent go through. Optional so a host that has not wired sub-agents still builds a registry; both tools then report themselves unavailable.
    */
@@ -94,7 +94,7 @@ export interface ToolServices {
   ids: IdGenerator;
   gitSettings: ToolGitSettings;
   /**
-   * Submit the spec's pull request (design section 8 "PR"): Verify, the
+   * Submit the plan's pull request (design section 8 "PR"): Verify, the
    * pr-writer stage, push, create-or-reuse, record. Optional so a host that
    * has not wired the PR flow still builds a registry; the `submit_pr` tool
    * then reports it as unavailable.

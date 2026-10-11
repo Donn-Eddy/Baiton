@@ -1,43 +1,16 @@
 /**
- * The engine facade that binds a stage/action trigger to the run queue
- * (task 15.2; design "Stage engine"). It also binds the spec-less dispatch
- * tools (`start_run` / `investigate`) to the run pipeline through
- * {@link createRunPipelineSeam} (design "dispatch modes").
+ * The engine facade binds phase and control triggers to run queues. It also
+ * binds plan-less dispatch tools (`start_run` / `investigate`) to the run
+ * pipeline through {@link createRunPipelineSeam}.
  *
- * Both the orchestrator's `run` tool (through {@link RunQueueSeam}) and the VS
- * Code stage-trigger commands and CodeLens ask for "run this stage/action on
- * this todo". The queue's {@link RunRequest} needs more than the caller carries
- * — the sub-agent role, the 1-based attempt/round index, and the executor
- * resume flag — so this facade derives those from the stage and the run journal
- * and dispatches a single {@link RunRequest} (Req 10.3, 19.1).
+ * The facade derives the role, attempt/round index, and executor resume flag
+ * from the stage and the merged plan journal, then dispatches one RunRequest.
+ * Phase queues are keyed by (slug, phase), each using its own worktree, so
+ * phases can run concurrently. The plan draft and plan-less pipeline still
+ * share the repository lock; phase queues do not hold or wait on it.
  *
- * Attempt/round derivation reads the merged spec journal (spec-level + per-todo files) so numbered artifacts and
- * the executor continue flag are consistent across triggers:
- *   - plan → attempt 1 (a single plan artifact, `plan.md`).
- *   - execute → one past the count of prior execute starts for the todo, and
- *     `resume` is set when a prior execute start exists *and* that start left a
- *     session the executor's CLI can actually resume, so the executor CLI
- *     continues its session across rounds (Req 13.2). Only claude honours
- *     Baiton's pre-assigned session id (`Adapter.acceptsSessionId`); codex,
- *     opencode and antigravity mint their own, so for them a resume is only
- *     offered once a real id has been discovered and journaled — otherwise the
- *     attempt launches fresh, carrying the latest review in its retry brief.
- *   - review → one past the count of prior review starts for the todo.
- *   - replan / stop → control actions with no stage; attempt is unused.
- *
- * Run queues are per todo: {@link createTodoQueues} caches one queue per
- * (slug, todo), each running its stages in that todo's worktree, so different
- * todos run concurrently. `busy` on the `run` tool therefore means "a stage is
- * already running (or being dispatched) for THIS todo" — the seam enforces that
- * with an in-flight set, since the FIFO queue itself would enqueue behind a
- * running stage. Only the spec draft and the spec-less run pipeline still hold
- * the repository lock ({@link createStageLock}); per-todo queues neither hold
- * nor wait on it.
- *
- * The facade never imports `vscode`; the command layer and the run tool call
- * into it with plain values. Harness ask relaying is instead a queue-level
- * `RunQueueDeps.askWatcherFactory` dependency wired in `commands.ts`, so all
- * triggers reaching the queue relay asks identically.
+ * The facade has no VS Code dependency. Commands and the run tool call it with
+ * plain values, and the queue relays harness asks through its shared watcher.
  */
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
@@ -50,7 +23,7 @@ import type {
   RunPipelineRequest,
   RunQueue,
   RunQueueDeps,
-  SpecBranchWriter,
+  PlanBranchWriter,
   TransitionAction,
 } from '../engine';
 import { createQueueWorktreeSeam, createRunQueue } from '../engine';
@@ -66,10 +39,10 @@ import type {
 import type { Adapter } from '../adapter';
 import {
   latestStart,
-  readSpecJournal,
+  readPlanJournal,
   resumableSessionId,
-  specJournalPathFor,
-  todoJournalPathFor,
+  planJournalPathFor,
+  phaseJournalPathFor,
   JournalEntry,
 } from '../journal';
 
@@ -83,28 +56,28 @@ export type AdapterForRole = (role: Role) => Adapter | undefined;
 
 /** A trigger the facade can dispatch: a stage run or a control action. */
 export type EngineTrigger =
-  | { kind: 'stage'; slug: string; todoId: string; stage: Stage }
-  | { kind: 'action'; slug: string; todoId: string; action: 'replan' | 'stop' };
+  | { kind: 'stage'; slug: string; phaseId: string; stage: Stage }
+  | { kind: 'action'; slug: string; phaseId: string; action: 'replan' | 'stop' };
 
 /**
- * The stage → sub-agent role mapping the launcher uses (design role table).
+ * The stage → sub-agent role mapping used by the launcher.
  * `plan-review` maps to the plan-reviewer role but is not a lifecycle
  * transition of its own, so it has no dispatchable action here. Exported so
  * the View command (`commands.ts`) can derive the role to `attach` with from
  * the stage recorded on a journal entry without duplicating this table.
  */
 export const STAGE_ROLE: Record<Stage, Role> = {
-  // `spec-draft` is spec-scoped and runs through its own runner
-  // (`src/engine/specDraft.ts`), never through the todo-scoped queue; the entry
+  // `plan-draft` is plan-scoped and runs through its own runner
+  // (`src/engine/planDraft.ts`), never through the phase-scoped queue; the entry
   // is here so the stage → role table stays total.
-  'spec-draft': 'spec-writer',
+  'plan-draft': 'plan-writer',
   plan: 'planner',
   'plan-review': 'plan-reviewer',
   execute: 'executor',
   review: 'reviewer',
   pr: 'pr-writer',
   // `investigate` is run-scoped and runs through the run pipeline, never
-  // through the todo-scoped queue; the existing `reviewer` role already has
+  // through the phase-scoped queue; the existing `reviewer` role already has
   // exactly the surface it needs (read + search + shell, writes only its run
   // result), so no new role is introduced.
   investigate: 'reviewer',
@@ -121,7 +94,7 @@ function actionForStage(stage: Stage): TransitionAction | undefined {
       return 'review';
     case 'plan-review':
       // `investigate` lands in the `default:` arm below for the same reason:
-      // it is dispatched by the run pipeline, not the per-todo queue.
+      // it is dispatched by the run pipeline, not the per-phase queue.
       return undefined;
     default:
       return undefined;
@@ -130,11 +103,11 @@ function actionForStage(stage: Stage): TransitionAction | undefined {
 
 /**
  * Dispatch a trigger through the run queue, deriving role/attempt/resume from
- * the spec's journal. Resolves with the queue's {@link DispatchResult}.
+ * the plan's journal. Resolves with the queue's {@link DispatchResult}.
  */
 export function dispatchTrigger(
   queue: RunQueue,
-  specsDir: string,
+  baitonDir: string,
   trigger: EngineTrigger,
   adapterForRole: AdapterForRole,
 ): Promise<DispatchResult> {
@@ -142,7 +115,7 @@ export function dispatchTrigger(
     // Control actions launch no sub-agent; role/attempt/resume are unused.
     return queue.dispatch({
       slug: trigger.slug,
-      todoId: trigger.todoId,
+      phaseId: trigger.phaseId,
       action: trigger.action,
       role: 'planner',
       attempt: 1,
@@ -163,12 +136,12 @@ export function dispatchTrigger(
     });
   }
 
-  const entries = readSpecJournal(specsDir, trigger.slug);
-  const priorStarts = countStageStarts(entries, trigger.todoId, trigger.stage);
+  const entries = readPlanJournal(baitonDir, trigger.slug);
+  const priorStarts = countStageStarts(entries, trigger.phaseId, trigger.stage);
   const attempt = priorStarts + 1;
   const role = STAGE_ROLE[trigger.stage];
 
-  // Resume by Session_Id: the executor continues the todo's most recent
+  // Resume by Session_Id: the executor continues the phase's most recent
   // execute start's session (Req 3.2). Whether that is possible at all depends
   // on the executor's CLI: claude accepts the id Baiton pre-assigned, so its
   // journal `sessionId` is resumable (and `-c` is a safe fallback when an old
@@ -181,7 +154,7 @@ export function dispatchTrigger(
   const accepts = adapterForRole(role)?.acceptsSessionId === true;
   const priorExecute =
     trigger.stage === 'execute'
-      ? latestStart(entries, trigger.todoId, 'execute')
+      ? latestStart(entries, trigger.phaseId, 'execute')
       : undefined;
   const priorSessionId = resumableSessionId(priorExecute, accepts);
   const resume =
@@ -192,7 +165,7 @@ export function dispatchTrigger(
 
   return queue.dispatch({
     slug: trigger.slug,
-    todoId: trigger.todoId,
+    phaseId: trigger.phaseId,
     action,
     role,
     attempt,
@@ -201,38 +174,38 @@ export function dispatchTrigger(
   });
 }
 
-/** The cache key of a todo's run queue. */
-export function todoQueueKey(slug: string, todoId: string): string {
-  return `${slug}/${todoId}`;
+/** The cache key of a phase's run queue. */
+export function phaseQueueKey(slug: string, phaseId: string): string {
+  return `${slug}/${phaseId}`;
 }
 
-/** Dependencies shared by every per-todo queue; slug/todo/journal wiring is derived per queue. */
-export type TodoQueuesDeps = Omit<
+/** Dependencies shared by every per-phase queue; slug/phase/journal wiring is derived per queue. */
+export type PhaseQueuesDeps = Omit<
   RunQueueDeps,
   | 'slug'
-  | 'todoId'
+  | 'phaseId'
   | 'journalPath'
   | 'journalPathFor'
   | 'readJournal'
   | 'worktrees'
-  | 'specWriter'
+  | 'planWriter'
   | 'isExternallyBusy'
   | 'git'
 > & {
-  specsDir: string;
+  baitonDir: string;
   /** Git service over the main checkout. */
   git: GitWorktreeService;
-  /** The one writer shared with the spec store so per-slug writes serialize. */
-  specWriter: SpecBranchWriter;
+  /** The one writer shared with the plan store so per-slug writes serialize. */
+  planWriter: PlanBranchWriter;
   worktrees?: QueueWorktreeSeam;
 };
 
-/** A cache of run queues keyed by (slug, todo). */
-export interface TodoQueues {
-  /** The todo's queue, created on first use. */
-  queueFor(slug: string, todoId: string): RunQueue;
-  /** The todo's queue if one exists; never creates one. */
-  find(slug: string, todoId: string): RunQueue | undefined;
+/** A cache of run queues keyed by (slug, phase). */
+export interface PhaseQueues {
+  /** The phase's queue, created on first use. */
+  queueFor(slug: string, phaseId: string): RunQueue;
+  /** The phase's queue if one exists; never creates one. */
+  find(slug: string, phaseId: string): RunQueue | undefined;
   /** Every live run across all queues. */
   running(): LiveRun[];
   /** True when any queue (of `slug`, when given) has a stage in flight. */
@@ -240,23 +213,23 @@ export interface TodoQueues {
 }
 
 /**
- * One {@link RunQueue} per (slug, todo), all sharing one worktree seam and one
- * spec-branch writer. No queue is given `isExternallyBusy`: todo stages run in
+ * One {@link RunQueue} per (slug, phase), all sharing one worktree seam and one
+ * plan-branch writer. No queue is given `isExternallyBusy`: phase stages run in
  * their own worktrees, outside the repository lock.
  */
-export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
-  const { specsDir, specWriter, worktrees, ...rest } = deps;
+export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
+  const { baitonDir, planWriter, worktrees, ...rest } = deps;
   const seam =
     worktrees ??
     createQueueWorktreeSeam({
       workspaceRoot: deps.workspaceRoot,
       git: deps.git,
-      writer: specWriter,
+      writer: planWriter,
     });
   const queues = new Map<string, { slug: string; queue: RunQueue }>();
   return {
-    queueFor(slug, todoId) {
-      const key = todoQueueKey(slug, todoId);
+    queueFor(slug, phaseId) {
+      const key = phaseQueueKey(slug, phaseId);
       const existing = queues.get(key);
       if (existing !== undefined) {
         return existing.queue;
@@ -264,17 +237,17 @@ export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
       const queue = createRunQueue({
         ...rest,
         slug,
-        todoId,
+        phaseId,
         worktrees: seam,
-        specWriter,
-        journalPath: specJournalPathFor(specsDir, slug),
-        journalPathFor: (id) => todoJournalPathFor(specsDir, slug, id),
-        readJournal: () => readSpecJournal(specsDir, slug),
+        planWriter,
+        journalPath: planJournalPathFor(baitonDir, slug),
+        journalPathFor: (id) => phaseJournalPathFor(baitonDir, slug, id),
+        readJournal: () => readPlanJournal(baitonDir, slug),
       });
       queues.set(key, { slug, queue });
       return queue;
     },
-    find: (slug, todoId) => queues.get(todoQueueKey(slug, todoId))?.queue,
+    find: (slug, phaseId) => queues.get(phaseQueueKey(slug, phaseId))?.queue,
     running() {
       const live: LiveRun[] = [];
       for (const { queue } of queues.values()) {
@@ -297,42 +270,42 @@ export function createTodoQueues(deps: TodoQueuesDeps): TodoQueues {
 }
 
 /**
- * The repository lock after per-todo worktrees: the spec draft and spec-less
- * runs still exclude each other. Per-todo queues neither hold nor wait on it.
+ * The repository lock after per-phase worktrees: the plan draft and plan-less
+ * runs still exclude each other. Per-phase queues neither hold nor wait on it.
  */
 export function createStageLock(holders: {
-  specDraftRunning: () => boolean;
+  planDraftRunning: () => boolean;
   runRunning: () => boolean;
-}): { runPipelineBusy(): boolean; specDraftBusy(): boolean } {
+}): { runPipelineBusy(): boolean; planDraftBusy(): boolean } {
   return {
-    runPipelineBusy: () => holders.specDraftRunning(),
-    specDraftBusy: () => holders.runRunning(),
+    runPipelineBusy: () => holders.planDraftRunning(),
+    planDraftBusy: () => holders.runRunning(),
   };
 }
 
 /**
  * A {@link RunQueueSeam} for the orchestrator's `run` tool, backed by
- * {@link dispatchTrigger} over the todo's own queue. It maps the queue's rich
+ * {@link dispatchTrigger} over the phase's own queue. It maps the queue's rich
  * {@link DispatchResult} down to the tool's narrow `dispatched | busy |
  * illegal` answer (Req 10.4, 10.5); every other refusal (probe/launch/guard) is
  * surfaced by the queue's reporter and reported to the tool as `illegal` with
  * the queue's message (for example `deps-unlanded`).
  *
- * `busy` means a stage is already running or being dispatched for THIS todo.
+ * `busy` means a stage is already running or being dispatched for THIS phase.
  * The queue is FIFO and would otherwise enqueue behind the running stage, so
- * the seam tracks in-flight dispatches itself. Different todos never see busy
+ * the seam tracks in-flight dispatches itself. Different phases never see busy
  * from each other.
  */
 export function createRunQueueSeam(
-  queueFor: (slug: string, todoId: string) => RunQueue,
-  specsDir: string,
+  queueFor: (slug: string, phaseId: string) => RunQueue,
+  baitonDir: string,
   adapterForRole: AdapterForRole,
 ): RunQueueSeam {
   const inFlight = new Set<string>();
   return {
     async dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome> {
-      const key = todoQueueKey(req.slug, req.todoId);
-      const queue = queueFor(req.slug, req.todoId);
+      const key = phaseQueueKey(req.slug, req.phaseId);
+      const queue = queueFor(req.slug, req.phaseId);
       if (inFlight.has(key) || queue.isRunning()) {
         return { kind: 'busy' };
       }
@@ -341,11 +314,11 @@ export function createRunQueueSeam(
       try {
         result = await dispatchTrigger(
           queue,
-          specsDir,
+          baitonDir,
           {
             kind: 'stage',
             slug: req.slug,
-            todoId: req.todoId,
+            phaseId: req.phaseId,
             stage: req.stage,
           },
           adapterForRole,
@@ -422,18 +395,19 @@ export function createRunPipelineSeam(
 }
 
 /**
- * Count an already-parsed journal's start records for a todo's stage
+ * Count an already-parsed journal's start records for a phase stage
  * (Req 21.1). Takes the parsed entry array so callers that also need
  * {@link latestStart} read the journal once (Req 3.2).
  */
 function countStageStarts(
   entries: JournalEntry[],
-  todoId: string,
+  phaseId: string,
   stage: Stage,
 ): number {
   let count = 0;
   for (const entry of entries) {
-    if (entry.todoId === todoId && entry.stage === stage) {
+    // JournalEntry.phaseId is a persisted field name.
+    if (entry.phaseId === phaseId && entry.stage === stage) {
       count += 1;
     }
   }

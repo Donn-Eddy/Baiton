@@ -1,6 +1,6 @@
 /**
  * An ESM customization hook that redirects the bare `vscode` specifier to the
- * in-repo fake module (Task 13.3).
+ * in-repo fake module.
  *
  * The extension source under `src/activation/` imports `vscode`, which only
  * resolves inside a running VS Code host. Registering this hook (via

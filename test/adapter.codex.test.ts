@@ -66,7 +66,7 @@ import { shellQuote } from '../src/adapter/permissions';
  * - the native ask relay: the `--dangerously-bypass-hook-trust` + inline
  *   `-c hooks.PermissionRequest=[…]` argv and the hook script's fallback to
  *   codex's own prompt;
- * - the `codex app-server` discovery handshake (T05): the three-message
+ * - the `codex app-server` discovery handshake : the three-message
  *   JSON-RPC framing over JSONL, the tolerant `codexModelsFromAppServer`
  *   payload parser, and the never-reject capability mapping of
  *   `discoverModels` (every failure path resolves `undefined` and the fake
@@ -147,32 +147,32 @@ describe('CodexAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () =
   const adapter = new CodexAdapter();
 
   it('fresh launch has no resume subcommand, starts at --model, and drops req.sessionId (Req 3.1)', () => {
-    const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.codex);
-    assert.strictEqual(spec.shellArgs[0], '--model');
-    assert.ok(!spec.shellArgs.includes('resume'));
-    assert.ok(!spec.shellArgs.includes('--last'));
-    assert.ok(!spec.shellArgs.includes('--continue'));
-    assert.ok(!spec.shellArgs.includes('--session-id'));
-    assert.ok(!spec.shellArgs.includes('exec'));
-    assert.ok(!spec.shellArgs.includes('session-xyz'));
+    const launchSpec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.codex);
+    assert.strictEqual(launchSpec.shellArgs[0], '--model');
+    assert.ok(!launchSpec.shellArgs.includes('resume'));
+    assert.ok(!launchSpec.shellArgs.includes('--last'));
+    assert.ok(!launchSpec.shellArgs.includes('--continue'));
+    assert.ok(!launchSpec.shellArgs.includes('--session-id'));
+    assert.ok(!launchSpec.shellArgs.includes('exec'));
+    assert.ok(!launchSpec.shellArgs.includes('session-xyz'));
   });
 
   it('resume with a prior Session_Id leads `resume <id>` (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['resume', 'prior-session']);
-    assert.ok(!spec.shellArgs.includes('--last'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['resume', 'prior-session']);
+    assert.ok(!launchSpec.shellArgs.includes('--last'));
   });
 
   it('resume with no prior Session_Id falls back to `resume --last` (Req 3.2, 13.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['resume', '--last']);
-    assert.strictEqual(spec.shellArgs.filter((a) => a === 'resume').length, 1);
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['resume', '--last']);
+    assert.strictEqual(launchSpec.shellArgs.filter((a) => a === 'resume').length, 1);
   });
 
   it('resume with an empty-string prior Session_Id behaves as no prior id', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['resume', '--last']);
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['resume', '--last']);
   });
 
   it('keeps the fresh and resume-with-id tails otherwise identical', () => {
@@ -195,9 +195,9 @@ describe('CodexAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', () =
   // rather than silently mistargeting a resume at a session that doesn't
   // exist.
   it('drops the prompt on the `resume --last` branch', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.ok(!spec.shellArgs.includes('--'));
-    assert.ok(!spec.shellArgs.includes(req().prompt));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.ok(!launchSpec.shellArgs.includes('--'));
+    assert.ok(!launchSpec.shellArgs.includes(req().prompt));
   });
 
   it('passes the model through verbatim and adds --config model_reasoning_effort=<effort> only when set', () => {
@@ -217,9 +217,9 @@ describe('CodexAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new CodexAdapter();
 
   it('builds resume <id> --sandbox <mode> --ask-for-approval on-request --add-dir <run-dir> with no prompt', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    const launchSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
 
-    assert.deepStrictEqual(spec.shellArgs, [
+    assert.deepStrictEqual(launchSpec.shellArgs, [
       'resume',
       'session-42',
       '--sandbox',
@@ -231,21 +231,21 @@ describe('CodexAdapter attach() (Req 3.3, 3.4)', () => {
       '-c',
       `${CODEX_DEVELOPER_INSTRUCTIONS_CONFIG_KEY}=${tomlQuote(roleProfile('executor').systemPrompt)}`,
     ]);
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.codex);
-    assert.strictEqual(spec.shellArgs.length, 10);
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.codex);
+    assert.strictEqual(launchSpec.shellArgs.length, 10);
 
-    assert.ok(!spec.shellArgs.includes('--'));
-    assert.ok(!spec.shellArgs.includes('Read brief.md and do what it says.'));
-    assert.ok(!spec.shellArgs.includes('--model'));
-    assert.ok(!spec.shellArgs.includes('--config'));
-    assert.ok(!spec.shellArgs.includes('--last'));
+    assert.ok(!launchSpec.shellArgs.includes('--'));
+    assert.ok(!launchSpec.shellArgs.includes('Read brief.md and do what it says.'));
+    assert.ok(!launchSpec.shellArgs.includes('--model'));
+    assert.ok(!launchSpec.shellArgs.includes('--config'));
+    assert.ok(!launchSpec.shellArgs.includes('--last'));
   });
 
   it('uses the workspace-write sandbox and run-dir grant for a read-only role too (Decision 2)', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0);
-    assert.ok(!spec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
-    assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    assert.ok(findPair(launchSpec.shellArgs, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0);
+    assert.ok(!launchSpec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
+    assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
   });
 });
 
@@ -331,24 +331,24 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
 
   for (const role of ROLES) {
     it(`grants the per-run --add-dir and omits forbidden flags/values for role ${role} on launch`, () => {
-      const spec = new CodexAdapter().launch(req({ role, runId: 'run-777' }));
-      assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
+      const launchSpec = new CodexAdapter().launch(req({ role, runId: 'run-777' }));
+      assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
       for (const flag of forbiddenFlags) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
       for (const value of forbiddenValues) {
-        assert.ok(!spec.shellArgs.includes(value), `did not expect ${value} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(value), `did not expect ${value} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
 
     it(`grants the per-run --add-dir and omits forbidden flags/values for role ${role} on attach`, () => {
-      const spec = new CodexAdapter().attach({ role, runId: 'run-777', sessionId: 's-1' });
-      assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
+      const launchSpec = new CodexAdapter().attach({ role, runId: 'run-777', sessionId: 's-1' });
+      assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
       for (const flag of forbiddenFlags) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
       for (const value of forbiddenValues) {
-        assert.ok(!spec.shellArgs.includes(value), `did not expect ${value} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(value), `did not expect ${value} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
   }
@@ -368,7 +368,7 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
  */
 describe('CodexAdapter.discoverSessionId (Req 3.2)', () => {
   const SESSION_ID = '01a0add4-6a1c-7151-82ba-d01d7f8ff33d';
-  const RUN_ID = 'demo-T11-execute-2-1758061574000';
+  const RUN_ID = 'demo-P11-execute-2-1758061574000';
 
   let codexHome: string;
   let workspace: string;
@@ -500,7 +500,7 @@ describe('CodexAdapter.discoverSessionId (Req 3.2)', () => {
   });
 
   it('ignores a session for a different run in the same workspace', async () => {
-    writeRollout({ runId: 'demo-T11-execute-1-1758000000000' });
+    writeRollout({ runId: 'demo-P11-execute-1-1758000000000' });
     assert.strictEqual(await discover(), undefined);
   });
 
@@ -591,9 +591,9 @@ describe('CodexAdapter -c developer_instructions carries the role profile', () =
   });
 
   it('is dropped along with the rest of the prompt-bearing tail on no branch: resume --last still carries it', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.ok(spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.ok(launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--'));
   });
 });
 
@@ -716,9 +716,9 @@ describe('CodexAdapter native ask relay (probe findings, codex 0.155.1)', () => 
   });
 
   it('attach() installs no relay (no attach caller passes one)', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
-    assert.ok(!spec.shellArgs.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
-    assert.ok(!spec.shellArgs.join(' ').includes('hooks.'));
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    assert.ok(!launchSpec.shellArgs.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
+    assert.ok(!launchSpec.shellArgs.join(' ').includes('hooks.'));
   });
 
   /**
@@ -864,12 +864,12 @@ describe('CodexAdapter native ask relay (probe findings, codex 0.155.1)', () => 
 });
 
 /**
- * The `model/list` payload parser (model-selector-refresh T05) is pure and
+ * The `model/list` payload parser is pure and
  * total, and deliberately tolerant of the loosely-pinned `codex app-server`
  * response shape: an unrecognised field is ignored rather than failing the
  * whole refresh, so it degrades to `[]`/fewer fields instead of throwing.
  */
-describe('codexModelsFromAppServer (model-selector-refresh T05)', () => {
+describe('codexModelsFromAppServer ', () => {
   it('parses the {models:[…]} shape with ids, labels, per-model efforts and defaults', () => {
     const entries = codexModelsFromAppServer({
       models: [
@@ -1087,14 +1087,14 @@ describe('codexModelsFromAppServer (model-selector-refresh T05)', () => {
 });
 
 /**
- * `discoverModels` (model-selector-refresh T05) drives one fake
+ * `discoverModels` drives one fake
  * `codex app-server` child (injected via `new CodexAdapter({ spawnAppServer
  * })`, the `fakeFetcher` pattern of test/adapter.claude.test.ts): no
  * `child_process` monkey-patching, no real spawn. It pins the JSONL framing,
  * the three-message handshake, the per-model effort mapping and union, the
  * never-reject contract on every failure path, and the always-kill teardown.
  */
-describe('CodexAdapter.discoverModels (model-selector-refresh T05)', () => {
+describe('CodexAdapter.discoverModels ', () => {
   /** The `model/list` result the happy script answers with. */
   const DISCOVERED_RESULT = {
     models: [

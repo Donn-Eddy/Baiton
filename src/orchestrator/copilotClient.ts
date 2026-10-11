@@ -52,7 +52,7 @@ export const COPILOT_JUSTIFICATION =
 export interface CopilotClientConfig {
   /**
    * The live `vscode` namespace (or a fake in tests); injected so this module
-   * stays host-import-free. The T05 provider router lives under
+   * stays host-import-free. The provider router lives under
    * `src/activation/` where `import * as vscode from 'vscode'` is already
    * legal, so it passes `vscode` itself — do not reintroduce a runtime import
    * of `vscode` in this module.

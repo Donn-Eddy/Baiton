@@ -1,5 +1,5 @@
 /**
- * The Usage view controller (spec first-party-usage, todo T08).
+ * The Usage view controller.
  *
  * This is the host-free half of baiton.usageView. Every host capability —
  * the webview, trust, the refresh-interval setting, the clock and logging —

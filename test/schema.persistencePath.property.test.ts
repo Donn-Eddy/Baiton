@@ -5,6 +5,7 @@ import {
   stageArtifactIsNumbered,
 } from '../src/schema';
 import { STAGES, Stage } from '../src/model/stage';
+import type { DocumentKind } from '../src/model/parser';
 
 /**
  * Property test for the stage → persistence-path mapping (Requirement 24.3,
@@ -13,19 +14,19 @@ import { STAGES, Stage } from '../src/model/stage';
  * Feature: baiton-first-pass, Property 23: Artifact persistence path matches
  * the stage naming rule
  *
- * For any stage, todo id and round/attempt index n (>= 1), the persistence path
- * SHALL match the naming rule. The four todo-level stages persist under the
- * todo's own folder so one todo can never overwrite another's artifacts:
- * plan → `todos/<id>/plan.md`, plan-review → `todos/<id>/plan-review-<n>.md`,
- * execute → `todos/<id>/execute-<n>.md`, review → `todos/<id>/review-<n>.md`.
- * The `plan` stage persists once per todo and ignores n; the other three are
- * numbered. The two spec-scoped stages ignore the todo id entirely: spec-draft
- * → `spec.md`, pr → `pr.md`.
+ * For any stage, phase id and round/attempt index n (>= 1), the persistence path
+ * SHALL match the naming rule. The four phase-level stages persist under the
+ * phase's own folder so one phase can never overwrite another's artifacts:
+ * Legacy: plan → `todos/<id>/plan.md`, plan-review → `todos/<id>/plan-review-<n>.md`,
+ * Legacy: execute → `todos/<id>/execute-<n>.md`, review → `todos/<id>/review-<n>.md`.
+ * The `plan` stage persists once per phase and ignores n; the other three are
+ * numbered. The two plan-scoped stages ignore the phase id entirely: plan-draft
+ * Legacy: → `spec.md`, pr → `pr.md`.
  *
- * The test generates random stages, todo ids and indexes, then asserts the
+ * The test generates random stages, phase ids and indexes, then asserts the
  * returned path equals the expected form; it also asserts plan ignores n, that
- * two distinct todo ids never collide on a path, and that a todo-level stage
- * refuses a missing or non-segment todo id.
+ * two distinct phase ids never collide on a path, and that a phase-level stage
+ * refuses a missing or non-segment phase id.
  */
 
 /** A generator over the four known stages. */
@@ -34,29 +35,29 @@ const stageArb: fc.Arbitrary<Stage> = fc.constantFrom(...(STAGES as readonly Sta
 /** A 1-based round/attempt index. */
 const indexArb: fc.Arbitrary<number> = fc.integer({ min: 1, max: 10_000 });
 
-/** A todo id: `T` followed by two or more decimal digits (Req 3.3). */
-const todoIdArb: fc.Arbitrary<string> = fc
+/** A phase id: `T` followed by two or more decimal digits (Req 3.3). */
+const phaseIdArb: fc.Arbitrary<string> = fc
   .integer({ min: 0, max: 999_999 })
   .map((n) => 'T' + String(n).padStart(2, '0'));
 
 describe('Stage persistence-path naming (property harness)', () => {
   // Feature: baiton-first-pass, Property 23: Artifact persistence path matches
   // the stage naming rule
-  it('matches the stage naming rule for any stage, todo id and index', () => {
+  it('matches the stage naming rule for any stage, phase id and index', () => {
     fc.assert(
-      fc.property(stageArb, todoIdArb, indexArb, (stage, todoId, n) => {
-        const path = persistencePathForStage(stage, todoId, n);
+      fc.property(stageArb, phaseIdArb, indexArb, fc.constantFrom<DocumentKind>('plan', 'legacy-spec'), (stage, phaseId, n, kind) => {
+        const path = persistencePathForStage(stage, phaseId, n, kind);
 
-        if (stage === 'spec-draft') {
-          // The spec draft persists once per spec, as the spec file itself.
-          assert.strictEqual(path, 'spec.md', `spec-draft must yield spec.md, got ${path}`);
+        if (stage === 'plan-draft') {
+          const documentFile = kind === 'plan' ? 'plan.md' : 'spec.md';
+          assert.strictEqual(path, documentFile, `plan-draft must yield ${documentFile}, got ${path}`);
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
             false,
-            'spec-draft artifact must not be numbered',
+            'plan-draft artifact must not be numbered',
           );
         } else if (stage === 'pr') {
-          // The PR draft persists once per spec, at the spec root.
+          // The PR draft persists once per plan, at the plan root.
           assert.strictEqual(path, 'pr.md', `pr must yield pr.md, got ${path}`);
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
@@ -76,11 +77,11 @@ describe('Stage persistence-path naming (property harness)', () => {
             'investigate artifact must not be numbered',
           );
         } else if (stage === 'plan') {
-          // The plan persists once per todo, under the todo's own folder.
+          // The plan persists once per phase, under the phase's own folder.
           assert.strictEqual(
             path,
-            `todos/${todoId}/plan.md`,
-            `plan must yield todos/${todoId}/plan.md, got ${path}`,
+            `${kind === 'plan' ? 'phases' : 'todos'}/${phaseId}/plan.md`,
+            `plan must yield the phase artifact path, got ${path}`,
           );
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
@@ -88,11 +89,11 @@ describe('Stage persistence-path naming (property harness)', () => {
             'plan artifact must not be numbered',
           );
         } else {
-          // Numbered todo-level stages yield `todos/<id>/<stage>-<n>.md`.
+          // Legacy: Numbered todo-level stages yield `todos/<id>/<stage>-<n>.md`.
           assert.strictEqual(
             path,
-            `todos/${todoId}/${stage}-${n}.md`,
-            `numbered stage ${stage} must yield todos/${todoId}/${stage}-${n}.md, got ${path}`,
+            `${kind === 'plan' ? 'phases' : 'todos'}/${phaseId}/${stage}-${n}.md`,
+            `numbered stage ${stage} must yield the phase artifact path, got ${path}`,
           );
           assert.strictEqual(
             stageArtifactIsNumbered(stage),
@@ -109,30 +110,32 @@ describe('Stage persistence-path naming (property harness)', () => {
   // the stage naming rule
   it('plan ignores the index across many values', () => {
     fc.assert(
-      fc.property(todoIdArb, fc.option(indexArb, { nil: undefined }), (todoId, n) => {
+      fc.property(phaseIdArb, fc.option(indexArb, { nil: undefined }), (phaseId, n) => {
+        assert.strictEqual(persistencePathForStage('plan', phaseId, n), `phases/${phaseId}/plan.md`);
         assert.strictEqual(
-          persistencePathForStage('plan', todoId, n),
-          `todos/${todoId}/plan.md`,
+          persistencePathForStage('plan', phaseId, n, 'legacy-spec'),
+          `todos/${phaseId}/plan.md`,
         );
       }),
       { numRuns: 200 },
     );
   });
 
-  // Per-todo isolation: two distinct todos never share an artifact path, so one
-  // todo's run can never overwrite another's plan or numbered artifact.
-  it('never yields the same path for two distinct todo ids', () => {
+  // Per-phase isolation: two distinct phases never share an artifact path, so one
+  // phase's run can never overwrite another's plan or numbered artifact.
+  it('never yields the same path for two distinct phase ids', () => {
     fc.assert(
       fc.property(
         fc.constantFrom<Stage>('plan', 'plan-review', 'execute', 'review'),
-        todoIdArb,
-        todoIdArb,
+        phaseIdArb,
+        phaseIdArb,
         indexArb,
-        (stage, a, b, n) => {
+        fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
+        (stage, a, b, n, kind) => {
           fc.pre(a !== b);
           assert.notStrictEqual(
-            persistencePathForStage(stage, a, n),
-            persistencePathForStage(stage, b, n),
+            persistencePathForStage(stage, a, n, kind),
+            persistencePathForStage(stage, b, n, kind),
           );
         },
       ),
@@ -140,30 +143,32 @@ describe('Stage persistence-path naming (property harness)', () => {
     );
   });
 
-  // A todo-level artifact has no location without a plain-segment todo id, so
-  // a missing or path-shaped id throws rather than escaping the spec folder.
-  it('refuses a missing or path-shaped todo id for a todo-level stage', () => {
+  // A phase-level artifact has no location without a plain-segment phase id, so
+  // a missing or path-shaped id throws rather than escaping the plan folder.
+  it('refuses a missing or path-shaped phase id for a phase-level stage', () => {
     fc.assert(
       fc.property(
         fc.constantFrom<Stage>('plan', 'plan-review', 'execute', 'review'),
         fc.constantFrom<string | undefined>(undefined, '', '..', 'a/b', 'a\\b', '.'),
-        (stage, todoId) => {
-          assert.throws(() => persistencePathForStage(stage, todoId, 1));
+        fc.constantFrom<DocumentKind>('plan', 'legacy-spec'),
+        (stage, phaseId, kind) => {
+          assert.throws(() => persistencePathForStage(stage, phaseId, 1, kind));
         },
       ),
       { numRuns: 100 },
     );
   });
 
-  // The spec-scoped stages ignore the todo id entirely, and so does the
+  // The plan-scoped stages ignore the phase id entirely, and so does the
   // run-scoped investigate stage.
-  it('the run- and spec-scoped stages ignore the todo id', () => {
+  it('the run- and plan-scoped stages ignore the phase id', () => {
     fc.assert(
-      fc.property(fc.option(todoIdArb, { nil: undefined }), (todoId) => {
-        assert.strictEqual(persistencePathForStage('spec-draft', todoId), 'spec.md');
-        assert.strictEqual(persistencePathForStage('pr', todoId), 'pr.md');
+      fc.property(fc.option(phaseIdArb, { nil: undefined }), (phaseId) => {
+        assert.strictEqual(persistencePathForStage('plan-draft', phaseId), 'plan.md');
+        assert.strictEqual(persistencePathForStage('plan-draft', phaseId, undefined, 'legacy-spec'), 'spec.md');
+        assert.strictEqual(persistencePathForStage('pr', phaseId), 'pr.md');
         assert.strictEqual(
-          persistencePathForStage('investigate', todoId),
+          persistencePathForStage('investigate', phaseId),
           'finding.md',
         );
       }),

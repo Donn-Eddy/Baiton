@@ -262,19 +262,32 @@ const MIGRATIONS: Record<number, (doc: Record<string, unknown>) => Record<string
 
 /**
  * Roles added after a `config.json` shape shipped, mapped to the role whose
- * entry stands in for a missing one. `spec-writer` is a read-only drafting role
- * like `planner`, so an existing config written before the spec-draft stage
- * existed keeps loading, with the spec writer inheriting the planner's agent,
- * model and effort. The user can override it by adding the entry.
+ * entry stands in for a missing one. `plan-writer` is a read-only plan-draft
+ * role like `planner`, so a config with neither entry still loads with the plan
+ * writer inheriting the planner's agent, model and effort.
  */
 const ROLE_FALLBACKS: Partial<Record<Role, Role>> = {
-  'spec-writer': 'planner',
+  'plan-writer': 'planner',
+};
+
+/**
+ * Legacy: configs written before the phased-plan rename name the drafting role
+ * `spec-writer`; map that key into the canonical role while loading.
+ */
+const LEGACY_ROLE_KEYS: Partial<Record<Role, string>> = {
+  'plan-writer': 'spec-writer',
 };
 
 /** The entry a missing role inherits, or `undefined` when it has no fallback. */
 function fallbackRoleEntry(role: Role, roles: Record<string, unknown>): unknown {
   const source = ROLE_FALLBACKS[role];
   return source === undefined ? undefined : roles[source];
+}
+
+/** The pre-rename config entry for a role, when that role has one. */
+function legacyRoleEntry(role: Role, roles: Record<string, unknown>): unknown {
+  const legacyKey = LEGACY_ROLE_KEYS[role];
+  return legacyKey === undefined ? undefined : roles[legacyKey];
 }
 
 /**
@@ -293,7 +306,8 @@ function readRoles(
 
   const out = {} as Record<Role, RoleConfig>;
   for (const role of ROLES) {
-    const entry = roles[role] ?? fallbackRoleEntry(role, roles);
+    const entry =
+      roles[role] ?? legacyRoleEntry(role, roles) ?? fallbackRoleEntry(role, roles);
     if (!isObject(entry)) {
       return err(
         missingSection(`roles.${role}`, `the "${role}" role is missing or not an object`),

@@ -1,5 +1,5 @@
 /**
- * Config Panel document I/O — spec "Config Panel" (config-panel).
+ * Config Panel document I/O.
  *
  * The panel reads the raw `.baiton/config.json` document itself — rather than
  * going through {@link loadConfig} — so unknown keys and the exact on-disk
@@ -7,7 +7,7 @@
  * the caller passes back the token it loaded with, and a write is refused if
  * the file changed on disk since. This narrows, but does not close, the
  * window between reading the token and the atomic rename; a file watcher
- * (T07) is the other half of the story.
+ * is the other half of the story.
  */
 import * as fs from 'fs/promises';
 import { createHash } from 'crypto';
@@ -27,7 +27,7 @@ export const ABSENT_TOKEN = '';
  * document. Computed over the raw file text (not the parsed object), so a
  * whitespace-only external edit still counts as a conflict. A local helper
  * rather than an export added to `src/model/hash.ts`, which is about
- * spec-content digests and has no business knowing about config files.
+ * plan-content digests and has no business knowing about config files.
  */
 export function configToken(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -145,7 +145,7 @@ export interface WriteConfigOptions {
  * `JSON.stringify(value, null, 2) + '\n'` — so the caller gets the post-write
  * token without re-reading the file. The serialization is duplicated with
  * `writeJsonAtomic` on purpose, to avoid widening that function's return
- * type; a test pins the two together (T03).
+ * type; a test pins the two together.
  *
  * The token check narrows, not closes, the window between reading the token
  * and the atomic rename (TOCTOU); this is accepted, not solved, here.

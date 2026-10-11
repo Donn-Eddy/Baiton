@@ -49,7 +49,7 @@ export function loadConfigMirror(): ConfigMirror {
   };
 }
 
-describe('config panel browser mirror (config-panel T09)', () => {
+describe('config panel browser mirror ', () => {
   let mirror: ConfigMirror;
 
   before(() => {
@@ -110,7 +110,7 @@ describe('config panel browser mirror (config-panel T09)', () => {
   it('the mirror block stays DOM-free', () => {
     // loadConfigMirror() evaluates media/config.js with `window` as its only
     // global — no `document`, no `acquireVsCodeApi`. This is the guard that
-    // T09's option-sync and stale rendering went in BELOW the
+ // 's option-sync and stale rendering went in BELOW the
     // `acquireVsCodeApi` early return.
     assert.doesNotThrow(() => {
       const reloaded = loadConfigMirror();
@@ -159,7 +159,7 @@ describe('config panel browser mirror (config-panel T09)', () => {
   });
 
   it('per-model entries are render-only: both validators keep checking the agent-level union', () => {
-    // codex-opencode-dropdown-fix T07: the effort dropdown narrows to the
+ // codex-opencode-dropdown-fix : the effort dropdown narrows to the
     // SELECTED model's own levels, but validation must not follow it — an
     // effort belonging to another model of the same agent renders through
     // `Other…` and stays valid.

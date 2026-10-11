@@ -9,38 +9,39 @@ import {
   type RunQueueDeps,
   type RunRequest,
   type ResultWatcherFactory,
-  type SpecStore,
+  type PlanStore,
 } from '../src/engine/runQueue';
 import type { Adapter } from '../src/adapter';
 import type { GitService } from '../src/git';
 import type { HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
 import type { Stage } from '../src/model/stage';
-import type { TodoState } from '../src/model/todoState';
+import type { PhaseState } from '../src/model/phaseState';
 import type { Role } from '../src/model/role';
-import { parseSpec } from '../src/model/parser';
+import { parsePlan } from '../src/model/parser';
 import { ok } from '../src/model/result';
 
 /**
  * The run queue's Brief context wiring (Requirement 18.3, 11.3).
  *
- * The queue assembles each stage's Context section from the spec and the todo's
+ * The queue assembles each stage's Context section from the plan and the phase's
  * own artifacts and hands it to the launcher, which writes it into
  * `.baiton/runs/<run-id>/brief.md`. These tests read the brief off disk, which
  * is exactly what the sub-agent is told to read, and assert:
  *
- *   - Execute is briefed with the plan and the todo line, and with no OVERVIEW;
+ *   - Execute is briefed with the plan and the phase line, and with no OVERVIEW;
  *   - Plan is briefed with the OVERVIEW and carries no plan text;
  *   - Execute with no plan on file is refused as `launch-failed` before any
- *     state write, so the todo is left exactly as it was.
+ *     state write, so the phase is left exactly as it was.
  */
 
 const SLUG = 'demo';
-const TODO_ID = 'T02';
+const PHASE_ID = 'T02';
 const PLAN_MARK = 'PLANMARK-T02';
 const OVERVIEW_MARK = 'OVERVIEWMARK';
 
-const SPEC_TEXT = [
+// Legacy spec fixture: preserve OVERVIEW/TODOS headings and T## identifiers.
+const LEGACY_SPEC_TEXT = [
   '---',
   'title: demo',
   '---',
@@ -49,8 +50,8 @@ const SPEC_TEXT = [
   `Build the thing ${OVERVIEW_MARK}.`,
   '',
   '# TODOS',
-  '- [done] T01 First todo TODO-ONE',
-  '- [planned] T02 Second todo TODO-TWO (after T01)',
+  '- [done] T01 First phase PHASE-ONE',
+  '- [planned] T02 Second phase PHASE-TWO (after T01)',
   '',
 ].join('\n');
 
@@ -72,7 +73,7 @@ const PLAN_RESULT = JSON.stringify({
 interface Rig {
   deps: RunQueueDeps;
   /** Every lifecycle state the queue wrote, in order. */
-  writes: TodoState[];
+  writes: PhaseState[];
   /** The brief path of the launched run, once one has launched. */
   briefPath: () => string | undefined;
   /** Whether any terminal was created at all. */
@@ -83,17 +84,17 @@ interface Rig {
 
 /**
  * Build a queue rig over a temp workspace. `artifacts` decides what the store
- * reports as on file for the todo, keyed by stage, so a test can run with or
- * without a plan; `state` is the todo's lifecycle state, which decides which
+ * reports as on file for the phase, keyed by stage, so a test can run with or
+ * without a plan; `state` is the phase's lifecycle state, which decides which
  * action is a legal transition.
  */
 function makeRig(
   workspaceRoot: string,
   artifacts: Partial<Record<Stage, string>>,
   resultJson: string,
-  state: TodoState = 'planned',
+  state: PhaseState = 'planned',
 ): Rig {
-  const writes: TodoState[] = [];
+  const writes: PhaseState[] = [];
   let briefPath: string | undefined;
   let terminalCount = 0;
   const cwds: Array<string | undefined> = [];
@@ -160,14 +161,14 @@ function makeRig(
 
   const git: GitService = {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async () => 'commitsha',
     head: async () => 'HEAD0',
-    currentBranch: async () => 'spec-branch',
+    currentBranch: async () => 'plan-branch',
     diff: async () => '',
     diffAgainstWorkingTree: async () => '',
     log: async () => '',
@@ -177,16 +178,16 @@ function makeRig(
     remoteUrl: async () => '',
   };
 
-  const specStore: SpecStore = {
+  const planStore: PlanStore = {
     currentState: async () => state,
-    readSpec: async () => parseSpec(SPEC_TEXT),
-    readArtifact: async (_slug, _todoId, stage) => artifacts[stage],
+    readPlan: async () => parsePlan(LEGACY_SPEC_TEXT),
+    readArtifact: async (_slug, _phaseId, stage) => artifacts[stage],
     latestExecuteCommit: async () => 'deadbee',
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,
     inputRev: async () => 'rev0',
-    writeState: async (_slug, _todoId, state) => {
+    writeState: async (_slug, _phaseId, state) => {
       writes.push(state);
       return true;
     },
@@ -198,11 +199,11 @@ function makeRig(
     git,
     terminalHost,
     watcherFactory,
-    specStore,
+    planStore,
     journalPath: path.join(workspaceRoot, '.baiton', 'specs', SLUG, 'runs.jsonl'),
     modelForRole: (_role: Role) => ({ model: 'test-model' }),
     report: () => {},
-    newRunId: (req) => `run-${req.todoId}-${req.action}`,
+    newRunId: (req) => `run-${req.phaseId}-${req.action}`,
     newSessionId: () => '11111111-1111-1111-1111-111111111111',
   };
 
@@ -216,7 +217,7 @@ function makeRig(
 }
 
 function request(action: 'plan' | 'execute', role: Role): RunRequest {
-  return { slug: SLUG, todoId: TODO_ID, action, role, attempt: 1, resume: false };
+  return { slug: SLUG, phaseId: PHASE_ID, action, role, attempt: 1, resume: false };
 }
 
 describe('run queue brief context (Req 18.3, 11.3)', () => {
@@ -231,7 +232,7 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
-  it('briefs the executor with the plan and the todo line, and no OVERVIEW', async () => {
+  it('briefs the executor with the plan and the phase line, and no OVERVIEW', async () => {
     const rig = makeRig(
       workspaceRoot,
       { plan: `# Plan T02\n\n${PLAN_MARK}\n` },
@@ -248,9 +249,9 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
 
     assert.ok(brief.includes('# Context'), 'the brief carries a Context section');
     assert.ok(brief.includes(PLAN_MARK), 'the executor is given the plan text');
-    assert.ok(brief.includes('TODO-TWO'), 'the executor is given its own todo line');
+    assert.ok(brief.includes('PHASE-TWO'), 'the executor is given its own phase line');
     assert.ok(!brief.includes(OVERVIEW_MARK), 'the executor is not given the OVERVIEW');
-    assert.ok(!brief.includes('TODO-ONE'), "the executor is not given another todo's line");
+    assert.ok(!brief.includes('PHASE-ONE'), "the executor is not given another phase's line");
   });
 
   it('briefs the planner with the OVERVIEW and no plan text', async () => {
@@ -269,14 +270,14 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
 
     const brief = fs.readFileSync(rig.briefPath() as string, 'utf8');
     assert.ok(brief.includes(OVERVIEW_MARK), 'the planner is given the OVERVIEW');
-    assert.ok(brief.includes('TODO-TWO'), 'the planner is given its todo line');
+    assert.ok(brief.includes('PHASE-TWO'), 'the planner is given its phase line');
     assert.ok(
       !brief.includes(PLAN_MARK),
-      'the planner is never handed the previous plan for the same todo',
+      'the planner is never handed the previous plan for the same phase',
     );
   });
 
-  it('refuses Execute with no plan on file and leaves the todo untouched', async () => {
+  it('refuses Execute with no plan on file and leaves the phase untouched', async () => {
     const rig = makeRig(workspaceRoot, {}, EXECUTE_RESULT);
     const queue = createRunQueue(rig.deps);
 
@@ -288,8 +289,8 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     }
     assert.strictEqual(result.error.kind, 'launch-failed');
     assert.ok(
-      result.error.message.includes(`no plan on file for "${TODO_ID}"`),
-      `the refusal names the todo: ${result.error.message}`,
+      result.error.message.includes(`no plan on file for "${PHASE_ID}"`),
+      `the refusal names the phase: ${result.error.message}`,
     );
     assert.ok(
       result.error.message.includes('run Plan first'),
@@ -300,7 +301,7 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     assert.strictEqual(rig.briefPath(), undefined, 'no brief was written');
   });
 
-  it('persists the execute artifact under the todo folder', async () => {
+  it('persists the execute artifact under the phase folder', async () => {
     const rig = makeRig(
       workspaceRoot,
       { plan: `# Plan T02\n\n${PLAN_MARK}\n` },
@@ -311,28 +312,28 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     await queue.dispatch(request('execute', 'executor'));
 
     const artifact = path.join(
-      workspaceRoot, '.baiton', 'specs', SLUG, 'todos', TODO_ID, 'execute-1.md',
+      workspaceRoot, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'execute-1.md',
     );
-    assert.ok(fs.existsSync(artifact), "the artifact landed in the todo's own folder");
+    assert.ok(fs.existsSync(artifact), "the artifact landed in the phase's own folder");
     assert.ok(
-      fs.readFileSync(artifact, 'utf8').startsWith(`# Execute ${TODO_ID}`),
+      fs.readFileSync(artifact, 'utf8').startsWith(`# Execute ${PHASE_ID}`),
       'the artifact is the rendered markdown, not a JSON dump',
     );
   });
 
-  it('in worktree mode launches in the worktree, writes the brief there and reads context from the spec store', async () => {
+  it('in worktree mode launches in the worktree, writes the brief there and reads context from the plan store', async () => {
     const mainRig = makeRig(workspaceRoot, { plan: `# Plan T02\n\n${PLAN_MARK}\n` }, EXECUTE_RESULT);
     await createRunQueue(mainRig.deps).dispatch(request('execute', 'executor'));
     const mainBrief = fs.readFileSync(mainRig.briefPath() as string, 'utf8');
 
     const rig = makeRig(workspaceRoot, { plan: `# Plan T02\n\n${PLAN_MARK}\n` }, EXECUTE_RESULT);
-    const wtDir = path.join(workspaceRoot, '.baiton', 'worktrees', SLUG, TODO_ID);
+  const wtDir = path.join(workspaceRoot, '.baiton', 'worktrees', SLUG, PHASE_ID);
     fs.mkdirSync(wtDir, { recursive: true });
     const worktrees: QueueWorktreeSeam = {
       ensure: async () => ok({ dir: wtDir, git: rig.deps.git }),
       unlanded: async () => [],
     };
-    const queue = createRunQueue({ ...rig.deps, slug: SLUG, todoId: TODO_ID, worktrees });
+    const queue = createRunQueue({ ...rig.deps, slug: SLUG, phaseId: PHASE_ID, worktrees });
 
     const result = await queue.dispatch(request('execute', 'executor'));
     assert.ok(result.ok, 'the execute dispatch ran');
@@ -341,7 +342,7 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     const briefPath = rig.briefPath() as string;
     assert.strictEqual(
       briefPath,
-      path.join(wtDir, '.baiton', 'runs', `run-${TODO_ID}-execute`, 'brief.md'),
+      path.join(wtDir, '.baiton', 'runs', `run-${PHASE_ID}-execute`, 'brief.md'),
     );
     const brief = fs.readFileSync(briefPath, 'utf8');
     const contextOf = (b: string): string => b.slice(b.indexOf('# Context'));

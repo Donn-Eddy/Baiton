@@ -17,7 +17,7 @@ import {
 
 /**
  * Unit tests for the intervention model, pending-ask registry,
- * InterventionSeam, and ConfirmSeam adapter (T01).
+ * InterventionSeam, and ConfirmSeam adapter .
  *
  * Runs host-free without a `vscode` environment.
  */

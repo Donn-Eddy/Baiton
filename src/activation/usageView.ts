@@ -1,5 +1,5 @@
 /**
- * The Usage WebviewView provider and its registration (spec first-party-usage, todo T10).
+ * The Usage WebviewView provider and its registration.
  *
  * Thin `vscode` glue mirroring `configPanel.ts`: it resolves the contributed
  * `baiton.usageView`, loads `media/usage.html` with a fresh nonce, and wires

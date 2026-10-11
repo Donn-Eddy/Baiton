@@ -6,7 +6,7 @@ import { HostToWebview, SessionItem } from '../src/orchestrator/webviewProtocol'
 
 /**
  * Fake-DOM unit tests for the composer's host-authoritative Mode select added
- * by dispatch-modes T12.
+ * by dispatch-modes .
  *
  * `media/chat.js` and `media/protocol.js` are plain scripts (neither is
  * compiled or linted by the toolchain), so they are executed inside one `vm`
@@ -379,22 +379,22 @@ function plainClone(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value));
 }
 
-describe('chat view Mode select (dispatch-modes T12)', () => {
-  it('seed paint: the six modes in RUN_MODES order, Spec selected, enabled', () => {
+describe('chat view Mode select ', () => {
+  it('seed paint: the six modes in RUN_MODES order, Phased Plan selected, enabled', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     assert.deepStrictEqual(
       modes.options.map((o) => o.value),
-      ['default', 'spec', 'bug', 'quick', 'refactor', 'investigate'],
+      ['default', 'plan', 'bug', 'quick', 'refactor', 'investigate'],
     );
     assert.deepStrictEqual(
       modes.options.map((o) => o.textContent),
-      ['Default', 'Spec', 'Bug', 'Quick', 'Refactor', 'Investigate'],
+      ['Default', 'Phased Plan', 'Bug', 'Quick Fix', 'Refactor', 'Investigate'],
     );
     for (const opt of modes.options) {
       assert.strictEqual(opt.dataset.mode, opt.value);
     }
-    assert.strictEqual(modes.value, 'spec');
+    assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.disabled, false);
     assert.strictEqual(view.posted.length, 0, 'the seed paint posts nothing');
   });
@@ -415,7 +415,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     modes.selectedIndex = modes.options.findIndex((o) => o.value === 'quick');
     modes.fire('change', {});
     assert.deepStrictEqual(view.posted.map(plainClone), [{ type: 'setMode', mode: 'quick' }]);
-    assert.strictEqual(modes.value, 'spec', 'snapped back; only the host echo moves it');
+    assert.strictEqual(modes.value, 'plan', 'snapped back; only the host echo moves it');
 
     view.send({ type: 'setMode', mode: 'quick' });
     assert.strictEqual(modes.value, 'quick');
@@ -464,7 +464,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     assert.strictEqual(modes.disabled, false);
   });
 
-  it('pins to Spec on a spec conversation and restores the mode on Workspace', () => {
+  it('pins to Phased Plan on a plan conversation and restores the mode on Workspace', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     view.send({ type: 'setMode', mode: 'quick' });
@@ -472,11 +472,11 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
       type: 'setConversations',
       items: [
         { id: 'workspace', label: 'Workspace' },
-        { id: 'my-spec', label: 'my-spec' },
+        { id: 'my-plan', label: 'my-plan' },
       ],
     });
-    view.send({ type: 'setActive', conversationId: 'my-spec' });
-    assert.strictEqual(modes.value, 'spec');
+    view.send({ type: 'setActive', conversationId: 'my-plan' });
+    assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.disabled, true);
     modes.fire('change', {});
     assert.strictEqual(view.posted.length, 0);
@@ -498,10 +498,10 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
     modes.selectedIndex = modes.options.findIndex((o) => o.value === 'default');
     modes.fire('change', {});
     assert.deepStrictEqual(view.posted.map(plainClone), [{ type: 'setMode', mode: 'default' }]);
-    assert.strictEqual(modes.value, 'spec', 'snapped back; only the host echo moves it');
+    assert.strictEqual(modes.value, 'plan', 'snapped back; only the host echo moves it');
   });
 
-  it('a spec conversation pins to Spec even when the host mode is Default', () => {
+  it('a plan conversation pins to Phased Plan even when the host mode is Default', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     view.send({ type: 'setMode', mode: 'default' });
@@ -509,29 +509,29 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
       type: 'setConversations',
       items: [
         { id: 'workspace', label: 'Workspace' },
-        { id: 'my-spec', label: 'my-spec' },
+        { id: 'my-plan', label: 'my-plan' },
       ],
     });
-    view.send({ type: 'setActive', conversationId: 'my-spec' });
-    assert.strictEqual(modes.value, 'spec');
+    view.send({ type: 'setActive', conversationId: 'my-plan' });
+    assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.disabled, true);
     view.send({ type: 'setActive', conversationId: 'workspace' });
     assert.strictEqual(modes.value, 'default');
     assert.strictEqual(modes.disabled, false);
   });
 
-  it('an unknown mode falls back to Spec rather than blanking the control', () => {
+  it('an unknown mode falls back to Plan rather than blanking the control', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
     // The reducer carries no `isRunMode` guard, so the state really can hold an
     // off-union value; the renderer must still show a mode.
     view.send({ type: 'setMode', mode: 'not-a-mode' } as unknown as HostToWebview);
-    assert.strictEqual(modes.value, 'spec');
+    assert.strictEqual(modes.value, 'plan');
     assert.strictEqual(modes.options.length, 6);
   });
 });
 
-describe('chat view context meter (context-budget T07)', () => {
+describe('chat view context meter ', () => {
   const usage = (loaded: number, window: number | null, source: 'usage' | 'estimate' = 'usage'): HostToWebview => ({
     type: 'setContextUsage',
     loaded,
@@ -600,7 +600,7 @@ describe('chat view context meter (context-budget T07)', () => {
   });
 });
 
-describe('chat view sub-agent chats (sub-agent-chats T08)', () => {
+describe('chat view sub-agent chats ', () => {
   const tree = (): SessionItem[] => [
     { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 },
     { id: 'p1/c1', parentId: 'p1', title: 'Child task', updatedAt: 2, scopeId: 'workspace', depth: 1 },

@@ -36,7 +36,7 @@ import type { NewRunInput, RunStore } from '../src/engine/runStore';
  * Everything here runs against a real temp directory with an injected clock, so
  * the manifest's shape, its classified failures, the launch-id composition and
  * the run-dir artifact writer are exercised exactly as the run pipeline will use
- * them — without a VS Code host, a spec, or a sub-agent.
+ * them — without a VS Code host, a plan, or a sub-agent.
  */
 
 /** A controllable ISO clock: each read returns the current `value`. */
@@ -103,12 +103,12 @@ describe('runStore', () => {
       assert.deepStrictEqual(complete, ['done', 'failed', 'cancelled', 'answered', 'merged']);
     });
 
-    it('lists the four run stages and rejects the spec-only ones', () => {
+    it('lists the four run stages and rejects the plan-only ones', () => {
       assert.deepStrictEqual(RUN_STAGES, ['plan', 'execute', 'review', 'investigate']);
       for (const stage of RUN_STAGES) {
         assert.ok(isRunStage(stage), `${stage} should be a run stage`);
       }
-      assert.strictEqual(isRunStage('spec-draft'), false);
+      assert.strictEqual(isRunStage('plan-draft'), false);
       assert.strictEqual(isRunStage('plan-review'), false);
       assert.strictEqual(isRunStage('pr'), false);
       assert.strictEqual(isRunStage('nope'), false);
@@ -231,10 +231,11 @@ describe('runStore', () => {
       assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
     });
 
-    it('refuses a spec mode and a dotted id, writing nothing', () => {
-      const spec = store.create(inputFor('r1', { mode: 'spec' }));
-      assert.ok(!spec.ok);
-      assert.strictEqual(spec.error.kind, 'invalid-id');
+    it('refuses a plan mode and a dotted id, writing nothing', () => {
+      const plan = store.create(inputFor('r1', { mode: 'plan' }));
+      assert.ok(!plan.ok);
+      assert.strictEqual(plan.error.kind, 'invalid-id');
+      assert.match(plan.error.message, /mode "plan"/);
 
       const dotted = store.create(inputFor('r.1'));
       assert.ok(!dotted.ok);
@@ -247,7 +248,7 @@ describe('runStore', () => {
       const d = store.create(inputFor('r1', { mode: 'default' }));
       assert.ok(!d.ok);
       assert.strictEqual(d.error.kind, 'invalid-id');
-      assert.match(d.error.message, /draft_spec/);
+      assert.match(d.error.message, /draft_plan/);
       assert.strictEqual(fs.existsSync(path.join(root, '.baiton', 'runs')), false);
     });
 
@@ -315,7 +316,7 @@ describe('runStore', () => {
 
       const cases: Record<string, unknown> = {
         'bad state': { ...base, state: 'nope' },
-        'spec mode': { ...base, mode: 'spec' },
+        'plan mode': { ...base, mode: 'plan' },
         'default mode': { ...base, mode: 'default' },
         'missing counter': { ...base, attempts: { plan: 0, execute: 0, investigate: 0 } },
         'wrong version': { ...base, version: 2 },
@@ -337,6 +338,23 @@ describe('runStore', () => {
       assert.strictEqual(read.value.composerMode, 'default');
       assert.strictEqual(read.value.explicitMode, true);
       assert.ok(parseRunManifest(text).ok);
+    });
+
+    it('normalizes legacy composerMode plan to plan', () => {
+      // Legacy persisted mode: the old "spec" value loads as "plan".
+      const base = validManifest();
+      const text = JSON.stringify({ ...base, composerMode: 'spec' }, null, 2) + '\n';
+      writeRaw('r1', text);
+      const read = store.read('r1');
+      assert.ok(read.ok);
+      if (read.ok) {
+        assert.strictEqual(read.value.composerMode, 'plan');
+      }
+      const parsed = parseRunManifest(text);
+      assert.ok(parsed.ok);
+      if (parsed.ok) {
+        assert.strictEqual(parsed.value.composerMode, 'plan');
+      }
     });
 
     it('drops unknown keys', () => {
@@ -517,7 +535,7 @@ describe('runStore', () => {
       assert.throws(() => runArtifactPathFor(root, 'r1', 'execute'));
     });
 
-    it('ignores the spec-relative path it is handed', () => {
+    it('ignores the plan-relative path it is handed', () => {
       const target = runArtifactWriter(root, 'r1', 'execute', 2);
       assert.strictEqual(target.path, runArtifactPathFor(root, 'r1', 'execute', 2));
 

@@ -1,5 +1,5 @@
 /**
- * Tests for the Chat controller's context summarisation (context-budget T06):
+ * Tests for the Chat controller's context summarisation :
  * the text-only summarise step at `contextSummarizeAt`, its inline failure
  * handling, replay after a reload, and the pure helpers.
  *
@@ -69,7 +69,7 @@ class FakeClient implements ModelClient {
   }
 }
 
-describe('ChatController context summarisation (context-budget T06)', () => {
+describe('ChatController context summarisation ', () => {
   let webview: FakeWebview;
   let client: FakeClient;
   let baitonDir: string;
@@ -82,8 +82,8 @@ describe('ChatController context summarisation (context-budget T06)', () => {
   async function build(opts: { window: number | undefined; small?: boolean }): Promise<void> {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-compact-'));
     baitonDir = path.join(tmp, '.baiton');
-    const specsDir = path.join(baitonDir, 'specs');
-    fs.mkdirSync(specsDir, { recursive: true });
+    const legacySpecsDir = path.join(baitonDir, 'specs');
+    fs.mkdirSync(legacySpecsDir, { recursive: true });
     fs.mkdirSync(path.join(baitonDir, 'chat'), { recursive: true });
     cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
     webview = new FakeWebview();
@@ -108,7 +108,6 @@ describe('ChatController context summarisation (context-budget T06)', () => {
       toolsFor: () => [],
       guardContext: () => ({ restricted: false }) as GuardContext,
       baitonDir,
-      specsDir,
       roundBound: () => 4,
       contextWindow: () => opts.window,
       maxTokens: () => 1,
@@ -238,7 +237,7 @@ describe('ChatController context summarisation (context-budget T06)', () => {
     assert.ok(!firstLoop.messages.some((m) => m.content === big('a')));
   });
 
-  describe('context meter and manual compaction (T07)', () => {
+ describe('context meter and manual compaction ', () => {
     const compactAndWait = async (): Promise<void> => {
       const before = webview.all('setBusy').length;
       await webview.send({ type: 'compactContext' });

@@ -2,7 +2,7 @@
  * The orchestrator tool registry (design "Orchestrator: tool registry and
  * guard").
  *
- * Assembles every read, spec-writing and control tool from a single
+ * Assembles every read, plan-writing and control tool from a single
  * {@link ToolServices} bundle, wraps each with {@link guardTool} so the guard's
  * idempotency, path-containment and Restricted-Mode rules apply uniformly
  * (Req 8.3–8.5, 22.1, 22.2), and exposes a name → guarded-run map plus a
@@ -16,7 +16,7 @@
  *
  * Every tool also declares which of the three orchestrator phases — `gather`,
  * `drive` and `run` — it belongs to (Req 11.1). A `run`-phase conversation sees
- * the read tools, `ask_user` and the two spec-less dispatch tools `start_run`
+ * the read tools, `ask_user` and the two plan-less dispatch tools `start_run`
  * and `investigate`, and nothing else. The phase is enforced twice:
  * {@link ToolRegistry.definitionsFor} and {@link ToolRegistry.assembleFor}
  * advertise only the current phase's tools, and {@link ToolRegistry.call}
@@ -27,13 +27,13 @@
  * A second axis, the {@link ToolSurface}, separates a top-level chat from a
  * sub-agent chat. A sub-agent surface is the read tools, `ask_user`, `run`
  * (drive only) and `spawn_subagent`/`send_to_subagent` within the current
- * phase; never `draft_spec`, `approve_spec`, `submit_pr`, `land_todo`,
- * `start_run`, `investigate` or the spec-write tools.
+ * phase; never `draft_plan`, `approve_plan`, `submit_pr`, `land_phase`,
+ * `start_run`, `investigate` or the plan-write tools.
  */
 import {
   GuardContext,
   IdempotencyStore,
-  OrchestratorPhase,
+  ConversationStep,
   Tool,
   ToolCaller,
   ToolContext,
@@ -43,7 +43,7 @@ import {
 } from './guard';
 import { createControlTools } from './controlTools';
 import { createReadTools } from './readTools';
-import { createSpecWriteTools } from './specWriteTools';
+import { createPlanWriteTools } from './planWriteTools';
 import { ToolServices } from './toolServices';
 import { ToolSpec } from './modelClient';
 import { Result, err, ok } from '../model/result';
@@ -84,7 +84,7 @@ export class ToolRegistry {
 
   constructor(services: ToolServices) {
     const reads = createReadTools(services);
-    const others = [...createSpecWriteTools(services), ...createControlTools(services)];
+    const others = [...createPlanWriteTools(services), ...createControlTools(services)];
     const register = (tool: Tool, subagent: boolean): void => {
       this.registered.set(tool.name, {
         tool,
@@ -110,7 +110,7 @@ export class ToolRegistry {
     return this.registered.has(name);
   }
 
-  /** Every registered tool name, sorted, for diagnostics and the model spec. */
+  /** Every registered tool name, sorted, for diagnostics and model definitions. */
   public names(): string[] {
     return [...this.registered.keys()].sort();
   }
@@ -127,14 +127,14 @@ export class ToolRegistry {
   }
 
   /**
-   * The raw {@link Tool} definitions advertised in `phase` (Req 11.1): the
-   * subset of {@link definitions} whose `phases` include it. On the
+   * The raw {@link Tool} definitions advertised in `step` (Req 11.1): the
+   * subset of {@link definitions} whose `steps` include it. On the
    * `'subagent'` surface only the sub-agent tools (read tools, `ask_user`,
    * `run`, the spawn tools) of that phase are returned.
    */
-  public definitionsFor(phase: OrchestratorPhase, surface: ToolSurface = 'top'): Tool[] {
+  public definitionsFor(step: ConversationStep, surface: ToolSurface = 'top'): Tool[] {
     return [...this.registered.values()]
-      .filter((entry) => entry.tool.phases.includes(phase) && this.onSurface(entry, surface))
+      .filter((entry) => entry.tool.steps.includes(step) && this.onSurface(entry, surface))
       .map((entry) => entry.tool);
   }
 
@@ -148,14 +148,14 @@ export class ToolRegistry {
   }
 
   /**
-   * The validated {@link ToolSpec}s to advertise while in `phase` (Req 11.1),
-   * validating only that phase's descriptions (Req 10.3–10.5).
+   * The validated {@link ToolSpec}s to advertise while in `step` (Req 11.1),
+   * validating only that step's descriptions (Req 10.3–10.5).
    */
   public assembleFor(
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     surface: ToolSurface = 'top',
   ): Result<ToolSpec[], ToolDescriptionError> {
-    return assembleToolSpecs(this.definitionsFor(phase, surface));
+    return assembleToolSpecs(this.definitionsFor(step, surface));
   }
 
   /**
@@ -163,8 +163,8 @@ export class ToolRegistry {
    * id, used as the idempotency key for mutating tools (Req 8.3). An unknown
    * tool name returns an error result rather than throwing.
    *
-   * `phase` is the orchestrator phase the conversation is in (Req 11.1). A tool
-   * that does not belong to that phase is refused here, before the guard and
+   * `step` is the conversation step the chat is in (Req 11.1). A tool
+   * that does not belong to that step is refused here, before the guard and
    * before the tool's own `run`, so an out-of-phase call reads nothing and
    * writes nothing. Likewise a tool not on the `surface` (a sub-agent calling a
    * top-only tool) is refused before the guard. `caller` is passed through to
@@ -175,7 +175,7 @@ export class ToolRegistry {
     args: unknown,
     callId: string | undefined,
     ctx: GuardContext,
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     surface: ToolSurface = 'top',
     caller?: ToolCaller,
   ): Promise<ToolResult> {
@@ -183,10 +183,10 @@ export class ToolRegistry {
     if (entry === undefined) {
       return { ok: false, error: `unknown tool: ${name}` };
     }
-    if (!entry.tool.phases.includes(phase)) {
+    if (!entry.tool.steps.includes(step)) {
       return {
         ok: false,
-        error: `tool "${name}" is not available while ${phase}`,
+        error: `tool "${name}" is not available while ${step}`,
       };
     }
     if (!this.onSurface(entry, surface)) {
@@ -214,13 +214,13 @@ export function createToolRegistry(services: ToolServices): ToolRegistry {
  * characters long, and not equal to the tool's `name` (Req 10.2). If any tool
  * fails, assembly is rejected with a {@link ToolDescriptionError} naming that
  * tool and its reason, and **no** definitions are produced (Req 10.5) — the
- * caller must send nothing to the model. On success each spec's `description`
- * is set from its tool's field (Req 10.3) and never from its `name` (Req 10.4).
+ * caller must send nothing to the model. On success each tool definition's
+ * `description` is set from its tool's field (Req 10.3) and never from its `name` (Req 10.4).
  */
 export function assembleToolSpecs(
   tools: Tool[],
 ): Result<ToolSpec[], ToolDescriptionError> {
-  const specs: ToolSpec[] = [];
+  const definitions: ToolSpec[] = [];
   for (const tool of tools) {
     const trimmed = tool.description.trim();
     if (trimmed === '') {
@@ -239,11 +239,11 @@ export function assembleToolSpecs(
         reason: 'description must not equal the tool name',
       });
     }
-    specs.push({
+    definitions.push({
       name: tool.name,
       description: tool.description,
       parameters: tool.schema,
     });
   }
-  return ok(specs);
+  return ok(definitions);
 }

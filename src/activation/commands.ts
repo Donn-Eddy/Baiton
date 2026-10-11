@@ -15,10 +15,10 @@
  *     under Restricted Mode and that stage's role executable (Req 14.5, 22.1,
  *     22.2).
  *   - `baiton.approve` — the approve/re-approve action through the orchestrator
- *     `approve_spec` control tool (Req 5.3, 10.3).
- *   - `baiton.submitPr` / `baiton.showPr` — open a pull request for a spec, and
+ *     `approve_plan` control tool (Req 5.3, 10.3).
+ *   - `baiton.submitPr` / `baiton.showPr` — open a pull request for a plan, and
  *     re-open the URL a completed submit already recorded in its frontmatter.
- *   - `baiton.viewPlan` — open a todo's persisted plan (`todos/<id>/plan.md`)
+ *   - `baiton.viewPlan` — open a phase's persisted plan (`phases/<id>/plan.md`)
  *     so the user can read it, and edit it before Execute.
  *   - `baiton.openChat` / `baiton.chat` — reveal and focus the Chat_View, whose
  *     {@link ChatController} runs the real host-side tool loop against the model
@@ -37,23 +37,23 @@
  *     the `baiton.orchestrator.endpoints` user setting, for feed providers
  *     models.dev publishes no URL for (or to route one through a proxy); the
  *     Chat view's inline "Set endpoint…" fix opens it pre-selected.
- *   - The Spec_Explorer tree view (with its filesystem watcher) whose inline
+ *   - The Plan Explorer tree view (with its filesystem watcher) whose inline
  *     actions forward to the same `baiton.plan/execute/review/replan/stop/
- *     approve` commands with `[slug, todoId]` / `[slug]` (Req 2, 5, 6, 18.4).
+ *     approve` commands with `[slug, phaseId]` / `[slug]` (Req 2, 5, 6, 18.4).
  *   - The Runs tree view beside it (with its `.baiton/runs/*\/run.json` watcher
  *     and a subscription to the run pipeline) whose inline actions forward the
  *     clicked run id to `baiton.runs.cancel` / `baiton.runs.viewDiff` /
  *     `baiton.runs.merge` (design "dispatch modes").
- *   - A {@link vscode.CodeLensProvider} over a spec's `# TODOS` lines exposing
- *     the stage triggers inline per todo.
+ *   - A {@link vscode.CodeLensProvider} over a plan's `# PHASES (legacy '# TODOS')` lines exposing
+ *     the stage triggers inline per phase.
  *
- * It also constructs the run store and the spec-less run pipeline (design
+ * It also constructs the run store and the plan-less run pipeline (design
  * "dispatch modes"), supplies the resulting `RunPipelineSeam` to the tool
  * registry (`start_run` / `investigate`) and to the chat's Investigate promote
  * flow, remembers the composer's Mode select in `workspaceState` under
- * {@link CHAT_MODE_KEY}. It caches one run queue per (slug, todo), each running
- * its stages in the todo's worktree, so different todos run concurrently; only
- * the spec draft and the spec-less run pipeline still exclude each other.
+ * {@link CHAT_MODE_KEY}. It caches one run queue per (slug, phase), each running
+ * its stages in the phase's worktree, so different phases run concurrently; only
+ * the plan draft and the plan-less run pipeline still exclude each other.
  *
  * Probe-failure, invalid-result, git, and recovery errors are surfaced through
  * the shared {@link Surface}: chat/tool errors as tool results, command
@@ -64,9 +64,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { isErr } from '../model/result';
-import { parseSpec, type ParsedSpec } from '../model/parser';
-import { legalActions, type TodoAction } from '../model/todoActions';
-import { DEFAULT_MODE, isRunMode } from '../model/mode';
+import { parsePlan, type ParsedPlan } from '../model/parser';
+import { legalActions, type PhaseAction } from '../model/phaseActions';
+import { DEFAULT_MODE, toRunMode } from '../model/mode';
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -77,30 +77,31 @@ import {
   createPrTool,
   createRunPipeline,
   createRunStore,
-  createSpecBranchWriter,
-  createSpecDraftRunner,
+  createPlanBranchWriter,
+  createPlanDraftRunner,
   DEFAULT_PR_TOOL,
   isPrToolSelection,
-  landTodoWorktree,
+  landPhaseWorktree,
   resolveProviderExecutable,
   runsRootDir,
   selectProvider,
   submitPr,
-  todoBranchFor,
-  todoWorktreeDirFor,
-  unlandedTodos,
+  phaseBranchFor,
+  phaseWorktreeDirFor,
+  unlandedPhases,
+  documentKindFor,
 } from '../engine';
 import type {
   DispatchResult,
   RunPipeline,
   RunQueue,
-  SpecDraftOutcome,
+  PlanDraftOutcome,
   SubmitPrError,
   TerminalHost,
 } from '../engine';
 import {
   latestStart,
-  readSpecJournal,
+  readPlanJournal,
   resumableSessionId,
   type JournalEntry,
 } from '../journal';
@@ -128,8 +129,8 @@ import type {
   EvaluationTaskContext,
   Intervention,
   InterventionSeam,
-  LandTodoSeam,
-  OrchestratorPhase,
+  LandPhaseSeam,
+  ConversationStep,
   PresentIntervention,
   RunPipelineSeam,
   SubAgentSeam,
@@ -144,7 +145,7 @@ import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
-import { createSpecStore } from './specStore';
+import { createPlanStore } from './planStore';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
 import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
@@ -152,17 +153,18 @@ import {
   createRunPipelineSeam,
   createRunQueueSeam,
   createStageLock,
-  createTodoQueues,
+  createPhaseQueues,
   dispatchTrigger,
   STAGE_ROLE,
   type AdapterForRole,
   type EngineTrigger,
-  type TodoQueues,
+  type PhaseQueues,
 } from './engineFacade';
 import { ChatController } from './chatController';
+import { listDocumentSlugs, resolveDocument } from '../storage/documentLocation';
 import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
-import { SpecExplorer, treeNodeTarget, type TreeNode } from './specExplorer';
+import { PlanExplorer, treeNodeTarget, type TreeNode } from './planExplorer';
 import {
   RunsExplorer,
   RUNS_VIEW_ID,
@@ -174,7 +176,7 @@ import {
   type RunTreeNode,
 } from './runsExplorer';
 import { openChat } from './openChat';
-import { planPath } from './specLister';
+import { phasePlanPath } from './planLister';
 import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
 import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEndpoint';
 import { ProviderRouter } from './providerRouter';
@@ -197,8 +199,8 @@ const SETTINGS_NS = 'baiton';
 /** The `workspaceState` key the composer's Mode select is remembered under. */
 const CHAT_MODE_KEY = 'baiton.chat.mode';
 
-/** The Spec_Explorer tree view id contributed in `package.json` (task 14.1). */
-const SPEC_EXPLORER_VIEW_ID = 'baiton.specExplorer';
+/** The Plan Explorer tree view id contributed in `package.json`. */
+const PLAN_EXPLORER_VIEW_ID = 'baiton.planExplorer';
 
 /**
  * Trailing debounce, in milliseconds, between the model-discovery service's
@@ -248,8 +250,8 @@ const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
 
 /**
  * Resolve what the Auto-mode risk evaluator is told about a relayed ask's
- * task: the workspace root, the command's working directory, the run's todo
- * (id and title, read from `spec.md` through the spec store) and the body of
+ * task: the workspace root, the command's working directory, the run's phase
+ * (id and title, read from the plan document through the plan store) and the body of
  * every script the command names. A script is read only when it resolves —
  * symlinks followed — to a regular file inside the workspace root, and only
  * its first {@link MAX_SCRIPT_CHARS} bytes; nothing outside the workspace is
@@ -259,23 +261,23 @@ async function autoModeTaskContext(
   workspaceRoot: string,
   ask: AutoModeAsk,
   context: AutoModeRunContext,
-  readSpec: (slug: string) => Promise<ParsedSpec | undefined>,
+  readPlan: (slug: string) => Promise<ParsedPlan | undefined>,
 ): Promise<EvaluationTaskContext> {
   const out: EvaluationTaskContext = { workspaceRoot };
   if (context.slug !== undefined) {
-    out.specSlug = context.slug;
+    out.planSlug = context.slug;
   }
-  if (context.todoId !== undefined) {
-    out.todoId = context.todoId;
+  if (context.phaseId !== undefined) {
+    out.phaseId = context.phaseId;
     if (context.slug !== undefined) {
       try {
-        const spec = await readSpec(context.slug);
-        const title = spec?.todos.find((t) => t.id === context.todoId)?.title;
+        const plan = await readPlan(context.slug);
+        const title = plan?.phases.find((phase) => phase.id === context.phaseId)?.title;
         if (title !== undefined) {
-          out.todoTitle = title;
+          out.phaseTitle = title;
         }
       } catch {
-        // No title: the todo id alone still names the task.
+        // No title: the phase id alone still names the task.
       }
     }
   }
@@ -359,7 +361,7 @@ export interface CommandActivation {
 export interface CommandSurface {
   /** All registrations, pushed onto `context.subscriptions`. */
   disposables: vscode.Disposable[];
-  /** Slug/todo pairs (and the spec draft / spec-less run) with a stage in flight. */
+  /** Slug/phase pairs (and the plan draft / plan-less run) with a stage in flight. */
   runningSlugs(): readonly string[];
 }
 
@@ -389,18 +391,17 @@ export function registerCommands(
   const cfg = (): Config => activation.config;
   const repoRoot = workspace.root.fsPath;
   const baitonDir = workspace.baitonDir.fsPath;
-  const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
   /**
    * The mode the composer's Mode select currently holds. The ChatController
    * persists it under the same `workspaceState` key (see its `modeMemory` dep
    * below), so reading the key is how the run-pipeline seam learns the composer
    * mode without reaching into the controller. A stale or off-union stored value
    * falls back to DEFAULT_MODE (Default), exactly as the controller's own seeding does.
-   * A spec conversation never reaches this fallback: it does not dispatch spec-less runs.
+   * A plan conversation never reaches this fallback: it does not dispatch plan-less runs.
    */
   const composerMode = (): RunMode => {
     const stored = context.workspaceState.get<string>(CHAT_MODE_KEY);
-    return stored !== undefined && isRunMode(stored) ? stored : DEFAULT_MODE;
+    return (stored !== undefined ? toRunMode(stored) : undefined) ?? DEFAULT_MODE;
   };
 
   // --- shared seams -------------------------------------------------------
@@ -416,7 +417,7 @@ export function registerCommands(
   let presentRelayAsk: (ask: Intervention, context: AutoModeRunContext) => void | Promise<void> =
     (ask) => presentAsk(ask);
   let declineAsk: (id: string, reason: string) => void = () => {};
-  // The spec-draft runner launches outside the queue and deliberately has no relay.
+  // The plan-draft runner launches outside the queue and deliberately has no relay.
   const askWatcherFactory = createVscodeAskWatcherFactory({
     registry: askRegistry,
     present: (ask, context) => presentRelayAsk(ask, context),
@@ -427,55 +428,55 @@ export function registerCommands(
   // One writer shared by the store, the queues and the worktree seam so state
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
-  const specWriter = createSpecBranchWriter({ specsDir, git });
-  const specStore = createSpecStore(specsDir, git, specWriter);
+  const planWriter = createPlanBranchWriter({ baitonDir, git });
+  const planStore = createPlanStore(baitonDir, git, planWriter);
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
   const adapters = createAdapterRegistry();
   // One live role → adapter resolver, shared by the queue, the facade (which
   // needs each role's `acceptsSessionId` to decide whether a journaled session
-  // is resumable), the View command and the spec-draft runner.
+  // is resumable), the View command and the plan-draft runner.
   const adapterFor = (role: Role): Adapter | undefined => adapterForRole(cfg(), adapters, role);
   const terminalHost = createVscodeTerminalHost();
   const watcherFactory = createVscodeResultWatcherFactory();
 
-  // Spec-scoped stages keep the spec-level journal
-  // (`.baiton/specs/<slug>/runs.jsonl`, Req 21); todo stages journal to
-  // `todos/<id>/runs.jsonl`, and the queue reads the merged spec journal. One
-  // serialized queue is built per slug+todo and cached, each running its stages
-  // in the todo's worktree. Manual mode runs one stage per trigger per todo and
+  // Plan-scoped stages keep the plan-level journal
+  // (legacy `.baiton/specs/<slug>/runs.jsonl`, Req 21); phase stages journal to
+  // `phases/<id>/runs.jsonl`, and the queue reads the merged plan journal. One
+  // serialized queue is built per slug+phase and cached, each running its stages
+  // in the phase's worktree. Manual mode runs one stage per trigger per phase and
   // the queue refuses a second while one is running (Req 19.1, 20.1). Every
   // refusal/halt is surfaced through the shared Surface (Req 5.3, 10.3, 14.5,
-  // 19.1). Todo queues sit outside the
+  // 19.1). Phase queues sit outside the
   // repository lock.
-  const todoQueues: TodoQueues = createTodoQueues({
+  const phaseQueues: PhaseQueues = createPhaseQueues({
     workspaceRoot: repoRoot,
-    specsDir,
+    baitonDir,
     git,
-    specWriter,
+    planWriter: planWriter,
     terminalHost,
     watcherFactory,
     askWatcherFactory,
-    specStore,
+    planStore: planStore,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
     report: (error) => surface.reportDispatchError(error),
   });
-  const queueFor = (slug: string, todoId: string): RunQueue => todoQueues.queueFor(slug, todoId);
+  const queueFor = (slug: string, phaseId: string): RunQueue => phaseQueues.queueFor(slug, phaseId);
 
-  // The repository lock after per-todo worktrees: the spec draft and spec-less
-  // runs exclude each other. Per-todo stages run concurrently in their own
+  // The repository lock after per-phase worktrees: the plan draft and plan-less
+  // runs exclude each other. Per-phase stages run concurrently in their own
   // worktrees and neither block nor are blocked by them.
   const stageLock = createStageLock({
-    specDraftRunning: () => specDraftRunner.isRunning(),
+    planDraftRunning: () => planDraftRunner.isRunning(),
     runRunning: () => runPipeline.isRunning(),
   });
 
-  // The spec-less run pipeline (design "dispatch modes"): Bug/Quick/Refactor
+  // The plan-less run pipeline (design "dispatch modes"): Bug/Quick/Refactor
   // drive plan -> execute -> review in a per-run worktree, Investigate answers a
-  // question read-only. It is run-scoped, so it sits beside the todo-scoped
-  // queues rather than inside one; it excludes only the spec draft. Manifests, journals and rendered artifacts live
-  // under `.baiton/runs/<run-id>/`; nothing is written under `.baiton/specs/`.
+  // question read-only. It is run-scoped, so it sits beside the phase-scoped
+  // queues rather than inside one; it excludes only the plan draft. Manifests, journals and rendered artifacts live
+  // under `.baiton/runs/<run-id>/`; nothing is written under the legacy `.baiton/specs/` root.
   const runStore = createRunStore({ workspaceRoot: repoRoot });
   const runPipeline: RunPipeline = createRunPipeline({
     workspaceRoot: repoRoot,
@@ -489,9 +490,9 @@ export function registerCommands(
     // Read per run off the live config, like every other config read here.
     execAttempts: () => cfg().limits.exec_attempts,
     verify: () => cfg().git.verify,
-    // A spec-less run refuses only while the spec draft runs; per-todo stages
+    // A plan-less run refuses only while the plan draft runs; per-phase stages
     // run in their own worktrees and do not block it.
-    isSpecBusy: () => stageLock.runPipelineBusy(),
+    isPlanBusy: () => stageLock.runPipelineBusy(),
     onComplete: (outcome) => surface.log(`Baiton: run ${outcome.runId} ${outcome.state}: ${outcome.message}`),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -501,14 +502,14 @@ export function registerCommands(
     (detail) => surface.warn(`Baiton: ${detail}`),
   );
 
-  // Submit PR (design section 8): the per-spec flow over the same seams as the
-  // queue. One in-flight submission per spec; it also refuses while that
-  // spec's queue is running a stage, and while any todo of the spec is
+  // Submit PR (design section 8): the per-plan flow over the same seams as the
+  // queue. One in-flight submission per plan; it also refuses while that
+  // plan's queue is running a stage, and while any phase of the plan is
   // unlanded (checked inside submitPr).
   const prInFlight = new Set<string>();
   const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
-    if (prInFlight.has(slug) || todoQueues.isRunning(slug)) {
-      return { ok: false, error: `spec "${slug}" already has a run in progress` };
+    if (prInFlight.has(slug) || phaseQueues.isRunning(slug)) {
+      return { ok: false, error: `plan "${slug}" already has a run in progress` };
     }
     const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
     if (!isPrToolSelection(selection)) {
@@ -535,7 +536,7 @@ export function registerCommands(
     try {
       const result = await submitPr(slug, {
         workspaceRoot: repoRoot,
-        specsDir,
+        baitonDir,
         terminalHost,
         watcherFactory,
         git,
@@ -544,7 +545,7 @@ export function registerCommands(
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
-        unlandedTodos: (s) => unlandedTodos({ git }, s),
+        unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repoRoot, git }, s),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -556,23 +557,23 @@ export function registerCommands(
     }
   };
 
-  // land_todo (per-todo worktrees): merge a done todo's branch into the spec
-  // branch in the main checkout. It goes through the spec-branch writer so a
-  // land never interleaves with a state commit for another todo of the spec.
-  const landTodoSeam: LandTodoSeam = {
-    land: async ({ slug, todoId }) => {
+  // land_phase (per-phase worktrees): merge a done phase's branch into the plan
+  // branch in the main checkout. It goes through the plan-branch writer so a
+  // land never interleaves with a state commit for another phase of the plan.
+  const landPhaseSeam: LandPhaseSeam = {
+    land: async ({ slug, phaseId }) => {
       if (prInFlight.has(slug)) {
-        return { kind: 'refused', reason: `a pull request is being submitted for spec "${slug}"` };
+        return { kind: 'refused', reason: `a pull request is being submitted for plan "${slug}"` };
       }
-      if (queueFor(slug, todoId).isRunning()) {
-        return { kind: 'refused', reason: `a stage is still running for todo "${todoId}"` };
+      if (queueFor(slug, phaseId).isRunning()) {
+        return { kind: 'refused', reason: `a stage is still running for phase "${phaseId}"` };
       }
       try {
-        return await specWriter.apply(slug, async () => {
-          if ((await git.branchHead(todoBranchFor(slug, todoId))) === undefined) {
+        return await planWriter.apply(slug, async () => {
+          if ((await git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
             return { kind: 'already-landed' as const };
           }
-          const landed = await landTodoWorktree({ workspaceRoot: repoRoot, git }, { slug, todoId });
+          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId });
           if (landed.ok) {
             return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
           }
@@ -588,11 +589,12 @@ export function registerCommands(
     },
   };
 
-  // The spec-draft runner (design "the harness writes the spec"): the
-  // orchestrator gathers requirements and calls `draft_spec`, which dispatches
-  // here. It is spec-scoped, so it runs beside the todo-scoped queues rather
-  // than through one; it excludes only a spec-less run. Its completion sink is bound after the ChatController exists.
-  let reportDraftOutcome: (outcome: SpecDraftOutcome) => void = () => {};
+  // The plan-draft runner (the harness writes the plan): the
+  // orchestrator gathers requirements and calls `draft_plan`, which dispatches
+  // here. It is plan-scoped, so it runs beside the phase-scoped queues rather
+  // than through one; it excludes only a run without a plan. Its completion
+  // sink is bound after the ChatController exists.
+  let reportDraftOutcome: (outcome: PlanDraftOutcome) => void = () => {};
   // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
   // goes through one registry and one seam. `present` is bound late: until the
   // Chat_View has resolved, an ask falls back to the modal so a confirmation
@@ -620,35 +622,33 @@ export function registerCommands(
     baitonDir,
     git,
     queueFor,
-    specsDir,
     adapterFor,
     submitPrForSlug,
     confirm,
     interventionSeam,
     runPipelineSeam,
-    landTodoSeam,
+    landPhaseSeam,
   );
-  const specDraftRunner = createSpecDraftRunner({
+  const planDraftRunner = createPlanDraftRunner({
     workspaceRoot: repoRoot,
-    specsDir,
     terminalHost,
     watcherFactory,
     services: draftServices,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
-    // Refuses only while a spec-less run is in flight; todo queues don't count.
-    isQueueRunning: () => stageLock.specDraftBusy(),
+    // Refuses only while a plan-less run is in flight; phase queues don't count.
+    isQueueRunning: () => stageLock.planDraftBusy(),
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
 
-  // The tool registry (read + spec-write + control tools) over the same seams
+  // The tool registry (read + plan-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, specsDir, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landTodoSeam, subAgents),
-    draftSpec: {
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents),
+    draftPlan: {
       draft: async (req) => {
-        const started = await specDraftRunner.start(req);
+        const started = await planDraftRunner.start(req);
         if (started.ok) {
           return { kind: 'started', runId: started.runId };
         }
@@ -792,18 +792,19 @@ export function registerCommands(
   }
 
   // The orchestrator has three jobs, and each advertises its own tool surface
-  // (Req 11.1): gathering requirements for a new or draft spec, driving an
-  // approved one, or dispatching a spec-less run (the read tools, `ask_user`,
+  // (Req 11.1): gathering requirements for a new or draft plan, driving an
+  // approved one, or dispatching a plan-less run (the read tools, `ask_user`,
   // `start_run` and `investigate`). Validation above ran once over the whole
-  // registry, so these only select from the specs it already accepted; a
+  // registry, so these only select from the validated tool definitions; a
   // rejected assembly leaves every phase empty. The controller picks one per
   // send, and the registry refuses an out-of-phase call even if the model names
   // it anyway.
-  const specsByName = new Map(tools.map((spec) => [spec.name, spec]));
-  const toolsByPhase = new Map<OrchestratorPhase, ToolSpec[]>([
-    ['gather', specsForPhase(registry, specsByName, 'gather')],
-    ['drive', specsForPhase(registry, specsByName, 'drive')],
-    ['run', specsForPhase(registry, specsByName, 'run')],
+  const toolSpecsByName = new Map(tools.map((toolSpec) => [toolSpec.name, toolSpec]));
+  // ConversationStep is the conversation step, distinct from a plan phase.
+  const toolsByStep = new Map<ConversationStep, ToolSpec[]>([
+    ['gather', toolSpecsForStep(registry, toolSpecsByName, 'gather')],
+    ['drive', toolSpecsForStep(registry, toolSpecsByName, 'drive')],
+    ['run', toolSpecsForStep(registry, toolSpecsByName, 'run')],
   ]);
 
   // `baiton.initialize` is registered separately (and unconditionally) so it
@@ -811,16 +812,16 @@ export function registerCommands(
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, specsDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, specsDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, specsDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, specsDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, specsDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, baitonDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, baitonDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, baitonDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, baitonDir, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, baitonDir, queueFor, adapterFor, surface),
     registerViewCommand(
       activation,
-      specsDir,
+      baitonDir,
       repoRoot,
-      (slug, todoId) => todoQueues.find(slug, todoId),
+      (slug, phaseId) => phaseQueues.find(slug, phaseId),
       adapterFor,
       terminalHost,
       surface,
@@ -843,31 +844,31 @@ export function registerCommands(
     vscode.commands.registerCommand(
       COMMANDS.submitPr,
       (arg?: TreeNode | string) =>
-        runSubmitPr(activation, specsDir, surface, submitPrForSlug, slugArg(arg)),
+        runSubmitPr(activation, baitonDir, surface, submitPrForSlug, slugArg(arg)),
     ),
   );
 
   // --- show PR (design section 8 "PR") ------------------------------------
-  // Once a spec records a `pr:` URL its root swaps Submit PR for Show PR, which
+  // Once a plan records a `pr:` URL its root swaps Submit PR for Show PR, which
   // only opens that URL in the browser; read-only, so it is not gated on
   // Restricted Mode.
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.showPr,
-      (arg?: TreeNode | string) => runShowPr(specsDir, surface, slugArg(arg)),
+      (arg?: TreeNode | string) => runShowPr(baitonDir, surface, slugArg(arg)),
     ),
   );
 
   // --- view plan ----------------------------------------------------------
-  // Opens the todo's persisted plan for reading or editing. Like Show PR it
+  // Opens the phase's persisted plan for reading or editing. Like Show PR it
   // only opens something already on disk, so it is not gated on Restricted
   // Mode or on a role executable.
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.viewPlan,
       async (a?: TreeNode | string, b?: string) => {
-        const { slug, todoId } = todoArgs(a, b);
-        await runViewPlan(specsDir, surface, slug, todoId);
+        const { slug, phaseId } = phaseArgs(a, b);
+        await runViewPlan(baitonDir, surface, slug, phaseId);
       },
     ),
   );
@@ -889,13 +890,13 @@ export function registerCommands(
     const runId = opts.context?.runId ?? AUTO_MODE_UNKNOWN_RUN;
     const gateAsk = askFromPermission(ask);
     // Stage (b) judges the action's effect, so it is told where the
-    // workspace is, which todo the run is on and what any script it runs
+    // workspace is, which phase the run is on and what any script it runs
     // says. Only a relayed ask has a run context; an orchestrator-raised ask
     // keeps the context-free fallback.
     const taskContext =
       opts.context === undefined
         ? undefined
-        : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => specStore.readSpec(slug));
+        : await autoModeTaskContext(repoRoot, gateAsk, opts.context, (slug) => planStore.readPlan(slug));
     return decideAsk(gateAsk, agentAllowList(agent, role, runId), router, {
       role,
       runId,
@@ -907,11 +908,10 @@ export function registerCommands(
     webview: chatWebview,
     client: router,
     registry,
-    toolsFor: (phase) => toolsByPhase.get(phase) ?? [],
+    toolsFor: (phase) => toolsByStep.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
     askRegistry,
     baitonDir,
-    specsDir,
     roundBound: () => readRoundBound(),
     contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
     contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
@@ -964,13 +964,13 @@ export function registerCommands(
   // Re-start the controller on every fresh webview resolve so a reopen or a
   // window reload reloads the current conversation into the new webview
   // (Req 8.8).
-  // Bind the spec-draft completion sink now that the controller exists: a
+  // Bind the plan-draft completion sink now that the controller exists: a
   // finished draft records a system note on the Workspace_Conversation and
-  // refreshes the view so the new spec appears in the selector.
+  // refreshes the view so the new plan appears in the selector.
   reportDraftOutcome = (outcome) => {
     const message = outcome.ok
-      ? `Spec \`${outcome.slug}\` drafted with ${outcome.todoCount} todo${outcome.todoCount === 1 ? '' : 's'}.`
-      : `Drafting spec \`${outcome.slug}\` failed: ${outcome.message}`;
+      ? `Plan \`${outcome.slug}\` drafted with ${outcome.phaseCount} phase${outcome.phaseCount === 1 ? '' : 's'}.`
+      : `Drafting plan \`${outcome.slug}\` failed: ${outcome.message}`;
     if (!outcome.ok) {
       surface.warn(`Baiton: ${message}`);
     }
@@ -1030,24 +1030,24 @@ export function registerCommands(
     ),
   );
 
-  // --- spec explorer tree provider + active-spec tracking (Req 2, 6, 7) ---
-  // The explorer's root click sets the Chat_View active spec through the
+  // --- plan explorer tree provider + active-plan tracking (Req 2, 6, 7) ---
+  // The explorer's root click sets the Chat_View active plan through the
   // controller's sink; the controller also follows the active editor when it is
-  // a `spec.md` (Req 7.4, 7.5).
-  const explorer = new SpecExplorer(
-    specsDir,
-    specStore,
+  // a `plan.md` or the legacy `spec.md` (Req 7.4, 7.5).
+  const explorer = new PlanExplorer(
+    baitonDir,
+    planStore,
     surface,
     workspace.restricted,
-    (slug) => chatController.setActiveSpec(slug),
+    (slug) => chatController.setActivePlan(slug),
   ).start();
   disposables.push(
-    vscode.window.registerTreeDataProvider(SPEC_EXPLORER_VIEW_ID, explorer),
+    vscode.window.registerTreeDataProvider(PLAN_EXPLORER_VIEW_ID, explorer),
     explorer,
   );
 
   // --- runs view (design "dispatch modes") ---
-  // Built after the Spec_Explorer so the `baiton.restricted` context key its
+  // Built after the Plan Explorer so the `baiton.restricted` context key its
   // `start()` publishes is already set; the Runs menus only negate it. The
   // `git` service here is the main-checkout one: the merge and the diff must
   // run in the main checkout, never in a run's worktree. `refresh` is a lazily
@@ -1091,34 +1091,35 @@ export function registerCommands(
     ),
   );
 
-  // Follow the active editor: when it is a spec's `spec.md`, make that spec the
-  // active conversation; other editors leave the active spec unchanged (Req 7.5).
+  // Follow the active editor: when it is a plan's `plan.md`, make that plan the
+  // active conversation; other editors leave the active plan unchanged (Req 7.5).
   disposables.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor === undefined) {
         return;
       }
-      const slug = slugFromSpecUri(editor.document.uri);
+      const slug = slugFromDocumentUri(editor.document.uri);
       if (slug !== undefined) {
-        chatController.setActiveSpec(slug);
+        chatController.setActivePlan(slug);
       }
     }),
   );
 
-  // --- CodeLens over spec todos ------------------------------------------
+  // --- CodeLens over plan phases ------------------------------------------
   disposables.push(
     vscode.languages.registerCodeLensProvider(
-      { pattern: '**/.baiton/specs/*/spec.md' },
-      new SpecCodeLensProvider(specsDir),
+      // Legacy: keep watching existing spec.md documents alongside plan.md.
+      { pattern: '**/.baiton/{plans/*/plan.md,specs/*/spec.md}' },
+      new PlanCodeLensProvider(baitonDir),
     ),
   );
 
   return {
     disposables,
     runningSlugs: () => {
-      const running = todoQueues.running().map((r) => `${r.slug}/${r.todoId}`);
-      if (specDraftRunner.isRunning()) {
-        running.push('(spec draft)');
+      const running = phaseQueues.running().map((r) => `${r.slug}/${r.phaseId}`);
+      if (planDraftRunner.isRunning()) {
+        running.push('(plan draft)');
       }
       const runId = runPipeline.currentRunId();
       if (runId !== undefined) {
@@ -1142,7 +1143,7 @@ export function registerInitializeCommand(surface: Surface): vscode.Disposable {
 }
 
 /**
- * Folder-scoped hot-reload seam for the config panel command (T08).
+ * Folder-scoped hot-reload seam for the config panel command.
  * Closes over the panel's resolved baitonDir before calling the underlying ApplyConfig.
  */
 export type FolderScopedApplyConfig = (
@@ -1152,7 +1153,7 @@ export type FolderScopedApplyConfig = (
 
 /**
  * Register the `baiton.openConfigPanel` command ahead of the activation gate.
- * Reveals and focuses the Configuration webview view in the Baiton container (T11).
+ * Reveals and focuses the Configuration webview view in the Baiton container.
  */
 export function registerConfigPanelCommand(): vscode.Disposable {
   return vscode.commands.registerCommand(COMMANDS.openConfigPanel, () =>
@@ -1251,17 +1252,17 @@ function directoryExists(p: string): boolean {
 
 // --- stage / action triggers ----------------------------------------------
 
-/** A per-slug run-queue accessor: builds (and caches) the queue for a spec. */
-type QueueFor = (slug: string, todoId: string) => RunQueue;
-/** Looks up a todo's queue without creating one. */
-type FindQueue = (slug: string, todoId: string) => RunQueue | undefined;
+/** A per-slug run-queue accessor: builds (and caches) the queue for a plan. */
+type QueueFor = (slug: string, phaseId: string) => RunQueue;
+/** Looks up a phase's queue without creating one. */
+type FindQueue = (slug: string, phaseId: string) => RunQueue | undefined;
 
 /** Register a stage-trigger command (plan/execute/review). */
 function registerStageCommand(
   commandId: string,
   stage: Stage,
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
@@ -1269,8 +1270,8 @@ function registerStageCommand(
   return vscode.commands.registerCommand(
     commandId,
     (a?: TreeNode | string, b?: string) => {
-      const { slug, todoId } = todoArgs(a, b);
-      return runStage(activation, specsDir, queueFor, adapterForRole, surface, stage, slug, todoId);
+      const { slug, phaseId } = phaseArgs(a, b);
+      return runStage(activation, baitonDir, queueFor, adapterForRole, surface, stage, slug, phaseId);
     },
   );
 }
@@ -1280,7 +1281,7 @@ function registerActionCommand(
   commandId: string,
   action: 'replan' | 'stop',
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
@@ -1295,45 +1296,45 @@ function registerActionCommand(
       if (!ensureNotRestricted(activation, surface)) {
         return;
       }
-      const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
-      const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+      const { slug: slugArg, phaseId: phaseArg } = phaseArgs(a, b);
+      const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
       if (target === undefined) {
         return;
       }
-      // Stop cancels the todo's running stage and clears its queue rather than
+      // Stop cancels the phase's running stage and clears its queue rather than
       // enqueuing behind it — dispatching a `stop` action would wait for the
       // busy stage to finish, defeating the cancellation. The queue serves only
-      // this todo, so other todos' stages are never cancelled; when nothing is
+      // this phase, so other phases' stages are never cancelled; when nothing is
       // running the transition table's revert path applies instead (Req 2.1, 2.2, 2.3,
       // 20.4–20.6).
       if (action === 'stop') {
-        const queue = queueFor(target.slug, target.todoId);
+        const queue = queueFor(target.slug, target.phaseId);
         if (queue.currentRun() !== undefined) {
           queue.stop();
-          surface.log(`Baiton: stop ${target.slug}/${target.todoId}`);
+          surface.log(`Baiton: stop ${target.slug}/${target.phaseId}`);
           return;
         }
         const trigger: EngineTrigger = {
           kind: 'action',
           slug: target.slug,
-          todoId: target.todoId,
+          phaseId: target.phaseId,
           action: 'stop',
         };
-        const result = await dispatchAndReport(queue, specsDir, trigger, adapterForRole, surface);
+        const result = await dispatchAndReport(queue, baitonDir, trigger, adapterForRole, surface);
         if (!result.ok && result.error.kind === 'illegal-transition') {
           // The queue's reporter already surfaced the generic transition-table
           // message; this friendlier wording is the one Req 2.3 asks for.
-          surface.warn(`Baiton: nothing to stop for ${target.slug}/${target.todoId}`);
+          surface.warn(`Baiton: nothing to stop for ${target.slug}/${target.phaseId}`);
         }
         return;
       }
       const trigger: EngineTrigger = {
         kind: 'action',
         slug: target.slug,
-        todoId: target.todoId,
+        phaseId: target.phaseId,
         action,
       };
-      await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
+      await dispatchAndReport(queueFor(target.slug, target.phaseId), baitonDir, trigger, adapterForRole, surface);
     },
   );
 }
@@ -1346,7 +1347,7 @@ function registerActionCommand(
  */
 function registerViewCommand(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   repoRoot: string,
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
@@ -1356,21 +1357,21 @@ function registerViewCommand(
   return vscode.commands.registerCommand(
     COMMANDS.view,
     async (a?: TreeNode | string, b?: string) => {
-      const { slug: slugArg, todoId: todoArg } = todoArgs(a, b);
-      const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+      const { slug: slugArg, phaseId: phaseArg } = phaseArgs(a, b);
+      const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
       if (target === undefined) {
         return;
       }
-      await runView(activation, target.slug, target.todoId, specsDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
+      await runView(activation, target.slug, target.phaseId, baitonDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
     },
   );
 }
 
 /**
- * View a todo's sub-agent session (Req 3.3, 3.4, 3.5, 3.6): reveal the
- * Live_Run's terminal when the todo is currently running; otherwise attach to
+ * View a phase's sub-agent session (Req 3.3, 3.4, 3.5, 3.6): reveal the
+ * Live_Run's terminal when the phase is currently running; otherwise attach to
  * the Session_Id the journal's most recent start recorded for it, launching a
- * new terminal in the todo's worktree (the directory the session was created
+ * new terminal in the phase's worktree (the directory the session was created
  * in) when it exists, else at the workspace root; otherwise warn that no session is
  * recorded. The role passed to `attach` comes from the stage recorded on that
  * journal entry via the shared {@link STAGE_ROLE} table (Req 3.6). The
@@ -1384,23 +1385,23 @@ function registerViewCommand(
 async function runView(
   activation: CommandActivation,
   slug: string,
-  todoId: string,
-  specsDir: string,
+  phaseId: string,
+  baitonDir: string,
   repoRoot: string,
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): Promise<void> {
-  const live = findQueue(slug, todoId)?.currentRun();
+  const live = findQueue(slug, phaseId)?.currentRun();
   if (live !== undefined) {
     live.terminal.show();
     return;
   }
 
-  const entry = latestStart(readSpecJournal(specsDir, slug), todoId);
+  const entry = latestStart(readPlanJournal(baitonDir, slug), phaseId);
   if (entry === undefined) {
-    surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
+    surface.warn(`Baiton: no session recorded for ${slug}/${phaseId}`);
     return;
   }
 
@@ -1419,11 +1420,11 @@ async function runView(
   // below), while codex/antigravity minted their own — for those only an id
   // discovered after the run can be reopened (Req 3.2).
   // Attach in the directory the session was created in.
-  const worktreeDir = todoWorktreeDirFor(repoRoot, slug, todoId);
+  const worktreeDir = phaseWorktreeDirFor(repoRoot, slug, phaseId);
   const cwd = fs.existsSync(worktreeDir) ? worktreeDir : repoRoot;
   let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
   if (sessionId === undefined) {
-    surface.warn(`Baiton: no session recorded for ${slug}/${todoId}`);
+    surface.warn(`Baiton: no session recorded for ${slug}/${phaseId}`);
     return;
   }
   // CLIs that mint their own session ids (opencode) map the journaled Baiton
@@ -1432,23 +1433,23 @@ async function runView(
   if (adapter.resolveSessionId !== undefined) {
     const resolved = await adapter.resolveSessionId(sessionId, cwd);
     if (resolved === undefined) {
-      surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${todoId}; opening its most recent session instead`);
+      surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${phaseId}; opening its most recent session instead`);
     } else {
       sessionId = resolved;
     }
   }
 
-  const spec = adapter.attach({
+  const adapterSpec = adapter.attach({
     role,
     runId: entry.runId,
     sessionId,
   });
   const terminal = terminalHost.createTerminal({
-    name: `Baiton view ${slug}/${todoId}`,
-    shellPath: spec.shellPath,
-    shellArgs: spec.shellArgs,
+    name: `Baiton view ${slug}/${phaseId}`,
+    shellPath: adapterSpec.shellPath,
+    shellArgs: adapterSpec.shellArgs,
     cwd,
-    ...(spec.env !== undefined ? { env: spec.env } : {}),
+    ...(adapterSpec.env !== undefined ? { env: adapterSpec.env } : {}),
   });
   terminal.show();
 }
@@ -1456,28 +1457,28 @@ async function runView(
 /** Dispatch a stage trigger, gated under Restricted Mode and the stage's role executable. */
 async function runStage(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
   stage: Stage,
   slugArg: string | undefined,
-  todoArg: string | undefined,
+  phaseArg: string | undefined,
 ): Promise<void> {
   if (!ensureCanDispatch(activation, surface, STAGE_ROLE[stage])) {
     return;
   }
-  const target = await resolveTarget(specsDir, slugArg, todoArg, surface);
+  const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
   if (target === undefined) {
     return;
   }
   const trigger: EngineTrigger = {
     kind: 'stage',
     slug: target.slug,
-    todoId: target.todoId,
+    phaseId: target.phaseId,
     stage,
   };
-  await dispatchAndReport(queueFor(target.slug, target.todoId), specsDir, trigger, adapterForRole, surface);
+  await dispatchAndReport(queueFor(target.slug, target.phaseId), baitonDir, trigger, adapterForRole, surface);
 }
 
 /**
@@ -1532,12 +1533,12 @@ function ensureExecutable(activation: CommandActivation, surface: Surface, role:
  */
 async function dispatchAndReport(
   queue: RunQueue,
-  specsDir: string,
+  baitonDir: string,
   trigger: EngineTrigger,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): Promise<DispatchResult> {
-  const result = await dispatchTrigger(queue, specsDir, trigger, adapterForRole);
+  const result = await dispatchTrigger(queue, baitonDir, trigger, adapterForRole);
   if (result.ok) {
     surface.log(
       `Baiton: ${describeTrigger(trigger)} → ${result.outcome.kind}`,
@@ -1549,13 +1550,13 @@ async function dispatchAndReport(
 /** A short description of a trigger for the running log. */
 function describeTrigger(trigger: EngineTrigger): string {
   const what = trigger.kind === 'stage' ? trigger.stage : trigger.action;
-  return `${what} ${trigger.slug}/${trigger.todoId}`;
+  return `${what} ${trigger.slug}/${trigger.phaseId}`;
 }
 
 // --- approve ---------------------------------------------------------------
 
 /**
- * Run the approve/re-approve action through the `approve_spec` control tool.
+ * Run the approve/re-approve action through the `approve_plan` control tool.
  * The guard disables it under Restricted Mode (Req 22.1); the tool confirms in
  * the UI and, on a fresh approval, creates the branch and records the approval
  * (Req 10.1, 16). A missing slug prompts the user.
@@ -1566,17 +1567,17 @@ async function runApprove(
   surface: Surface,
   slugArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await promptForSlug(workspace, 'Spec slug to approve'));
+  const slug = slugArg ?? (await promptForSlug(workspace, 'Plan slug to approve'));
   if (slug === undefined) {
     return;
   }
   const ctx = guardContextFor(workspace);
   const callId = `approve-${slug}-${Date.now()}`;
-  // `approve_spec` belongs to both orchestrator phases; a spec approved from
+  // `approve_plan` belongs to both orchestrator phases; a plan approved from
   // the UI is by definition still being gathered rather than driven (Req 11.1).
-  const result = await registry.call('approve_spec', { slug }, callId, ctx, 'gather');
+  const result = await registry.call('approve_plan', { slug }, callId, ctx, 'gather');
   if (result.ok) {
-    surface.info(`Baiton: approved spec "${slug}".`);
+    surface.info(`Baiton: approved plan "${slug}".`);
   } else {
     surface.warn(`Baiton: ${result.error}`);
   }
@@ -1584,35 +1585,35 @@ async function runApprove(
 
 /**
  * The validated {@link ToolSpec}s to advertise in one orchestrator phase
- * (Req 11.1): the already-validated specs of the tools the registry lists for
+ * (Req 11.1): the already-validated tool definitions the registry lists for
  * that phase, in registry order. Selecting from `validated` keeps description
  * validation a single pass over the whole registry (Req 10.3–10.5).
  */
-function specsForPhase(
+function toolSpecsForStep(
   registry: ToolRegistry,
   validated: Map<string, ToolSpec>,
-  phase: OrchestratorPhase,
+  step: ConversationStep,
 ): ToolSpec[] {
-  const specs: ToolSpec[] = [];
-  for (const tool of registry.definitionsFor(phase)) {
-    const spec = validated.get(tool.name);
-    if (spec !== undefined) {
-      specs.push(spec);
+  const toolSpecs: ToolSpec[] = [];
+  for (const tool of registry.definitionsFor(step)) {
+    const toolSpec = validated.get(tool.name);
+    if (toolSpec !== undefined) {
+      toolSpecs.push(toolSpec);
     }
   }
-  return specs;
+  return toolSpecs;
 }
 
 // --- submit PR -------------------------------------------------------------
 
 /**
- * Run the Submit PR flow for a spec, gated like a stage dispatch (Restricted
+ * Run the Submit PR flow for a plan, gated like a stage dispatch (Restricted
  * Mode, executable). The tree passes its node, the palette a slug or nothing.
  * Success offers to open the PR; a halt is surfaced with its reason.
  */
 async function runSubmitPr(
   activation: CommandActivation,
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   submit: (slug: string) => Promise<SubmitPrOutcome>,
   slugArg: string | undefined,
@@ -1620,12 +1621,12 @@ async function runSubmitPr(
   if (!ensureCanDispatch(activation, surface, 'pr-writer')) {
     return;
   }
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
   if (slug === undefined) {
     return;
   }
   const answer = await vscode.window.showWarningMessage(
-    `Submit a pull request for spec "${slug}"? This pushes its branch and opens the PR.`,
+    `Submit a pull request for plan "${slug}"? This pushes its branch and opens the PR.`,
     { modal: true },
     'Submit PR',
   );
@@ -1652,34 +1653,34 @@ async function runSubmitPr(
 // --- show PR ---------------------------------------------------------------
 
 /**
- * Open the pull request a spec already recorded, from the tree's Show PR inline
- * action or the palette. The URL is read from the spec's frontmatter `pr` key on
+ * Open the pull request a plan already recorded, from the tree's Show PR inline
+ * action or the palette. The URL is read from the plan's frontmatter `pr` key on
  * disk rather than from the clicked node, so the palette path works and the URL
- * is always the current on-disk value. A spec without a recorded PR is a
+ * is always the current on-disk value. A plan without a recorded PR is a
  * warning, not an error: the user has simply not submitted one yet.
  */
 async function runShowPr(
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   slugArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
   if (slug === undefined) {
     return;
   }
   let raw: string;
   try {
-    raw = fs.readFileSync(path.join(specsDir, slug, 'spec.md'), 'utf8');
+    raw = fs.readFileSync(resolveDocument(baitonDir, slug).documentPath, 'utf8');
   } catch (e) {
     surface.error(
-      `Baiton: could not read spec "${slug}": ${e instanceof Error ? e.message : String(e)}.`,
+      `Baiton: could not read plan "${slug}": ${e instanceof Error ? e.message : String(e)}.`,
     );
     return;
   }
-  const url = parseSpec(raw).frontmatter.get('pr')?.trim();
+  const url = parsePlan(raw).frontmatter.get('pr')?.trim();
   if (url === undefined || url === '') {
     surface.warn(
-      `Baiton: spec "${slug}" has no recorded pull request; submit one first.`,
+      `Baiton: plan "${slug}" has no recorded pull request; submit one first.`,
     );
     return;
   }
@@ -1689,35 +1690,35 @@ async function runShowPr(
 // --- view plan -------------------------------------------------------------
 
 /**
- * Open a todo's persisted plan (`todos/<id>/plan.md`) in an editor, from the
+ * Open a phase's persisted plan (`phases/<id>/plan.md`) in an editor, from the
  * tree's View plan inline action, the CodeLens, or the palette. The palette
- * path picks a spec and then one of its planned todos. A todo with no plan on
+ * path picks a plan and then one of its planned phases. A phase with no plan on
  * file is a warning, not an error: the user has simply not planned it yet.
  *
  * The plan is opened as an ordinary editable document on purpose — edits the
  * user makes before Execute are picked up by the executor's brief, and land in
- * the `executing` state commit (which stages the whole spec folder).
+ * the `executing` state commit (which stages the whole plan folder).
  */
 async function runViewPlan(
-  specsDir: string,
+  baitonDir: string,
   surface: Surface,
   slugArg: string | undefined,
-  todoArg: string | undefined,
+  phaseArg: string | undefined,
 ): Promise<void> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
   if (slug === undefined) {
-    surface.warn('Baiton: no spec selected.');
+    surface.warn('Baiton: no plan selected.');
     return;
   }
-  const todoId = todoArg ?? (await pickPlannedTodoId(specsDir, slug, surface));
-  if (todoId === undefined || todoId.trim().length === 0) {
-    surface.warn('Baiton: no todo selected.');
+  const phaseId = phaseArg ?? (await pickPlannedPhaseId(baitonDir, slug, surface));
+  if (phaseId === undefined || phaseId.trim().length === 0) {
+    surface.warn('Baiton: no phase selected.');
     return;
   }
-  const file = planPath(specsDir, slug, todoId);
+  const file = phasePlanPath(baitonDir, slug, phaseId);
   if (!fs.existsSync(file)) {
     surface.warn(
-      `Baiton: no plan on file for "${todoId}" in spec "${slug}"; run Plan first.`,
+      `Baiton: no plan on file for "${phaseId}" in plan "${slug}"; run Plan first.`,
     );
     return;
   }
@@ -1726,40 +1727,40 @@ async function runViewPlan(
     await vscode.window.showTextDocument(doc);
   } catch (e) {
     surface.error(
-      `Baiton: could not open the plan for "${todoId}": ${e instanceof Error ? e.message : String(e)}.`,
+      `Baiton: could not open the plan for "${phaseId}": ${e instanceof Error ? e.message : String(e)}.`,
     );
   }
 }
 
 /**
- * Present the todos of a spec that have a plan on file, for the palette path of
- * View plan. A spec with no planned todo warns and selects nothing.
+ * Present the phases of a plan that have a plan on file, for the palette path of
+ * View plan. A plan with no planned phase warns and selects nothing.
  */
-async function pickPlannedTodoId(
-  specsDir: string,
+async function pickPlannedPhaseId(
+  baitonDir: string,
   slug: string,
   surface: Surface,
 ): Promise<string | undefined> {
-  const ids = plannedTodoIds(specsDir, slug);
+  const ids = plannedPhaseIds(baitonDir, slug);
   if (ids.length === 0) {
-    surface.warn(`Baiton: spec "${slug}" has no plan on file; run Plan first.`);
+    surface.warn(`Baiton: plan "${slug}" has no phase plan on file; run Plan first.`);
     return undefined;
   }
-  return vscode.window.showQuickPick(ids, { placeHolder: 'Select a todo' });
+  return vscode.window.showQuickPick(ids, { placeHolder: 'Select a phase' });
 }
 
-/** The ids, in directory order, of a spec's todos that have a `plan.md`. */
-function plannedTodoIds(specsDir: string, slug: string): string[] {
+/** The ids, in directory order, of a plan's phases that have a `plan.md`. */
+function plannedPhaseIds(baitonDir: string, slug: string): string[] {
   let entries: string[];
   try {
     entries = fs
-      .readdirSync(path.join(specsDir, slug, 'todos'), { withFileTypes: true })
+      .readdirSync(resolveDocument(baitonDir, slug).artifactsDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
   } catch {
     return [];
   }
-  return entries.filter((id) => fs.existsSync(planPath(specsDir, slug, id))).sort();
+  return entries.filter((id) => fs.existsSync(phasePlanPath(baitonDir, slug, id))).sort();
 }
 
 /** Render a Submit PR halt for the user, including verify output. */
@@ -1773,8 +1774,8 @@ function describeSubmitPrError(error: SubmitPrError): string {
 
 // --- CodeLens --------------------------------------------------------------
 
-/** The lens title and command for each state-gated todo action (Req 4.2). */
-const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
+/** The lens title and command for each state-gated phase action (Req 4.2). */
+const ACTION_LENS: Record<PhaseAction, { title: string; command: string }> = {
   plan: { title: 'Plan', command: COMMANDS.plan },
   execute: { title: 'Execute', command: COMMANDS.execute },
   review: { title: 'Review', command: COMMANDS.review },
@@ -1785,133 +1786,128 @@ const ACTION_LENS: Record<TodoAction, { title: string; command: string }> = {
 };
 
 /**
- * A CodeLens provider that puts the state-gated actions inline above each todo
- * line of a spec's `spec.md`. Each todo emits exactly `legalActions(todo.state,
+ * A CodeLens provider that puts the state-gated actions inline above each phase
+ * line of a plan's `plan.md`. Each phase emits exactly `legalActions(phase.state,
  * hasSession)`, so the tree and the CodeLens cannot disagree (Req 4.2, 4.3);
- * `hasSession` comes from one merged read of the spec's journals per provide call.
- * Each lens invokes a stage/action/view command with the spec's slug and the
- * todo id, wiring the editor surface to the run queue and tools (Req 10.3).
+ * `hasSession` comes from one merged read of the plan's journals per provide call.
+ * Each lens invokes a stage/action/view command with the plan's slug and the
+ * phase id, wiring the editor surface to the run queue and tools (Req 10.3).
  */
-class SpecCodeLensProvider implements vscode.CodeLensProvider {
-  constructor(private readonly specsDir: string) {}
+class PlanCodeLensProvider implements vscode.CodeLensProvider {
+  constructor(private readonly baitonDir: string) {}
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const slug = slugFromSpecUri(document.uri);
+    const slug = slugFromDocumentUri(document.uri);
     if (slug === undefined) {
       return [];
     }
-    const spec = parseSpec(document.getText());
-    const sessions = sessionSet(readSpecJournal(this.specsDir, slug));
+    const parsedPlan = parsePlan(document.getText());
+    const sessions = sessionSet(readPlanJournal(this.baitonDir, slug));
     const lenses: vscode.CodeLens[] = [];
-    for (const todo of spec.todos) {
-      const line = document.lineAt(todo.lineIndex);
+    for (const phase of parsedPlan.phases) {
+      const line = document.lineAt(phase.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
-      const hasPlan = fs.existsSync(planPath(this.specsDir, slug, todo.id));
-      for (const action of legalActions(todo.state, sessions.has(todo.id), hasPlan)) {
+      const hasPlan = fs.existsSync(phasePlanPath(this.baitonDir, slug, phase.id));
+      for (const action of legalActions(phase.state, sessions.has(phase.id), hasPlan)) {
         const { title, command } = ACTION_LENS[action];
-        lenses.push(lens(range, title, command, slug, todo.id));
+        lenses.push(lens(range, title, command, slug, phase.id));
       }
     }
     return lenses;
   }
 }
 
-/** The set of todo ids the journal records a Session_Id for (Req 4.4). */
+/** The set of phase ids the journal records a Session_Id for (Req 4.4). */
 function sessionSet(entries: JournalEntry[]): Set<string> {
   const sessions = new Set<string>();
   for (const entry of entries) {
     if (entry.sessionId !== undefined) {
-      sessions.add(entry.todoId);
+      // JournalEntry.phaseId is a persisted field name.
+      sessions.add(entry.phaseId); // legacy journal field name
     }
   }
   return sessions;
 }
 
-/** Build one CodeLens invoking a command with `[slug, todoId]`. */
+/** Build one CodeLens invoking a command with `[slug, phaseId]`. */
 function lens(
   range: vscode.Range,
   title: string,
   command: string,
   slug: string,
-  todoId: string,
+  phaseId: string,
 ): vscode.CodeLens {
-  return new vscode.CodeLens(range, { title, command, arguments: [slug, todoId] });
+  return new vscode.CodeLens(range, { title, command, arguments: [slug, phaseId] });
 }
 
-/** The spec slug from a `.baiton/specs/<slug>/spec.md` URI, or `undefined`. */
-function slugFromSpecUri(uri: vscode.Uri): string | undefined {
-  const match = /[/\\]\.baiton[/\\]specs[/\\]([^/\\]+)[/\\]spec\.md$/.exec(uri.fsPath);
-  return match ? match[1] : undefined;
+/** The plan slug from a document URI, including the legacy `.baiton/specs/<slug>/spec.md` root. */
+function slugFromDocumentUri(uri: vscode.Uri): string | undefined {
+  // Legacy: accept document URIs from the former specs/ root.
+  const match = /[/\\]\.baiton[/\\](?:plans[/\\]([^/\\]+)[/\\]plan\.md|specs[/\\]([^/\\]+)[/\\]spec\.md)$/.exec(uri.fsPath);
+  return match ? (match[1] ?? match[2]) : undefined;
 }
 
 // --- shared helpers --------------------------------------------------------
 
-/** Build the guard context (repo root, specs dir, restricted flag) for a call. */
+/** Build the guard context (repo root, legacy session root, restricted flag) for a call. */
 function guardContextFor(workspace: WorkspaceContext<vscode.Uri>): GuardContext {
   return new GuardContext({
     repoRoot: workspace.root.fsPath,
-    specsDir: vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath,
+    baitonDir: workspace.baitonDir.fsPath,
     restricted: workspace.restricted,
   });
 }
 
 /**
- * Resolve the `{slug, todoId}` a trigger acts on from the command arguments,
+ * Resolve the `{slug, phaseId}` a trigger acts on from the command arguments,
  * prompting the user for anything a CodeLens/palette invocation did not supply.
  */
 async function resolveTarget(
-  specsDir: string,
+  baitonDir: string,
   slugArg: string | undefined,
-  todoArg: string | undefined,
+  phaseArg: string | undefined,
   surface: Surface,
-): Promise<{ slug: string; todoId: string } | undefined> {
-  const slug = slugArg ?? (await pickSpecSlug(specsDir));
+): Promise<{ slug: string; phaseId: string } | undefined> {
+  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
   if (slug === undefined) {
-    surface.warn('Baiton: no spec selected.');
+    surface.warn('Baiton: no plan selected.');
     return undefined;
   }
-  const todoId =
-    todoArg ?? (await vscode.window.showInputBox({ prompt: 'Todo id (e.g. T01)' }));
-  if (todoId === undefined || todoId.trim().length === 0) {
-    surface.warn('Baiton: no todo id provided.');
+  const phaseId =
+    phaseArg ?? (await vscode.window.showInputBox({ prompt: 'Phase id (e.g. P01)' }));
+  if (phaseId === undefined || phaseId.trim().length === 0) {
+    surface.warn('Baiton: no phase id provided.');
     return undefined;
   }
-  return { slug, todoId };
+  return { slug, phaseId };
 }
 
-/** Present the spec slugs under `.baiton/specs/` for the user to choose from. */
-async function pickSpecSlug(specsDir: string): Promise<string | undefined> {
-  let slugs: string[] = [];
-  try {
-    slugs = fs
-      .readdirSync(specsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch {
-    slugs = [];
-  }
+/** Present plan slugs under both document roots (including legacy `.baiton/specs/`) for the user to choose from. */
+async function pickPlanSlug(baitonDir: string): Promise<string | undefined> {
+  const slugs = listDocumentSlugs(baitonDir).filter((slug) =>
+    fs.existsSync(resolveDocument(baitonDir, slug).documentPath),
+  );
   if (slugs.length === 0) {
-    return vscode.window.showInputBox({ prompt: 'Spec slug' });
+    return vscode.window.showInputBox({ prompt: 'Plan slug' });
   }
-  return vscode.window.showQuickPick(slugs, { placeHolder: 'Select a spec' });
+  return vscode.window.showQuickPick(slugs, { placeHolder: 'Select a plan' });
 }
 
-/** Prompt for a spec slug, defaulting to a quick pick of existing specs. */
+/** Prompt for a plan slug, defaulting to a quick pick of existing plans. */
 async function promptForSlug(
   workspace: WorkspaceContext<vscode.Uri>,
   _prompt: string,
 ): Promise<string | undefined> {
-  const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
-  return pickSpecSlug(specsDir);
+  return pickPlanSlug(workspace.baitonDir.fsPath);
 }
 
 /**
  * Build the {@link ToolServices} bundle for the tool registry from the real git
- * service, the run-queue seam, the run-pipeline seam the spec-less dispatch
+ * service, the run-queue seam, the run-pipeline seam the plan-less dispatch
  * tools (`start_run` / `investigate`) start a run through, the injected
  * confirmation seam, and the shared intervention seam itself — the seam the
  * inline-card `confirm` adapter wraps, and which `ask_user` asks through
- * directly. Both seams, and the land seam `land_todo` merges through, are
+ * directly. Both seams, and the land seam `land_phase` merges through, are
  * supplied by the caller so both tool-services bundles share one of each.
  */
 function buildToolServices(
@@ -1919,13 +1915,12 @@ function buildToolServices(
   baitonDir: string,
   git: ReturnType<typeof createGitService>,
   queueFor: QueueFor,
-  specsDir: string,
   adapterForRole: AdapterForRole,
   submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
   confirm: ConfirmSeam,
   intervention: InterventionSeam,
   runPipeline: RunPipelineSeam,
-  landTodo: LandTodoSeam,
+  landPhase: LandPhaseSeam,
   subAgents?: SubAgentSeam,
 ): ToolServices {
   return {
@@ -1934,9 +1929,9 @@ function buildToolServices(
     git,
     confirm,
     intervention,
-    runQueue: createRunQueueSeam(queueFor, specsDir, adapterForRole),
+    runQueue: createRunQueueSeam(queueFor, baitonDir, adapterForRole),
     runPipeline,
-    landTodo,
+    landPhase,
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),
@@ -2053,7 +2048,7 @@ function triggerFix(
 }
 
 /**
- * Normalize the first argument a stage/approve command receives into a spec
+ * Normalize the first argument a stage/approve command receives into a plan
  * slug. The tree's inline actions invoke the command with the clicked
  * {@link TreeNode}; the CodeLens and palette invoke it with a slug string (or
  * nothing). A tree node yields its slug through {@link treeNodeTarget}
@@ -2068,21 +2063,21 @@ function slugArg(arg: TreeNode | string | undefined): string | undefined {
 }
 
 /**
- * Normalize the arguments a per-todo stage/action command receives into
- * `{ slug, todoId }`. The tree's inline actions invoke the command with the
+ * Normalize the arguments a per-phase stage/action command receives into
+ * `{ slug, phaseId }`. The tree's inline actions invoke the command with the
  * clicked {@link TreeNode} as the sole argument; the CodeLens and palette invoke
- * it with `(slug, todoId)`. A todo tree node yields both through
+ * it with `(slug, phaseId)`. A phase tree node yields both through
  * {@link treeNodeTarget} (Req 5.2, 18.4).
  */
-function todoArgs(
+function phaseArgs(
   a: TreeNode | string | undefined,
   b: string | undefined,
-): { slug?: string; todoId?: string } {
+): { slug?: string; phaseId?: string } {
   if (a !== undefined && typeof a !== 'string') {
     const target = treeNodeTarget(a);
-    return { slug: target?.[0], todoId: target?.[1] };
+    return { slug: target?.[0], phaseId: target?.[1] };
   }
-  return { slug: a, todoId: b };
+  return { slug: a, phaseId: b };
 }
 
 /**

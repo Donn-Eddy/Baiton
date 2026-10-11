@@ -6,9 +6,9 @@
  * process dies (window reload, crash, power loss) mid-stage, the journal is
  * left with a START record and no COMPLETION record. On the next activation the
  * extension must reconcile every such result-less entry rather than leave the
- * todo wedged in a running state (`planning`/`executing`/`reviewing`) forever.
+ * phase wedged in a running state (`planning`/`executing`/`reviewing`) forever.
  *
- * {@link recoverJournal} reads the journal (the merged spec journal via {@link readSpecJournal}, or a single file via {@link parseJournal}), selects
+ * {@link recoverJournal} reads the journal (the merged plan journal via {@link readPlanJournal}, or a single file via {@link parseJournal}), selects
  * the entries with no `result` (Req 21.3), and for each one, in order:
  *
  *   1. If the entry recorded a `terminalPid` and a process with that id is
@@ -18,7 +18,7 @@
  *      {@link GitService.findCommitByRunId} returns a sha), treat the work as
  *      landed and replay the lost lifecycle state write — the stage's success
  *      state (Req 21.5).
- *   3. Otherwise the work did not land: set the todo `failed` with note
+ *   3. Otherwise the work did not land: set the phase `failed` with note
  *      `host exited` (Req 21.7).
  *
  * The PR-run reconciliation branch (Req 21.6) is deferred with the rest of the
@@ -26,15 +26,15 @@
  * `Run-Id` commit fully decides every entry here.
  *
  * Everything host-specific is injected — the journal path, the git seam, a
- * process-control seam (liveness + kill), and the serializer-backed spec-write
+ * process-control seam (liveness + kill), and the serializer-backed plan-write
  * seam — so recovery is unit-testable without real PIDs or `vscode`. The
  * activation layer wires the real implementations.
  */
 import type { GitService } from '../git';
 import type { JournalEntry } from '../journal';
-import { parseJournal, readSpecJournal } from '../journal';
-import type { SpecStore } from './runQueue';
-import type { TodoState } from '../model/todoState';
+import { parseJournal, readPlanJournal } from '../journal';
+import type { PlanStore } from './runQueue';
+import type { PhaseState } from '../model/phaseState';
 import type { Stage } from '../model/stage';
 
 /**
@@ -71,7 +71,7 @@ export type RecoveryAction =
   | 'reverted-state'
   /**
    * No commit landed and the entry predates `fromState` (a legacy entry): the
-   * todo was set `failed` with note `host exited`, as before (Req 21.7).
+   * phase was set `failed` with note `host exited`, as before (Req 21.7).
    */
   | 'marked-failed'
   /** The entry needed no state write (e.g. a stage with no lifecycle state, or a write abort). */
@@ -81,13 +81,13 @@ export type RecoveryAction =
 export interface RecoveryOutcome {
   /** The run id of the reconciled entry. */
   readonly runId: string;
-  /** The todo the entry acted on. */
-  readonly todoId: string;
+  /** The phase the entry acted on. */
+  readonly phaseId: string;
   /** The stage the entry was running. */
   readonly stage: Stage;
   /** Whether a still-live recorded pid was terminated first (Req 21.4). */
   readonly killedPid: boolean;
-  /** The reconciliation applied to the todo state. */
+  /** The reconciliation applied to the phase state. */
   readonly action: RecoveryAction;
   /** The `Run-Id` commit sha when the work landed (Req 21.5), else undefined. */
   readonly commit?: string;
@@ -98,32 +98,32 @@ export type RecoveryDeps = RecoveryBaseDeps &
   (
     | {
         /**
-         * Absolute `.baiton/specs/` dir; recovery reads the merged spec journal —
-         * spec-level plus every `todos/<id>/runs.jsonl` — via readSpecJournal.
+         * Absolute document root dir; recovery reads the merged plan journal —
+         * document-level plus each phase's `runs.jsonl` — via readPlanJournal.
          */
-        specsDir: string;
+        baitonDir: string;
         journalPath?: never;
       }
     | {
-        /** A single journal file to reconcile instead; used when specsDir is absent. */
+        /** A single journal file to reconcile instead; used when baitonDir is absent. */
         journalPath: string;
-        specsDir?: never;
+        baitonDir?: never;
       }
   );
 
 /** The journal-source-independent part of {@link RecoveryDeps}. */
 export interface RecoveryBaseDeps {
-  /** The spec slug whose journal is being reconciled. */
+  /** The plan slug whose journal is being reconciled. */
   slug: string;
   /** The git seam; only {@link GitService.findCommitByRunId} is used (Req 21.5). */
   git: Pick<GitService, 'findCommitByRunId'>;
   /** The process-control seam for the still-live-pid kill (Req 21.4). */
   process: ProcessControl;
-  /** The serializer-backed spec-write seam; only {@link SpecStore.writeState} is used. */
-  specStore: Pick<SpecStore, 'writeState'>;
+  /** The serializer-backed plan-write seam; only {@link PlanStore.writeState} is used. */
+  planStore: Pick<PlanStore, 'writeState'>;
 }
 
-/** The note recorded on a todo whose host exited without the work landing (Req 21.7). */
+/** The note recorded on a phase whose host exited without the work landing (Req 21.7). */
 export const HOST_EXITED_NOTE = 'host exited';
 
 /**
@@ -132,13 +132,13 @@ export const HOST_EXITED_NOTE = 'host exited';
  * Reads the journal, filters to entries with no `result`, and reconciles each
  * in journal order. Returns one {@link RecoveryOutcome} per reconciled entry so
  * the activation layer can surface what recovery did. Never throws: a git or
- * spec-write failure for one entry is contained so the remaining entries are
+ * plan-write failure for one entry is contained so the remaining entries are
  * still reconciled.
  */
 export async function recoverJournal(deps: RecoveryDeps): Promise<RecoveryOutcome[]> {
   const all =
-    deps.specsDir !== undefined
-      ? readSpecJournal(deps.specsDir, deps.slug)
+    deps.baitonDir !== undefined
+      ? readPlanJournal(deps.baitonDir, deps.slug)
       : parseJournal(deps.journalPath);
   const entries = all.filter(isResultLess);
   const outcomes: RecoveryOutcome[] = [];
@@ -155,7 +155,7 @@ function isResultLess(entry: JournalEntry): boolean {
 
 /**
  * Reconcile a single result-less entry: kill a still-live pid (Req 21.4), then
- * replay the landed state (Req 21.5) or mark the todo failed (Req 21.7).
+ * replay the landed state (Req 21.5) or mark the phase failed (Req 21.7).
  */
 async function reconcileEntry(
   deps: RecoveryDeps,
@@ -172,7 +172,7 @@ async function reconcileEntry(
     const action = await applyState(deps, entry, successState);
     return {
       runId: entry.runId,
-      todoId: entry.todoId,
+      phaseId: entry.phaseId,
       stage: entry.stage,
       killedPid,
       action: action === 'wrote' ? 'replayed-state' : 'no-op',
@@ -188,7 +188,7 @@ async function reconcileEntry(
   const action = await applyState(deps, entry, revertTo, HOST_EXITED_NOTE);
   return {
     runId: entry.runId,
-    todoId: entry.todoId,
+    phaseId: entry.phaseId,
     stage: entry.stage,
     killedPid,
     action:
@@ -236,9 +236,9 @@ async function findLandedCommit(
  * on recovery when the run's commit landed (Req 21.5): `plan` → `planned`,
  * `execute` → `executed`, `review` → `done`. `plan-review` runs inside the Plan
  * action and moves no lifecycle state of its own, so it has no success state to
- * replay (the todo is left in `planning` for the next trigger).
+ * replay (the phase is left in `planning` for the next trigger).
  */
-function successStateFor(stage: Stage): TodoState | undefined {
+function successStateFor(stage: Stage): PhaseState | undefined {
   switch (stage) {
     case 'plan':
       return 'planned';
@@ -263,14 +263,14 @@ function successStateFor(stage: Stage): TodoState | undefined {
 async function applyState(
   deps: RecoveryDeps,
   entry: JournalEntry,
-  state: TodoState | undefined,
+  state: PhaseState | undefined,
   note?: string,
 ): Promise<'wrote' | 'skipped'> {
   if (state === undefined) {
     return 'skipped';
   }
   try {
-    const wrote = await deps.specStore.writeState(deps.slug, entry.todoId, state, note);
+    const wrote = await deps.planStore.writeState(deps.slug, entry.phaseId, state, note);
     return wrote ? 'wrote' : 'skipped';
   } catch {
     return 'skipped';

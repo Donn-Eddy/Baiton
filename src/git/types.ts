@@ -24,8 +24,8 @@ export interface GitChange {
 /**
  * The result of `status()`: whether the working tree has no changes at all and
  * the full list of changed paths. `clean` is true if and only if `changes` is
- * empty; callers that need the narrower "clean except one spec folder" check
- * use {@link GitService.isCleanExceptSpecFolder} instead (Req 16.1).
+ * empty; callers that need the narrower "clean except the plan document folder"
+ * use {@link GitService.isCleanExceptPlanFolder} instead (Req 16.1).
  */
 export interface GitStatus {
   /** True when the working tree reports no changes of any kind. */
@@ -61,15 +61,16 @@ export interface GitService {
   status(): Promise<GitStatus>;
   /**
    * Treat the tree as clean if and only if every change is confined to
-   * `.baiton/specs/<slug>/` (Req 16.1).
+   * the resolved document folder under `.baiton/plans/` or legacy
+   * `.baiton/plans/<slug>/` or a legacy `.baiton/specs/<slug>/` (Req 16.1).
    */
-  isCleanExceptSpecFolder(slug: string): Promise<boolean>;
+  isCleanExceptPlanFolder(slug: string): Promise<boolean>;
   /** Fetch the configured remote (Req 16.3). */
   fetch(remote: string): Promise<void>;
   /** Resolve a base ref to a single commit sha (Req 16.3). */
   resolveBaseCommit(base: string): Promise<string>;
   /** Create a new branch pointing at `fromCommit` (Req 16.5). */
-  createSpecBranch(branch: string, fromCommit: string): Promise<void>;
+  createPlanBranch(branch: string, fromCommit: string): Promise<void>;
   /** Check out an existing branch (Req 16.5, 16.6). */
   checkout(branch: string): Promise<void>;
   /**
@@ -149,7 +150,7 @@ export interface GitWorktree {
  *
  * The same convention as {@link GitService} holds: reads reject on an unexpected
  * non-zero exit, the mutators `addWorktree`, `removeWorktree` and
- * `deleteBranch` reject with a {@link GitError} like `createSpecBranch`,
+ * `deleteBranch` reject with a {@link GitError} like `createPlanBranch`,
  * `checkout` and `commit`, and only `merge` returns a {@link Result}, because a
  * conflict is an ordinary outcome the caller reports as a named reason rather
  * than a fault (same rationale as `resetWorkingTree`, Req 15.6).
@@ -189,8 +190,8 @@ export interface GitWorktreeService extends GitService {
   merge(branch: string, message: string): Promise<Result<string, GitError>>;
   /**
    * True when the WHOLE working tree has no changes of any kind — the run
-   * pipeline's `dirty-tree` check, as opposed to the spec-scoped
-   * {@link GitService.isCleanExceptSpecFolder}.
+   * pipeline's `dirty-tree` check, as opposed to the plan-scoped
+   * {@link GitService.isCleanExceptPlanFolder}.
    */
   isClean(): Promise<boolean>;
   /**
@@ -203,7 +204,8 @@ export interface GitWorktreeService extends GitService {
   commitPaths(paths: readonly string[], message: string, trailers?: Record<string, string>): Promise<string>;
   /**
    * Every local branch whose short name starts with `prefix` (e.g.
-   * `baiton-todo/<slug>/`), as short names (no `refs/heads/`), sorted.
+   * `baiton-phase/<slug>/` (or legacy `baiton-todo/<slug>/`), as short names
+   * (no `refs/heads/`), sorted.
    */
   listBranches(prefix: string): Promise<readonly string[]>;
 }

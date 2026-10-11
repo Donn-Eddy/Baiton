@@ -52,7 +52,7 @@ export interface LiveRunStageFact {
 export interface RunNode {
   /** The run id, which is also its directory name under `.baiton/runs/`. */
   runId: string;
-  /** The mode the run runs as; never 'spec'. */
+  /** The mode the run runs as; never 'plan'. */
   mode: RunMode;
   /** The confirmed work statement, whitespace-collapsed (NOT truncated). */
   statement: string;
@@ -222,7 +222,7 @@ export function legalRunActions(input: RunActionInput): RunAction[] {
  * Builds the tree item `contextValue` for a run: `baiton.run.<group>` followed
  * by one space-separated token per legal action, e.g.
  * `baiton.run.complete viewDiff merge`. This is exactly the token shape
- * `specContextValue` and `todoContextValue` produce, so the
+ * `planContextValue` and `phaseContextValue` produce, so the
  * `view/item/context` `when` clauses in `package.json` match on them with
  * `viewItem =~ /\bcancel\b/`, `/\bviewDiff\b/` and `/\bmerge\b/`.
  */
@@ -301,7 +301,7 @@ export function buildRunNode(manifest: RunManifest, live?: LiveRunStageFact): Ru
  *
  * Input order is preserved inside each group and never re-sorted —
  * `RunStore.list()` already returns manifests newest first, exactly as
- * `buildSpecTree` leaves ordering to its lister. Never throws, for any manifest
+ * `buildPlanTree` leaves ordering to its lister. Never throws, for any manifest
  * shape.
  */
 export function buildRunTree(

@@ -22,9 +22,9 @@
   permission) built by chat.js.   The composer's control row also carries the
   Auto-mode toggle immediately left of Stop, which reflects `state.autoMode`
   and posts `setAutoMode`, and, immediately left of the Auto-mode toggle, a
-  host-authoritative Mode select over the six conversation modes (Default, Spec,
-  Bug, Quick, Refactor, Investigate) that reflects `state.mode`, posts `setMode`,
-  and is disabled while busy, while a run is active, or on a spec conversation.
+  host-authoritative Mode select over the six conversation modes (Default, Phased Plan,
+  Bug, Quick Fix, Refactor, Investigate) that reflects `state.mode`, posts `setMode`,
+  and is disabled while busy, while a run is active, or on a plan conversation.
   The composer ends with a context meter (`~256K / 1M · usage`) and a Compact
   link that posts `compactContext`.
   The composer also carries the provider-first model
@@ -773,7 +773,7 @@
 
       /* Conversation mode select: host-authoritative, sits immediately left of
          the Auto-mode toggle. Disabled while the chat is busy, while a run is
-         in flight, and on a spec conversation (which is always Spec). */
+         in flight, and on a plan conversation (which is always Phased Plan). */
       #mode-select {
         flex: 0 0 auto;
         color: var(--vscode-dropdown-foreground);

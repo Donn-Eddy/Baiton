@@ -10,7 +10,7 @@ import { SUPPORTED_VERSION } from '../src/config/types';
 import { isErr, isOk } from '../src/model/result';
 
 /**
- * Unit tests for the config service and the Initialize command (Task 5.5).
+ * Unit tests for the config service and the Initialize command.
  *
  * Everything runs against a throwaway `.baiton/`-style directory under
  * `os.tmpdir()` so the tests exercise the real Node `fs` paths without a VS
@@ -38,7 +38,7 @@ function configJson(doc: Record<string, unknown>): string {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-describe('config service and Initialize command (Task 5.5)', () => {
+describe('config service and Initialize command', () => {
   const dirs: string[] = [];
 
   /** Allocate a fresh temp directory registered for cleanup. */
@@ -156,19 +156,19 @@ describe('config service and Initialize command (Task 5.5)', () => {
   });
 
   describe('loadConfig role fallbacks', () => {
-    it('fills a missing "spec-writer" entry from the planner so older configs still load', async () => {
+    it('fills a missing "plan-writer" entry from the planner', async () => {
       const dir = newDir();
       const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
       doc.roles = { ...doc.roles };
       doc.roles.planner = { agent: 'claude', model: 'planner-model', effort: 'high' };
-      delete doc.roles['spec-writer'];
+      delete doc.roles['plan-writer'];
       writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
 
       const result = await loadConfig(dir);
 
-      assert.ok(isOk(result), 'a config without a spec-writer entry should still load');
+      assert.ok(isOk(result), 'a config without a plan-writer entry should still load');
       if (isOk(result)) {
-        assert.deepStrictEqual(result.value.roles['spec-writer'], {
+        assert.deepStrictEqual(result.value.roles['plan-writer'], {
           agent: 'claude',
           model: 'planner-model',
           effort: 'high',
@@ -176,31 +176,65 @@ describe('config service and Initialize command (Task 5.5)', () => {
       }
     });
 
-    it('prefers an explicit "spec-writer" entry over the planner fallback', async () => {
+    it('prefers an explicit "plan-writer" entry over the planner fallback', async () => {
       const dir = newDir();
       const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
-      doc.roles = { ...doc.roles, 'spec-writer': { agent: 'claude', model: 'writer-model' } };
+      doc.roles = { ...doc.roles, 'plan-writer': { agent: 'claude', model: 'writer-model' } };
       writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
 
       const result = await loadConfig(dir);
 
       assert.ok(isOk(result));
       if (isOk(result)) {
-        assert.strictEqual(result.value.roles['spec-writer'].model, 'writer-model');
+        assert.strictEqual(result.value.roles['plan-writer'].model, 'writer-model');
       }
     });
 
-    it('still reports a missing section when the fallback source is absent too', async () => {
+    it('loads a legacy "plan-writer" entry as plan-writer', async () => {
+      // Legacy config compatibility: spec-writer migrates to plan-writer.
       const dir = newDir();
       const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
       doc.roles = { ...doc.roles };
-      delete doc.roles['spec-writer'];
-      delete doc.roles.planner;
+      delete doc.roles['plan-writer'];
+      const legacyEntry = { agent: 'claude', model: 'legacy-model', effort: 'low' };
+      doc.roles['spec-writer'] = legacyEntry;
+      doc.roles.planner = { agent: 'codex', model: 'fallback-model' };
       writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
 
       const result = await loadConfig(dir);
 
-      assert.ok(isErr(result), 'no fallback source means the role is genuinely missing');
+      assert.ok(isOk(result));
+      if (isOk(result)) {
+        assert.deepStrictEqual(result.value.roles['plan-writer'], legacyEntry);
+        assert.strictEqual('spec-writer' in result.value.roles, false);
+      }
+    });
+
+    it('prefers "plan-writer" over a legacy "plan-writer" when both exist', async () => {
+      // Legacy config compatibility: the canonical key takes precedence.
+      const dir = newDir();
+      const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
+      doc.roles = {
+        ...doc.roles,
+        'plan-writer': { agent: 'claude', model: 'canonical-model' },
+        'spec-writer': { agent: 'codex', model: 'legacy-model' },
+      };
+      writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
+
+      const result = await loadConfig(dir);
+
+      assert.ok(isOk(result));
+      if (isOk(result)) {
+        assert.strictEqual(result.value.roles['plan-writer'].model, 'canonical-model');
+      }
+    });
+
+    it('writes plan-writer and no legacy role in defaults', () => {
+      // Legacy config compatibility: defaults never write spec-writer.
+      const config = defaultConfig();
+      assert.ok(Object.keys(config.roles).includes('plan-writer'));
+      assert.strictEqual('spec-writer' in config.roles, false);
+      assert.strictEqual(defaultConfigJson().includes('spec-writer'), false);
     });
   });
 
@@ -304,9 +338,10 @@ describe('config service and Initialize command (Task 5.5)', () => {
       // .gitignore is ensured with the required exclusions.
       const gitignore = fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8');
       assert.strictEqual(gitignore, GITIGNORE_CONTENTS);
-      // The runs/ and specs/ directories exist.
+      // The runs/ and plans/ directories exist; new layouts do not create plans/.
       assert.ok(fs.existsSync(path.join(baitonDir, 'runs')), 'runs/ should exist');
-      assert.ok(fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should exist');
+      assert.ok(fs.existsSync(path.join(baitonDir, 'plans')), 'plans/ should exist');
+      assert.ok(!fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should not be created');
     });
 
     it('writes a default config.json on a fresh directory', async () => {

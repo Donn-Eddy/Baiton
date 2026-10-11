@@ -7,11 +7,11 @@ import {
   Transition,
   TransitionAction,
 } from '../src/engine/transitions';
-import { TODO_STATES, TodoState } from '../src/model/todoState';
+import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
 /**
  * Feature: baiton-first-pass, Property 14: Stage dispatch obeys the transition
- * table — For any pair of a todo's current state and a requested stage/action,
+ * table — For any pair of a phase's current state and a requested stage/action,
  * the extension SHALL dispatch iff that pair is a legal transition in the state
  * table (Plan from `pending` when approved and unblocked; Execute from
  * `planned`/`executed`/`failed` with a clean tree; Review from `executed`;
@@ -20,10 +20,10 @@ import { TODO_STATES, TodoState } from '../src/model/todoState';
  *
  * Validates: Requirements 10.5, 18.1, 18.2, 18.7, 18.12, 18.13, 18.14, 18.15
  *
- * The check exhaustively cross-products the eight `TodoState` values with the
+ * The check exhaustively cross-products the eight `PhaseState` values with the
  * five `TransitionAction` values and compares `isLegalTransition` /
  * `resolveTransition` against an independent reference derived directly from the
- * design's "Todo State Machine" table. For legal pairs the reference also pins
+ * design's "Phase State Machine" table. For legal pairs the reference also pins
  * the `running`, `onSuccess`, and `onFindings` states, so the property fails if
  * the implementation dispatches an illegal pair, refuses a legal one, or applies
  * the wrong resulting state.
@@ -32,7 +32,7 @@ import { TODO_STATES, TodoState } from '../src/model/todoState';
 const ALL_ACTIONS: readonly TransitionAction[] = ['plan', 'execute', 'review', 'replan', 'stop'];
 
 /** The running states, per the design (a stage is in flight). */
-const RUNNING: readonly TodoState[] = ['planning', 'executing', 'reviewing'];
+const RUNNING: readonly PhaseState[] = ['planning', 'executing', 'reviewing'];
 
 /**
  * Independent reference for the design's transition table. Returns the expected
@@ -40,7 +40,7 @@ const RUNNING: readonly TodoState[] = ['planning', 'executing', 'reviewing'];
  * when the pair must be refused. Written from the design table rather than the
  * implementation so the two can disagree.
  */
-function referenceTransition(from: TodoState, action: TransitionAction): Transition | undefined {
+function referenceTransition(from: PhaseState, action: TransitionAction): Transition | undefined {
   const running = RUNNING.includes(from);
   switch (action) {
     case 'plan':
@@ -94,7 +94,7 @@ function referenceTransition(from: TodoState, action: TransitionAction): Transit
       if (!running) {
         return undefined;
       }
-      const reverted: TodoState =
+      const reverted: PhaseState =
         from === 'planning' ? 'pending' : from === 'reviewing' ? 'executed' : 'failed';
       return {
         action: 'stop',
@@ -136,7 +136,7 @@ describe('stage dispatch obeys the transition table (property)', () => {
   it('legality and resolved state match the design table for every (state, action) pair', () => {
     fc.assert(
       fc.property(
-        fc.constantFrom<TodoState>(...TODO_STATES),
+        fc.constantFrom<PhaseState>(...PHASE_STATES),
         fc.constantFrom<TransitionAction>(...ALL_ACTIONS),
         (from, action) => {
           const expected = referenceTransition(from, action);
@@ -172,7 +172,7 @@ describe('stage dispatch obeys the transition table (property)', () => {
   // Feature: baiton-first-pass, Property 14: Stage dispatch obeys the transition table
   it('exhaustively covers all 40 (state, action) pairs against the reference', () => {
     // A deterministic full sweep so no legal/illegal pair can be missed by sampling.
-    for (const from of TODO_STATES) {
+    for (const from of PHASE_STATES) {
       for (const action of ALL_ACTIONS) {
         const expected = referenceTransition(from, action);
         const resolved = resolveTransition(from, action);

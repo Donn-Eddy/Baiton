@@ -1,6 +1,6 @@
 // @ts-check
 /*
- * Config_Panel entry script — spec "Configuration Panel" (config-panel), todos T04, T10, T11.
+ * Config_Panel entry script.
  *
  * **src/config/configPanel.ts is the source of truth.** This file is its
  * plain-script mirror, exactly as media/protocol.js mirrors
@@ -17,8 +17,8 @@
  * document itself — `applyFormToDocument` (unknown-key preservation) is
  * host-side only.
  *
- * Per-agent capabilities carry `modelEntries` (codex-opencode-dropdown-fix
- * T06/T07): one entry per model with an `id`, an optional `label` (the option
+ * Per-agent capabilities carry `modelEntries`: one entry per model with an
+ * `id`, an optional `label` (the option
  * TEXT, while the option value is always the id), an optional per-model
  * `efforts` list (Codex/Claude reasoning levels, OpenCode variant keys, an
  * Antigravity family's levels), an optional `defaultEffort` (shown as
@@ -34,17 +34,17 @@
   // ----- Mirror of src/config/configPanel.ts (host-free) -----------------
   //
   // Self-contained: no DOM access below this block. Exposed as
-  // `window.baitonConfigForm` so T09's fixture test can load this file
+  // `window.baitonConfigForm` so the fixture test can load this file
   // outside a webview (no `document`, no `acquireVsCodeApi`) and compare its
   // output against the compiled TypeScript core.
 
   /** Mirrors src/model/role.ts ROLES — same order. */
-  var ROLES = ['spec-writer', 'planner', 'plan-reviewer', 'executor', 'reviewer', 'pr-writer'];
+  var ROLES = ['plan-writer', 'planner', 'plan-reviewer', 'executor', 'reviewer', 'pr-writer'];
 
   /**
    * Mirrors src/config/types.ts LIMIT_BOUNDS — same key order, because the
    * validator below walks these keys in order and the error order is part of
-   * what T09 compares.
+   * the option order used by the fixture comparison.
    */
   var LIMIT_BOUNDS = {
     plan_review_rounds: { min: 0, max: 10 },
@@ -123,7 +123,7 @@
     validateConfigForm: validateConfigForm,
   };
 
-  // The mirror above is what lets T09 unit-test this file outside a webview
+  // The mirror above is what lets the fixture test this file outside a webview
   // (a fake `window`, no `acquireVsCodeApi`). Everything past this guard is
   // DOM/host wiring and never runs under that test.
   if (typeof acquireVsCodeApi !== 'function') {
@@ -161,7 +161,7 @@
    *
    * `stale`: `Record<agentId, { stale: boolean, reason?: string, fetchedAt?: string }>`
    * — the per-agent refresh staleness last pushed by the host
-   * (model-selector-refresh T08/T09). A missing key means "not stale".
+   *. A missing key means "not stale".
    *
    * `otherModel` / `otherEffort`: `Record<role, true>` — sticky "the user chose
    * Other…" flags. They keep an in-progress free-text entry visible even after
@@ -234,11 +234,11 @@
   var rolesBuilt = false;
 
   /**
-   * Builds the six role stacked blocks from ROLES (T11) — structure only, and
+   * Builds the six role stacked blocks from ROLES — structure only, and
    * exactly once. The dynamic agent/model/effort options are NOT appended here;
    * `renderOptionLists()` syncs them in place on every render so an out-of-band
    * refresh cannot destroy focus, caret position or the shown/hidden state of
-   * the `Other…` inputs (model-selector-refresh T09). Only the static
+   * the `Other…` inputs. Only the static
    * `(default)` and `Other…` options are created here, marked `data-static` so
    * the sync leaves them alone.
    *
@@ -400,7 +400,7 @@
   }
 
   /** One dynamic option, from a plain id or a `{ value, text }` pair. */
-  function optionSpec(item) {
+  function optionEntry(item) {
     if (item !== null && typeof item === 'object') {
       var value = String(item.value);
       return {
@@ -428,7 +428,7 @@
     var desired = [];
     var i;
     for (i = 0; i < source.length; i++) {
-      desired.push(optionSpec(source[i]));
+      desired.push(optionEntry(source[i]));
     }
     var current = [];
     for (i = 0; i < selectEl.children.length; i++) {
@@ -485,7 +485,7 @@
 
   /**
    * The rich entries behind a capability's `models`: the host's `modelEntries`
-   * (codex-opencode-dropdown-fix T06) when present, else one bare `{ id }` per
+   * when present, else one bare `{ id }` per
    * model so an older/leaner payload renders exactly as before.
    */
   function capabilityEntries(cap) {
@@ -1105,7 +1105,7 @@
         break;
       }
       case 'optionsChanged':
-        // Additive out-of-band refresh (model-selector-refresh T08/T09):
+        // Additive out-of-band refresh:
         // replace the option lists only. No form, no token, no baseline, no
         // busy/error change — the user's in-progress edits and the conflict
         // token must survive. Safe before the first `loaded` too: it just

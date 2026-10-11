@@ -1,7 +1,8 @@
 /**
  * Conversation transcript reader (Requirements 8.3, 8.4, 8.5).
  *
- * Reads a session transcript file (`.baiton/chat/<id>.jsonl`, or
+ * Reads a session transcript file (`.baiton/chat/<id>.jsonl`, or a plan
+ * session under `.baiton/plans/<slug>/chat/<id>.jsonl`; legacy documents keep
  * `.baiton/specs/<slug>/chat/<id>.jsonl`) written by {@link ChatTranscript} and
  * returns its records in append order, one per line. This is a pure filesystem seam with no
  * VS Code import, so it is testable without a host: the Chat_View loads a
