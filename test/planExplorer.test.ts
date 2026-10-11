@@ -106,17 +106,76 @@ describe('PlanExplorer', () => {
       surface,
       false,
     ).start();
-    await waitFor(() => explorer?.getChildren().length === 2, 'the initial root refresh');
+    await waitFor(() => explorer !== undefined && explorer.getChildren()
+      .some((group) => explorer!.getChildren(group).length > 0), 'the initial plan refresh');
 
     const roots = explorer.getChildren();
-    assert.deepStrictEqual(roots.map((node) => node.kind), ['plan', 'plan']);
-    assert.deepStrictEqual(roots.map((node) => node.kind === 'plan' ? node.node.slug : ''), ['alpha', 'beta']);
-    const children = roots.map((rootNode) => explorer!.getChildren(rootNode));
+    assert.deepStrictEqual(roots.map((node) => node.kind), ['group', 'group', 'group']);
+    assert.deepStrictEqual(roots.map((node) => node.kind === 'group' ? node.node.kind : ''), ['active', 'pending', 'completed']);
+    const labels = ['Active', 'Pending', 'Completed'];
+    const kinds = ['active', 'pending', 'completed'];
+    const counts = ['0', '2', '0'];
+    roots.forEach((group, index) => {
+      const item = explorer!.getTreeItem(group);
+      assert.strictEqual(item.label, labels[index]);
+      assert.strictEqual(item.id, `baiton.planGroup.${kinds[index]}`);
+      assert.strictEqual(item.contextValue, `baiton.planGroup.${kinds[index]}`);
+      assert.strictEqual(item.collapsibleState, index === 2 ? 1 : 2);
+      assert.strictEqual(item.description, counts[index]);
+      assert.strictEqual(item.command, undefined);
+      assert.strictEqual(mod.treeNodeTarget(group), undefined);
+    });
+
+    const activePlans = explorer.getChildren(roots[0]);
+    const plans = explorer.getChildren(roots[1]);
+    const completedPlans = explorer.getChildren(roots[2]);
+    assert.deepStrictEqual(activePlans, []);
+    assert.deepStrictEqual(completedPlans, []);
+    assert.deepStrictEqual(plans.map((node) => node.kind === 'plan' ? node.node.slug : ''), ['alpha', 'beta']);
+    const children = plans.map((plan) => explorer!.getChildren(plan));
     assert.deepStrictEqual(children.map((nodes) => nodes.map((node) => node.kind === 'phase' ? node.node.id : node.kind)), [['P01'], ['T01']]);
 
-    assert.ok(explorer.getTreeItem(roots[0]).contextValue?.startsWith('baiton.planRoot'));
+    assert.ok(explorer.getTreeItem(plans[0]).contextValue?.startsWith('baiton.planRoot'));
     assert.ok(explorer.getTreeItem(children[0][0]).contextValue?.startsWith('baiton.phase'));
-    assert.deepStrictEqual(mod.treeNodeTarget(roots[0]), ['alpha']);
+    assert.deepStrictEqual(mod.treeNodeTarget(plans[0]), ['alpha']);
     assert.deepStrictEqual(mod.treeNodeTarget(children[0][0]), ['alpha', 'P01']);
+  });
+
+  it('places plans into Active, Pending, and Completed groups from their facts', async () => {
+    const write = (relative: string, contents: string) => {
+      const target = path.join(baitonDir, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, contents);
+    };
+    write('plans/gamma/plan.md', ['---', 'status: done', '---', validPlan()].join('\n'));
+    write(
+      'plans/delta/plan.md',
+      validPlan().replace('- [pending] P01 Implement the plan', '- [executing] P01 Implement the plan'),
+    );
+    write(
+      'plans/eps/plan.md',
+      [
+        '---', 'status: done', '---',
+        validPlan().replace(
+          '- [pending] P01 Implement the plan',
+          '- [pending] P01 Implement the plan\n- [pending] P01 Duplicate phase',
+        ),
+      ].join('\n'),
+    );
+
+    const surface = { error: () => undefined } as unknown as Surface;
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async (slug: string) => slug === 'beta' } as unknown as PlanStore,
+      surface,
+      false,
+    ).start();
+    await waitFor(() => explorer !== undefined && explorer.getChildren()
+      .some((group) => explorer!.getChildren(group).length === 2), 'the grouped plan refresh');
+
+    const groups = explorer.getChildren();
+    const slugsByGroup = groups.map((group) => explorer!.getChildren(group)
+      .map((node) => node.kind === 'plan' ? node.node.slug : ''));
+    assert.deepStrictEqual(slugsByGroup, [['beta', 'delta'], ['alpha'], ['eps', 'gamma']]);
   });
 });
