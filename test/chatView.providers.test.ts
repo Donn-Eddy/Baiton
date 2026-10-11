@@ -7,8 +7,8 @@ import { HostToWebview, ProviderGroup } from '../src/orchestrator/webviewProtoco
 /**
  * Fake-DOM unit tests for the provider-first model selection in
  * `media/chat.js` — the Provider & Model dropdown added by
- * multi-provider-orchestrator T08, split into two selects by
- * model-selector-refresh T14.
+ * multi-provider-orchestrator, split into two selects by
+ * model-selector-refresh .
  *
  * `media/chat.js` and `media/protocol.js` are plain scripts (neither is
  * compiled or linted by the toolchain), so they are executed inside one `vm`
@@ -429,7 +429,7 @@ function providerIndex(select: FakeEl, id: string): number {
   return index;
 }
 
-describe('chat view provider-first model selector (model-selector-refresh T14)', () => {
+describe('chat view provider-first model selector ', () => {
   it('seed paint: a disabled placeholder in each select, no Set API key, no stale badge', () => {
     const view = loadChatView();
     const providers = view.ids['provider-select'];

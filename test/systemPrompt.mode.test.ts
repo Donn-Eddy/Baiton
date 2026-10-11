@@ -37,8 +37,8 @@ import {
  */
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
-// 'spec' is the legacy persisted conversation kind.
-const PLAN: ConversationKind = { kind: 'spec', slug: 'my-plan' };
+// 'plan' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'plan', slug: 'my-plan' };
 
 /** A plan document with the given frontmatter `status`. */
 function planWithStatus(status: string): string {
@@ -180,7 +180,7 @@ describe('mode-scoped system prompt: run prompt content', () => {
 
     it(`omits every plan-only section from the ${mode} run prompt`, () => {
       const prompt = buildSystemPrompt(WORKSPACE, undefined, mode);
-      assert.ok(!/draft_plan/.test(prompt), 'no spec flow');
+      assert.ok(!/draft_plan/.test(prompt), 'no plan flow');
       assert.ok(!/submit_pr/.test(prompt), 'no drive stage table');
       assert.ok(!/Phase line grammar/.test(prompt), 'no phase grammar');
       assert.ok(!/Plan frontmatter rules/.test(prompt), 'no frontmatter rules');

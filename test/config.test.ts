@@ -10,7 +10,7 @@ import { SUPPORTED_VERSION } from '../src/config/types';
 import { isErr, isOk } from '../src/model/result';
 
 /**
- * Unit tests for the config service and the Initialize command (Task 5.5).
+ * Unit tests for the config service and the Initialize command.
  *
  * Everything runs against a throwaway `.baiton/`-style directory under
  * `os.tmpdir()` so the tests exercise the real Node `fs` paths without a VS
@@ -38,7 +38,7 @@ function configJson(doc: Record<string, unknown>): string {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-describe('config service and Initialize command (Task 5.5)', () => {
+describe('config service and Initialize command', () => {
   const dirs: string[] = [];
 
   /** Allocate a fresh temp directory registered for cleanup. */
@@ -190,7 +190,8 @@ describe('config service and Initialize command (Task 5.5)', () => {
       }
     });
 
-    it('loads a legacy "spec-writer" entry as plan-writer', async () => {
+    it('loads a legacy "plan-writer" entry as plan-writer', async () => {
+      // Legacy config compatibility: spec-writer migrates to plan-writer.
       const dir = newDir();
       const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
       doc.roles = { ...doc.roles };
@@ -209,7 +210,8 @@ describe('config service and Initialize command (Task 5.5)', () => {
       }
     });
 
-    it('prefers "plan-writer" over a legacy "spec-writer" when both exist', async () => {
+    it('prefers "plan-writer" over a legacy "plan-writer" when both exist', async () => {
+      // Legacy config compatibility: the canonical key takes precedence.
       const dir = newDir();
       const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
       doc.roles = {
@@ -228,6 +230,7 @@ describe('config service and Initialize command (Task 5.5)', () => {
     });
 
     it('writes plan-writer and no legacy role in defaults', () => {
+      // Legacy config compatibility: defaults never write spec-writer.
       const config = defaultConfig();
       assert.ok(Object.keys(config.roles).includes('plan-writer'));
       assert.strictEqual('spec-writer' in config.roles, false);
@@ -335,7 +338,7 @@ describe('config service and Initialize command (Task 5.5)', () => {
       // .gitignore is ensured with the required exclusions.
       const gitignore = fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8');
       assert.strictEqual(gitignore, GITIGNORE_CONTENTS);
-      // The runs/ and plans/ directories exist; new layouts do not create specs/.
+      // The runs/ and plans/ directories exist; new layouts do not create plans/.
       assert.ok(fs.existsSync(path.join(baitonDir, 'runs')), 'runs/ should exist');
       assert.ok(fs.existsSync(path.join(baitonDir, 'plans')), 'plans/ should exist');
       assert.ok(!fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should not be created');

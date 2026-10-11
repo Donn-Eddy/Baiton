@@ -11,13 +11,19 @@ export const PLANS_SUBDIR = 'plans';
 // Legacy: pre-phased-plan documents live under .baiton/specs/; read-only compatibility.
 export const LEGACY_SPECS_SUBDIR = 'specs';
 
+/** Legacy documents retain their existing spec.md filename. */
 export function documentFileName(kind: DocumentKind): 'plan.md' | 'spec.md' {
-  return kind === 'plan' ? 'plan.md' : 'spec.md';
+  if (kind === 'plan') return 'plan.md';
+  // Legacy: existing documents keep the spec.md filename.
+  return 'spec.md';
 }
 
+// Legacy: artifactsSubdirName preserves the old todos/ artifact layout.
 export function artifactsSubdirName(kind: DocumentKind): 'phases' | 'todos' {
   // Legacy documents retain their original artifact layout.
-  return kind === 'plan' ? 'phases' : 'todos';
+  if (kind === 'plan') return 'phases';
+  // Legacy: existing documents keep their todos/ artifact directory.
+  return 'todos';
 }
 
 export interface DocumentLocation {
@@ -27,7 +33,7 @@ export interface DocumentLocation {
   kind: DocumentKind;
   /** Absolute `<baitonDir>/<root>/<slug>` directory. */
   dir: string;
-  /** Absolute `plan.md` or `spec.md` path. */
+  /** Absolute `plan.md` path or, for a legacy document, its `spec.md` path. */
   documentPath: string;
   /** Absolute `phases/` or Legacy `todos/` directory. */
   artifactsDir: string;

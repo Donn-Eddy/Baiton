@@ -49,7 +49,7 @@ export interface PlanResult {
   steps: PlanStep[];
   /** Known risks the plan carries. */
   risks: string[];
-  /** Acceptance checks that define "done" for the todo. */
+  /** Acceptance checks that define "done" for the phase. */
   acceptance: string[];
 }
 

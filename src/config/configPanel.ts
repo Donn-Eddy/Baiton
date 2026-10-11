@@ -1,6 +1,5 @@
 /**
- * Config panel message protocol and form model (host-free core) — spec
- * "Configuration Panel" (config-panel), todos T01, T10.
+ * Config panel message protocol and form model (host-free core).
  *
  * The Config_Panel webview is driven by a typed message union, in the same
  * shape as {@link "../orchestrator/webviewProtocol"}: the host sends
@@ -20,7 +19,7 @@ import { Config, LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from './types';
 
 /**
  * One model behind `AgentFormCapability.models`, as the webview receives it
- * (codex-opencode-dropdown-fix T06). Structurally a subset of `ModelEntry`
+ *. Structurally a subset of `ModelEntry`
  * from `src/orchestrator/modelCatalog`, declared locally to keep this module
  * import-free of adapter/orchestrator code. `provider` is deliberately NOT
  * mirrored: only ids, labels and effort names cross to the webview.
@@ -39,7 +38,7 @@ export interface FormModelEntry {
 }
 
 /**
- * Per-agent capability descriptor as held by the config panel (T10).
+ * Per-agent capability descriptor as held by the config panel.
  * Structurally identical to `AgentCapabilities` from `src/adapter/adapter`
  * but declared locally to keep this module import-free of adapter dependencies.
  */
@@ -54,7 +53,7 @@ export interface AgentFormCapability {
    */
   readonly modelEntries?: readonly FormModelEntry[];
   /**
-   * Where this list came from in this window (model-selector-refresh T08).
+   * Where this list came from in this window.
    * Absent means the curated builtin table with no refresh applied.
    */
   readonly source?: 'live' | 'cached' | 'builtin';
@@ -68,7 +67,7 @@ export interface AgentFormCapability {
 
 /**
  * The per-agent staleness the webview renders as "stale — showing last known
- * models" (model-selector-refresh T08).
+ * models".
  */
 export interface AgentStaleness {
   readonly stale: boolean;
@@ -143,8 +142,8 @@ export type ConfigPanelHostToWebview =
   /** The form parsed from disk, the conflict token to echo back on save, and the dropdown option sets. */
   | { type: 'loaded'; form: ConfigForm; token: string; options: ConfigFormOptions }
   /**
-   * The option lists were refreshed out-of-band (a model catalog refresh landed;
-   * model-selector-refresh T08). The webview must replace the option lists in
+   * The option lists were refreshed out-of-band (a model catalog refresh landed).
+   * The webview must replace the option lists in
    * place without touching the user's edits — no form is carried and no reload
    * is implied.
    */
@@ -173,14 +172,14 @@ export type ConfigPanelWebviewToHost =
  * The dropdown option sets for the form: the installed agent ids plus any
  * agent value already present in the form that is not an installed id, and
  * a copy of the capability catalogue with out-of-table models and efforts
- * appended for agents with closed sets (T10 round-trip rule).
+ * appended for agents with closed sets.
  *
  * A capability's `modelEntries` are copied through (minus `provider`), or
  * synthesised as one bare `{ id }` per model when the capability carries none;
  * an agent with no models carries no `modelEntries` own key at all. A
  * configured-but-unlisted model is appended both to `models` and to
  * `modelEntries`, as `{ id, custom: true }` at the end, so the webview can
- * render it as an editable "Other…" entry (codex-opencode-dropdown-fix T06).
+ * render it as an editable "Other…" entry.
  */
 export function configFormOptions(
   agentIds: readonly string[],
@@ -212,7 +211,7 @@ export function configFormOptions(
         modelEntries: entries,
         ...(cap.modelLink !== undefined ? { modelLink: cap.modelLink } : {}),
         // Refresh metadata is copied conditionally so an untouched builtin entry keeps
-        // exactly its old key set (T08).
+        // exactly its old key set.
         ...(cap.source !== undefined ? { source: cap.source } : {}),
         ...(cap.stale !== undefined ? { stale: cap.stale } : {}),
         ...(cap.staleReason !== undefined ? { staleReason: cap.staleReason } : {}),

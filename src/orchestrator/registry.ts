@@ -33,7 +33,7 @@
 import {
   GuardContext,
   IdempotencyStore,
-  OrchestratorPhase,
+  ConversationStep,
   Tool,
   ToolCaller,
   ToolContext,
@@ -127,14 +127,14 @@ export class ToolRegistry {
   }
 
   /**
-   * The raw {@link Tool} definitions advertised in `phase` (Req 11.1): the
-   * subset of {@link definitions} whose `phases` include it. On the
+   * The raw {@link Tool} definitions advertised in `step` (Req 11.1): the
+   * subset of {@link definitions} whose `steps` include it. On the
    * `'subagent'` surface only the sub-agent tools (read tools, `ask_user`,
    * `run`, the spawn tools) of that phase are returned.
    */
-  public definitionsFor(phase: OrchestratorPhase, surface: ToolSurface = 'top'): Tool[] {
+  public definitionsFor(step: ConversationStep, surface: ToolSurface = 'top'): Tool[] {
     return [...this.registered.values()]
-      .filter((entry) => entry.tool.phases.includes(phase) && this.onSurface(entry, surface))
+      .filter((entry) => entry.tool.steps.includes(step) && this.onSurface(entry, surface))
       .map((entry) => entry.tool);
   }
 
@@ -148,14 +148,14 @@ export class ToolRegistry {
   }
 
   /**
-   * The validated {@link ToolSpec}s to advertise while in `phase` (Req 11.1),
-   * validating only that phase's descriptions (Req 10.3–10.5).
+   * The validated {@link ToolSpec}s to advertise while in `step` (Req 11.1),
+   * validating only that step's descriptions (Req 10.3–10.5).
    */
   public assembleFor(
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     surface: ToolSurface = 'top',
   ): Result<ToolSpec[], ToolDescriptionError> {
-    return assembleToolSpecs(this.definitionsFor(phase, surface));
+    return assembleToolSpecs(this.definitionsFor(step, surface));
   }
 
   /**
@@ -163,8 +163,8 @@ export class ToolRegistry {
    * id, used as the idempotency key for mutating tools (Req 8.3). An unknown
    * tool name returns an error result rather than throwing.
    *
-   * `phase` is the orchestrator phase the conversation is in (Req 11.1). A tool
-   * that does not belong to that phase is refused here, before the guard and
+   * `step` is the conversation step the chat is in (Req 11.1). A tool
+   * that does not belong to that step is refused here, before the guard and
    * before the tool's own `run`, so an out-of-phase call reads nothing and
    * writes nothing. Likewise a tool not on the `surface` (a sub-agent calling a
    * top-only tool) is refused before the guard. `caller` is passed through to
@@ -175,7 +175,7 @@ export class ToolRegistry {
     args: unknown,
     callId: string | undefined,
     ctx: GuardContext,
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     surface: ToolSurface = 'top',
     caller?: ToolCaller,
   ): Promise<ToolResult> {
@@ -183,10 +183,10 @@ export class ToolRegistry {
     if (entry === undefined) {
       return { ok: false, error: `unknown tool: ${name}` };
     }
-    if (!entry.tool.phases.includes(phase)) {
+    if (!entry.tool.steps.includes(step)) {
       return {
         ok: false,
-        error: `tool "${name}" is not available while ${phase}`,
+        error: `tool "${name}" is not available while ${step}`,
       };
     }
     if (!this.onSurface(entry, surface)) {

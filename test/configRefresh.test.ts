@@ -1,5 +1,5 @@
 /**
- * Unit tests for the host-free live configuration refresher (spec "Config Panel", todo T08).
+ * Unit tests for the host-free live configuration refresher .
  *
  * This suite statically imports {@link createConfigRefresh} with no `vscodeLoader`
  * hook, proving that `src/activation/configRefresh.ts` remains host-free.
@@ -41,7 +41,7 @@ function fakeExecutables(
   };
 }
 
-describe('configRefresh (T08)', () => {
+describe('configRefresh ', () => {
   it('replaces the config object as a whole (strict reference equality)', async () => {
     const initialConfig = defaultConfig();
     const executables = fakeExecutables();
@@ -173,17 +173,17 @@ describe('configRefresh (T08)', () => {
     const notes1 = await refresh1(defaultConfig());
     assert.deepStrictEqual(notes1, [IN_FLIGHT_NOTE(['alpha'])]);
 
-    // 2. Multiple running slugs including synthetic spec draft
+    // 2. Multiple running slugs including synthetic plan draft
     const refresh2 = createConfigRefresh({
       state: () => target,
       resolveExecutables: () => fakeExecutables(),
       completeActivation: async () => [],
-      runningSlugs: () => ['alpha', 'beta', '(spec draft)'],
+      runningSlugs: () => ['alpha', 'beta', '(plan draft)'],
       log: () => {},
     });
 
     const notes2 = await refresh2(defaultConfig());
-    assert.deepStrictEqual(notes2, [IN_FLIGHT_NOTE(['alpha', 'beta', '(spec draft)'])]);
+    assert.deepStrictEqual(notes2, [IN_FLIGHT_NOTE(['alpha', 'beta', '(plan draft)'])]);
 
     // 3. Nothing running -> no in-flight note
     const refresh3 = createConfigRefresh({

@@ -191,6 +191,7 @@ function renderPhaseRef(phase: Phase): string {
   return ('- [' + phase.state + '] ' + phase.id + ' ' + phase.title).trimEnd();
 }
 
+// Legacy: old documents keep the user-facing noun "todo".
 function itemNoun(kind: DocumentKind): 'phase' | 'todo' {
   // Legacy spec.md format keeps the user-facing "todo" wording byte-identical.
   return kind === 'plan' ? 'phase' : 'todo';

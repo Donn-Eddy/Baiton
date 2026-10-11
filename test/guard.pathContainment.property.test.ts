@@ -25,7 +25,7 @@ import { GuardContext } from '../src/orchestrator/guard';
  * sibling directory outside the repo entirely. It generates target paths across
  * four families:
  *
- *   1. inside `.baiton/plans/` or `.baiton/specs/` (possibly not-yet-existing, for a create);
+ * Legacy: 1. inside `.baiton/plans/` or `.baiton/specs/` (possibly not-yet-existing, for a create);
  *   2. inside the repo but outside both document roots;
  *   3. outside the repo root;
  *   4. via symlinks — including a symlink that lives inside the repo but points
@@ -75,12 +75,12 @@ interface Fixture {
   /** Symlink-resolved repository root (temp dirs on macOS live under /var -> /private/var). */
   repoRoot: string;
   plansDir: string;
-  specsDir: string;
+  legacySpecsDir: string;
   /** A directory outside the repo root entirely. */
   outsideDir: string;
   /** A symlink inside the repo that points at `outsideDir` (escapes on resolve). */
   escapingLink: string;
-  /** A symlink inside .baiton/specs that points at a real dir under specs. */
+  /* Legacy: * A symlink inside .baiton/specs that points at a real dir under specs. */
   specsInternalLink: string;
   cleanup: () => Promise<void>;
 }
@@ -89,8 +89,8 @@ interface Fixture {
  * Build a real on-disk repo with:
  *   <root>/.baiton/plans/<slug>/plan.md         (a real plan tree)
  *   <root>/.baiton/specs/<slug>/spec.md         (a legacy spec tree)
- *   <root>/.baiton/specs/link-to-slug -> <slug>  (symlink staying under specs)
- *   <root>/src/index.ts                          (in-repo, outside specs)
+ * Legacy: <root>/.baiton/specs/link-to-slug -> <slug>  (symlink staying under specs)
+ *   <root>/src/index.ts                          (in-repo, outside plans)
  *   <root>/escape -> <outsideDir>                (in-repo symlink escaping root)
  *   <sibling outside root>/secret.txt            (outside the repo)
  *
@@ -103,11 +103,11 @@ async function makeFixture(): Promise<Fixture> {
 
   const repoRoot = path.join(realBase, 'repo');
   const plansDir = path.join(repoRoot, '.baiton', 'plans');
-  const specsDir = path.join(repoRoot, '.baiton', 'specs');
+  const legacySpecsDir = path.join(repoRoot, '.baiton', 'specs');
   const planDir = path.join(plansDir, 'my-plan');
   await fsp.mkdir(planDir, { recursive: true });
   await fsp.writeFile(path.join(planDir, 'plan.md'), '# Endstate\n\n# PHASES\n', 'utf8');
-  const slugDir = path.join(specsDir, 'my-spec');
+  const slugDir = path.join(legacySpecsDir, 'my-spec');
   await fsp.mkdir(slugDir, { recursive: true });
   await fsp.writeFile(path.join(slugDir, 'spec.md'), '# OVERVIEW\n', 'utf8');
 
@@ -123,14 +123,14 @@ async function makeFixture(): Promise<Fixture> {
   const escapingLink = path.join(repoRoot, 'escape');
   await fsp.symlink(outsideDir, escapingLink, 'dir');
 
-  // A symlink under .baiton/specs pointing at a real dir still under specs.
-  const specsInternalLink = path.join(specsDir, 'link-to-slug');
+  // Legacy: A symlink under .baiton/specs pointing at a real dir still under specs.
+  const specsInternalLink = path.join(legacySpecsDir, 'link-to-slug');
   await fsp.symlink(slugDir, specsInternalLink, 'dir');
 
   return {
     repoRoot,
     plansDir,
-    specsDir,
+    legacySpecsDir,
     outsideDir,
     escapingLink,
     specsInternalLink,
@@ -184,8 +184,8 @@ describe('Guard path containment (property harness)', function () {
       // 1. Inside .baiton/plans/ (real or not-yet-created leaf).
       tailArb.map((tail) => path.join(fx.plansDir, 'my-plan', ...tail)),
       // 1b. Inside legacy .baiton/specs/.
-      tailArb.map((tail) => path.join(fx.specsDir, 'my-spec', ...tail)),
-      // 1c. Through the internal specs symlink — still resolves under specs.
+      tailArb.map((tail) => path.join(fx.legacySpecsDir, 'my-spec', ...tail)),
+      // 1c. Through the internal plans symlink — still resolves under plans.
       tailArb.map((tail) => path.join(fx.specsInternalLink, ...tail)),
       // 2. Inside the repo but outside both document roots.
       tailArb.map((tail) => path.join(fx.repoRoot, 'src', ...tail)),
@@ -193,10 +193,10 @@ describe('Guard path containment (property harness)', function () {
       fc.constantFrom(fx.repoRoot, path.join(fx.repoRoot, '.baiton')),
       // 3. Outside the repo root entirely.
       tailArb.map((tail) => path.join(fx.outsideDir, ...tail)),
-      // 3b. Lexical climb out of specs with '..' (must be caught after resolve).
+      // 3b. Lexical climb out of plans with '..' (must be caught after resolve).
       fc
         .tuple(dotdotArb, tailArb)
-        .map(([dots, tail]) => path.join(fx.specsDir, ...dots, ...tail)),
+        .map(([dots, tail]) => path.join(fx.legacySpecsDir, ...dots, ...tail)),
       // 4. Through the escaping symlink — resolution lands outside the repo.
       tailArb.map((tail) => path.join(fx.escapingLink, ...tail)),
     );
@@ -205,7 +205,7 @@ describe('Guard path containment (property harness)', function () {
       fc.asyncProperty(targetArb, async (target) => {
         // Independent oracle: resolve symlinks the same way, then lexical check.
         const resolved = await oracleResolve(target);
-        const underDocuments = isWithin(fx.specsDir, resolved) || isWithin(fx.plansDir, resolved);
+        const underDocuments = isWithin(fx.legacySpecsDir, resolved) || isWithin(fx.plansDir, resolved);
         const underRepo = isWithin(fx.repoRoot, resolved);
 
         // --- Mutating: ok iff resolved path is under either document root (8.1, 8.2).
@@ -266,7 +266,7 @@ describe('Guard path containment (property harness)', function () {
       assert.strictEqual(mut.error.kind, 'outside-documents');
     }
 
-    // The internal specs symlink resolves to a dir still under the legacy root, so a
+    // The internal plans symlink resolves to a dir still under the legacy root, so a
     // mutating create through it is permitted.
     const throughInternal = path.join(fx.specsInternalLink, 'plan.md');
     const okMut = await ctx.resolveMutatingPath(throughInternal);
@@ -274,7 +274,7 @@ describe('Guard path containment (property harness)', function () {
 
     const planTarget = await ctx.resolveMutatingPath(path.join(fx.plansDir, 'new-plan', 'plan.md'));
     assert.strictEqual(planTarget.ok, true, 'mutating under plans must be permitted');
-    const legacyTarget = await ctx.resolveMutatingPath(path.join(fx.specsDir, 'new-spec', 'spec.md'));
+    const legacyTarget = await ctx.resolveMutatingPath(path.join(fx.legacySpecsDir, 'new-spec', 'spec.md'));
     assert.strictEqual(legacyTarget.ok, true, 'mutating under legacy specs must be permitted');
   });
 

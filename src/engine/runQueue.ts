@@ -785,7 +785,7 @@ class SerialRunQueue implements RunQueue {
     if (transition.guards.cleanTreeAndInputRev) {
       // Clean tree required except changes confined to the plan folder (Req
       // 16.1, 17.2, 17.3).
-      if (!(await git.isCleanExceptSpecFolder(req.slug))) {
+      if (!(await git.isCleanExceptPlanFolder(req.slug))) {
         return {
           ok: false,
           error: { kind: 'dirty-tree', message: 'a clean working tree is required to execute' },
@@ -907,7 +907,7 @@ class SerialRunQueue implements RunQueue {
     await this.journal(req.slug, () =>
       appendStart(this.journalFor(req.phaseId), {
         runId,
-        todoId: req.phaseId,
+        phaseId: req.phaseId,
         stage,
         attempt: req.attempt,
         startHead,
@@ -963,7 +963,7 @@ class SerialRunQueue implements RunQueue {
           workspaceRoot: this.deps.workspaceRoot,
           slug: req.slug,
           stage,
-          todoId: req.phaseId,
+          phaseId: req.phaseId,
           index: req.attempt,
           terminal,
           watcher,

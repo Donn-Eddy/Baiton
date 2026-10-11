@@ -97,7 +97,7 @@ export interface AwaitStageResultInput {
    * Legacy documents use `todos/<id>/`; required for phase stages and ignored by `plan-draft` and `pr`
    * (Req 24.3).
    */
-  todoId?: string;
+  phaseId?: string;
   /**
    * The 1-based round/attempt index for numbered artifacts (`plan-review-<n>`,
    * `execute-<n>`, `review-<n>`); ignored for `plan` (Req 24.3).
@@ -360,12 +360,12 @@ export function awaitStageResult(
         input.workspaceRoot,
         input.slug,
         input.stage,
-        input.todoId,
+        input.phaseId,
         input.index,
       );
       writeArtifact(
         artifactPath,
-        renderArtifact(input.stage, validated.value, input.todoId),
+        renderArtifact(input.stage, validated.value, input.phaseId),
       );
       input.terminal.dispose();
       finish({

@@ -2,8 +2,8 @@ import * as assert from 'assert';
 import { isErr, isOk } from '../src/model/result';
 import { writeFrontmatterKey, writePhaseState } from '../src/model/writer';
 
-/** A representative spec with frontmatter, an OVERVIEW and several todos. */
-const SPEC = [
+/** Legacy spec fixture: frontmatter, an OVERVIEW and several phase lines. */
+const LEGACY_SPEC = [
   '---',
   'status: draft',
   'branch:',
@@ -17,9 +17,9 @@ const SPEC = [
   '',
   '# TODOS',
   '',
-  '- [pending] T01 First todo (after T02; files: a.ts, b.ts)',
-  '- [executing] T02 Second todo',
-  '- [done] T03 Third todo',
+  '- [pending] T01 First phase (after T02; files: a.ts, b.ts)',
+  '- [executing] T02 Second phase',
+  '- [done] T03 Third phase',
   '',
 ].join('\n');
 
@@ -44,40 +44,40 @@ describe('writer', () => {
       }
     });
 
-    it('rewrites only the target todo state box, leaving every other byte identical', () => {
-      const r = writePhaseState(SPEC, 'T01', 'planning');
+    it('rewrites only the target phase state box, leaving every other byte identical', () => {
+      const r = writePhaseState(LEGACY_SPEC, 'T01', 'planning');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
-        const expected = SPEC.replace(
-          '- [pending] T01 First todo',
-          '- [planning] T01 First todo',
+        const expected = LEGACY_SPEC.replace(
+          '- [pending] T01 First phase',
+          '- [planning] T01 First phase',
         );
         assert.strictEqual(r.value, expected);
       }
     });
 
     it('preserves the id, title and hints on the edited line', () => {
-      const r = writePhaseState(SPEC, 'T01', 'executed');
+      const r = writePhaseState(LEGACY_SPEC, 'T01', 'executed');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
         assert.ok(
           r.value.includes(
-            '- [executed] T01 First todo (after T02; files: a.ts, b.ts)',
+            '- [executed] T01 First phase (after T02; files: a.ts, b.ts)',
           ),
         );
       }
     });
 
     it('aborts with phase-not-found when the id is absent', () => {
-      const r = writePhaseState(SPEC, 'T99', 'planning');
+      const r = writePhaseState(LEGACY_SPEC, 'T99', 'planning');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'phase-not-found');
       }
     });
 
-    it('refuses to change a done todo and reports done-protected', () => {
-      const r = writePhaseState(SPEC, 'T03', 'executing');
+    it('refuses to change a done phase and reports done-protected', () => {
+      const r = writePhaseState(LEGACY_SPEC, 'T03', 'executing');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');
@@ -87,8 +87,8 @@ describe('writer', () => {
       }
     });
 
-    it('leaves a done todo unchanged even when the requested state is done', () => {
-      const r = writePhaseState(SPEC, 'T03', 'done');
+    it('leaves a done phase unchanged even when the requested state is done', () => {
+      const r = writePhaseState(LEGACY_SPEC, 'T03', 'done');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'done-protected');
@@ -98,19 +98,19 @@ describe('writer', () => {
 
   describe('writeFrontmatterKey', () => {
     it('writes a managed key value, leaving every other byte identical', () => {
-      const r = writeFrontmatterKey(SPEC, 'branch', 'spec/my-feature');
+      const r = writeFrontmatterKey(LEGACY_SPEC, 'branch', 'baiton/my-feature');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
-        const expected = SPEC.replace(
+        const expected = LEGACY_SPEC.replace(
           'branch:',
-          'branch: spec/my-feature',
+          'branch: baiton/my-feature',
         );
         assert.strictEqual(r.value, expected);
       }
     });
 
     it('overwrites an existing managed value in place', () => {
-      const withStatus = writeFrontmatterKey(SPEC, 'status', 'approved');
+      const withStatus = writeFrontmatterKey(LEGACY_SPEC, 'status', 'approved');
       assert.strictEqual(isOk(withStatus), true);
       if (isOk(withStatus)) {
         assert.ok(withStatus.value.includes('status: approved'));
@@ -119,7 +119,7 @@ describe('writer', () => {
     });
 
     it('does not touch a non-managed key that shares a value shape', () => {
-      const r = writeFrontmatterKey(SPEC, 'status', 'approved');
+      const r = writeFrontmatterKey(LEGACY_SPEC, 'status', 'approved');
       assert.strictEqual(isOk(r), true);
       if (isOk(r)) {
         // The user-owned `title` key is untouched.
@@ -128,7 +128,7 @@ describe('writer', () => {
     });
 
     it('aborts with key-not-found when the managed key is absent', () => {
-      const r = writeFrontmatterKey(SPEC, 'pr', '42');
+      const r = writeFrontmatterKey(LEGACY_SPEC, 'pr', '42');
       assert.strictEqual(isErr(r), true);
       if (isErr(r)) {
         assert.strictEqual(r.error.kind, 'key-not-found');

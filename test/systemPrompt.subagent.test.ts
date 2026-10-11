@@ -12,17 +12,17 @@ import {
   subAgentSpawnText,
 } from '../src/orchestrator/systemPrompt';
 import type { ConversationKind } from '../src/orchestrator/systemPrompt';
-import { ORCHESTRATOR_PHASES } from '../src/orchestrator/guard';
+import { CONVERSATION_STEPS } from '../src/orchestrator/guard';
 import { MAX_SUBAGENT_DEPTH } from '../src/orchestrator/seams';
 
 const WORKSPACE: ConversationKind = { kind: 'workspace' };
-// 'spec' is the legacy persisted conversation kind.
-const PLAN: ConversationKind = { kind: 'spec', slug: 'sample' };
+// 'plan' is the legacy persisted conversation kind.
+const PLAN: ConversationKind = { kind: 'plan', slug: 'sample' };
 const DEPTHS = [0, 1, 2];
 
 describe('buildSubAgentPrompt', () => {
   it('states the role, refusal, ask_user and prohibitions for every conversation step and depth', () => {
-    for (const step of ORCHESTRATOR_PHASES) {
+    for (const step of CONVERSATION_STEPS) {
       for (const depth of DEPTHS) {
         const prompt = buildSubAgentPrompt(WORKSPACE, step, depth);
         assert.ok(prompt.includes(SUBAGENT_ROLE_TEXT));
@@ -47,7 +47,7 @@ describe('buildSubAgentPrompt', () => {
   });
 
   it('never names the tools a sub-agent lacks or the top-level scope text', () => {
-    for (const step of ORCHESTRATOR_PHASES) {
+    for (const step of CONVERSATION_STEPS) {
       const prompt = buildSubAgentPrompt(PLAN, step, 1, 'content');
       assert.ok(!prompt.includes(DRIVE_TEXT));
       assert.ok(!prompt.includes(SCOPE_TEXT));

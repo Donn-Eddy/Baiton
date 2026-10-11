@@ -181,7 +181,7 @@ function makeStore(
   });
 }
 
-describe('T07 ModelDiscoveryService.refresh', () => {
+describe('ModelDiscoveryService.refresh', () => {
   it('drives all four sources, fetching the feed exactly once and handing it to claude', async () => {
     const feed = fakeFeed();
     const spy = feedSpy(feed);
@@ -517,7 +517,7 @@ describe('T07 ModelDiscoveryService.refresh', () => {
   });
 });
 
-describe('T07 ModelDiscoveryService.onDidChange', () => {
+describe('ModelDiscoveryService.onDidChange', () => {
   it('fires with the current table, survives a throwing listener and unsubscribes on dispose', async () => {
     const logged: string[] = [];
     const seen: ModelCatalogTable[] = [];
@@ -552,7 +552,7 @@ describe('T07 ModelDiscoveryService.onDidChange', () => {
   });
 });
 
-describe('T07 ModelDiscoveryService persistence', () => {
+describe('ModelDiscoveryService persistence', () => {
   it('persists the snapshots and rehydrates them as cached in a new store', async () => {
     const memento = fakeMemento();
     const service = new ModelDiscoveryService({
@@ -629,7 +629,7 @@ describe('T07 ModelDiscoveryService persistence', () => {
   });
 });
 
-describe('T07 ModelDiscoveryService supersede and dispose', () => {
+describe('ModelDiscoveryService supersede and dispose', () => {
   it('aborts the in-flight refresh and drops everything the superseded run would write', async () => {
     const pending: Deferred<AgentCapabilities | undefined>[] = [];
     const codex = fakeAdapter('codex', () => {
@@ -697,7 +697,7 @@ describe('T07 ModelDiscoveryService supersede and dispose', () => {
   });
 });
 
-describe('T07 ModelDiscoveryService apiLog', () => {
+describe('ModelDiscoveryService apiLog', () => {
   const okAdapter = (id: AgentId): FakeAdapter => fakeAdapter(id, async () => caps(['m']));
 
   it('forwards apiLog into every adapter ctx', async () => {
@@ -875,7 +875,7 @@ describe('T07 ModelDiscoveryService apiLog', () => {
   });
 });
 
-describe('T07 builtinCatalogFetches', () => {
+describe('builtinCatalogFetches', () => {
   it('seeds exactly the four CLI sources with fresh objects on every call', () => {
     const first = builtinCatalogFetches();
     assert.deepStrictEqual(Object.keys(first).sort(), ['antigravity', 'claude', 'codex', 'opencode']);
@@ -898,7 +898,7 @@ describe('T07 builtinCatalogFetches', () => {
   });
 });
 
-describe('T07 host-free', () => {
+describe('host-free', () => {
   it('the module source contains no runtime vscode import', () => {
     const source = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'activation', 'modelDiscovery.ts'),

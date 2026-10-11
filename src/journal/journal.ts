@@ -77,7 +77,7 @@ export function planJournalPaths(baitonDir: string, slug: string): string[] {
 /** The start metadata a caller supplies when a stage begins (Req 21.1). */
 export interface StartInput {
   runId: string;
-  todoId: string;
+  phaseId: string;
   stage: Stage;
   attempt: number;
   startHead: string;
@@ -112,7 +112,9 @@ export function appendStart(path: string, input: StartInput): void {
   const record: StartRecord = {
     type: 'start',
     runId: input.runId,
-    todoId: input.todoId,
+    // Legacy wire key retained so existing journal lines remain unchanged.
+    // Legacy wire key: preserve the field name already stored in run journals.
+    todoId: input.phaseId,
     stage: input.stage,
     attempt: input.attempt,
     startHead: input.startHead,
@@ -221,20 +223,20 @@ function mergeRecords(
 }
 
 /**
- * Returns the last start entry recorded for `todoId` (optionally restricted to
+ * Returns the last start entry recorded for `phaseId` (optionally restricted to
  * one `stage`), or `undefined` if none. Operates on already-parsed entries
  * (Req 1.2, 3.1); callers read the journal once with {@link parseJournal} and
  * pass the result in rather than this function reading the file itself.
  */
 export function latestStart(
   entries: JournalEntry[],
-  todoId: string,
+  phaseId: string,
   stage?: Stage,
 ): JournalEntry | undefined {
   let latest: JournalEntry | undefined;
   for (const entry of entries) {
     if (
-      entry.todoId === todoId &&
+      entry.phaseId === phaseId &&
       (stage === undefined || entry.stage === stage)
     ) {
       latest = entry;
@@ -276,7 +278,9 @@ function appendRecord(path: string, record: JournalRecord): void {
 function startToEntry(record: StartRecord): JournalEntry {
   const entry: JournalEntry = {
     runId: record.runId,
-    todoId: record.todoId,
+    // Legacy wire key: expose this wire field in memory as phaseId.
+    // Legacy wire key: the serialized phase id remains under `todoId`.
+    phaseId: record.todoId,
     stage: record.stage,
     attempt: record.attempt,
     startHead: record.startHead,
@@ -342,6 +346,8 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
   const stage = typeof obj.stage === 'string' ? toStage(obj.stage) : undefined;
   if (
     typeof obj.runId !== 'string' ||
+    // Legacy wire key: existing journal START records carry this field name.
+    // Legacy wire key: parse the id field used by existing start records.
     typeof obj.todoId !== 'string' ||
     stage === undefined ||
     typeof obj.attempt !== 'number' ||
@@ -353,6 +359,7 @@ function toStartRecord(obj: Record<string, unknown>): StartRecord | undefined {
   const record: StartRecord = {
     type: 'start',
     runId: obj.runId,
+    // Legacy wire key: existing journals serialize their phase id as `todoId`.
     todoId: obj.todoId,
     stage,
     attempt: obj.attempt,

@@ -32,7 +32,7 @@ import { ROLES, Role } from '../src/model/role';
  * the request's model and effort.
  *
  * The test generates random roles, models, efforts, run ids, prompts, and
- * resume flags, builds the launch spec, and asserts every table entry holds for
+ * resume flags, builds the launch plan, and asserts every table entry holds for
  * the produced `shellArgs`.
  */
 
@@ -118,7 +118,7 @@ describe('Claude adapter per-role launch arguments (property harness)', () => {
             : DEFAULT_PERMISSION_MODE;
           const adapter = new ClaudeAdapter(mode);
 
-          const spec = adapter.launch({
+          const launchSpec = adapter.launch({
             role,
             model,
             effort,
@@ -128,10 +128,10 @@ describe('Claude adapter per-role launch arguments (property harness)', () => {
             sessionId,
             resumeSessionId,
           });
-          const args = spec.shellArgs;
+          const args = launchSpec.shellArgs;
 
           // The adapter always launches the `claude` binary directly.
-          assert.strictEqual(spec.shellPath, 'claude');
+          assert.strictEqual(launchSpec.shellPath, 'claude');
 
           // Model flag carries the requested model as an adjacent pair.
           assert.ok(

@@ -11,7 +11,7 @@
  * what it never does itself, and how to treat a tool refusal (Req 11.1) — when
  * to ask through `ask_user` rather than ending the turn, the section-5 phase
  * grammar (Req 11.3) and the section-5 frontmatter rules
- * (Req 11.4). The rest depends on the conversation's {@link OrchestratorPhase}
+ * (Req 11.4). The rest depends on the conversation's {@link ConversationStep}
  * (Req 11.1):
  *
  * - **gather** — a Workspace conversation, or a plan still in `draft`: the
@@ -51,17 +51,13 @@
  */
 import { isPlanless, RunMode } from '../model/mode';
 import { parsePlan } from '../model/parser';
-import type { OrchestratorPhase } from './guard';
+import type { ConversationStep } from './guard';
 import { MAX_SUBAGENT_DEPTH } from './seams';
-
-/** The conversation step a chat is in: `gather`, `drive` or `run`. This is not a plan phase. The tool surface in guard.ts still names the same union `OrchestratorPhase` and its `phases` field. */
-export type ConversationStep = OrchestratorPhase;
 
 /** Which conversation the prompt is being built for. */
 export type ConversationKind =
   | { kind: 'workspace' }
-  /** `'spec'` is the legacy persisted name for a plan conversation; kept so saved sessions and callers still match. */
-  | { kind: 'spec'; slug: string };
+  | { kind: 'plan'; slug: string };
 
 /** The eight allowed phase lifecycle states, per tech-sheet section 5. */
 const PHASE_STATES = [
@@ -108,7 +104,7 @@ const DRIVE_STATUSES: readonly string[] = [
  * Every non-Plan mode maps to the single `run` step: the pipeline, not the
  * step, distinguishes `investigate` from bug/quick/refactor, and
  * `controlTools.ts` advertises both `start_run` and `investigate` on
- * `phases: ['run']`.
+ * `steps: ['run']`.
  *
  * @param mode The conversation's mode. Absent means Plan (the literal `'plan'`,
  *   not DEFAULT_MODE, which is now Default), so the step is computed exactly
@@ -125,7 +121,7 @@ export function conversationStepFor(
   if (kind.kind === 'workspace' && isPlanless(mode)) {
     return 'run';
   }
-  if (kind.kind !== 'spec' || documentContent === undefined) {
+  if (kind.kind !== 'plan' || documentContent === undefined) {
     return 'gather';
   }
   const status = (parsePlan(documentContent).frontmatter.get('status') ?? '').trim();
@@ -347,7 +343,7 @@ const PHASE_GRAMMAR_TEXT = [
   '- Each phase line has the shape `- [<state>] <id> <title>`, optionally followed by ` (<hints>)` as the last thing on the line.',
   `- \`state\` is one of: ${PHASE_STATES.join(', ')}.`,
   '- In a plan (phases under `# PHASES`), `id` is `P` followed by two or more digits (for example `P01`), unique in the file, and never renumbered.',
-  '- A legacy spec document (lines under `# TODOS`) uses `T` ids instead (for example `T01`). A line whose id prefix does not match its document is malformed.',
+  '- A legacy spec document (lines under `# TODOS`) uses `T` ids instead. A line whose id prefix does not match its document is malformed.',
   '- `hints` are groups separated by `;`. `after P01, P02` lists dependency ids. `files: a, b` lists starting files.',
   '- A trailing parenthesis that does not parse as hints is part of the title.',
 ].join('\n');
@@ -408,7 +404,7 @@ export function buildSystemPrompt(
   sections.push(step === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
   sections.push(STYLE_TEXT, PHASE_GRAMMAR_TEXT, FRONTMATTER_TEXT);
 
-  if (kind.kind === 'spec' && documentContent !== undefined) {
+  if (kind.kind === 'plan' && documentContent !== undefined) {
     sections.push(['Current plan document content:', '', documentContent].join('\n'));
   }
 
@@ -458,7 +454,7 @@ export function buildSubAgentPrompt(
     sections.push(SUBAGENT_DRIVE_TEXT);
   }
   sections.push(subAgentSpawnText(depth), STYLE_TEXT);
-  if (kind.kind === 'spec' && documentContent !== undefined) {
+  if (kind.kind === 'plan' && documentContent !== undefined) {
     sections.push(['Current plan document content:', '', documentContent].join('\n'));
   }
   return sections.join('\n\n');

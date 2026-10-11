@@ -8,8 +8,9 @@
  * injected {@link Clock} for timestamps, so it is testable without a VS Code
  * host, and the activation layer wires it to the live chat session.
  *
- * Workspace sessions persist to `.baiton/chat/<id>.jsonl` and each spec
- * conversation's sessions to `.baiton/specs/<slug>/chat/<id>.jsonl` (see
+ * Workspace sessions persist to `.baiton/chat/<id>.jsonl` and plan
+ * conversations' sessions to `.baiton/plans/<slug>/chat/<id>.jsonl` (legacy
+ * documents keep `.baiton/specs/<slug>/chat/<id>.jsonl`; see
  * {@link SessionStore}); the caller supplies the full file path so one recorder
  * can serve any session of any conversation (Req 8.1, 8.2).
  *

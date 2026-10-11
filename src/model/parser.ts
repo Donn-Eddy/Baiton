@@ -41,29 +41,30 @@ export function phaseIdPrefix(kind: DocumentKind): 'P' | 'T' {
   return kind === 'plan' ? 'P' : 'T';
 }
 
+// Legacy documents preserve the old TODOS section name.
 function phasesSectionName(kind: DocumentKind): 'PHASES' | 'TODOS' {
-  // Legacy spec.md format uses the TODOS section.
+  // Legacy: retain the old section name for existing documents.
   return kind === 'plan' ? 'PHASES' : 'TODOS';
 }
 
-/** Infer document kind from its first PHASES/TODOS header, then OVERVIEW. */
+/** Infer document kind from PHASES, or legacy TODOS and OVERVIEW headers. */
 export function detectDocumentKind(raw: string): DocumentKind {
   const lines = raw.split('\n');
   const { bodyStart } = parseFrontmatter(lines);
   let phasesHeader = -1;
-  let todosHeader = -1;
+  let legacyTodosHeader = -1;
   for (let i = bodyStart; i < lines.length; i++) {
     if (phasesHeader === -1 && isHeader(lines[i], 'PHASES')) phasesHeader = i;
     // Legacy spec.md format is identified by its TODOS header.
-    if (todosHeader === -1 && isHeader(lines[i], 'TODOS')) todosHeader = i;
-    if (phasesHeader !== -1 || todosHeader !== -1) {
-      if (phasesHeader !== -1 && todosHeader !== -1) {
-        return phasesHeader < todosHeader ? 'plan' : 'legacy-spec';
+    if (legacyTodosHeader === -1 && isHeader(lines[i], 'TODOS')) legacyTodosHeader = i;
+    if (phasesHeader !== -1 || legacyTodosHeader !== -1) {
+      if (phasesHeader !== -1 && legacyTodosHeader !== -1) {
+        return phasesHeader < legacyTodosHeader ? 'plan' : 'legacy-spec';
       }
     }
   }
   if (phasesHeader !== -1) return 'plan';
-  if (todosHeader !== -1) return 'legacy-spec';
+  if (legacyTodosHeader !== -1) return 'legacy-spec';
   return findHeader(lines, bodyStart, 'OVERVIEW') !== -1 ? 'legacy-spec' : 'plan';
 }
 

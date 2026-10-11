@@ -24,7 +24,7 @@ function ok(tool: UsageToolId): UsageReading {
   );
 }
 
-describe('usage protocol (first-party-usage T08)', () => {
+describe('usage protocol ', () => {
   it('parses ready/refresh and drops extra fields', () => {
     assert.deepStrictEqual(parseUsageWebviewMessage({ type: 'ready', x: 1 }), { type: 'ready' });
     assert.deepStrictEqual(parseUsageWebviewMessage({ type: 'refresh', y: 2 }), { type: 'refresh' });

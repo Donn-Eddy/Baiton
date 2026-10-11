@@ -55,7 +55,7 @@ export function createPlanStore(
     async latestExecuteCommit(slug, phaseId): Promise<string | undefined> {
       let commit: string | undefined;
       for (const entry of readPlanJournal(baitonDir, slug)) {
-        if (entry.stage === 'execute' && entry.todoId === phaseId && entry.result === 'completed' && entry.commit !== undefined) {
+        if (entry.stage === 'execute' && entry.phaseId === phaseId && entry.result === 'completed' && entry.commit !== undefined) {
           commit = entry.commit;
         }
       }
@@ -140,7 +140,7 @@ function baseName(relativePath: string): string {
 function recordedPlanInputRev(entries: JournalEntry[], phaseId: string): string | undefined {
   let latest: string | undefined;
   for (const entry of entries) {
-    if (entry.stage === 'plan' && entry.todoId === phaseId) latest = entry.inputRev;
+    if (entry.stage === 'plan' && entry.phaseId === phaseId) latest = entry.inputRev;
   }
   return latest;
 }

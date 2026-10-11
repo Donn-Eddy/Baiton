@@ -1,8 +1,8 @@
 /**
  * A pipeline stage the extension can dispatch. Every stage except
- * `plan-draft` and `investigate` is scoped to a single todo; `plan-draft` is
+ * `plan-draft` and `investigate` are not scoped to a single phase; `plan-draft` is
  * plan-scoped and runs before the plan exists, turning the requirements the
- * orchestrator gathered into the plan's OVERVIEW and todo list. `investigate`
+ * orchestrator gathered into the plan's preamble and phase list. `investigate`
  * is run-scoped: it is run by the existing `reviewer` role and persists a
  * single `finding.md` at the root of its run directory.
  */

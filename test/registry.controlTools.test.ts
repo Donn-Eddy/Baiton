@@ -5,8 +5,8 @@ import * as path from 'path';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import {
   GuardContext,
-  ORCHESTRATOR_PHASES,
-  OrchestratorPhase,
+  CONVERSATION_STEPS,
+  ConversationStep,
   ToolCaller,
 } from '../src/orchestrator/guard';
 import { subAgentDepthRefusal } from '../src/orchestrator/controlTools';
@@ -38,19 +38,19 @@ import type {
 } from '../src/orchestrator/interventions';
 
 /**
- * Unit tests for the orchestrator tool registry and control tools (Task 13.8).
+ * Unit tests for the orchestrator tool registry and control tools.
  *
  * Covers:
- *  - Tool presence: the registry advertises every read, spec-writing and
+ *  - Tool presence: the registry advertises every read, plan-writing and
  *    control tool the design names (Req 9.1, 9.5, 9.6).
  *  - `approve_plan` confirmation and decline: the tool asks the confirm seam
- *    first (Req 10.1) and, on a decline, leaves the spec byte-for-byte
+ *    first (Req 10.1) and, on a decline, leaves the plan byte-for-byte
  *    unchanged and returns an error while touching no git (Req 10.2).
  *  - Phase scoping: each tool is advertised in exactly the orchestrator phases
  *    the design assigns it, and a call made in the wrong phase is refused
  *    before the tool runs, changing nothing (Req 11.1).
  *  - `run` stage rejection: the tool itself rejects `plan-review` (and the
- *    spec-scoped `pr`) before the run-queue seam is reached (Req 11.1).
+ *    plan-scoped `pr`) before the run-queue seam is reached (Req 11.1).
  *  - `ask_user`: the question control tool forwards to the intervention seam,
  *    validates its arguments before the seam, maps answers and declines, and
  *    reports itself unavailable when no seam is wired.
@@ -97,10 +97,10 @@ function throwingGit(): GitService {
   };
   return {
     status: boom('status'),
-    isCleanExceptSpecFolder: boom('isCleanExceptSpecFolder'),
+    isCleanExceptPlanFolder: boom('isCleanExceptPlanFolder'),
     fetch: boom('fetch'),
     resolveBaseCommit: boom('resolveBaseCommit'),
-    createSpecBranch: boom('createSpecBranch'),
+    createPlanBranch: boom('createPlanBranch'),
     checkout: boom('checkout'),
     commit: boom('commit'),
     head: boom('head'),
@@ -119,10 +119,10 @@ function throwingGit(): GitService {
 function benignGit(commits: string[] = [], branches: string[] = []): GitService {
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async (branch: string) => { branches.push(branch); },
+    createPlanBranch: async (branch: string) => { branches.push(branch); },
     checkout: async () => undefined,
     commit: async (message: string) => { commits.push(message); return 'a'.repeat(40); },
     head: async () => 'a'.repeat(40),
@@ -228,11 +228,11 @@ function recordingSubAgents(
 }
 
 /** A caller at `depth` in `phase`. */
-function makeCaller(depth: number, phase: OrchestratorPhase = 'gather'): ToolCaller {
+function makeCaller(depth: number, step: ConversationStep = 'gather'): ToolCaller {
   return {
     sessionKey: 'chat-1',
     depth,
-    phase,
+    step,
     kind: { kind: 'workspace' },
     signal: new AbortController().signal,
   };
@@ -293,11 +293,11 @@ function makeRepo(): string {
 
 /** Legacy: write a spec.md for `slug` under the temp repo and return its absolute path. */
 function writeLegacySpec(repoRoot: string, slug: string, content: string): string {
-  const specDir = path.join(repoRoot, '.baiton', 'specs', slug);
-  fs.mkdirSync(specDir, { recursive: true });
-  const specFile = path.join(specDir, 'spec.md');
-  fs.writeFileSync(specFile, content, 'utf8');
-  return specFile;
+  const legacySpecsDir = path.join(repoRoot, '.baiton', 'specs', slug);
+  fs.mkdirSync(legacySpecsDir, { recursive: true });
+  const legacySpecFile = path.join(legacySpecsDir, 'spec.md');
+  fs.writeFileSync(legacySpecFile, content, 'utf8');
+  return legacySpecFile;
 }
 
 /** Write a plan.md for `slug` under the temp repo and return its absolute path. */
@@ -309,7 +309,7 @@ function writePlan(repoRoot: string, slug: string, content: string): string {
   return planFile;
 }
 
-/** Legacy: minimal spec document with frontmatter, OVERVIEW and one T01. */
+/** Legacy: minimal plan document with frontmatter, OVERVIEW and one . */
 function legacySpecDocument(): string {
   return [
     '---',
@@ -320,7 +320,7 @@ function legacySpecDocument(): string {
     '',
     '# OVERVIEW',
     '',
-    'A sample spec used by the registry unit tests.',
+    'A sample legacy document used by the registry unit tests.',
     '',
     '# TODOS',
     '',
@@ -372,7 +372,7 @@ function recordingLand(outcome: LandPhaseOutcome): {
   };
 }
 
-/** Legacy: approved spec document with one T01 phase in `state`. */
+/** Legacy: approved plan document with one phase in `state`. */
 function approvedLegacySpec(state: string): string {
   return [
     '---',
@@ -383,7 +383,7 @@ function approvedLegacySpec(state: string): string {
     '',
     '# OVERVIEW',
     '',
-    'A sample spec used by the registry unit tests.',
+    'A sample legacy document used by the registry unit tests.',
     '',
     '# TODOS',
     '',
@@ -392,7 +392,7 @@ function approvedLegacySpec(state: string): string {
   ].join('\n');
 }
 
-describe('orchestrator registry and control tools (Task 13.8)', () => {
+describe('orchestrator registry and control tools', () => {
   const repos: string[] = [];
 
   function newRepo(): string {
@@ -439,7 +439,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.deepStrictEqual(defNames, [...EXPECTED_TOOLS].sort());
     });
 
-    it('names() is sorted for a stable model spec / diagnostics view', () => {
+    it('names() is sorted for a stable model plan / diagnostics view', () => {
       const repo = newRepo();
       const registry = createToolRegistry(
         makeServices(repo, benignGit(), recordingConfirm(true)),
@@ -549,7 +549,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
     });
 
-    it('refuses a slug that already has a legacy spec, before confirming or dispatching', async () => {
+    it('refuses a slug that already has a legacy plan, before confirming or dispatching', async () => {
       const repo = newRepo();
       const slug = 'sample';
       const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
@@ -685,7 +685,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
   });
 
   describe('approve_plan confirmation and decline (Req 10.1, 10.2)', () => {
-    it('asks the confirm seam and, on decline, leaves the spec unchanged and returns an error', async () => {
+    it('asks the confirm seam and, on decline, leaves the plan unchanged and returns an error', async () => {
       const repo = newRepo();
       const slug = 'sample';
       const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
@@ -707,18 +707,18 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       // Req 10.1: the confirmation was requested before any change.
       assert.strictEqual(confirm.calls.length, 1, 'approve_plan must ask to confirm');
-      assert.match(confirm.calls[0], new RegExp(slug), 'the prompt names the spec');
+      assert.match(confirm.calls[0], new RegExp(slug), 'the prompt names the plan');
 
-      // Req 10.2: declined => error result and the spec is byte-for-byte unchanged.
+      // Req 10.2: declined => error result and the plan is byte-for-byte unchanged.
       assert.strictEqual(result.ok, false, 'a declined approval returns an error');
       if (!result.ok) {
         assert.match(result.error, /declined|unchanged/i);
       }
       const after = fs.readFileSync(specFile, 'utf8');
-      assert.strictEqual(after, before, 'a declined approval leaves the spec unchanged');
+      assert.strictEqual(after, before, 'a declined approval leaves the document unchanged');
     });
 
-    it('approves plans and legacy specs, records metadata, and uses plan commit messages', async () => {
+    it('approves plans and legacy plans, records metadata, and uses plan commit messages', async () => {
       const commits: string[] = [];
       const branches: string[] = [];
       const git = benignGit(commits, branches);
@@ -784,16 +784,16 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
   describe('phase scoping (Req 11.1)', () => {
     /**
      * The tool surface of each orchestrator phase. `gather` asks clarifying
-     * questions and hands the agreed requirements to the spec writer; `drive`
-     * dispatches stages for an approved spec. The repository read tools and
+     * questions and hands the agreed requirements to the plan writer; `drive`
+     * dispatches stages for an approved plan. The repository read tools and
      * `draft_plan` belong to the first, `run` and `submit_pr` to the second,
-     * and the spec-write tools plus the cheap orientation reads to both. The
-     * third phase, `run`, is a spec-less (Bug/Quick/Refactor/Investigate)
+     * and the plan-write tools plus the cheap orientation reads to both. The
+     * third phase, `run`, is a plan-less (Bug/Quick/Refactor/Investigate)
      * conversation: it sees the read tools, `ask_user` and the two dispatch
-     * tools `start_run` and `investigate`, and no spec tool at all. Note the
+     * tools `start_run` and `investigate`, and no plan tool at all. Note the
      * phase named `run` is not the tool named `run`, which stays drive-only.
      */
-    const EXPECTED_PHASE_TOOLS: Record<OrchestratorPhase, string[]> = {
+    const EXPECTED_PHASE_TOOLS: Record<ConversationStep, string[]> = {
       gather: [
         'list_plans',
         'read_plan',
@@ -852,7 +852,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
 
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const names = registry.definitionsFor(phase).map((d) => d.name).sort();
         assert.deepStrictEqual(
           names,
@@ -869,7 +869,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       );
       for (const tool of registry.definitions()) {
         assert.ok(
-          tool.phases.length > 0,
+          tool.steps.length > 0,
           `"${tool.name}" would be dead weight: it belongs to no phase`,
         );
       }
@@ -903,7 +903,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(
         fs.readFileSync(specFile, 'utf8'),
         before,
-        'an out-of-phase mutating call leaves the spec byte-for-byte unchanged',
+        'an out-of-phase mutating call leaves the document byte-for-byte unchanged',
       );
     });
 
@@ -928,7 +928,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         assert.match(result.error, /draft_plan/);
         assert.match(result.error, /drive/);
       }
-      assert.strictEqual(draft.calls.length, 0, 'the spec writer was never dispatched');
+      assert.strictEqual(draft.calls.length, 0, 'the plan writer was never dispatched');
       assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
     });
 
@@ -962,9 +962,9 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
         makeServices(repo, benignGit(), recordingConfirm(true)),
       );
 
-      // `read_plan` is in both phases: the refusals above are about the phase,
+      // `read_plan` is in both steps: the refusals above are about the phase,
       // not a blanket block.
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const result = await registry.call(
           'read_plan',
           { slug },
@@ -1002,7 +1002,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
     });
 
-    it('refuses every spec tool while in the run phase, changing nothing', async () => {
+    it('refuses every plan tool while in the run phase, changing nothing', async () => {
       const repo = newRepo();
       const slug = 'sample';
       const specFile = writeLegacySpec(repo, slug, legacySpecDocument());
@@ -1039,11 +1039,11 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
       assert.strictEqual(queue.calls.length, 0, 'the run queue was never reached');
-      assert.strictEqual(draft.calls.length, 0, 'the spec writer was never dispatched');
+      assert.strictEqual(draft.calls.length, 0, 'the plan writer was never dispatched');
       assert.strictEqual(
         fs.readFileSync(specFile, 'utf8'),
         before,
-        'an out-of-phase call leaves the spec byte-for-byte unchanged',
+        'an out-of-phase call leaves the document byte-for-byte unchanged',
       );
     });
   });
@@ -1401,8 +1401,8 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
       for (const tool of [startRun, investigate]) {
         assert.strictEqual(tool.dispatch, true, `${tool.name} is a dispatch tool`);
-        assert.strictEqual(tool.mutating, false, `${tool.name} writes no spec file itself`);
-        assert.deepStrictEqual([...tool.phases], ['run'], `${tool.name} is run-phase only`);
+        assert.strictEqual(tool.mutating, false, `${tool.name} writes no plan document itself`);
+        assert.deepStrictEqual([...tool.steps], ['run'], `${tool.name} is run-phase only`);
       }
     });
   });
@@ -1452,7 +1452,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(queue.calls.length, 0, 'the queue was never reached');
     });
 
-    it('rejects the spec-scoped pr stage and points at submit_pr', async () => {
+    it('rejects the plan-scoped pr stage and points at submit_pr', async () => {
       const repo = newRepo();
       const slug = 'sample';
       writeLegacySpec(repo, slug, legacySpecDocument());
@@ -1531,7 +1531,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
   });
 
   describe('ask_user', () => {
-    const QUESTION = 'Which branch should this spec target?';
+    const QUESTION = 'Which branch should this plan target?';
 
     it('forwards an option question to the seam and returns the chosen option', async () => {
       const repo = newRepo();
@@ -1768,7 +1768,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('is available while driving', async () => {
       const repo = newRepo();
-      const question = 'Is the spec good to approve?';
+      const question = 'Is the plan good to approve?';
       const ask = recordingIntervention({ kind: 'text', text: 'yes' });
       const registry = createToolRegistry(
         makeServices(repo, throwingGit(), recordingConfirm(true), undefined, undefined, ask.seam),
@@ -1837,12 +1837,12 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
 
     it('answers busy per phase, dispatches other phases, and clears in-flight state', async () => {
-      const specsDir = path.join(newRepo(), '.baiton', 'specs');
+      const legacySpecsDir = path.join(newRepo(), '.baiton', 'specs');
       const queues = new Map<string, FakeQueue>([
         ['demo/T01', fakeQueue()],
         ['demo/T02', fakeQueue()],
       ]);
-      const seam = createRunQueueSeam((slug, todoId) => queues.get(`${slug}/${todoId}`)!, path.dirname(specsDir), () => undefined);
+      const seam = createRunQueueSeam((slug, phaseId) => queues.get(`${slug}/${phaseId}`)!, path.dirname(legacySpecsDir), () => undefined);
       const t01 = queues.get('demo/T01')!;
       const t02 = queues.get('demo/T02')!;
       const req = (phaseId: string) => ({ slug: 'demo', phaseId, stage: 'plan' as const });
@@ -1866,9 +1866,9 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     });
 
     it('answers busy while the queue itself is running and maps refusals to illegal', async () => {
-      const specsDir = path.join(newRepo(), '.baiton', 'specs');
+      const legacySpecsDir = path.join(newRepo(), '.baiton', 'specs');
       const q = fakeQueue();
-      const seam = createRunQueueSeam(() => q, path.dirname(specsDir), () => undefined);
+      const seam = createRunQueueSeam(() => q, path.dirname(legacySpecsDir), () => undefined);
       const req = { slug: 'demo', phaseId: 'T01', stage: 'plan' as const };
 
       q.running = true;
@@ -1896,7 +1896,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
     }
     const LANDED: LandPhaseOutcome = { kind: 'landed', commit: 'c'.repeat(40), noop: false, cleanup: [] };
 
-    it('lands a done todo without a confirm card', async () => {
+    it('lands a done phase without a confirm card', async () => {
       const { repo, seam, confirm, registry } = setup('done', LANDED);
       const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-a', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, true);
@@ -1923,7 +1923,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       if (result.ok) assert.deepStrictEqual(result.data, { slug, phase: 'P01', landed: true, commit: COMMIT });
     });
 
-    it('reports an already-landed todo', async () => {
+    it('reports an already-landed phase', async () => {
       const { repo, registry } = setup('done', { kind: 'already-landed' });
       const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-b', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, true);
@@ -1934,7 +1934,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       }
     });
 
-    it('refuses a todo that is not done', async () => {
+    it('refuses a phase that is not done', async () => {
       const { repo, seam, registry } = setup('executed', LANDED);
       const result = await registry.call('land_phase', { slug, phase: 'T01' }, 'call-land-c', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
@@ -1945,7 +1945,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       assert.strictEqual(seam.calls.length, 0);
     });
 
-    it('refuses an unknown todo id', async () => {
+    it('refuses an unknown phase id', async () => {
       const { repo, seam, registry } = setup('done', LANDED);
       const result = await registry.call('land_phase', { slug, phase: 'T09' }, 'call-land-d', makeGuard(repo), 'drive');
       assert.strictEqual(result.ok, false);
@@ -2014,7 +2014,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
   describe('sub-agent surface', () => {
     const READS = ['list_plans', 'read_plan', 'list_files', 'read_file', 'search', 'git_status', 'git_diff', 'git_log'];
-    const EXPECTED_SUBAGENT_TOOLS: Record<OrchestratorPhase, string[]> = {
+    const EXPECTED_SUBAGENT_TOOLS: Record<ConversationStep, string[]> = {
       gather: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
       drive: ['list_plans', 'read_plan', 'git_status', 'ask_user', 'run', 'spawn_subagent', 'send_to_subagent'],
       run: [...READS, 'ask_user', 'spawn_subagent', 'send_to_subagent'],
@@ -2032,7 +2032,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('advertises exactly the sub-agent tools of each phase', () => {
       const registry = registryFor(newRepo());
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         assert.deepStrictEqual(
           registry.definitionsFor(phase, 'subagent').map((d) => d.name).sort(),
           [...EXPECTED_SUBAGENT_TOOLS[phase]].sort(),
@@ -2047,7 +2047,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('never advertises a top-only tool to a sub-agent', () => {
       const registry = registryFor(newRepo());
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const names = registry.definitionsFor(phase, 'subagent').map((d) => d.name);
         for (const name of TOP_ONLY) {
           assert.ok(!names.includes(name), `${name} must not be on the ${phase} sub-agent surface`);
@@ -2057,7 +2057,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
 
     it('assembles the sub-agent surface in definition order', () => {
       const registry = registryFor(newRepo());
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const result = registry.assembleFor(phase, 'subagent');
         assert.strictEqual(result.ok, true);
         if (result.ok) {
@@ -2078,7 +2078,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const pipeline = spyingPipeline();
       const registry = registryFor(repo, { confirm, draft, pipeline });
       const guard = makeGuard(repo);
-      const cases: Array<[string, unknown, OrchestratorPhase]> = [
+      const cases: Array<[string, unknown, ConversationStep]> = [
         ['submit_pr', { slug: 'sample' }, 'drive'],
         ['land_phase', { slug: 'sample', phase: 'T01' }, 'drive'],
         ['draft_plan', { slug: 'sample', request: 'x' }, 'gather'],
@@ -2102,7 +2102,7 @@ describe('orchestrator registry and control tools (Task 13.8)', () => {
       const repo = newRepo();
       writeLegacySpec(repo, 'sample', legacySpecDocument());
       const registry = registryFor(repo);
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const result = await registry.call('read_plan', { slug: 'sample' }, undefined, makeGuard(repo), phase, 'subagent');
         assert.strictEqual(result.ok, true, `read_plan in ${phase}`);
       }

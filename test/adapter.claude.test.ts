@@ -57,7 +57,7 @@ import { Role, ROLES } from '../src/model/role';
 import { defaultConfig } from '../src/config/defaultConfig';
 
 /**
- * Task 9.3 — focused unit tests for the Claude adapter's probe shape and its
+ * Focused unit tests for the Claude adapter's probe shape and its
  * continue-flag / read-only-fallback launch branches. These complement the
  * per-role permission-table property test in `adapter.launch.property.test.ts`
  * by pinning the concrete contracts the design calls out:
@@ -153,29 +153,29 @@ describe('ClaudeAdapter session-id / continue-flag branches (Req 3.1, 3.2, 13.2,
   const adapter = new ClaudeAdapter();
 
   it('prepends --session-id on a fresh launch (Req 3.1)', () => {
-    const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['--session-id', 'session-xyz']);
-    assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--resume'));
+    const launchSpec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['--session-id', 'session-xyz']);
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--resume'));
   });
 
   it('falls back to the continue flag on resume with no prior Session_Id (Req 3.2, 13.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
     assert.strictEqual(
-      spec.shellArgs[0],
+      launchSpec.shellArgs[0],
       '-c',
-      `resume without a session id must lead with -c: ${JSON.stringify(spec.shellArgs)}`,
+      `resume without a session id must lead with -c: ${JSON.stringify(launchSpec.shellArgs)}`,
     );
-    assert.strictEqual(spec.shellArgs.filter((a) => a === '-c').length, 1);
-    assert.ok(!spec.shellArgs.includes('--session-id'));
-    assert.ok(!spec.shellArgs.includes('--resume'));
+    assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '-c').length, 1);
+    assert.ok(!launchSpec.shellArgs.includes('--session-id'));
+    assert.ok(!launchSpec.shellArgs.includes('--resume'));
   });
 
   it('prepends --resume <id> on resume with a prior Session_Id (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['--resume', 'prior-session']);
-    assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--session-id'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['--resume', 'prior-session']);
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--session-id'));
   });
 
   it('keeps the fresh and no-session-id-resume branches otherwise identical', () => {
@@ -191,38 +191,38 @@ describe('ClaudeAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new ClaudeAdapter();
 
   it('builds --resume <id> with no prompt, plus permission flags and the run-dir grant', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    const launchSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
 
-    assert.strictEqual(spec.shellPath, 'claude');
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['--resume', 'session-42']);
+    assert.strictEqual(launchSpec.shellPath, 'claude');
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['--resume', 'session-42']);
     assert.ok(
-      findPair(spec.shellArgs, '--permission-mode', ACCEPT_EDITS_MODE) >= 0,
-      `expected executor's permission-mode row: ${JSON.stringify(spec.shellArgs)}`,
+      findPair(launchSpec.shellArgs, '--permission-mode', ACCEPT_EDITS_MODE) >= 0,
+      `expected executor's permission-mode row: ${JSON.stringify(launchSpec.shellArgs)}`,
     );
     assert.ok(
-      findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-9/') >= 0,
-      `expected the per-run write grant: ${JSON.stringify(spec.shellArgs)}`,
+      findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-9/') >= 0,
+      `expected the per-run write grant: ${JSON.stringify(launchSpec.shellArgs)}`,
     );
     // No prompt is appended.
-    assert.ok(!spec.shellArgs.includes('--model'));
+    assert.ok(!launchSpec.shellArgs.includes('--model'));
   });
 
   it('uses the role-specific permission row, e.g. the read-only allow-list for planner', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0);
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    assert.ok(findPair(launchSpec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0);
   });
 });
 
 describe('ClaudeAdapter role permission table', () => {
-  it('treats the spec writer as a read-only role', () => {
+  it('treats the plan writer as a read-only role', () => {
     assert.ok(
       (READ_ONLY_ROLES as readonly string[]).includes('plan-writer'),
       'plan-writer must be read-only: it writes only its result file',
     );
   });
 
-  it('launches the spec writer with the read-only allow-list', () => {
-    const spec = new ClaudeAdapter().launch({
+  it('launches the plan writer with the read-only allow-list', () => {
+    const launchSpec = new ClaudeAdapter().launch({
       role: 'plan-writer',
       model: 'claude-sonnet-5',
       prompt: 'Read /repo/.baiton/runs/draft-1/brief.md and do what it says.',
@@ -230,7 +230,7 @@ describe('ClaudeAdapter role permission table', () => {
       resume: false,
       sessionId: '11111111-1111-4111-8111-111111111111',
     });
-    assert.ok(findPair(spec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0);
+    assert.ok(findPair(launchSpec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0);
   });
 });
 
@@ -240,33 +240,33 @@ describe('ClaudeAdapter read-only acceptEdits fallback (Req 15.7)', () => {
   for (const role of READ_ONLY_ROLES) {
     it(`emits the acceptEdits fallback arg set for read-only role ${role} when the flip is on`, () => {
       const adapter = new ClaudeAdapter(fallbackMode);
-      const spec = adapter.launch(req({ role }));
+      const launchSpec = adapter.launch(req({ role }));
 
       // The fallback swaps the scoped Write(...) allow-list for accept-edits.
       assert.ok(
-        findPair(spec.shellArgs, '--permission-mode', ACCEPT_EDITS_MODE) >= 0,
-        `expected --permission-mode ${ACCEPT_EDITS_MODE} for ${role}: ${JSON.stringify(spec.shellArgs)}`,
+        findPair(launchSpec.shellArgs, '--permission-mode', ACCEPT_EDITS_MODE) >= 0,
+        `expected --permission-mode ${ACCEPT_EDITS_MODE} for ${role}: ${JSON.stringify(launchSpec.shellArgs)}`,
       );
       // And it does NOT hand the role the read-only allow-list.
       assert.ok(
-        findPair(spec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) < 0,
-        `fallback must not emit the read-only allow-list for ${role}: ${JSON.stringify(spec.shellArgs)}`,
+        findPair(launchSpec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) < 0,
+        `fallback must not emit the read-only allow-list for ${role}: ${JSON.stringify(launchSpec.shellArgs)}`,
       );
-      assert.ok(!spec.shellArgs.includes('--allowedTools'));
+      assert.ok(!launchSpec.shellArgs.includes('--allowedTools'));
     });
 
     it(`emits the scoped Write(...) allow-list for read-only role ${role} when the flip is off`, () => {
       const adapter = new ClaudeAdapter(DEFAULT_PERMISSION_MODE);
-      const spec = adapter.launch(req({ role }));
+      const launchSpec = adapter.launch(req({ role }));
 
       // Default mode uses the scoped allow-list, not accept-edits.
       assert.ok(
-        findPair(spec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0,
-        `expected the read-only allow-list for ${role}: ${JSON.stringify(spec.shellArgs)}`,
+        findPair(launchSpec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0,
+        `expected the read-only allow-list for ${role}: ${JSON.stringify(launchSpec.shellArgs)}`,
       );
       assert.ok(
-        !spec.shellArgs.includes('--permission-mode'),
-        `default read-only mode must not use --permission-mode for ${role}: ${JSON.stringify(spec.shellArgs)}`,
+        !launchSpec.shellArgs.includes('--permission-mode'),
+        `default read-only mode must not use --permission-mode for ${role}: ${JSON.stringify(launchSpec.shellArgs)}`,
       );
     });
   }
@@ -590,7 +590,7 @@ describe('ClaudeAdapter ask-relay hook wiring', function () {
   }).timeout(4000);
 });
 
-describe('claudeModelsFromFeed (model-selector-refresh T04)', () => {
+describe('claudeModelsFromFeed ', () => {
   // test/fixtures/modelsDev.sample.json is read untyped (fs + JSON.parse, not
   // resolveJsonModule import) like test/modelsDev.test.ts does.
   const fixtureText = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
@@ -730,7 +730,7 @@ describe('claudeModelsFromFeed (model-selector-refresh T04)', () => {
   });
 });
 
-describe('claudeModelsFromCatalog (T02)', () => {
+describe('claudeModelsFromCatalog ', () => {
   // test/fixtures/claudeModelCatalog.sample.json is read untyped (fs +
   // JSON.parse, not a resolveJsonModule import) like the models.dev fixture.
   const catalogJson: unknown = JSON.parse(
@@ -890,7 +890,7 @@ describe('claudeModelsFromCatalog (T02)', () => {
   });
 });
 
-describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
+describe('ClaudeAdapter.discoverModels ', () => {
   /** The parsed checked-in fixture feed. */
   const fixtureFeed: ModelsDevFeed = (() => {
     const result = parseModelsDevFeed(
@@ -919,7 +919,7 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
   }
 
   /**
-   * A ClaudeAdapter with the local-catalog leg switched OFF (T02). Mandatory for
+ * A ClaudeAdapter with the local-catalog leg switched OFF . Mandatory for
    * every feed-path assertion in this describe: the default reader reads the
    * developer's real `~/.claude/cache/model-catalog`, which would make these
    * expectations machine-dependent.
@@ -1059,7 +1059,7 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
   });
 
   it('a fetcher that aborts the ctx signal synchronously and never settles resolves undefined promptly', async () => {
-    // Regression (T04 review): the abort can complete INSIDE the fetch call,
+ // Regression : the abort can complete INSIDE the fetch call,
     // before raceAbort subscribes — no abort event ever fires then, so the
     // race must check signal.aborted itself instead of hanging forever.
     const controller = new AbortController();
@@ -1074,7 +1074,7 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
     assert.ok(Date.now() - started < 2000, 'the synchronously-aborted race must not hang until the timeout');
   });
 
-  // ---- T02: the local model catalog takes precedence over the feed ----
+ // ---- : the local model catalog takes precedence over the feed ----
 
   /** The checked-in local-catalog fixture, read untyped. */
   const catalogJson: unknown = JSON.parse(
@@ -1257,7 +1257,7 @@ describe('ClaudeAdapter.discoverModels (model-selector-refresh T04)', () => {
   });
 });
 
-describe('ClaudeAdapter feed fallback API failure log (api-error-log T08)', () => {
+describe('ClaudeAdapter feed fallback API failure log ', () => {
   const fixtureText = fs.readFileSync(path.join(__dirname, 'fixtures', 'modelsDev.sample.json'), 'utf8');
   const fixtureFeed: ModelsDevFeed = (() => {
     const result = parseModelsDevFeed(JSON.parse(fixtureText));

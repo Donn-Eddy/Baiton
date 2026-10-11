@@ -8,7 +8,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
  * Feature: baiton-first-pass, Property 15: Planner context is confined to
  * allowed content
  *
- * For any spec and any planned phase, the planner's brief SHALL contain only the
+ * For any plan and any planned phase, the planner's brief SHALL contain only the
  * OVERVIEW, that phase's line, and the execution summaries of that phase's
  * `after` targets, and no content from any other phase.
  *
@@ -20,7 +20,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
  * latest execution summary), never what it intended (its plan), so the planner
  * is briefed on the state of the code rather than on other phases' plans.
  *
- * This test generates a spec with several phases wired by `after` edges, gives
+ * This test generates a plan with several phases wired by `after` edges, gives
  * every phase a plan marker, an exec-summary marker, and a title/line marker
  * that are all unique, builds the plan context for a randomly chosen target,
  * and asserts:
@@ -33,7 +33,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
  *       neither the target nor one of its `after` targets.
  */
 
-/** The model a generated spec is rendered from and parsed back into. */
+/** The model a generated plan is rendered from and parsed back into. */
 interface SpecModel {
   overviewMarker: string;
   phases: TodoModel[];
@@ -47,7 +47,7 @@ interface TodoModel {
   after: string[];
 }
 
-/** Renders a {@link SpecModel} to canonical spec text `parsePlan` consumes. */
+/** Renders a {@link SpecModel} to canonical plan text `parsePlan` consumes. */
 function renderSpec(model: SpecModel): string {
   const lines: string[] = [];
   lines.push('---');
@@ -81,7 +81,7 @@ const idArb: fc.Arbitrary<string> = fc
   .map((n) => 'T' + String(n).padStart(2, '0'));
 
 /**
- * A spec with at least two phases so a target can have both `after` targets and
+ * A plan with at least two phases so a target can have both `after` targets and
  * non-`after` phases. Ids are unique; each phase's `after` list is drawn from the
  * other ids in the set (self-edges excluded so the target's own line is not
  * double-counted as an `after` target).
@@ -116,7 +116,7 @@ const specModelArb: fc.Arbitrary<SpecModel> = fc
 
 /**
  * Per-phase plan/exec-summary markers. The trailing `-END` matters: without it
- * the marker of `T18` would be a prefix of the marker of `T182237`, and a
+ * the marker of `` would be a prefix of the marker of `T182237`, and a
  * "must not contain" assertion would fire on a legitimately included marker.
  */
 function planMarker(id: string): string {
@@ -154,12 +154,12 @@ describe('plan stage context confinement (property)', () => {
           }),
         ),
         ({ model, targetIdx }) => {
-          const spec: ParsedPlan = parsePlan(renderSpec(model));
+          const parsedPlan: ParsedPlan = parsePlan(renderSpec(model));
           const target = model.phases[targetIdx];
 
           const context = buildStageContext({
             stage: 'plan',
-            plan: spec,
+            plan: parsedPlan,
             phaseId: target.id,
             afterExecutes: buildAfterExecutes(model),
           });

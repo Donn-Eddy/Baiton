@@ -85,7 +85,7 @@ export type Intervention = InterventionRequest & {
   id: string;
   /** ISO-8601 creation time from the injected Clock. */
   createdAt: string;
-  /** Conversation scope the card belongs to ('workspace' or a spec slug). */
+  /** Conversation scope the card belongs to ('workspace' or a plan slug). */
   scopeId?: string;
   /** Present only for an ask a sub-agent raised. */
   origin?: InterventionOrigin;

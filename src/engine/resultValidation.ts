@@ -17,7 +17,7 @@ import {
 
 /**
  * Why a Result_File was rejected (Req 12.3, 12.9). Both variants mean the
- * artifact is not persisted, the terminal stays open, and the todo state is
+ * artifact is not persisted, the terminal stays open, and the phase state is
  * left unchanged (Req 12.6).
  *
  * - `malformed-json` — the file contents were not well-formed JSON (Req 12.3).

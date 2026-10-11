@@ -28,7 +28,7 @@ import type { Role } from '../src/model/role';
  * attempt and advances the lifecycle: the queue commits the execution (the
  * counted-attempt observable, carrying `execute attempt <n>`) and writes the
  * `executed` terminal state. A non-`completed` outcome — `invalid_output`,
- * `closed`, or `cancelled` — halts the stage, leaves the todo state unchanged
+ * `closed`, or `cancelled` — halts the stage, leaves the phase state unchanged
  * (except `cancelled`, which sets `failed`), and is never counted as an
  * attempt. Over a random sequence of outcomes, the number of counted attempts
  * (execute commits) equals exactly the number of `completed` execute outcomes.
@@ -41,7 +41,7 @@ import type { Role } from '../src/model/role';
  *   - `invalid_output`  — the test emits an invalid result (kept open for a
  *                         rewrite), then closes the terminal (halts, not counted).
  *   - `cancelled`       — `stop()` disposes the running terminal.
- * The spec store keeps every execute transition legal and records each
+ * The plan store keeps every execute transition legal and records each
  * `executing`→`executed` advance; the git stub records each execute commit as
  * the counted-attempt observable.
  */
@@ -197,10 +197,10 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
   // Every execute commit is the counted-attempt observable (Req 18.17, 17.4).
   const git = {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async (message: string, trailers?: Record<string, string>) => {
       if (worktreeMode) {
@@ -213,7 +213,7 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
       return 'commitsha';
     },
     head: async () => 'HEAD0',
-    currentBranch: async () => 'spec-branch',
+    currentBranch: async () => 'plan-branch',
     diff: async () => '',
     diffAgainstWorkingTree: async () => '',
     log: async () => '',
@@ -223,8 +223,8 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
     remoteUrl: async () => '',
   } satisfies GitService;
 
-  // A spec store that keeps every execute transition legal. Each dispatch's
-  // todo is `planned` (legal for execute). Observing an `executing`→`executed`
+  // A plan store that keeps every execute transition legal. Each dispatch's
+  // phase is `planned` (legal for execute). Observing an `executing`→`executed`
   // write is the lifecycle-advance observable that only a completed run drives.
   const wtGit = {
     ...git,
@@ -235,21 +235,21 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
     },
   } satisfies GitService;
   const worktrees: QueueWorktreeSeam = {
-    ensure: async (slug, todoId) =>
-      ok({ dir: path.join(path.dirname(journalPath), '.baiton', 'worktrees', slug, todoId), git: wtGit }),
+    ensure: async (slug, phaseId) =>
+      ok({ dir: path.join(path.dirname(journalPath), '.baiton', 'worktrees', slug, phaseId), git: wtGit }),
     unlanded: async () => [],
   };
 
   const planStore: PlanStore = {
     currentState: async () => 'planned',
     readPlan: async () => undefined,
-    readArtifact: async () => '# Plan T01\n',
+    readArtifact: async () => '# Plan P01\n',
     latestExecuteCommit: async () => undefined,
     isApproved: async () => true,
     isBlocked: async () => false,
     inputRevMatches: async () => true,
     inputRev: async () => 'rev0',
-    writeState: async (_slug, _todoId, state) => {
+    writeState: async (_slug, _phaseId, state) => {
       if (state === 'executed') {
         advanceCount += 1;
       }
@@ -288,11 +288,11 @@ function makeRig(journalPath: string, worktreeMode = false): Rig {
   };
 }
 
-/** Build an `execute` dispatch request with a per-index todo/attempt. */
+/** Build an `execute` dispatch request with a per-index phase/attempt. */
 function executeRequest(index: number): RunRequest {
   return {
     slug: 'demo',
-    phaseId: `todo-${index}`,
+    phaseId: `phase-${index}`,
     action: 'execute',
     role: 'executor',
     attempt: index + 1,
@@ -407,8 +407,8 @@ describe('run queue attempt counting (property harness)', () => {
             assert.strictEqual(rig.mainCommits(), 0, 'the main checkout is never committed to');
             assert.strictEqual(rig.worktreeCommits.length, expectedAttempts);
             for (const c of rig.worktreeCommits) {
-              assert.match(c.message, /^plan\(demo\): todo-\d+ execute attempt \d+$/);
-              assert.ok(c.trailers?.['Run-Id']?.startsWith('demo-todo-'), 'Run-Id trailer');
+              assert.match(c.message, /^plan\(demo\): phase-\d+ execute attempt \d+$/);
+              assert.ok(c.trailers?.['Run-Id']?.startsWith('demo-phase-'), 'Run-Id trailer');
             }
           }
 

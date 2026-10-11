@@ -130,7 +130,7 @@ import type {
   Intervention,
   InterventionSeam,
   LandPhaseSeam,
-  OrchestratorPhase,
+  ConversationStep,
   PresentIntervention,
   RunPipelineSeam,
   SubAgentSeam,
@@ -391,8 +391,6 @@ export function registerCommands(
   const cfg = (): Config => activation.config;
   const repoRoot = workspace.root.fsPath;
   const baitonDir = workspace.baitonDir.fsPath;
-  // Legacy chat-session root owned by SessionStore.
-  const specsDir = vscode.Uri.joinPath(workspace.baitonDir, 'specs').fsPath;
   /**
    * The mode the composer's Mode select currently holds. The ChatController
    * persists it under the same `workspaceState` key (see its `modeMemory` dep
@@ -802,8 +800,8 @@ export function registerCommands(
   // send, and the registry refuses an out-of-phase call even if the model names
   // it anyway.
   const toolSpecsByName = new Map(tools.map((toolSpec) => [toolSpec.name, toolSpec]));
-  // OrchestratorPhase is the conversation step, distinct from a plan phase.
-  const toolsByStep = new Map<OrchestratorPhase, ToolSpec[]>([
+  // ConversationStep is the conversation step, distinct from a plan phase.
+  const toolsByStep = new Map<ConversationStep, ToolSpec[]>([
     ['gather', toolSpecsForStep(registry, toolSpecsByName, 'gather')],
     ['drive', toolSpecsForStep(registry, toolSpecsByName, 'drive')],
     ['run', toolSpecsForStep(registry, toolSpecsByName, 'run')],
@@ -914,7 +912,6 @@ export function registerCommands(
     guardContext: () => guardContextFor(workspace),
     askRegistry,
     baitonDir,
-    specsDir, // legacy chat-session root (SessionStore)
     roundBound: () => readRoundBound(),
     contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
     contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
@@ -1111,6 +1108,7 @@ export function registerCommands(
   // --- CodeLens over plan phases ------------------------------------------
   disposables.push(
     vscode.languages.registerCodeLensProvider(
+      // Legacy: keep watching existing spec.md documents alongside plan.md.
       { pattern: '**/.baiton/{plans/*/plan.md,specs/*/spec.md}' },
       new PlanCodeLensProvider(baitonDir),
     ),
@@ -1594,7 +1592,7 @@ async function runApprove(
 function toolSpecsForStep(
   registry: ToolRegistry,
   validated: Map<string, ToolSpec>,
-  step: OrchestratorPhase,
+  step: ConversationStep,
 ): ToolSpec[] {
   const toolSpecs: ToolSpec[] = [];
   for (const tool of registry.definitionsFor(step)) {
@@ -1824,8 +1822,8 @@ function sessionSet(entries: JournalEntry[]): Set<string> {
   const sessions = new Set<string>();
   for (const entry of entries) {
     if (entry.sessionId !== undefined) {
-      // JournalEntry.todoId is a persisted field name.
-      sessions.add(entry.todoId); // legacy journal field name
+      // JournalEntry.phaseId is a persisted field name.
+      sessions.add(entry.phaseId); // legacy journal field name
     }
   }
   return sessions;
@@ -1844,6 +1842,7 @@ function lens(
 
 /** The plan slug from a document URI, including the legacy `.baiton/specs/<slug>/spec.md` root. */
 function slugFromDocumentUri(uri: vscode.Uri): string | undefined {
+  // Legacy: accept document URIs from the former specs/ root.
   const match = /[/\\]\.baiton[/\\](?:plans[/\\]([^/\\]+)[/\\]plan\.md|specs[/\\]([^/\\]+)[/\\]spec\.md)$/.exec(uri.fsPath);
   return match ? (match[1] ?? match[2]) : undefined;
 }

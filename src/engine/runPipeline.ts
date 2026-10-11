@@ -23,8 +23,8 @@
  *
  * Nothing here ever reads or writes anything under a plan document folder: a plan-less
  * run has no plan and no phase, so the run id stands in for a phase id everywhere
- * the plan pipeline would use one (the journal's `todoId`, `awaitStageResult`'s
- * `todoId`).
+ * the plan pipeline would use one (the journal's `phaseId`, `awaitStageResult`'s
+ * `phaseId`).
  *
  * It holds the one-stage-per-repository lock from both sides, exactly as
  * `planDraft.ts` does: `start()` refuses `busy` while a phase queue or the
@@ -816,7 +816,7 @@ class DefaultRunPipeline implements RunPipeline {
     }
     const { terminal, resultPath, relay } = launched.value;
 
-    // 6. Journal the start. The run id stands in for `todoId` exactly as
+    // 6. Journal the start. The run id stands in for `phaseId` exactly as
     //    `planDraft.ts` passes the plan slug, and `inputRev` is empty because a
     //    run has no plan input rev. The run directory already exists — the
     //    manifest was written there — so the append has somewhere to go.
@@ -824,7 +824,7 @@ class DefaultRunPipeline implements RunPipeline {
     const terminalPid = await resolvePid(terminal);
     appendStart(journalPath, {
       runId: launchId,
-      todoId: runId,
+      phaseId: runId,
       stage,
       attempt,
       startHead,
@@ -859,7 +859,7 @@ class DefaultRunPipeline implements RunPipeline {
       }
     }
 
-    // 8. Await the outcome. `slug`/`workspaceRoot`/`todoId` only feed the
+    // 8. Await the outcome. `slug`/`workspaceRoot`/`phaseId` only feed the
     //    plan-relative `artifactPath` that `awaitStageResult` composes and puts
     //    on the outcome; nothing is written there, because `target.write`
     //    ignores its path argument and writes into the run directory instead.
@@ -877,7 +877,7 @@ class DefaultRunPipeline implements RunPipeline {
           workspaceRoot: input.cwd ?? this.deps.workspaceRoot,
           slug: runId,
           stage,
-          todoId: runId,
+          phaseId: runId,
           ...(isNumbered ? { index: attempt } : {}),
           terminal,
           watcher,

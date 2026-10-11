@@ -328,7 +328,7 @@ describe('phase worktree lifecycle', () => {
   });
 });
 
-describe('legacy spec documents', () => {
+describe('legacy plan documents', () => {
   const repos: string[] = [];
 
   function legacyRepo(): string {

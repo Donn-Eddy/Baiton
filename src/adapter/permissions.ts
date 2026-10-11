@@ -113,14 +113,14 @@ export function runDirGrant(runId: string): string[] {
 }
 
 /**
- * Split an `--allowedTools` spec on commas that are *outside* parentheses, so
+ * Split an `--allowedTools` value on commas that are *outside* parentheses, so
  * a pattern like `Write(.baiton/runs/**)` is not split inside its pattern.
  */
-function splitSpec(spec: string): string[] {
+function splitAllowList(value: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let current = '';
-  for (const ch of spec) {
+  for (const ch of value) {
     if (ch === '(') {
       depth++;
       current += ch;
@@ -139,7 +139,7 @@ function splitSpec(spec: string): string[] {
 }
 
 /**
- * Parse an `--allowedTools` spec string (the same strings
+ * Parse an `--allowedTools` value (the same strings
  * {@link permissionFlags} emits for `READ_ONLY_ALLOWED_TOOLS` /
  * `REVIEWER_ALLOWED_TOOLS`) into per-tool entries, so the auto-mode
  * allow-list and the launch flags cannot drift.
@@ -149,9 +149,9 @@ function splitSpec(spec: string): string[] {
  * `'Read,Glob,Grep,Write(.baiton/runs/**)'` parses to
  * `[{tool:'Read'},{tool:'Glob'},{tool:'Grep'},{tool:'Write',paths:['.baiton/runs/**']}]`.
  */
-export function parseAllowedTools(spec: string): { tool: string; paths?: string[] }[] {
+export function parseAllowedTools(value: string): { tool: string; paths?: string[] }[] {
   const entries: { tool: string; paths?: string[] }[] = [];
-  for (const raw of splitSpec(spec.trim())) {
+  for (const raw of splitAllowList(value.trim())) {
     const entry = raw.trim();
     if (entry.length === 0) {
       continue;
@@ -185,11 +185,11 @@ const CLAUDE_TOOL_FAMILY: Record<string, AllowedToolFamily> = {
  * {@link permissionFlags} emits, so the gate reads exactly the table claude
  * is launched with.
  *
- * - `['--allowedTools', spec]`: each parsed entry maps onto a
+ * - `['--allowedTools', value]`: each parsed entry maps onto a
  *   {@link ToolAllowRule} via {@link CLAUDE_TOOL_FAMILY}; a Write rule is
  *   substituted with the concrete {@link runDirGlob} (the `--add-dir` grant
  *   from {@link runDirGrant}), scoping the rule to this agent's own run dir
- *   rather than the spec's broader `.baiton/runs/**` pattern.
+ *   rather than the broader `.baiton/runs/**` pattern.
  * - `['--permission-mode', ACCEPT_EDITS_MODE]`: accept-edits carries no
  *   per-tool table, so fall back to the profile-derived
  *   {@link roleAllowList} (this covers both the executor row and the
@@ -205,7 +205,7 @@ export function claudeAllowList(role: Role, runId: string, mode: PermissionMode 
         continue;
       }
       if (family === 'write') {
-        // Substitute the concrete run-dir glob for the spec's broad pattern:
+        // Substitute the concrete run-dir glob for the broad pattern:
         // `Write(.baiton/runs/**)` reaches into every run's directory, but
         // this agent's grant is exactly its own run dir (plus the `--add-dir`
         // grant from `runDirGrant`), so the rule must be scoped to

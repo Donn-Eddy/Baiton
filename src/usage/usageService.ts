@@ -1,6 +1,6 @@
 /**
- * Host-free UsageService for the Usage view (baiton.usageView) — spec
- * first-party-usage, todo T02. Coalesces per-tool reads, timeboxes them, keeps
+ * Host-free UsageService for the Usage view (baiton.usageView). Coalesces
+ * per-tool reads, timeboxes them, keeps
  * the last good reading as stale, never throws.
  *
  * Imports only from './model': no vscode, no Node built-in modules. Timers come

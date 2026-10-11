@@ -81,7 +81,7 @@ export type SnapshotSource = 'live' | 'cached' | 'builtin';
  * Note the two-level naming split resolved here (catalog OVERVIEW calls both
  * "source"): `sourceId` names WHICH feed the list came from, while `source`
  * names its origin in this window (`live` | `cached` | `builtin`). Later
- * todos (discovery service, router, config panel) must keep this split.
+ * modules (discovery service, router, config panel) must keep this split.
  */
 export interface ModelCatalogSnapshot {
   /** The catalog feed this list came from. */

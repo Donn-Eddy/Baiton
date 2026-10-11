@@ -1,6 +1,6 @@
 /**
- * Host-free usage reading model for the Usage view (baiton.usageView) — spec
- * first-party-usage, todo T01. Carries no vscode import, no Node built-in
+ * Host-free usage reading model for the Usage view (baiton.usageView). Carries
+ * no vscode import, no Node built-in
  * import and does no I/O; every function is total (never throws).
  *
  * This module deliberately depends on nothing so later readers, the

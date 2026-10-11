@@ -123,33 +123,33 @@ describe('AntigravityAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)'
   const adapter = new AntigravityAdapter();
 
   it('fresh launch has no leading subcommand, starts at --model, and drops req.sessionId (Req 3.1)', () => {
-    const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
+    const launchSpec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
     // agy, not the agent id `antigravity`.
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.antigravity);
-    assert.strictEqual(spec.shellArgs[0], '--model');
-    assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--conversation'));
-    assert.ok(!spec.shellArgs.includes('session-xyz'));
-    assert.ok(!spec.shellArgs.includes('--session-id'));
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.antigravity);
+    assert.strictEqual(launchSpec.shellArgs[0], '--model');
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--conversation'));
+    assert.ok(!launchSpec.shellArgs.includes('session-xyz'));
+    assert.ok(!launchSpec.shellArgs.includes('--session-id'));
   });
 
   it('resume with a prior Session_Id leads --conversation <id> (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['--conversation', 'prior-session']);
-    assert.ok(!spec.shellArgs.includes('-c'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: 'prior-session' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['--conversation', 'prior-session']);
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
   });
 
   it('resume with no prior Session_Id falls back to -c (Req 3.2, 13.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.strictEqual(spec.shellArgs[0], '-c');
-    assert.strictEqual(spec.shellArgs.filter((a) => a === '-c').length, 1);
-    assert.ok(!spec.shellArgs.includes('--conversation'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.strictEqual(launchSpec.shellArgs[0], '-c');
+    assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '-c').length, 1);
+    assert.ok(!launchSpec.shellArgs.includes('--conversation'));
   });
 
   it('resume with an empty-string prior Session_Id behaves as no prior id', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
-    assert.strictEqual(spec.shellArgs[0], '-c');
-    assert.ok(!spec.shellArgs.includes('--conversation'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
+    assert.strictEqual(launchSpec.shellArgs[0], '-c');
+    assert.ok(!launchSpec.shellArgs.includes('--conversation'));
   });
 
   it('keeps the fresh and no-session-id-resume branches otherwise identical', () => {
@@ -173,10 +173,10 @@ describe('AntigravityAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)'
   });
 
   it('folds a bare Gemini family plus effort into the suffixed --model id (no --effort flag)', () => {
-    const spec = adapter.launch(req({ model: 'gemini-3.8-flash', effort: 'medium' }));
-    assert.ok(findPair(spec.shellArgs, '--model', 'gemini-3.8-flash-medium') >= 0);
-    assert.ok(!spec.shellArgs.includes('--effort'));
-    assert.ok(!spec.shellArgs.includes('gemini-3.8-flash'));
+    const launchSpec = adapter.launch(req({ model: 'gemini-3.8-flash', effort: 'medium' }));
+    assert.ok(findPair(launchSpec.shellArgs, '--model', 'gemini-3.8-flash-medium') >= 0);
+    assert.ok(!launchSpec.shellArgs.includes('--effort'));
+    assert.ok(!launchSpec.shellArgs.includes('gemini-3.8-flash'));
   });
 
   it('refuses a launch agy is known to reject, before building any argv', () => {
@@ -188,8 +188,8 @@ describe('AntigravityAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)'
 
   it('appends the prompt as the value of a trailing --prompt-interactive flag, with no -- separator', () => {
     const request = req();
-    const spec = adapter.launch(request);
-    const args = spec.shellArgs;
+    const launchSpec = adapter.launch(request);
+    const args = launchSpec.shellArgs;
     assert.strictEqual(args[args.length - 1], request.prompt);
     assert.strictEqual(args[args.length - 2], '--prompt-interactive');
     assert.ok(!args.includes('--'));
@@ -200,9 +200,9 @@ describe('AntigravityAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new AntigravityAdapter();
 
   it('builds --conversation <id> --mode <mode> --add-dir <run-dir> with no prompt', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    const launchSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
 
-    assert.deepStrictEqual(spec.shellArgs, [
+    assert.deepStrictEqual(launchSpec.shellArgs, [
       '--conversation',
       'session-42',
       '--mode',
@@ -210,18 +210,18 @@ describe('AntigravityAdapter attach() (Req 3.3, 3.4)', () => {
       '--add-dir',
       '.baiton/runs/run-9/',
     ]);
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.antigravity);
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.antigravity);
 
-    assert.strictEqual(spec.shellArgs.length, 6);
-    assert.ok(!spec.shellArgs.includes('--prompt-interactive'));
-    assert.ok(!spec.shellArgs.includes('--model'));
-    assert.ok(!spec.shellArgs.includes('-c'));
+    assert.strictEqual(launchSpec.shellArgs.length, 6);
+    assert.ok(!launchSpec.shellArgs.includes('--prompt-interactive'));
+    assert.ok(!launchSpec.shellArgs.includes('--model'));
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
   });
 
   it('uses the plan mode and run-dir grant for a read-only role', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
-    assert.ok(findPair(spec.shellArgs, '--mode', ANTIGRAVITY_PLAN_MODE) >= 0);
-    assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    assert.ok(findPair(launchSpec.shellArgs, '--mode', ANTIGRAVITY_PLAN_MODE) >= 0);
+    assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
   });
 });
 
@@ -270,18 +270,18 @@ describe('AntigravityAdapter role -> --mode permission mapping (Req 15.1-15.3)',
 
   for (const role of ROLES) {
     it(`grants the per-run --add-dir and omits claude/opencode-only flags for role ${role} on launch`, () => {
-      const spec = new AntigravityAdapter().launch(req({ role, runId: 'run-777' }));
-      assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
+      const launchSpec = new AntigravityAdapter().launch(req({ role, runId: 'run-777' }));
+      assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
       for (const flag of forbidden) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
 
     it(`grants the per-run --add-dir and omits claude/opencode-only flags for role ${role} on attach`, () => {
-      const spec = new AntigravityAdapter().attach({ role, runId: 'run-777', sessionId: 's-1' });
-      assert.ok(findPair(spec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
+      const launchSpec = new AntigravityAdapter().attach({ role, runId: 'run-777', sessionId: 's-1' });
+      assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-777/') >= 0);
       for (const flag of forbidden) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
   }
@@ -463,12 +463,12 @@ describe('AntigravityAdapter native ask relay (probe findings, agy 1.2.8)', () =
 
   it('keeps every role on its own --mode and carries no env layer', () => {
     for (const role of ROLES) {
-      const spec = adapter.launch(relayed({ role }));
-      assert.strictEqual(spec.env, undefined);
-      const mode = spec.shellArgs[spec.shellArgs.indexOf('--mode') + 1];
+      const launchSpec = adapter.launch(relayed({ role }));
+      assert.strictEqual(launchSpec.env, undefined);
+      const mode = launchSpec.shellArgs[launchSpec.shellArgs.indexOf('--mode') + 1];
       assert.strictEqual(mode, isReadOnlyRole(role) ? ANTIGRAVITY_PLAN_MODE : ANTIGRAVITY_ACCEPT_EDITS_MODE);
-      assert.ok(!spec.shellArgs.includes('--sandbox'));
-      assert.ok(!spec.shellArgs.join(' ').includes('hooks.json'), 'the hook path never reaches the argv');
+      assert.ok(!launchSpec.shellArgs.includes('--sandbox'));
+      assert.ok(!launchSpec.shellArgs.join(' ').includes('hooks.json'), 'the hook path never reaches the argv');
     }
   });
 
@@ -480,9 +480,9 @@ describe('AntigravityAdapter native ask relay (probe findings, agy 1.2.8)', () =
   });
 
   it('attach() installs no relay and never emits skip-permissions', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
-    assert.ok(!spec.shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
-    assert.ok(!spec.shellArgs.join(' ').includes('hooks.json'));
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    assert.ok(!launchSpec.shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
+    assert.ok(!launchSpec.shellArgs.join(' ').includes('hooks.json'));
   });
 
   /**
@@ -609,7 +609,7 @@ function ctx(overrides: Partial<DiscoveryContext> = {}): DiscoveryContext {
   return { timeoutMs: 1_000, ...overrides };
 }
 
-describe('antigravityModelsFromCliOutput (codex-opencode-dropdown-fix T04)', () => {
+describe('antigravityModelsFromCliOutput ', () => {
   const entries = antigravityModelsFromCliOutput(AGY_MODELS_FIXTURE);
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
 
@@ -727,7 +727,7 @@ describe('antigravityModelsFromCliOutput (codex-opencode-dropdown-fix T04)', () 
   });
 });
 
-describe('AntigravityAdapter.discoverModels (codex-opencode-dropdown-fix T04)', () => {
+describe('AntigravityAdapter.discoverModels ', () => {
   it('spawns plain `agy models` with no undocumented flag', () => {
     assert.deepStrictEqual([...ANTIGRAVITY_MODELS_ARGS], ['models']);
     assert.deepStrictEqual([...ANTIGRAVITY_EFFORT_VOCABULARY], ['low', 'medium', 'high', 'max']);

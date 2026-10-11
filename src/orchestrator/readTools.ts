@@ -47,7 +47,7 @@ function listPlansTool(services: ToolServices): Tool {
     description: 'List the slugs of every plan under .baiton/plans/ (and legacy specs under .baiton/specs/) that has a plan document.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
       const slugs: string[] = [];
@@ -72,7 +72,7 @@ function readPlanTool(services: ToolServices): Tool {
     description: 'Read the raw plan document (plan.md, or a legacy spec.md) for a slug, bounded to the read cap.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -111,7 +111,7 @@ function listFilesTool(services: ToolServices): Tool {
     description: 'List repository-relative file paths matching the given glob pattern.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'run'],
+    steps: ['gather', 'run'],
     schema: {
       type: 'object',
       properties: { glob: { type: 'string' } },
@@ -143,7 +143,7 @@ function readFileTool(_services: ToolServices): Tool {
     description: "Read a file's text, or an optional 1-based inclusive line range of it.",
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'run'],
+    steps: ['gather', 'run'],
     schema: {
       type: 'object',
       properties: {
@@ -204,7 +204,7 @@ function searchTool(services: ToolServices): Tool {
     description: 'Search repository file contents for lines matching a regular expression.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'run'],
+    steps: ['gather', 'run'],
     schema: {
       type: 'object',
       properties: {
@@ -272,7 +272,7 @@ function gitStatusTool(services: ToolServices): Tool {
     description: 'Report the working-tree status: whether it is clean and any pending changes.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     schema: { type: 'object', properties: {}, additionalProperties: false },
     async run(): Promise<ToolResult> {
       try {
@@ -299,7 +299,7 @@ function gitDiffTool(services: ToolServices): Tool {
     description: 'Show the diff between the working tree and an optional ref (defaults to HEAD).',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'run'],
+    steps: ['gather', 'run'],
     schema: {
       type: 'object',
       properties: { ref: { type: 'string' } },
@@ -330,7 +330,7 @@ function gitLogTool(services: ToolServices): Tool {
     description: 'List the most recent commits as "<sha> <subject>" lines, bounded to the read cap.',
     mutating: false,
     concurrent: true,
-    phases: ['gather', 'run'],
+    steps: ['gather', 'run'],
     schema: {
       type: 'object',
       properties: { n: { type: 'integer', minimum: 1 } },

@@ -26,9 +26,9 @@ import {
 import { ok } from '../src/model/result';
 
 /**
- * Task 3.4 — the engine facade resumes the executor by Session_Id.
+ * The engine facade resumes the executor by Session_Id.
  *
- * For a second `execute` dispatch on a todo, `dispatchTrigger` reads the same
+ * For a second `execute` dispatch on a phase, `dispatchTrigger` reads the same
  * parsed journal it uses for the attempt count and, via `latestStart`, finds
  * the phase's most recent execute start. When that start recorded a
  * Session_Id, the facade carries it as `resumeSessionId` on the `RunRequest`
@@ -43,7 +43,7 @@ import { ok } from '../src/model/result';
  * discovered and journaled as `discoveredSessionId`.
  *
  * The test runs the real `RunQueue` + `ClaudeAdapter`/`CodexAdapter` over
- * stubbed terminal/watcher/git/spec-store dependencies and inspects the actual
+ * stubbed terminal/watcher/git/plan-store dependencies and inspects the actual
  * `shellArgs` the terminal host was asked to launch.
  */
 
@@ -112,10 +112,10 @@ function makeCompletingWatcherFactory(): ResultWatcherFactory {
 function makeGit(): GitService {
   return {
     status: async () => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => {},
     resolveBaseCommit: async () => 'base',
-    createSpecBranch: async () => {},
+    createPlanBranch: async () => {},
     checkout: async () => {},
     commit: async () => 'commit-sha',
     head: async () => 'head-sha',
@@ -133,10 +133,10 @@ function makeGit(): GitService {
 /** A plan store that keeps every `execute` transition legal, regardless of history. */
 const planStore: PlanStore = {
   currentState: async () => 'planned',
-  // Every todo has a plan on file, so the Execute brief can be assembled; the
+  // Every phase has a plan on file, so the Execute brief can be assembled; the
   // plan itself is not needed for what this test observes.
   readPlan: async () => undefined,
-  readArtifact: async () => '# Plan T01\n',
+  readArtifact: async () => '# Plan P01\n',
   latestExecuteCommit: async () => undefined,
   isApproved: async () => true,
   isBlocked: async () => false,
@@ -168,14 +168,14 @@ function flush(): Promise<void> {
 
 describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
   let tmpDir: string;
-  let specsDir: string;
+  let legacySpecsDir: string;
   let journalPath: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-resume-'));
-    specsDir = path.join(tmpDir, '.baiton', 'specs');
-    fs.mkdirSync(path.join(specsDir, 'demo'), { recursive: true });
-    journalPath = path.join(specsDir, 'demo', 'runs.jsonl');
+    legacySpecsDir = path.join(tmpDir, '.baiton', 'specs');
+    fs.mkdirSync(path.join(legacySpecsDir, 'demo'), { recursive: true });
+    journalPath = path.join(legacySpecsDir, 'demo', 'runs.jsonl');
   });
 
   it('carries --resume <prior id> on the second execute for a phase with a recorded session', async () => {
@@ -197,7 +197,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const first = await dispatchTrigger(
       queue,
-      path.dirname(specsDir),
+      path.dirname(legacySpecsDir),
       { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -206,7 +206,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const second = await dispatchTrigger(
       queue,
-      path.dirname(specsDir),
+      path.dirname(legacySpecsDir),
       { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -227,7 +227,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
     // Fixture: a prior execute start for t2 written before Session_Id existed.
     appendStart(journalPath, {
       runId: 'run-legacy',
-      todoId: 't2',
+      phaseId: 't2',
       stage: 'execute',
       attempt: 1,
       startHead: 'head-0',
@@ -251,7 +251,7 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
 
     const result = await dispatchTrigger(
       queue,
-      path.dirname(specsDir),
+      path.dirname(legacySpecsDir),
       { kind: 'stage', slug: 'demo', phaseId: 't2', stage: 'execute' },
       deps.adapterForRole,
     );
@@ -283,14 +283,14 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
  */
 describe('engine facade: adapters that mint their own session id (Req 3.2)', () => {
   let tmpDir: string;
-  let specsDir: string;
+  let legacySpecsDir: string;
   let journalPath: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-resume-codex-'));
-    specsDir = path.join(tmpDir, '.baiton', 'specs');
-    fs.mkdirSync(path.join(specsDir, 'demo'), { recursive: true });
-    journalPath = path.join(specsDir, 'demo', 'runs.jsonl');
+    legacySpecsDir = path.join(tmpDir, '.baiton', 'specs');
+    fs.mkdirSync(path.join(legacySpecsDir, 'demo'), { recursive: true });
+    journalPath = path.join(legacySpecsDir, 'demo', 'runs.jsonl');
   });
 
   afterEach(() => {
@@ -327,11 +327,11 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const trigger = { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' } as const;
 
-    const first = await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    const first = await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     assert.strictEqual(first.ok, true, `first execute should succeed: ${JSON.stringify(first)}`);
     await flush();
 
-    const second = await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    const second = await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     assert.strictEqual(second.ok, true, `second execute should succeed: ${JSON.stringify(second)}`);
     await flush();
 
@@ -354,7 +354,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     // run settled and journaled on its completion record.
     appendStart(journalPath, {
       runId: 'run-prior',
-      todoId: 't3',
+      phaseId: 't3',
       stage: 'execute',
       attempt: 1,
       startHead: 'head-0',
@@ -372,7 +372,7 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const result = await dispatchTrigger(
       queue,
-      path.dirname(specsDir),
+      path.dirname(legacySpecsDir),
       { kind: 'stage', slug: 'demo', phaseId: 't3', stage: 'execute' },
       adapterForRole,
     );
@@ -401,9 +401,9 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     const { queue, terminalHost, adapterForRole } = makeQueue(adapter);
     const trigger = { kind: 'stage', slug: 'demo', phaseId: 't5', stage: 'execute' } as const;
 
-    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     await flush();
-    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     await flush();
 
     const journal = fs.readFileSync(journalPath, 'utf8');
@@ -425,9 +425,9 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
     );
     const trigger = { kind: 'stage', slug: 'demo', phaseId: 't4', stage: 'execute' } as const;
 
-    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     await flush();
-    await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole);
+    await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole);
     await flush();
 
     assert.strictEqual(terminalHost.launches.length, 2);
@@ -440,12 +440,12 @@ describe('engine facade: adapters that mint their own session id (Req 3.2)', () 
 
 describe('engine facade: per-phase journals (sub-agent chats)', () => {
   let tmpDir: string;
-  let specsDir: string;
+  let legacySpecsDir: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-resume-pertodo-'));
-    specsDir = path.join(tmpDir, '.baiton', 'specs');
-    fs.mkdirSync(path.join(specsDir, 'demo'), { recursive: true });
+    legacySpecsDir = path.join(tmpDir, '.baiton', 'specs');
+    fs.mkdirSync(path.join(legacySpecsDir, 'demo'), { recursive: true });
   });
 
   afterEach(() => {
@@ -467,9 +467,9 @@ describe('engine facade: per-phase journals (sub-agent chats)', () => {
       terminalHost,
       watcherFactory: makeCompletingWatcherFactory(),
       planStore,
-      journalPath: planJournalPathFor(path.dirname(specsDir), 'demo'),
-      journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), 'demo', id),
-      readJournal: () => readPlanJournal(path.dirname(specsDir), 'demo'),
+      journalPath: planJournalPathFor(path.dirname(legacySpecsDir), 'demo'),
+      journalPathFor: (id) => phaseJournalPathFor(path.dirname(legacySpecsDir), 'demo', id),
+      readJournal: () => readPlanJournal(path.dirname(legacySpecsDir), 'demo'),
       modelForRole: (_role: Role) => ({ model: 'test-model' }),
       report: () => {},
       newSessionId: () => `session-${sessionCounter++}`,
@@ -480,22 +480,22 @@ describe('engine facade: per-phase journals (sub-agent chats)', () => {
   it('journals to phases/<id>/runs.jsonl and resumes on the second execute', async () => {
     const { queue, terminalHost, adapterForRole } = makeQueue();
     const trigger = { kind: 'stage', slug: 'demo', phaseId: 't1', stage: 'execute' } as const;
-    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole)).ok, true);
     await flush();
-    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole)).ok, true);
     await flush();
 
     assert.deepStrictEqual(terminalHost.launches[1].shellArgs.slice(0, 2), ['--resume', 'session-0']);
-    const todoFile = phaseJournalPathFor(path.dirname(specsDir), 'demo', 't1');
-    assert.ok(fs.existsSync(todoFile));
-    assert.ok(!fs.existsSync(planJournalPathFor(path.dirname(specsDir), 'demo')));
-    assert.strictEqual(readPlanJournal(path.dirname(specsDir), 'demo').length, 2);
+    const phaseJournalFile = phaseJournalPathFor(path.dirname(legacySpecsDir), 'demo', 't1');
+    assert.ok(fs.existsSync(phaseJournalFile));
+    assert.ok(!fs.existsSync(planJournalPathFor(path.dirname(legacySpecsDir), 'demo')));
+    assert.strictEqual(readPlanJournal(path.dirname(legacySpecsDir), 'demo').length, 2);
   });
 
-  it('resumes a session recorded in a legacy spec-level journal', async () => {
-    appendStart(planJournalPathFor(path.dirname(specsDir), 'demo'), {
+  it('resumes a session recorded in a legacy plan-level journal', async () => {
+    appendStart(planJournalPathFor(path.dirname(legacySpecsDir), 'demo'), {
       runId: 'run-legacy',
-      todoId: 't6',
+      phaseId: 't6',
       stage: 'execute',
       attempt: 1,
       startHead: 'h',
@@ -504,11 +504,11 @@ describe('engine facade: per-phase journals (sub-agent chats)', () => {
     });
     const { queue, terminalHost, adapterForRole } = makeQueue();
     const trigger = { kind: 'stage', slug: 'demo', phaseId: 't6', stage: 'execute' } as const;
-    assert.strictEqual((await dispatchTrigger(queue, path.dirname(specsDir), trigger, adapterForRole)).ok, true);
+    assert.strictEqual((await dispatchTrigger(queue, path.dirname(legacySpecsDir), trigger, adapterForRole)).ok, true);
     await flush();
 
     assert.deepStrictEqual(terminalHost.launches[0].shellArgs.slice(0, 2), ['--resume', 'legacy-session']);
-    const entries = readPlanJournal(path.dirname(specsDir), 'demo').filter((e) => e.todoId === 't6');
+    const entries = readPlanJournal(path.dirname(legacySpecsDir), 'demo').filter((e) => e.phaseId === 't6');
     assert.strictEqual(entries.length, 2);
     assert.strictEqual(entries[1].attempt, 2);
   });

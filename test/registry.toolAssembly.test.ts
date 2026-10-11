@@ -8,7 +8,7 @@ import {
   createToolRegistry,
 } from '../src/orchestrator/registry';
 import {
-  ORCHESTRATOR_PHASES,
+  CONVERSATION_STEPS,
   Tool,
   ToolContext,
   ToolResult,
@@ -19,7 +19,7 @@ import { Result, ok } from '../src/model/result';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
 
 /**
- * Unit tests for tool-description assembly rejection (Task 8.2).
+ * Unit tests for tool-description assembly rejection.
  *
  * Covers Req 10.5 (and 10.2–10.4 by way of it):
  *  - `assembleToolSpecs` rejects a tool whose description is missing (empty),
@@ -38,7 +38,7 @@ function fakeTool(name: string, description: string): Tool {
     name,
     description,
     mutating: false,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: { type: 'object' },
     // Assembly never runs the tool; this stub is only here to satisfy the type.
     run: async (_args: unknown, _tc: ToolContext): Promise<ToolResult> => ({
@@ -48,11 +48,11 @@ function fakeTool(name: string, description: string): Tool {
   };
 }
 
-describe('assembleToolSpecs description validation (Task 8.2)', () => {
+describe('assembleToolSpecs description validation', () => {
   describe('rejection cases (Req 10.5)', () => {
     it('rejects an empty description, names the tool, and produces no definitions', () => {
       const tools = [
-        fakeTool('list_plans', 'Lists every spec in the workspace.'),
+        fakeTool('list_plans', 'Lists every plan in the workspace.'),
         fakeTool('read_plan', ''),
       ];
 
@@ -95,7 +95,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
         'the fixture must actually be under the minimum after trimming',
       );
       const tools = [
-        fakeTool('list_plans', 'Lists every spec in the workspace.'),
+        fakeTool('list_plans', 'Lists every plan in the workspace.'),
         fakeTool('read_file', shortDescription),
       ];
 
@@ -144,8 +144,8 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
   describe('successful assembly (Req 10.3, 10.4)', () => {
     it('assembles a ToolSpec per tool with each description set from the tool field', () => {
       const tools = [
-        fakeTool('list_plans', 'Lists every spec in the workspace.'),
-        fakeTool('read_plan', 'Reads the raw text of one spec by slug.'),
+        fakeTool('list_plans', 'Lists every plan in the workspace.'),
+        fakeTool('read_plan', 'Reads the raw text of one plan by slug.'),
       ];
 
       const result = assembleToolSpecs(tools);
@@ -158,12 +158,12 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
           assert.strictEqual(
             result.value[i].description,
             tools[i].description,
-            'the spec description comes from the tool description field',
+            'the description comes from the tool description field',
           );
           assert.notStrictEqual(
             result.value[i].description,
             tools[i].name,
-            'the spec description is never the tool name',
+            'the description is never the tool name',
           );
           assert.strictEqual(result.value[i].parameters, tools[i].schema);
         }
@@ -187,7 +187,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       }
     });
 
-    it('a registry with every tool given a real description assembles, each spec matching its tool', () => {
+    it('a registry with every tool given a real description assembles, each plan matching its tool', () => {
       const repo = newRepo();
       const registry = createToolRegistry(makeServices(repo));
 
@@ -199,24 +199,24 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
         assert.strictEqual(
           result.value.length,
           definitions.length,
-          'one spec per registered tool',
+          'one tool definition per registered tool',
         );
         const byName = new Map(result.value.map((s) => [s.name, s]));
         for (const def of definitions) {
-          const spec = byName.get(def.name);
-          assert.ok(spec, `assembled specs include "${def.name}"`);
+          const toolDefinition = byName.get(def.name);
+          assert.ok(toolDefinition, `assembled definitions include "${def.name}"`);
           assert.strictEqual(
-            spec!.description,
+            toolDefinition!.description,
             def.description,
-            `"${def.name}" spec description matches its tool field`,
+            `"${def.name}" description matches its tool field`,
           );
           assert.notStrictEqual(
-            spec!.description,
+            toolDefinition!.description,
             def.name,
             `"${def.name}" description is not its name (Req 10.4)`,
           );
           assert.ok(
-            spec!.description.trim().length >= MIN_TOOL_DESCRIPTION_LENGTH,
+            toolDefinition!.description.trim().length >= MIN_TOOL_DESCRIPTION_LENGTH,
             `"${def.name}" description is long enough (Req 10.2)`,
           );
         }
@@ -245,7 +245,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       const registry = createToolRegistry(makeServices(repo));
       const allNames = new Set(registry.definitions().map((d) => d.name));
 
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const result = registry.assembleFor(phase);
         assert.strictEqual(result.ok, true, `the ${phase} phase must assemble`);
         if (!result.ok) {
@@ -255,7 +255,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
         assert.deepStrictEqual(
           names,
           registry.definitionsFor(phase).map((d) => d.name),
-          `the ${phase} specs match its definitions, in order`,
+          `the ${phase} definitions match its tools, in order`,
         );
         for (const name of names) {
           assert.ok(allNames.has(name), `"${name}" is a registered tool`);
@@ -269,7 +269,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
 
     it('assembles the sub-agent surface of each phase as a subset of the top surface', () => {
       const registry = createToolRegistry(makeServices(newRepo()));
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         const top = registry.assembleFor(phase);
         const sub = registry.assembleFor(phase, 'subagent');
         assert.ok(top.ok && sub.ok, `the ${phase} phase must assemble on both surfaces`);
@@ -279,9 +279,9 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
         const topNames = top.value.map((s) => s.name);
         const defs = registry.definitionsFor(phase, 'subagent');
         assert.deepStrictEqual(sub.value.map((s) => s.name), defs.map((d) => d.name));
-        for (const spec of sub.value) {
-          assert.ok(topNames.includes(spec.name));
-          assert.strictEqual(spec.description, defs.find((d) => d.name === spec.name)!.description);
+        for (const toolDefinition of sub.value) {
+          assert.ok(topNames.includes(toolDefinition.name));
+          assert.strictEqual(toolDefinition.description, defs.find((d) => d.name === toolDefinition.name)!.description);
         }
         assert.ok(sub.value.length < top.value.length, `${phase} sub-agent surface is strictly smaller`);
       }
@@ -289,7 +289,7 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
 
     it('advertises the spawn tools on both surfaces of every phase and run only in drive for sub-agents', () => {
       const registry = createToolRegistry(makeServices(newRepo()));
-      for (const phase of ORCHESTRATOR_PHASES) {
+      for (const phase of CONVERSATION_STEPS) {
         for (const surface of ['top', 'subagent'] as const) {
           const names = registry.definitionsFor(phase, surface).map((d) => d.name);
           assert.ok(names.includes('spawn_subagent'), `${phase}/${surface} has spawn_subagent`);
@@ -318,25 +318,25 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
       }
 
       const byName = new Map(registry.definitionsFor('run').map((d) => [d.name, d]));
-      for (const spec of result.value) {
+      for (const toolDefinition of result.value) {
         assert.strictEqual(
-          spec.description,
-          byName.get(spec.name)!.description,
-          `"${spec.name}" carries its tool's own description`,
+          toolDefinition.description,
+          byName.get(toolDefinition.name)!.description,
+          `"${toolDefinition.name}" carries its tool's own description`,
         );
-        assert.notStrictEqual(spec.description.trim(), '');
-        assert.notStrictEqual(spec.description, spec.name);
+        assert.notStrictEqual(toolDefinition.description.trim(), '');
+        assert.notStrictEqual(toolDefinition.description, toolDefinition.name);
       }
     });
 
     it('validates only the phase it assembles, so another phase\'s bad description cannot block it', () => {
       const good: Tool = fakeTool('gather_only', 'a perfectly good description');
-      good.phases = ['gather'];
+      good.steps = ['gather'];
       const bad: Tool = fakeTool('drive_only', 'x');
-      bad.phases = ['drive'];
+      bad.steps = ['drive'];
 
-      const gather = assembleToolSpecs([good, bad].filter((t) => t.phases.includes('gather')));
-      const drive = assembleToolSpecs([good, bad].filter((t) => t.phases.includes('drive')));
+      const gather = assembleToolSpecs([good, bad].filter((t) => t.steps.includes('gather')));
+      const drive = assembleToolSpecs([good, bad].filter((t) => t.steps.includes('drive')));
 
       assert.strictEqual(gather.ok, true, 'the gather phase assembles on its own');
       assert.strictEqual(drive.ok, false, 'the drive phase is rejected by its own bad tool');
@@ -351,10 +351,10 @@ describe('assembleToolSpecs description validation (Task 8.2)', () => {
 function benignGit(): GitService {
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async () => undefined,
+    createPlanBranch: async () => undefined,
     checkout: async () => undefined,
     commit: async () => 'a'.repeat(40),
     head: async () => 'a'.repeat(40),

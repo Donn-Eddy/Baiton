@@ -203,7 +203,7 @@ export const OPENCODE_EFFORTS: readonly string[] = [];
 /** Documentation URL for opencode model selection rendered inline in the config panel. */
 export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
 
-// --- opencode model discovery (model-selector-refresh T06) ---
+// --- opencode model discovery ---
 
 /** The only subcommand discovery ever spawns: `opencode serve`. */
 export const OPENCODE_SERVE_SUBCOMMAND = 'serve';
@@ -657,7 +657,7 @@ export function opencodeModelsFromVerboseOutput(stdout: string): ModelEntry[] {
 /**
  * Union the two discovery sources.
  *
- * Since T03 inverted the precedence this runs only on the `/api/model` fallback
+ * Since the precedence was inverted this runs only on the `/api/model` fallback
  * path, where the CLI list is empty — so it is effectively the identity on the
  * API entries. It is kept because the union rule itself is still the contract:
  * a model missing from one source is a gap in that source, not evidence the
@@ -720,7 +720,7 @@ export function mergeOpencodeModelSources(
  *    which opencode accepts even when the project has no sessions yet.
  * 3. This adapter emits **no** ask-relay wiring: `LaunchRequest.relay` is
  *    deliberately ignored, and `launch()`/`attach()` produce byte-identical
- *    specs with and without a descriptor. That is a probe result, not an
+ *    entries with and without a descriptor. That is a probe result, not an
  *    omission — see README.md, "Harness ask relay (per-adapter probe
  *    findings)", for the transcript. On opencode 1.18.30 the only surface that
  *    can intercept a tool call is a plugin's `tool.execute.before` hook

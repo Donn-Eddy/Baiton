@@ -46,7 +46,7 @@ describe('document location resolver', () => {
     assert.strictEqual(resolveDocument(baitonDir, 'same').kind, 'plan');
   });
 
-  it('uses directory-only fallbacks, including a legacy draft before spec.md', () => {
+  it('uses directory-only fallbacks, including a legacy draft before plan.md', () => {
     fs.mkdirSync(path.join(baitonDir, 'plans', 'draft'), { recursive: true });
     fs.mkdirSync(path.join(baitonDir, 'specs', 'legacy-draft'), { recursive: true });
     assert.strictEqual(resolveDocument(baitonDir, 'draft').kind, 'plan');

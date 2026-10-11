@@ -406,8 +406,8 @@ function countStageStarts(
 ): number {
   let count = 0;
   for (const entry of entries) {
-    // JournalEntry.todoId is a persisted field name.
-    if (entry.todoId === phaseId && entry.stage === stage) {
+    // JournalEntry.phaseId is a persisted field name.
+    if (entry.phaseId === phaseId && entry.stage === stage) {
       count += 1;
     }
   }

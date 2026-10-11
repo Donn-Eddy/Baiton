@@ -105,7 +105,7 @@ function askUserTool(services: ToolServices): Tool {
     description:
       'Ask the user a question and wait for their answer: offer a short list of options, accept a typed reply, or both. Use this instead of ending your turn with a question.',
     mutating: false,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     subagent: true,
     schema: {
       type: 'object',
@@ -202,7 +202,7 @@ function draftPlanTool(services: ToolServices): Tool {
     description:
       'Hand an agreed request (endstate, what needs changing, limitations & constraints) to the plan-writer agent, which studies the repository and drafts the phased plan for a new slug.',
     mutating: false,
-    phases: ['gather'],
+    steps: ['gather'],
     dispatch: true,
     schema: {
       type: 'object',
@@ -314,7 +314,7 @@ function startRunTool(services: ToolServices): Tool {
     description:
       'Start a plan-less run (bug, quick or refactor): hand a one-line statement of the work and the files involved to the planner, which plans, executes and reviews it on its own branch.',
     mutating: false,
-    phases: ['run'],
+    steps: ['run'],
     dispatch: true,
     schema: {
       type: 'object',
@@ -428,7 +428,7 @@ function investigateTool(services: ToolServices): Tool {
     description:
       'Answer a question about the repository with a read-only investigation: the investigator studies the named files and writes a one-line finding, the files it looked at, and suggested next steps.',
     mutating: false,
-    phases: ['run'],
+    steps: ['run'],
     dispatch: true,
     schema: {
       type: 'object',
@@ -505,7 +505,7 @@ function approvePlanTool(services: ToolServices): Tool {
     name: 'approve_plan',
     description: 'Approve or re-approve a plan: create its branch and record the approval hash.',
     mutating: true,
-    phases: ['gather', 'drive'],
+    steps: ['gather', 'drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -575,7 +575,7 @@ async function freshApprove(
   // Req 16.1/16.2: clean only if every change is confined to this document folder.
   let clean: boolean;
   try {
-    clean = await services.git.isCleanExceptSpecFolder(slug);
+    clean = await services.git.isCleanExceptPlanFolder(slug);
   } catch (e) {
     return { ok: false, error: gitErrorMessage(e) };
   }
@@ -605,7 +605,7 @@ async function freshApprove(
   // out. The branch name is derived from the slug.
   const branch = `baiton/${slug}`;
   try {
-    await services.git.createSpecBranch(branch, baseCommit);
+    await services.git.createPlanBranch(branch, baseCommit);
     await services.git.checkout(branch);
   } catch (e) {
     return {
@@ -689,7 +689,7 @@ function runTool(services: ToolServices): Tool {
     description:
       'Dispatch one stage for one phase (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
     mutating: false,
-    phases: ['drive'],
+    steps: ['drive'],
     subagent: true,
     dispatch: true,
     concurrent: true,
@@ -786,7 +786,7 @@ function landPhaseTool(services: ToolServices): Tool {
     description:
       'Land a done phase: merge its branch into the plan branch and remove its worktree. Returns the merge commit, or reports that the phase is already landed.',
     mutating: true,
-    phases: ['drive'],
+    steps: ['drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' }, phase: { type: 'string' } },
@@ -865,7 +865,7 @@ function submitPrTool(services: ToolServices): Tool {
     description:
       'Submit the pull request for a plan whose phases are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
     mutating: true,
-    phases: ['drive'],
+    steps: ['drive'],
     schema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -932,7 +932,7 @@ function spawnSubAgentTool(services: ToolServices): Tool {
     mutating: false,
     concurrent: true,
     subagent: true,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
       properties: { task: { type: 'string' } },
@@ -975,7 +975,7 @@ function sendToSubAgentTool(services: ToolServices): Tool {
     mutating: false,
     concurrent: true,
     subagent: true,
-    phases: ['gather', 'drive', 'run'],
+    steps: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
       properties: { chat_id: { type: 'string' }, message: { type: 'string' } },

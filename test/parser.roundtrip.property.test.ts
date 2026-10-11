@@ -15,7 +15,7 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
  * Since a dedicated full-document serializer is not yet built (only the
  * minimal-edit writers of task 4 are planned), this test carries a small,
  * test-local canonical renderer for both document kinds. The legacy branch
- * intentionally keeps `# OVERVIEW`, `# TODOS` and T ids as documented fixtures.
+ * Legacy: intentionally keeps `# OVERVIEW`, `# TODOS` and T ids as documented fixtures.
  */
 
 /** The model a generated document is rendered from and parsed back into. */

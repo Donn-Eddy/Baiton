@@ -12,7 +12,7 @@
  */
 import { AsyncLocalStorage } from 'async_hooks';
 import type { ChatMessage, ModelClient, ToolSpec } from './modelClient';
-import type { GuardContext, OrchestratorPhase, Tool, ToolCaller, ToolResult, ToolSurface } from './guard';
+import type { GuardContext, ConversationStep, Tool, ToolCaller, ToolResult, ToolSurface } from './guard';
 import type { ToolDescriptionError } from './registry';
 import type { Result } from '../model/result';
 import { ChatTranscript, TranscriptRecord, forwardedAskNoteRecord, interventionViewOf } from './chatTranscript';
@@ -57,14 +57,14 @@ export function isDescendantKey(key: string, ancestorKey: string): boolean {
 
 /** The slice of the tool registry a sub-agent turn needs (ToolRegistry satisfies it structurally). */
 export interface SubAgentToolSurface {
-  assembleFor(phase: OrchestratorPhase, surface: ToolSurface): Result<ToolSpec[], ToolDescriptionError>;
-  definitionsFor(phase: OrchestratorPhase, surface: ToolSurface): Tool[];
+  assembleFor(step: ConversationStep, surface: ToolSurface): Result<ToolSpec[], ToolDescriptionError>;
+  definitionsFor(step: ConversationStep, surface: ToolSurface): Tool[];
   call(
     name: string,
     args: unknown,
     callId: string | undefined,
     ctx: GuardContext,
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     surface: ToolSurface,
     caller?: ToolCaller,
   ): Promise<ToolResult>;
@@ -111,7 +111,7 @@ interface LiveSubAgent {
   rootKey: string;
   scope: SessionScope;
   depth: number;
-  phase: OrchestratorPhase;
+  step: ConversationStep;
   transcript: ChatTranscript;
   history: ChatMessage[];
   /** Set while a turn runs; undefined when idle. */
@@ -157,7 +157,7 @@ export class SubAgentRunner implements SubAgentSeam {
       return { kind: 'refused', reason: `unknown calling chat "${caller.sessionKey}"` };
     }
     const chatId = await this.deps.sessions.createChild(scope, parentId);
-    const entry = this.newEntry(scope, chatId, caller.depth + 1, caller.phase, []);
+    const entry = this.newEntry(scope, chatId, caller.depth + 1, caller.step, []);
     this.live.set(entry.key, entry);
     this.emit({
       type: 'started',
@@ -192,7 +192,7 @@ export class SubAgentRunner implements SubAgentSeam {
         return { kind: 'refused', reason: `no sub-agent chat "${req.chatId}"` };
       }
       const history = toHistory(await readTranscript(this.deps.sessions.pathFor(scope, req.chatId)));
-      entry = this.newEntry(scope, req.chatId, caller.depth + 1, caller.phase, history);
+      entry = this.newEntry(scope, req.chatId, caller.depth + 1, caller.step, history);
       this.live.set(entry.key, entry);
     }
     if (entry.turn !== undefined) {
@@ -269,7 +269,7 @@ export class SubAgentRunner implements SubAgentSeam {
     scope: SessionScope,
     chatId: string,
     depth: number,
-    phase: OrchestratorPhase,
+    step: ConversationStep,
     history: ChatMessage[],
   ): LiveSubAgent {
     const parentId = parentIdOf(chatId) as string;
@@ -280,7 +280,7 @@ export class SubAgentRunner implements SubAgentSeam {
       rootKey: chatSessionKey(scope, sessionIdSegments(chatId)[0]),
       scope,
       depth,
-      phase,
+      step,
       transcript: new ChatTranscript(this.deps.sessions.pathFor(scope, chatId), this.deps.clock ?? systemClock),
       history,
       turn: undefined,
@@ -305,7 +305,7 @@ export class SubAgentRunner implements SubAgentSeam {
       entry.history.push({ ...userRecord });
       this.emit({ type: 'appended', ...base, record: userRecord });
 
-      const assembled = this.deps.tools().assembleFor(entry.phase, 'subagent');
+      const assembled = this.deps.tools().assembleFor(entry.step, 'subagent');
       if (!assembled.ok) {
         const reason = `the sub-agent's tools are invalid: ${assembled.error.tool}: ${assembled.error.reason}`;
         this.emit({ type: 'finished', ...base, outcome: 'failed', error: reason });
@@ -314,7 +314,7 @@ export class SubAgentRunner implements SubAgentSeam {
       const concurrent = new Set(
         this.deps
           .tools()
-          .definitionsFor(entry.phase, 'subagent')
+          .definitionsFor(entry.step, 'subagent')
           .filter((t) => t.concurrent === true)
           .map((t) => t.name),
       );
@@ -326,10 +326,10 @@ export class SubAgentRunner implements SubAgentSeam {
           call: (name, args, callId, signal) =>
             signal.aborted
               ? Promise.resolve({ ok: false, error: 'the run was stopped before the tool call' })
-              : this.deps.tools().call(name, parseArgs(args), callId, this.deps.guardContext(), entry.phase, 'subagent', {
+              : this.deps.tools().call(name, parseArgs(args), callId, this.deps.guardContext(), entry.step, 'subagent', {
                   sessionKey: entry.key,
                   depth: entry.depth,
-                  phase: entry.phase,
+                  step: entry.step,
                   kind: entry.scope,
                   signal,
                 }),
@@ -337,9 +337,9 @@ export class SubAgentRunner implements SubAgentSeam {
           systemPrompt: async () =>
             buildSubAgentPrompt(
               entry.scope,
-              entry.phase,
+              entry.step,
               entry.depth,
-              entry.scope.kind === 'spec' ? await this.deps.readPlan(entry.scope.slug) : undefined,
+              entry.scope.kind === 'plan' ? await this.deps.readPlan(entry.scope.slug) : undefined,
             ),
           append: async (m) => {
             await entry.transcript.append(m);

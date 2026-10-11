@@ -135,10 +135,10 @@ function recordingGit(commits: string[], fail = false): GitService {
   };
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async () => undefined,
+    createPlanBranch: async () => undefined,
     checkout: async () => undefined,
     commit: async (message: string) => {
       if (fail) {
@@ -414,7 +414,7 @@ describe('plan-draft runner (unit)', () => {
     assert.strictEqual(h.terminalHost.created.length, 0);
   });
 
-  it('refuses a slug with an existing legacy spec, without launching anything', async () => {
+  it('refuses a slug with an existing legacy plan, without launching anything', async () => {
     const h = track(makeHarness());
     fs.mkdirSync(path.dirname(h.legacySpecFile('greeting')), { recursive: true });
     fs.writeFileSync(h.legacySpecFile('greeting'), '# OVERVIEW\n', 'utf8');
@@ -429,7 +429,7 @@ describe('plan-draft runner (unit)', () => {
     assert.strictEqual(h.terminalHost.created.length, 0);
   });
 
-  it('drafts under plans when a legacy spec directory only has a journal', async () => {
+  it('drafts under plans when a legacy plan directory only has a journal', async () => {
     const h = track(makeHarness());
     const legacyDir = path.dirname(h.legacySpecFile('greeting'));
     fs.mkdirSync(legacyDir, { recursive: true });

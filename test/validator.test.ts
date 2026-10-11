@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import { detectDocumentKind, parsePlan, validatePlan, PlanError } from '../src/model';
 
 /**
- * Unit tests for validator error messages and located errors (Task 3.7).
+ * Unit tests for validator error messages and located errors.
  *
  * These tests pin down the concrete, user-visible output of `validatePlan`:
  * the located `line`/`text` of each error and the human-readable `reason`
@@ -83,9 +83,9 @@ describe('validator error messages and located errors', () => {
   });
 
   describe('grammar failure (Req 4.2)', () => {
-    it('locates a malformed todo line and displays the grammar reason', () => {
+    it('locates a malformed phase line and displays the grammar reason', () => {
       // The offending line is on line 5 (1-based). Only the state box would
-      // parse; there is no id, so the line fails the todo grammar.
+      // parse; there is no id, so the line fails the phase grammar.
       const raw = [
         '# OVERVIEW', // 1
         '', // 2
@@ -188,7 +188,7 @@ describe('validator error messages and located errors', () => {
   });
 
   describe('self dependency (Req 4.6)', () => {
-    it('reports a todo that lists its own id in after', () => {
+    it('reports a phase that lists its own id in after', () => {
       const raw = [
         '# TODOS', // 1
         '- [pending] T01 depends on itself (after T01)', // 2
@@ -242,8 +242,8 @@ describe('validator error messages and located errors', () => {
     });
   });
 
-  describe('valid spec', () => {
-    it('produces no errors for a well-formed spec', () => {
+  describe('valid plan', () => {
+    it('produces no errors for a well-formed plan', () => {
       const raw = [
         '# OVERVIEW',
         '',

@@ -22,10 +22,10 @@ function stubGit(commits: string[] = []): GitService {
   };
   return {
     status: async (): Promise<GitStatus> => ({ clean: true, changes: [] }),
-    isCleanExceptSpecFolder: async () => true,
+    isCleanExceptPlanFolder: async () => true,
     fetch: async () => undefined,
     resolveBaseCommit: async () => '0'.repeat(40),
-    createSpecBranch: async () => undefined,
+    createPlanBranch: async () => undefined,
     checkout: async () => undefined,
     commit: async (message: string) => { commits.push(message); return 'a'.repeat(40); },
     head: async () => 'a'.repeat(40),
@@ -104,7 +104,7 @@ function makeRepo(slug: string, kind: DocumentKind): {
 }
 
 describe('plan-writing tools: protected-state phase edit/remove', () => {
-  it('refuses protected phase states and accepts the others for plans and legacy specs', async () => {
+  it('refuses protected phase states and accepts the others for plans and legacy plans', async () => {
     let callSeq = 0;
     await fc.assert(
       fc.asyncProperty(

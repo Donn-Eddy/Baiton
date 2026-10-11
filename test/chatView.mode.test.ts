@@ -6,7 +6,7 @@ import { HostToWebview, SessionItem } from '../src/orchestrator/webviewProtocol'
 
 /**
  * Fake-DOM unit tests for the composer's host-authoritative Mode select added
- * by dispatch-modes T12.
+ * by dispatch-modes .
  *
  * `media/chat.js` and `media/protocol.js` are plain scripts (neither is
  * compiled or linted by the toolchain), so they are executed inside one `vm`
@@ -379,7 +379,7 @@ function plainClone(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value));
 }
 
-describe('chat view Mode select (dispatch-modes T12)', () => {
+describe('chat view Mode select ', () => {
   it('seed paint: the six modes in RUN_MODES order, Phased Plan selected, enabled', () => {
     const view = loadChatView();
     const modes = view.ids['mode-select'];
@@ -531,7 +531,7 @@ describe('chat view Mode select (dispatch-modes T12)', () => {
   });
 });
 
-describe('chat view context meter (context-budget T07)', () => {
+describe('chat view context meter ', () => {
   const usage = (loaded: number, window: number | null, source: 'usage' | 'estimate' = 'usage'): HostToWebview => ({
     type: 'setContextUsage',
     loaded,
@@ -600,7 +600,7 @@ describe('chat view context meter (context-budget T07)', () => {
   });
 });
 
-describe('chat view sub-agent chats (sub-agent-chats T08)', () => {
+describe('chat view sub-agent chats ', () => {
   const tree = (): SessionItem[] => [
     { id: 'p1', title: 'Parent', updatedAt: 3, scopeId: 'workspace', depth: 0 },
     { id: 'p1/c1', parentId: 'p1', title: 'Child task', updatedAt: 2, scopeId: 'workspace', depth: 1 },

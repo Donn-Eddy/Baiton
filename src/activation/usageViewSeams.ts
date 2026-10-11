@@ -1,5 +1,5 @@
 /**
- * The real Node seams of the Usage view (spec first-party-usage, todo T10).
+ * The real Node seams of the Usage view.
  *
  * This module is Node-only and imports no `vscode`, so it is unit-testable
  * without the loader. It supplies the effects `createUsageReaders` leaves

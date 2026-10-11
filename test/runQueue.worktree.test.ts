@@ -31,15 +31,16 @@ import type { Stage } from '../src/model/stage';
 import type { PhaseState } from '../src/model/phaseState';
 
 /**
- * The run queue in per-todo worktree mode, against a real temporary git
- * repository: two todos' queues run their stages concurrently, each committing
- * only on its own todo branch, while artifacts, state and journals stay in the
- * main checkout's spec folder (written through the spec-branch writer).
+ * The run queue in per-phase worktree mode, against a real temporary git
+ * repository: two phases' queues run their stages concurrently, each committing
+ * only on its own phase branch, while artifacts, state and journals stay in the
+ * main checkout's plan folder (written through the plan-branch writer).
  */
 
 const SLUG = 'demo';
 
-const SPEC_TEXT = [
+// Legacy spec fixture: these queue tests pin the existing specs/todos layout.
+const LEGACY_SPEC_TEXT = [
   '---',
   'title: demo',
   '---',
@@ -48,9 +49,9 @@ const SPEC_TEXT = [
   'Build the thing.',
   '',
   '# TODOS',
-  '- [planned] T01 First todo',
-  '- [planned] T02 Second todo',
-  '- [pending] T03 Third todo (after T01)',
+  '- [planned] T01 First phase',
+  '- [planned] T02 Second phase',
+  '- [pending] T03 Third phase (after T01)',
   '',
 ].join('\n');
 
@@ -81,7 +82,7 @@ function writeFile(root: string, rel: string, contents: string): void {
   fs.writeFileSync(full, contents);
 }
 
-/** A temp repo on `baiton/demo` with the Baiton gitignore, a spec and a base file committed. */
+/** A temp repo on `baiton/demo` with the Baiton gitignore, a plan and a base file committed. */
 function makeRepo(): string {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-rqwt-'));
   git(repo, 'init', '-q');
@@ -89,7 +90,7 @@ function makeRepo(): string {
   git(repo, 'config', 'user.email', 'baiton-test@example.com');
   git(repo, 'checkout', '-q', '-b', 'main');
   writeFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
-  writeFile(repo, `.baiton/specs/${SLUG}/spec.md`, SPEC_TEXT);
+  writeFile(repo, `.baiton/specs/${SLUG}/spec.md`, LEGACY_SPEC_TEXT);
   writeFile(repo, 'src/base.txt', 'base\n');
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'initial commit');
@@ -107,7 +108,7 @@ interface DrivenStage {
 
 interface Rig {
   repo: string;
-  specsDir: string;
+  legacySpecsDir: string;
   states: Map<string, PhaseState>;
   stages: DrivenStage[];
   created: Array<string | undefined>;
@@ -116,14 +117,14 @@ interface Rig {
 }
 
 function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
-  const specsDir = path.join(repo, '.baiton', 'specs');
+  const legacySpecsDir = path.join(repo, '.baiton', 'specs');
   const mainGit = createGitService(repo);
-  const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: mainGit });
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(legacySpecsDir), git: mainGit });
   const states = new Map<string, PhaseState>(Object.entries(initial));
   const stages: DrivenStage[] = [];
   const created: Array<string | undefined> = [];
 
-  const artifactDir = (phaseId: string): string => path.join(specsDir, SLUG, 'todos', phaseId);
+  const artifactDir = (phaseId: string): string => path.join(legacySpecsDir, SLUG, 'todos', phaseId);
   const latest = (phaseId: string, stage: Stage): string | undefined => {
     let names: string[] = [];
     try {
@@ -138,7 +139,7 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
 
   const planStore: PlanStore = {
     currentState: async (_slug, phaseId) => states.get(phaseId),
-    readPlan: async () => parsePlan(SPEC_TEXT),
+    readPlan: async () => parsePlan(LEGACY_SPEC_TEXT),
     readArtifact: async (_slug, phaseId, stage) => (stage === 'plan' ? '# Plan\n' : latest(phaseId, stage)),
     latestExecuteCommit: async () => undefined,
     persistArtifact: (slug, artifactPath, contents) =>
@@ -250,9 +251,9 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
         terminalHost,
         watcherFactory,
         planStore,
-        journalPath: path.join(specsDir, SLUG, 'runs.jsonl'),
-        journalPathFor: (id) => phaseJournalPathFor(path.dirname(specsDir), SLUG, id),
-        readJournal: () => readPlanJournal(path.dirname(specsDir), SLUG),
+        journalPath: path.join(legacySpecsDir, SLUG, 'runs.jsonl'),
+        journalPathFor: (id) => phaseJournalPathFor(path.dirname(legacySpecsDir), SLUG, id),
+        readJournal: () => readPlanJournal(path.dirname(legacySpecsDir), SLUG),
         modelForRole: () => ({ model: 'test-model' }),
         adapterForRole: () => adapter,
         newRunId: (req) => `run-${req.phaseId}-${req.action}-${req.attempt}-${counter++}`,
@@ -264,7 +265,7 @@ function makeRig(repo: string, initial: Record<string, PhaseState>): Rig {
 
   return {
     repo,
-    specsDir,
+    legacySpecsDir,
     states,
     stages,
     created,
@@ -356,17 +357,17 @@ describe('run queue per-phase worktrees (real repo)', () => {
       const files = git(repo, 'show', '--name-only', '--format=', branch).trim().split('\n');
       assert.deepStrictEqual(files, [file], `${id} commit holds only its own file (not ${other})`);
 
-      assert.ok(fs.existsSync(path.join(rig.specsDir, SLUG, 'todos', id, 'execute-1.md')));
+      assert.ok(fs.existsSync(path.join(rig.legacySpecsDir, SLUG, 'todos', id, 'execute-1.md')));
       const sha = git(repo, 'rev-parse', branch).trim();
       const records = fs
-        .readFileSync(phaseJournalPathFor(path.dirname(rig.specsDir), SLUG, id), 'utf8')
+        .readFileSync(phaseJournalPathFor(path.dirname(rig.legacySpecsDir), SLUG, id), 'utf8')
         .split('\n')
         .filter(Boolean)
         .map((l) => JSON.parse(l) as { runId?: string; commit?: string; result?: string; stage?: string });
       assert.strictEqual(records.length, 2, 'start + completion records');
       assert.ok(records.every((r) => r.runId === runId));
       const completion = records.find((e) => e.result === 'completed');
-      assert.strictEqual(completion?.commit, sha, 'completion carries the todo-branch commit');
+      assert.strictEqual(completion?.commit, sha, 'completion carries the phase branch commit');
       assert.strictEqual(rig.states.get(id), 'executed');
     }
 
@@ -454,7 +455,7 @@ describe('run queue per-phase worktrees (real repo)', () => {
     assert.ok(fs.existsSync(path.join(wt3, 'src/t01.txt')), "the new worktree contains T01's file");
     rig.stages[0].complete(PLAN_RESULT);
     assert.ok((await plan).ok);
-    assert.ok(fs.existsSync(path.join(rig.specsDir, SLUG, 'todos', 'T03', 'plan.md')));
+    assert.ok(fs.existsSync(path.join(rig.legacySpecsDir, SLUG, 'todos', 'T03', 'plan.md')));
   });
 
   it('leaves the worktree and branch in place after a cancelled stage', async () => {

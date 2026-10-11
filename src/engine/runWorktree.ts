@@ -2,7 +2,7 @@
  * Run worktree lifecycle (host-free core).
  *
  * This module composes the worktree and merge primitives of
- * {@link GitWorktreeService} into the three lifecycle operations a spec-less run
+ * {@link GitWorktreeService} into the three lifecycle operations a plan-less run
  * needs:
  *
  * - **create** a linked worktree at `.baiton/worktrees/<run-id>/`, checked out on

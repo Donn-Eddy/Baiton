@@ -1,14 +1,14 @@
 /**
- * The Config_Panel controller (spec "Configuration Panel", config-panel, todo T05).
+ * The Config_Panel controller.
  *
  * This is the host-free half driven by the {@link ConfigPanelHostToWebview} and
  * {@link ConfigPanelWebviewToHost} message unions defined in
- * `src/config/configPanel.ts` (T01). Every host capability — modal confirm and
+ * `src/config/configPanel.ts`. Every host capability — modal confirm and
  * live-config apply — arrives as an injected seam.
  *
  * The controller carries no `vscode` import (matching `chatController.ts`, which
  * imports only `path`, `fs/promises` and host-free cores), which makes the whole
- * of T05's behaviour unit-testable without the `vscodeLoader` hook.
+ * of the controller's behaviour unit-testable without the `vscodeLoader` hook.
  *
  * Passing `form` into `configFormOptions` during load is load-bearing: it
  * appends an out-of-set agent or effort already present in the document so the
@@ -17,10 +17,10 @@
  * same applies to {@link ConfigPanelController.refreshOptions}, which rebuilds
  * the options from the live capability table plus the last form read from disk:
  * a model or effort that is configured but missing from a refreshed list is
- * appended again, exactly as on load (model-selector-refresh T08). That same
+ * appended again, exactly as on load. That same
  * round-trip pass is what marks a configured-but-unlisted model `custom: true`
  * in `modelEntries`, so the webview can render it as an editable "Other…" entry
- * instead of an ordinary option (codex-opencode-dropdown-fix T06).
+ * instead of an ordinary option.
  */
 import * as path from 'path';
 import { mkdir } from 'fs/promises';
@@ -73,7 +73,7 @@ export interface ConfigPanelWebview {
 }
 
 /**
- * The hot-reload seam (T08). Receives the freshly loaded config as a replaced
+ * The hot-reload seam. Receives the freshly loaded config as a replaced
  * whole and returns human-readable notes naming anything that could not be
  * reloaded live.
  */
@@ -90,7 +90,7 @@ export interface ConfigPanelControllerDeps {
    */
   capabilities?: Readonly<Record<string, AgentCapabilities>>;
   /**
-   * The live capability table (model-selector-refresh T08). Read on EVERY use —
+   * The live capability table. Read on EVERY use —
    * never hoisted into a field — so a refreshed catalog reaches the next `load()`
    * or `refreshOptions()`.
    */
@@ -172,7 +172,7 @@ export class ConfigPanelController {
   }
 
   /**
-   * Re-post the dropdown option sets after a model catalog refresh (T08).
+   * Re-post the dropdown option sets after a model catalog refresh.
    *
    * Deliberately does NOT re-post `loaded` and does not read the file, so an
    * open panel's in-progress edits are never overwritten. The options are
@@ -196,7 +196,7 @@ export class ConfigPanelController {
 
   /**
    * Called when an external event suggests `.baiton/config.json` may have
-   * changed on disk (T07).
+   * changed on disk.
    *
    * Suppresses the controller's own writes: while a write is in-flight
    * (`this.writing`), or when the token on disk equals `this.token`, nothing is

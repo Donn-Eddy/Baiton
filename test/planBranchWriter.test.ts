@@ -9,7 +9,7 @@ import { createGitService } from '../src/git/gitService';
 import { createPlanBranchWriter, planFolderPathspec } from '../src/engine/planBranchWriter';
 import { locationFor } from '../src/storage/documentLocation';
 
-/** Unit tests for the per-slug serialized spec-branch writer. */
+/** Unit tests for the per-slug serialized plan-branch writer. */
 
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
 
@@ -148,6 +148,7 @@ describe('planBranchWriter', () => {
       baitonDir: path.join(repo, '.baiton'),
       git: createGitService(repo),
     });
+    // Legacy fixture: this document retains its T## phase id.
     await w.apply('s', (scope) => scope.commit('plan(s): T01 planning'));
     const files = git(repo, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n');
     assert.deepStrictEqual(files, ['.baiton/specs/s/spec.md']);

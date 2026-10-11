@@ -1,6 +1,6 @@
 /**
- * Unit tests for sub-agent chats inside the host-free Chat controller (spec
- * "sub-agent chats", todo T12). Imported statically with no `vscode` loader.
+ * Unit tests for sub-agent chats inside the host-free Chat controller (plan
+ * "sub-agent chats", phase ). Imported statically with no `vscode` loader.
  *
  * Coverage:
  * 1. Top-level tool calls receive surface 'top' and a depth-0 caller.
@@ -113,7 +113,6 @@ const call = (id: string, name: string, args: object): CompletionResult => ({
 describe('ChatController sub-agent chats', () => {
   let tmp: string;
   let baitonDir: string;
-  let specsDir: string;
   let webview: FakeWebview;
   let client: RoutingClient;
   let askRegistry: PendingAskRegistry;
@@ -158,7 +157,6 @@ describe('ChatController sub-agent chats', () => {
       toolsFor: () => [],
       guardContext: () => ({}) as GuardContext,
       baitonDir,
-      specsDir,
       roundBound: () => 6,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
       triggerFix: () => {},
@@ -208,7 +206,6 @@ describe('ChatController sub-agent chats', () => {
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-subagents-'));
     baitonDir = path.join(tmp, '.baiton');
-    specsDir = path.join(baitonDir, 'specs');
     client = new RoutingClient();
     askRegistry = new PendingAskRegistry({
       ids: { next: () => `ask-${Date.now()}-${Math.random().toString(36).slice(2)}` },
@@ -234,7 +231,7 @@ describe('ChatController sub-agent chats', () => {
     assert.strictEqual(toolCalls[0].caller.sessionKey, `workspace/${topId()}`);
     assert.strictEqual(toolCalls[0].caller.depth, 0);
     assert.deepStrictEqual(toolCalls[0].caller.kind, { kind: 'workspace' });
-    assert.strictEqual(toolCalls[0].caller.phase, 'run');
+    assert.strictEqual(toolCalls[0].caller.step, 'run');
   });
 
   it('spawns a child chat under the parent and lists the session tree', async () => {

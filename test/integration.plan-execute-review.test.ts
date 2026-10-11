@@ -12,7 +12,7 @@ import type { RunQueue, PlanStore, ResultWatcherFactory } from '../src/engine/ru
 import { createPlanBranchWriter, type PlanBranchWriter } from '../src/engine/planBranchWriter';
 import { landPhaseWorktree, phaseBranchFor, phaseWorktreeDirFor } from '../src/engine/phaseWorktree';
 import { createPlanStore } from '../src/activation/planStore';
-import { createPhaseQueues, type PhaseQueues } from '../src/activation/engineFacade';
+import { createPhaseQueues, createRunQueueSeam, type PhaseQueues } from '../src/activation/engineFacade';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import type { HostTerminal, TerminalHost, CreateTerminalOptions } from '../src/engine/terminalHost';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
@@ -25,6 +25,12 @@ import { isOk } from '../src/model/result';
 import type { PhaseState } from '../src/model/phaseState';
 import type { Stage } from '../src/model/stage';
 import type { Role } from '../src/model/role';
+import { documentKindFor, unlandedPhases } from '../src/engine/phaseWorktree';
+import { submitPr as submitPrFlow } from '../src/engine/submitPr';
+import type { CreatePrInput, PrTool } from '../src/engine/prTool';
+import { createToolRegistry } from '../src/orchestrator/registry';
+import { GuardContext } from '../src/orchestrator/guard';
+import type { ToolServices } from '../src/orchestrator/toolServices';
 import {
   OpenAiModelClient,
   UnreachableEndpointError,
@@ -33,8 +39,8 @@ import {
 } from '../src/orchestrator/modelClient';
 
 /**
- * The single offline, deterministic integration test for the first pass
- * (Task 16.1). It exercises Plan → Execute → Review over a single todo against
+ * Offline, deterministic integration coverage for Plan → Execute → Review over
+ * a single legacy phase against
  * a REAL temporary git repository, using a STUBBED sub-agent (no Claude CLI, no
  * terminal, no network beyond a local mock HTTP server) that writes
  * schema-conformant `result.json` files. The real engine pieces — the run
@@ -44,11 +50,11 @@ import {
  *
  * Coverage (mapped to requirements):
  *   1. Approval branch creation from a resolved base_commit + the
- *      `spec(<slug>): approve` commit (Req 16.3, 16.5, 17.1).
+ *      `plan(<slug>): approve` commit (Req 16.3, 16.5, 17.1).
  *   2. Plan → planned, `phases/<id>/plan.md` persisted, metadata commit between stages
  *      (Req 17.1).
- *   3. Execute requires a clean tree (Req 17.2); a dirty tree outside the spec
- *      folder is refused (Req 17.3). On completion: todo executed, `phases/<id>/execute-1.md`
+ *   3. Execute requires a clean tree (Req 17.2); a dirty tree outside the
+ *      document folder is refused (Req 17.3). On completion: phase executed, `phases/<id>/execute-1.md`
  *      persisted, and one `plan(<slug>): <id> execute attempt 1` commit carrying
  *      a `Run-Id:` trailer (Req 17.4), findable via findCommitByRunId (Req 21.5).
  *   4. Review → done, `phases/<id>/review-1.md` persisted; the non-executor post-run reset
@@ -82,15 +88,15 @@ function readRepoFile(repo: string, relPath: string): string {
   return fs.readFileSync(path.join(repo, relPath), 'utf8');
 }
 
-/** The spec slug and its single todo used throughout the test. */
-const SLUG = 'demo-spec';
+/** Legacy plan fixture: its `` item exercises the preserved on-disk format. */
+const SLUG = 'demo-legacy';
 const PHASE_ID = 'T01';
 
-/** Spec-relative path of the spec file. */
-const SPEC_REL = `.baiton/specs/${SLUG}/spec.md`;
+/** Legacy plan fixture path. */
+const LEGACY_SPEC_REL = `.baiton/specs/${SLUG}/spec.md`;
 
-/** The initial spec.md content: one pending, approvable, unblocked todo. */
-function initialSpec(): string {
+/** The initial legacy `spec.md`: one pending, approvable, unblocked item. */
+function initialLegacySpec(): string {
   return [
     '---',
     'version: 1',
@@ -113,7 +119,7 @@ function initialSpec(): string {
 }
 
 /**
- * Create an initialized temp repo with the initial spec committed on `main`, a
+ * Legacy plan fixture: create a temp repo with the initial document committed on `main`, a
  * local identity, a `.gitignore` that ignores the runs directory and a scratch
  * gitignored file, and `main` as the base branch. Returns the repo path.
  */
@@ -131,7 +137,7 @@ function makeRepo(): string {
   writeRepoFile(repo, '.gitignore', ['.baiton/runs/', 'scratch.local', ''].join('\n'));
   // Without this the `/worktrees/` directory would dirty the main checkout.
   writeRepoFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
-  writeRepoFile(repo, SPEC_REL, initialSpec());
+  writeRepoFile(repo, LEGACY_SPEC_REL, initialLegacySpec());
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'initial commit');
   return repo;
@@ -269,9 +275,9 @@ class StubSubAgentFactory implements ResultWatcherFactory {
     this.watchers.push(watcher);
     this.runIds.push(input.runId);
 
-    // Infer the stage from the run-id composite the default generator produced
-    // (`<slug>-<todo>-<stage>-<attempt>-<time>`); robust enough for the test.
-    const stage = inferStage(input.runId);
+    // Infer the stage from the default run-id composite
+    // (`<slug>-<phase>-<stage>-<attempt>-<time>`).
+    const stage = inferStage(input.runId, input.slug);
 
     // Defer to the next tick so the queue has registered its onResult listener
     // (the watcher factory is called before awaitStageResult subscribes).
@@ -297,17 +303,11 @@ class StubSubAgentFactory implements ResultWatcherFactory {
 }
 
 /** Infer the stage embedded in a default run-id composite. */
-function inferStage(runId: string): Stage {
-  if (runId.includes('-plan-review-')) {
-    return 'plan-review';
-  }
-  if (runId.includes('-plan-')) {
-    return 'plan';
-  }
-  if (runId.includes('-execute-')) {
-    return 'execute';
-  }
-  return 'review';
+function inferStage(runId: string, slug: string): Stage {
+  const suffix = runId.slice(slug.length + 1);
+  if (suffix.startsWith('pr-')) return 'pr';
+  const match = /^(?:P|T)\d+-(plan-review|plan|execute|review)-/.exec(suffix);
+  return (match?.[1] as Stage | undefined) ?? 'review';
 }
 
 /** The schema-conformant body for a stage. */
@@ -319,6 +319,8 @@ function resultFor(stage: Stage): string {
       return executeResultJson();
     case 'review':
       return reviewPassResultJson();
+    case 'pr':
+      return JSON.stringify({ title: 'Add greeting support', body: 'Implements the greeting plan.' });
     default:
       return planResultJson();
   }
@@ -335,7 +337,7 @@ function modelForRole(_role: Role): { model: string; effort?: string } {
 
 interface Harness {
   repo: string;
-  specsDir: string;
+  legacySpecsDir: string;
   git: GitWorktreeService;
   writer: PlanBranchWriter;
   store: PlanStore;
@@ -348,14 +350,14 @@ interface Harness {
 
 /** Wire a harness over `repo` the way commands.ts does: per-phase queues, one shared writer. */
 function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
-  const specsDir = path.join(repo, '.baiton', 'specs');
+  const legacySpecsDir = path.join(repo, '.baiton', 'specs');
   const gitService = createGitService(repo);
-  const writer = createPlanBranchWriter({ baitonDir: path.dirname(specsDir), git: gitService });
-  const store = createPlanStore(path.dirname(specsDir), gitService, writer);
+  const writer = createPlanBranchWriter({ baitonDir: path.dirname(legacySpecsDir), git: gitService });
+  const store = createPlanStore(path.dirname(legacySpecsDir), gitService, writer);
   const terminalHost = new StubTerminalHost();
   const queues = createPhaseQueues({
     workspaceRoot: repo,
-    baitonDir: path.dirname(specsDir),
+    baitonDir: path.dirname(legacySpecsDir),
     git: gitService,
     planWriter: writer,
     planStore: store,
@@ -366,7 +368,7 @@ function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
   });
   return {
     repo,
-    specsDir,
+    legacySpecsDir,
     git: gitService,
     writer,
     store,
@@ -374,7 +376,7 @@ function wireHarness(repo: string, factory: ResultWatcherFactory): Harness {
     queue: queues.queueFor(SLUG, PHASE_ID),
     factory: factory as unknown as StubSubAgentFactory,
     terminalHost,
-    journalPath: planJournalPathFor(path.dirname(specsDir), SLUG),
+    journalPath: planJournalPathFor(path.dirname(legacySpecsDir), SLUG),
   };
 }
 
@@ -383,28 +385,28 @@ function makeHarness(): Harness {
   return wireHarness(makeRepo(), new StubSubAgentFactory());
 }
 
-/** Approve the spec directly through the git service (the control-tool path). */
-async function approveSpec(h: Harness): Promise<{ baseCommit: string; branch: string; approveCommit: string }> {
-  // Clean-except-spec-folder check (Req 16.1) — the tree is clean here.
-  assert.strictEqual(await h.git.isCleanExceptSpecFolder(SLUG), true);
+/** Approve the legacy plan fixture directly through the git service. */
+async function approvePlan(h: Harness): Promise<{ baseCommit: string; branch: string; approveCommit: string }> {
+  // Clean-except-plan-folder check (Req 16.1) — the tree is clean here.
+  assert.strictEqual(await h.git.isCleanExceptPlanFolder(SLUG), true);
   // Fetch is a no-op locally (no remote); resolve the base to base_commit
   // (Req 16.3) and create + check out the branch from it (Req 16.5).
   const baseCommit = await h.git.resolveBaseCommit('main');
   const branch = `baiton/${SLUG}`;
-  await h.git.createSpecBranch(branch, baseCommit);
+  await h.git.createPlanBranch(branch, baseCommit);
   await h.git.checkout(branch);
 
-  // Record approval metadata into the spec, then compute the Approval_Hash into
-  // approved_rev and commit `spec(<slug>): approve` (Req 16.5, 17.1).
-  const specAbs = path.join(h.repo, SPEC_REL);
-  let content = fs.readFileSync(specAbs, 'utf8');
+  // Record approval metadata into the legacy document, then compute the Approval_Hash into
+  // approved_rev and commit `plan(<slug>): approve` (Req 16.5, 17.1).
+  const documentAbs = path.join(h.repo, LEGACY_SPEC_REL);
+  let content = fs.readFileSync(documentAbs, 'utf8');
   content = setKey(content, 'base_commit', baseCommit);
   content = setKey(content, 'branch', branch);
   content = setKey(content, 'status', 'approved');
   const hash = approvalHash(parsePlan(content));
   content = setKey(content, 'approved_rev', hash);
-  fs.writeFileSync(specAbs, content, 'utf8');
-  const approveCommit = await h.git.commit(`spec(${SLUG}): approve`);
+  fs.writeFileSync(documentAbs, content, 'utf8');
+  const approveCommit = await h.git.commit(`plan(${SLUG}): approve`);
   return { baseCommit, branch, approveCommit };
 }
 
@@ -412,7 +414,7 @@ async function approveSpec(h: Harness): Promise<{ baseCommit: string; branch: st
 function setKey(content: string, key: string, value: string): string {
   const lines = content.split('\n');
   if (lines[0]?.trim() !== '---') {
-    throw new Error('spec has no frontmatter');
+    throw new Error('document has no frontmatter');
   }
   for (let i = 1; i < lines.length; i++) {
     if (lines[i].trim() === '---') {
@@ -427,7 +429,7 @@ function setKey(content: string, key: string, value: string): string {
   throw new Error(`frontmatter key "${key}" not found`);
 }
 
-/** The current state of the single todo. */
+/** The current state of the single legacy phase. */
 async function stateOf(h: Harness): Promise<PhaseState | undefined> {
   return h.store.currentState(SLUG, PHASE_ID);
 }
@@ -490,7 +492,7 @@ async function startMockServer(
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('Integration: Plan → Execute → Review over a temp git repo (Task 16.1)', () => {
+describe('Integration: Plan → Execute → Review over a legacy document', () => {
   const repos: string[] = [];
 
   afterEach(() => {
@@ -511,21 +513,21 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     const h = harness();
 
     // -- Approval (Req 16.3, 16.5, 17.1) -----------------------------------
-    const { baseCommit, branch, approveCommit } = await approveSpec(h);
+    const { baseCommit, branch, approveCommit } = await approvePlan(h);
 
     assert.match(baseCommit, /^[0-9a-f]{40}$/, 'base commit resolved to a full sha');
-    assert.strictEqual(await h.git.currentBranch(), branch, 'checked out the spec branch');
+    assert.strictEqual(await h.git.currentBranch(), branch, 'checked out the plan branch');
     // The branch was created from the resolved base commit.
     const branchBase = git(h.repo, 'merge-base', branch, baseCommit).trim();
-    assert.strictEqual(branchBase, baseCommit, 'spec branch descends from base_commit');
+    assert.strictEqual(branchBase, baseCommit, 'plan branch descends from base_commit');
     // The approve commit exists with the fixed message (Req 16.5).
     assert.strictEqual(await h.git.head(), approveCommit, 'approve commit is HEAD');
     assert.strictEqual(
       git(h.repo, 'log', '-1', '--format=%s').trim(),
-      `spec(${SLUG}): approve`,
-      'approval commit carries the fixed spec(<slug>): approve message',
+      `plan(${SLUG}): approve`,
+      'approval commit carries the fixed plan(<slug>): approve message',
     );
-    assert.strictEqual(await h.store.isApproved(SLUG), true, 'spec reports approved');
+    assert.strictEqual(await h.store.isApproved(SLUG), true, 'the document reports approved');
 
     // -- Plan → planned, plan.md, metadata commits between stages (Req 17.1) --
     const headBeforePlan = await h.git.head();
@@ -538,8 +540,8 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       resume: false,
     });
     assert.strictEqual(planResult.ok, true, 'plan dispatch succeeded');
-    assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned');
-    // Artifact persisted at the plan path under the spec.
+    assert.strictEqual(await stateOf(h), 'planned', 'phase transitioned to planned');
+    // Legacy fixture artifacts remain under their existing document folder.
     const planArtifact = path.join(
       h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'plan.md',
     );
@@ -566,11 +568,11 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'),
       'the worktree is on the phase branch',
     );
-    assert.strictEqual(phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'), 'baiton-todo/demo-spec/T01');
+    assert.strictEqual(phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec'), 'baiton-todo/demo-legacy/T01');
     const wtGit = createGitService(wt);
 
     // -- Dirty-tree refusal for Execute (Req 17.2/17.3) --------------------
-    // A change OUTSIDE the spec folder makes the tree dirty; Execute is refused.
+    // A change outside the document folder makes the tree dirty; Execute is refused.
     writeRepoFile(wt, 'src/greeting.ts', 'export const version = 99; // dirty\n');
     const dirtyResult = await h.queue.dispatch({
       slug: SLUG,
@@ -598,7 +600,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       resume: false,
     });
     assert.strictEqual(executeResult.ok, true, 'execute dispatch succeeded');
-    assert.strictEqual(await stateOf(h), 'executed', 'todo transitioned to executed');
+    assert.strictEqual(await stateOf(h), 'executed', 'phase transitioned to executed');
     const executeArtifact = path.join(
       h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'execute-1.md',
     );
@@ -609,17 +611,17 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
 
     // Exactly one execute commit with the expected message.
     const executeSubject = `plan(${SLUG}): ${PHASE_ID} execute attempt 1`;
-    const todoBranch = phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec');
-    const todoSubjects = git(h.repo, 'log', '--format=%s', todoBranch).split('\n');
+    const phaseBranch = phaseBranchFor(SLUG, PHASE_ID, 'legacy-spec');
+    const phaseSubjects = git(h.repo, 'log', '--format=%s', phaseBranch).split('\n');
     assert.strictEqual(
-      todoSubjects.filter((s) => s === executeSubject).length,
+      phaseSubjects.filter((s) => s === executeSubject).length,
       1,
       'exactly one execute commit landed on the phase branch',
     );
     assert.strictEqual(
       commitSubjects(h.repo).filter((s) => s === executeSubject).length,
       0,
-      'the spec branch has no execute commit before landing',
+      'the plan branch has no execute commit before landing',
     );
 
     // The execute commit carries the Run-Id trailer and is findable by run id.
@@ -658,7 +660,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       resume: false,
     });
     assert.strictEqual(reviewResult.ok, true, 'review dispatch succeeded');
-    assert.strictEqual(await stateOf(h), 'done', 'todo transitioned to done on a pass verdict');
+    assert.strictEqual(await stateOf(h), 'done', 'phase transitioned to done on a pass verdict');
     const reviewArtifact = path.join(
       h.repo, '.baiton', 'specs', SLUG, 'todos', PHASE_ID, 'review-1.md',
     );
@@ -670,7 +672,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     assert.ok(fs.existsSync(scratchAbs), 'gitignored scratch file survived the post-run reset');
     assert.strictEqual(fs.readFileSync(scratchAbs, 'utf8'), 'keep me\n', 'its contents are intact');
 
-    // -- Land the phase into the spec branch ---------------------------------
+    // -- Land the phase into the plan branch ---------------------------------
     const landed = await h.writer.apply(SLUG, () =>
       landPhaseWorktree({ workspaceRoot: h.repo, git: h.git }, { slug: SLUG, phaseId: PHASE_ID }),
     );
@@ -679,7 +681,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       readRepoFile(h.repo, 'src/greeting.ts').includes('hello'),
       'the main checkout now has the executor change',
     );
-    assert.strictEqual(git(h.repo, 'branch', '--list', todoBranch).trim(), '', 'the phase branch is gone');
+    assert.strictEqual(git(h.repo, 'branch', '--list', phaseBranch).trim(), '', 'the phase branch is gone');
     assert.ok(!fs.existsSync(wt), 'the worktree is gone');
     assert.strictEqual(commitSubjects(h.repo)[0], `plan(${SLUG}): land ${PHASE_ID}`);
   });
@@ -722,7 +724,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     repos.push(repo);
     const h = wireHarness(repo, new CloseThenSucceedFactory());
 
-    await approveSpec(h);
+    await approvePlan(h);
 
     // First Plan dispatch: the terminal closes before a result, so the stage
     // halts with `closed` and the phase reverts to its From_State (`pending`).
@@ -739,7 +741,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       !firstPlan.ok && firstPlan.error.kind === 'outcome' && firstPlan.error.outcome.kind === 'closed',
       'the refusal reports the closed outcome',
     );
-    assert.strictEqual(await stateOf(h), 'pending', 'todo reverted to pending, its From_State');
+    assert.strictEqual(await stateOf(h), 'pending', 'phase reverted to pending, its From_State');
     assert.ok(
       fs.existsSync(phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID)),
       'a failed stage never removes the worktree',
@@ -750,7 +752,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       'the revert commit names the closed exit code',
     );
 
-    // Plan succeeds on the next dispatch against the same (reverted) todo.
+    // Plan succeeds on the next dispatch against the same (reverted) phase.
     const secondPlan = await h.queue.dispatch({
       slug: SLUG,
       phaseId: PHASE_ID,
@@ -760,13 +762,13 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       resume: false,
     });
     assert.strictEqual(secondPlan.ok, true, 'plan succeeds once retried');
-    assert.strictEqual(await stateOf(h), 'planned', 'todo transitioned to planned on retry');
+    assert.strictEqual(await stateOf(h), 'planned', 'phase transitioned to planned on retry');
     assert.ok(fs.existsSync(phaseWorktreeDirFor(h.repo, SLUG, PHASE_ID)), 'the retry reused the worktree');
   });
 
   it('replays a lost state write on crash recovery when the Run-Id commit landed (Req 21.5)', async () => {
     const h = harness();
-    await approveSpec(h);
+    await approvePlan(h);
 
     // Wedge the phase into a running state and land an execute commit carrying
     // the crash run's Run-Id trailer, but journal ONLY the START record — the
@@ -777,7 +779,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     await h.git.commit(`plan(${SLUG}): ${PHASE_ID} execute attempt 1`, { 'Run-Id': crashRunId });
     appendStart(h.journalPath, {
       runId: crashRunId,
-      todoId: PHASE_ID,
+      phaseId: PHASE_ID,
       stage: 'execute',
       attempt: 1,
       startHead: await h.git.head(),
@@ -789,7 +791,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
     // wedged in `executing`.
     const beforeEntry = parseJournal(h.journalPath).find((e) => e.runId === crashRunId);
     assert.ok(beforeEntry && beforeEntry.result === undefined, 'the crash entry is result-less');
-    assert.strictEqual(await stateOf(h), 'executing', 'todo is wedged in executing before recovery');
+    assert.strictEqual(await stateOf(h), 'executing', 'phase is wedged in executing before recovery');
 
     // A process seam reporting the recorded pid as dead, paired with the real
     // git seam so findCommitByRunId locates the landed commit.
@@ -814,7 +816,7 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       await h.git.findCommitByRunId(crashRunId),
       'recovery reported the landed Run-Id commit',
     );
-    // The todo is no longer wedged: recovery replayed the execute success state.
+    // The phase is no longer wedged: recovery replayed the execute success state.
     assert.strictEqual(await stateOf(h), 'executed', 'recovery restored the executed state');
   });
 
@@ -843,11 +845,11 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
       const tools: ToolSpec[] = [
         {
           name: 'read_plan',
-          description: 'Read a spec',
+          description: 'Read a plan',
           parameters: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] },
         },
       ];
-      const messages: ChatMessage[] = [{ role: 'user', content: 'read the demo spec' }];
+      const messages: ChatMessage[] = [{ role: 'user', content: 'read the demo plan' }];
       const result = await client.complete({ messages, tools, signal: new AbortController().signal });
 
       // The tools array went out on the wire as an OpenAI function tool.
@@ -888,5 +890,228 @@ describe('Integration: Plan → Execute → Review over a temp git repo (Task 16
         return true;
       },
     );
+  });
+});
+
+describe('Integration: plan and legacy document flows through the control tools', () => {
+  const repos: string[] = [];
+
+  afterEach(() => {
+    while (repos.length > 0) {
+      fs.rmSync(repos.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  async function driveThroughTools(kind: 'plan' | 'legacy-spec'): Promise<void> {
+    const slug = kind === 'plan' ? 'greeting-plan' : 'greeting-legacy';
+    const phaseId = kind === 'plan' ? 'P01' : 'T01';
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-control-flow-'));
+    const remote = `${repo}-remote.git`;
+    repos.push(repo, remote);
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'Baiton Test');
+    git(repo, 'config', 'user.email', 'baiton-test@example.com');
+    git(repo, 'checkout', '-q', '-b', 'main');
+    writeRepoFile(repo, 'src/greeting.ts', 'export const version = 0;\n');
+    writeRepoFile(repo, '.gitignore', ['.baiton/runs/', 'scratch.local', ''].join('\n'));
+    writeRepoFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
+
+    const documentPath = kind === 'plan'
+      ? `.baiton/plans/${slug}/plan.md`
+      : `.baiton/specs/${slug}/spec.md`;
+    const document = kind === 'plan'
+      ? [
+          '---', 'version: 1', 'status: draft', 'base: main', 'base_commit:', 'branch:', 'approved_rev:', '---', '',
+          '# Endstate', 'The greeting module exposes a greeting function.', '',
+          '# What needs changing', 'Update src/greeting.ts.', '',
+          '# Limitations & constraints', 'Keep the public API small.', '',
+          '# PHASES', `- [pending] ${phaseId} Add a greeting function (files: src/greeting.ts)`, '',
+        ].join('\n')
+      : [
+          '---', 'version: 1', 'status: draft', 'base: main', 'base_commit:', 'branch:', 'approved_rev:', '---', '',
+          '# OVERVIEW', 'The greeting module needs a greeting function.', '',
+          '# TODOS', `- [pending] ${phaseId} Add a greeting function (files: src/greeting.ts)`, '',
+        ].join('\n');
+    writeRepoFile(repo, documentPath, document);
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'initial commit');
+    const baseCommit = git(repo, 'rev-parse', 'HEAD').trim();
+
+    fs.mkdirSync(remote, { recursive: true });
+    git(remote, 'init', '-q', '--bare');
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-q', 'origin', 'main');
+
+    const baitonDir = path.join(repo, '.baiton');
+    const gitService = createGitService(repo);
+    const writer = createPlanBranchWriter({ baitonDir, git: gitService });
+    const store = createPlanStore(baitonDir, gitService, writer);
+    const terminalHost = new StubTerminalHost();
+    const watcherFactory = new StubSubAgentFactory();
+    const adapterForRole = () => new StubAdapter();
+    const queues = createPhaseQueues({
+      workspaceRoot: repo,
+      baitonDir,
+      git: gitService,
+      planWriter: writer,
+      planStore: store,
+      terminalHost,
+      watcherFactory,
+      adapterForRole,
+      modelForRole,
+      clock: () => 1_700_000_000_000,
+      newSessionId: () => 'session-control-flow',
+    });
+    const createdPrs: CreatePrInput[] = [];
+    const pr: PrTool = {
+      findOpenByHead: async () => undefined,
+      create: async (input) => {
+        createdPrs.push(input);
+        return { url: 'https://example.test/pull/42', number: 42 };
+      },
+    };
+    const services: ToolServices = {
+      repoRoot: repo,
+      baitonDir,
+      git: gitService,
+      confirm: { confirm: async () => true },
+      runQueue: createRunQueueSeam(queues.queueFor, baitonDir, adapterForRole),
+      landPhase: {
+        land: async ({ slug: targetSlug, phaseId: targetPhaseId }) =>
+          writer.apply(targetSlug, async () => {
+            const kindForTarget = documentKindFor(repo, targetSlug);
+            const phaseBranch = phaseBranchFor(targetSlug, targetPhaseId, kindForTarget);
+            if ((await gitService.branchHead(phaseBranch)) === undefined) {
+              return { kind: 'already-landed' as const };
+            }
+            const landed = await landPhaseWorktree(
+              { workspaceRoot: repo, git: gitService },
+              { slug: targetSlug, phaseId: targetPhaseId, kind: kindForTarget },
+            );
+            return landed.ok
+              ? {
+                  kind: 'landed' as const,
+                  commit: landed.value.commit,
+                  noop: landed.value.noop,
+                  cleanup: landed.value.cleanup,
+                }
+              : { kind: 'refused' as const, reason: landed.error.message };
+          }),
+      },
+      submitPr: async (targetSlug) => {
+        const submitted = await submitPrFlow(targetSlug, {
+          workspaceRoot: repo,
+          baitonDir,
+          terminalHost,
+          watcherFactory,
+          git: gitService,
+          pr,
+          remote: 'origin',
+          modelForRole,
+          adapterForRole,
+          unlandedPhases: (value) => unlandedPhases({ workspaceRoot: repo, git: gitService }, value),
+          clock: () => 1_700_000_000_000,
+          newSessionId: () => 'session-pr',
+        });
+        return submitted.ok
+          ? { ok: true, url: submitted.pr.url, reused: submitted.reused, title: submitted.title }
+          : { ok: false, error: submitted.error.message };
+      },
+      clock: { now: () => '2026-01-01T00:00:00.000Z' },
+      ids: { next: () => 'control-flow-id' },
+      gitSettings: { remote: 'origin', base: 'main' },
+    };
+    const registry = createToolRegistry(services);
+    const guard = new GuardContext({ repoRoot: repo, baitonDir, restricted: false });
+    let callIndex = 0;
+    const call = (
+      name: string,
+      args: unknown,
+      step: 'gather' | 'drive',
+    ) => registry.call(name, args, `control-flow-${++callIndex}`, guard, step);
+
+    const approved = await call('approve_plan', { slug }, 'gather');
+    assert.strictEqual(approved.ok, true, JSON.stringify(approved));
+    assert.strictEqual(await gitService.currentBranch(), `baiton/${slug}`);
+    assert.ok(commitSubjects(repo).includes(`plan(${slug}): approve`));
+
+    for (const [stage, expectedState] of [
+      ['plan', 'planned'],
+      ['execute', 'executed'],
+      ['review', 'done'],
+    ] as const) {
+      const result = await call('run', { slug, phase: phaseId, stage }, 'drive');
+      assert.strictEqual(result.ok, true, `${stage} dispatch: ${JSON.stringify(result)}`);
+      assert.strictEqual(await store.currentState(slug, phaseId), expectedState);
+    }
+
+    const artifactSubdir = kind === 'plan' ? 'phases' : 'todos';
+    const documentDir = path.dirname(path.join(repo, documentPath));
+    const phaseDir = path.join(documentDir, artifactSubdir, phaseId);
+    for (const artifact of ['plan.md', 'execute-1.md', 'review-1.md']) {
+      assert.ok(fs.existsSync(path.join(phaseDir, artifact)), `${artifact} exists for ${kind}`);
+    }
+    const phaseBranch = phaseBranchFor(slug, phaseId, kind);
+    assert.strictEqual(
+      phaseBranch,
+      kind === 'plan'
+        ? `baiton-phase/${slug}/${phaseId}`
+        : `baiton-todo/${slug}/${phaseId}`,
+    );
+    assert.notStrictEqual(await gitService.branchHead(phaseBranch), undefined);
+    const phaseWorktree = phaseWorktreeDirFor(repo, slug, phaseId);
+    assert.ok(readRepoFile(phaseWorktree, 'src/greeting.ts').includes('hello'));
+
+    const refused = await call('submit_pr', { slug }, 'drive');
+    assert.strictEqual(refused.ok, false);
+    if (!refused.ok) assert.match(refused.error, /unlanded/i);
+    assert.strictEqual(createdPrs.length, 0);
+
+    const landed = await call('land_phase', { slug, phase: phaseId }, 'drive');
+    assert.strictEqual(landed.ok, true, JSON.stringify(landed));
+    if (landed.ok) assert.strictEqual((landed.data as { landed: boolean }).landed, true);
+    assert.strictEqual(await gitService.branchHead(phaseBranch), undefined);
+    assert.ok(commitSubjects(repo).includes(`plan(${slug}): land ${phaseId}`));
+    assert.ok(readRepoFile(repo, 'src/greeting.ts').includes('hello'));
+
+    const alreadyLanded = await call('land_phase', { slug, phase: phaseId }, 'drive');
+    assert.strictEqual(alreadyLanded.ok, true);
+    if (alreadyLanded.ok) assert.strictEqual((alreadyLanded.data as { landed: boolean }).landed, false);
+
+    const submitted = await call('submit_pr', { slug }, 'drive');
+    assert.strictEqual(submitted.ok, true, JSON.stringify(submitted));
+    assert.strictEqual(createdPrs.length, 1);
+    assert.strictEqual(createdPrs[0].head, `baiton/${slug}`);
+    assert.strictEqual(createdPrs[0].base, 'main');
+    assert.strictEqual(
+      git(remote, 'show-ref', '--verify', `refs/heads/baiton/${slug}`).trim().split(/\s+/)[1],
+      `refs/heads/baiton/${slug}`,
+    );
+    const finalDocument = readRepoFile(repo, documentPath);
+    assert.ok(finalDocument.includes('pr: https://example.test/pull/42'));
+    assert.ok(finalDocument.includes('status: pr'));
+
+    const newSubjects = git(repo, 'log', '--format=%s', `${baseCommit}..HEAD`)
+      .trim().split('\n').filter(Boolean);
+    assert.ok(newSubjects.length > 0);
+    assert.ok(newSubjects.every((subject) => subject.startsWith(`plan(${slug}):`)), newSubjects.join('\n'));
+    assert.ok(newSubjects.includes(`plan(${slug}): approve`));
+    assert.ok(newSubjects.includes(`plan(${slug}): land ${phaseId}`));
+    assert.ok(newSubjects.includes(`plan(${slug}): pr`));
+
+    const otherRoot = kind === 'plan' ? 'specs' : 'plans';
+    assert.strictEqual(
+      fs.existsSync(path.join(baitonDir, otherRoot)),
+      false,
+      `${kind} flow writes nothing under .baiton/${otherRoot}/`,
+    );
+  }
+
+  it('drives a new plan through approve, run, land and submit_pr', async () => {
+    await driveThroughTools('plan');
+  });
+
+  it('drives a legacy document through approve, run, land and submit_pr', async () => {
+    await driveThroughTools('legacy-spec');
   });
 });

@@ -1,5 +1,5 @@
 /**
- * Usage view message protocol (host-free core) — spec first-party-usage, todo T08.
+ * Usage view message protocol (host-free core).
  *
  * Defines the messages exchanged between the host and the Usage webview, plus
  * pure helpers that build them. Carries no vscode import and no Node built-in

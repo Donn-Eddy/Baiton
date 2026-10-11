@@ -9,7 +9,8 @@ import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 import { createGitService } from '../src/git/gitService';
 import { appendCompletion, appendStart, phaseJournalPathFor } from '../src/journal';
 
-const SPEC = [
+// Legacy spec fixture: the store preserves its existing document and artifact paths.
+const LEGACY_SPEC = [
   '---',
   'status: draft',
   'branch:',
@@ -22,8 +23,8 @@ const SPEC = [
   '',
   '# TODOS',
   '',
-  '- [pending] T01 First todo',
-  '- [pending] T02 Second todo',
+  '- [pending] T01 First phase',
+  '- [pending] T02 Second phase',
   '',
 ].join('\n');
 
@@ -55,7 +56,7 @@ describe('createPlanStore (real repo)', () => {
     git(repo, 'checkout', '-q', '-b', 'main');
     writeFile(repo, 'README.md', 'baseline\n');
     writeFile(repo, '.baiton/.gitignore', GITIGNORE_CONTENTS);
-    writeFile(repo, '.baiton/specs/s/spec.md', SPEC);
+    writeFile(repo, '.baiton/specs/s/spec.md', LEGACY_SPEC);
     git(repo, 'add', '-A');
     git(repo, 'commit', '-q', '-m', 'initial commit');
     git(repo, 'checkout', '-q', '-b', 'baiton/s');
@@ -70,7 +71,7 @@ describe('createPlanStore (real repo)', () => {
   const subjects = (n: number): string[] =>
     git(repo, 'log', '-n', String(n), '--format=%s').trim().split('\n');
 
-  it('concurrent writes for two todos do not clobber each other', async () => {
+  it('concurrent writes for two phases do not clobber each other', async () => {
     const r = await Promise.all([
       store.writeState('s', 'T01', 'planning'),
       store.writeState('s', 'T02', 'planning'),
@@ -100,7 +101,7 @@ describe('createPlanStore (real repo)', () => {
     ]);
   });
 
-  it('commits only the spec folder', async () => {
+  it('commits only the plan folder', async () => {
     writeFile(repo, 'src/unrelated.ts', 'x\n');
     fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
     assert.strictEqual(await store.writeState('s', 'T01', 'planning'), true);
@@ -135,11 +136,11 @@ describe('createPlanStore (real repo)', () => {
     assert.strictEqual(await store.readArtifact('s', 'T01', 'plan'), '# Plan T01\n');
   });
 
-  it('latestExecuteCommit and plan Input_Rev read per-todo journals', async () => {
+  it('latestExecuteCommit and plan Input_Rev read per-phase journals', async () => {
     const file = phaseJournalPathFor(baitonDir, 's', 'T01');
     appendStart(file, {
       runId: 'r-plan',
-      todoId: 'T01',
+      phaseId: 'T01',
       stage: 'plan',
       attempt: 1,
       startHead: 'h',
@@ -147,7 +148,7 @@ describe('createPlanStore (real repo)', () => {
     });
     appendStart(file, {
       runId: 'r-exec',
-      todoId: 'T01',
+      phaseId: 'T01',
       stage: 'execute',
       attempt: 1,
       startHead: 'h',
@@ -159,7 +160,7 @@ describe('createPlanStore (real repo)', () => {
     assert.strictEqual(await store.latestExecuteCommit('s', 'T02'), undefined);
   });
 
-  it('routes a slug present in both roots to plans and leaves specs byte-identical', async () => {
+  it('routes a slug present in both roots to plans and leaves plans byte-identical', async () => {
     const legacyFile = path.join(baitonDir, 'specs', 's', 'spec.md');
     const legacyBefore = fs.readFileSync(legacyFile, 'utf8');
     writeFile(repo, '.baiton/plans/s/plan.md', PLAN);
@@ -179,11 +180,11 @@ describe('createPlanStore (real repo)', () => {
     assert.ok(git(repo, 'ls-files').includes('.baiton/plans/s/phases/P01/plan.md'));
     const journal = phaseJournalPathFor(baitonDir, 's', 'P01');
     appendStart(journal, {
-      runId: 'plan-run', todoId: 'P01', stage: 'plan', attempt: 1,
+      runId: 'plan-run', phaseId: 'P01', stage: 'plan', attempt: 1,
       startHead: 'h', inputRev: 'old',
     });
     appendStart(journal, {
-      runId: 'execute-run', todoId: 'P01', stage: 'execute', attempt: 1,
+      runId: 'execute-run', phaseId: 'P01', stage: 'execute', attempt: 1,
       startHead: 'h', inputRev: 'old',
     });
     appendCompletion(journal, { runId: 'execute-run', result: 'completed', commit: 'phase-commit' });

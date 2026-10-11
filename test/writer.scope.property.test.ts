@@ -7,22 +7,22 @@ import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 import { isOk } from '../src/model/result';
 
 /**
- * Feature: baiton-first-pass, Property 9: Extension writes touch only state
- * boxes and managed frontmatter keys — For any spec and any single state-box
+ * Feature: phased plans, Property 9: Extension writes touch only phase state
+ * boxes and managed frontmatter keys — For any legacy document and any single state-box
  * write or managed-frontmatter-key write, the resulting text SHALL differ from
  * the original only within the targeted state box or managed key, leaving every
- * other byte — OVERVIEW prose, titles, ids, hints, non-managed frontmatter
+ * other byte — overview prose, titles, ids, hints, non-managed frontmatter
  * keys, and other prose — unchanged.
  *
  * Validates: Requirements 6.1, 6.2, 9.7
  *
- * The test renders a spec whose frontmatter mixes extension-managed keys with
+ * The test renders a legacy document whose frontmatter mixes extension-managed keys with
  * non-managed keys, then applies exactly one `writePhaseState` or
  * `writeFrontmatterKey` to the freshly rendered text. It asserts, byte for
  * byte, that the only region that may differ is the targeted `[state]` box or
  * the targeted managed key's value; every other byte — including the prefix
  * before that region and the suffix after it — is unchanged. Abort cases
- * (a `done`-protected state write, an absent todo id, an absent managed key)
+ * (a `done`-protected state write, an absent phase id, an absent managed key)
  * are asserted to return an error and leave the output byte-identical to the
  * input.
  */
@@ -35,7 +35,8 @@ interface FmEntry {
   managed: boolean;
 }
 
-interface TodoModel {
+// Legacy spec fixture generator: these properties preserve the old OVERVIEW/TODOS grammar.
+interface LegacyPhaseModel {
   id: string;
   state: PhaseState;
   title: string;
@@ -43,14 +44,14 @@ interface TodoModel {
   files: string[];
 }
 
-interface SpecModel {
+interface LegacyDocumentModel {
   frontmatter: FmEntry[];
   overviewLines: string[];
-  todos: TodoModel[];
+  phases: LegacyPhaseModel[];
 }
 
-/** Renders a {@link SpecModel} to the canonical text `parsePlan` consumes. */
-function renderSpec(model: SpecModel): string {
+/** Renders a {@link LegacyDocumentModel} to the canonical text `parsePlan` consumes. */
+function renderLegacyDocument(model: LegacyDocumentModel): string {
   const lines: string[] = [];
   lines.push('---');
   for (const { key, value } of model.frontmatter) {
@@ -62,20 +63,20 @@ function renderSpec(model: SpecModel): string {
     lines.push(l);
   }
   lines.push('# TODOS');
-  for (const t of model.todos) {
-    lines.push(renderTodoLine(t));
+  for (const phase of model.phases) {
+    lines.push(renderLegacyPhaseLine(phase));
   }
   return lines.join('\n');
 }
 
-function renderTodoLine(t: TodoModel): string {
-  let line = `- [${t.state}] ${t.id} ${t.title}`;
+function renderLegacyPhaseLine(phase: LegacyPhaseModel): string {
+  let line = `- [${phase.state}] ${phase.id} ${phase.title}`;
   const groups: string[] = [];
-  if (t.after.length > 0) {
-    groups.push(`after ${t.after.join(',')}`);
+  if (phase.after.length > 0) {
+    groups.push(`after ${phase.after.join(',')}`);
   }
-  if (t.files.length > 0) {
-    groups.push(`files: ${t.files.join(',')}`);
+  if (phase.files.length > 0) {
+    groups.push(`files: ${phase.files.join(',')}`);
   }
   if (groups.length > 0) {
     line += ` (${groups.join('; ')})`;
@@ -90,7 +91,7 @@ const idArb: fc.Arbitrary<string> = fc
   .map((n) => 'T' + String(n).padStart(2, '0'));
 
 /**
- * A todo title free of the characters the hint/section grammar reserves, so it
+ * A phase title free of the characters the hint/section grammar reserves, so it
  * round-trips through parse unchanged and never collides with a trailing hint
  * group.
  */
@@ -156,14 +157,14 @@ const frontmatterArb: fc.Arbitrary<{
     return { entries: shuffled, presentManaged: [...managedSubset] };
   });
 
-const specModelArb: fc.Arbitrary<{ model: SpecModel; presentManaged: ManagedKey[] }> = fc
+const legacyDocumentArb: fc.Arbitrary<{ model: LegacyDocumentModel; presentManaged: ManagedKey[] }> = fc
   .record({
     fm: frontmatterArb,
     overviewLines: fc.array(overviewLineArb, { maxLength: 5 }),
     ids: fc.uniqueArray(idArb, { minLength: 1, maxLength: 5 }),
   })
   .chain(({ fm, overviewLines, ids }) => {
-    const todosArb = fc.tuple(
+    const phasesArb = fc.tuple(
       ...ids.map((id) =>
         fc
           .record({
@@ -175,8 +176,8 @@ const specModelArb: fc.Arbitrary<{ model: SpecModel; presentManaged: ManagedKey[
           .map((r) => ({ id, ...r })),
       ),
     );
-    return todosArb.map((todos) => ({
-      model: { frontmatter: fm.entries, overviewLines, todos },
+    return phasesArb.map((phases) => ({
+      model: { frontmatter: fm.entries, overviewLines, phases },
       presentManaged: fm.presentManaged,
     }));
   });
@@ -220,34 +221,34 @@ function lineStartOffset(text: string, lineIndex: number): number {
 describe('writer scope containment (property)', () => {
   it('Property 9: writePhaseState touches only the target state box', () => {
     fc.assert(
-      fc.property(specModelArb, fc.nat(), fc.nat(), ({ model }, todoPick, statePick) => {
-        const before = renderSpec(model);
-        const todo = model.todos[todoPick % model.todos.length];
+      fc.property(legacyDocumentArb, fc.nat(), fc.nat(), ({ model }, phasePick, statePick) => {
+        const before = renderLegacyDocument(model);
+        const phase = model.phases[phasePick % model.phases.length];
         const newState = PHASE_STATES[statePick % PHASE_STATES.length];
 
-        const result = writePhaseState(before, todo.id, newState);
+        const result = writePhaseState(before, phase.id, newState);
 
-        if (todo.state === 'done') {
+        if (phase.state === 'done') {
           // done-protected abort: output is left unchanged (Req 4.11 / 6.5).
-          assert.ok(!isOk(result), 'expected abort on done todo');
+          assert.ok(!isOk(result), 'expected abort on done phase');
           return;
         }
 
         assert.ok(isOk(result), 'expected a successful write');
         const after = result.value;
 
-        // The only region allowed to differ is this todo's `[state]` box.
+        // The only region allowed to differ is this phase's `[state]` box.
         // Its line index is stable across the edit because the edit changes
         // only characters inside the box (state names are single-line).
-        const parsedTodo = parsePlan(before).phases.find((t) => t.id === todo.id);
-        assert.ok(parsedTodo !== undefined, 'target todo parses');
-        const lineStart = lineStartOffset(before, parsedTodo.lineIndex);
+        const parsedPhase = parsePlan(before).phases.find((p) => p.id === phase.id);
+        assert.ok(parsedPhase !== undefined, 'target phase parses');
+        const lineStart = lineStartOffset(before, parsedPhase.lineIndex);
         const boxStart = before.indexOf('[', lineStart);
         const boxEnd = before.indexOf(']', boxStart) + 1;
         assertOnlySpanChanged(before, after, boxStart, boxEnd, 'writePhaseState');
 
-        // And the parsed model confirms only that todo's state moved: every
-        // other todo's id/state/title/hints and all frontmatter are intact.
+        // And the parsed model confirms only that phase's state moved: every
+        // other phase's id/state/title/hints and all frontmatter are intact.
         const parsedBefore = parsePlan(before);
         const parsedAfter = parsePlan(after);
         assert.deepStrictEqual(
@@ -260,11 +261,11 @@ describe('writer scope containment (property)', () => {
         for (let i = 0; i < parsedBefore.phases.length; i++) {
           const b = parsedBefore.phases[i];
           const a = parsedAfter.phases[i];
-          assert.strictEqual(a.id, b.id, 'todo id unchanged');
-          assert.strictEqual(a.title, b.title, 'todo title unchanged');
-          assert.deepStrictEqual(a.after, b.after, 'todo after unchanged');
-          assert.deepStrictEqual(a.files, b.files, 'todo files unchanged');
-          if (b.id === todo.id) {
+          assert.strictEqual(a.id, b.id, 'phase id unchanged');
+          assert.strictEqual(a.title, b.title, 'phase title unchanged');
+          assert.deepStrictEqual(a.after, b.after, 'phase dependencies unchanged');
+          assert.deepStrictEqual(a.files, b.files, 'phase files unchanged');
+          if (b.id === phase.id) {
             assert.strictEqual(a.state, newState, 'target state applied');
           } else {
             assert.strictEqual(a.state, b.state, 'non-target state unchanged');
@@ -278,11 +279,11 @@ describe('writer scope containment (property)', () => {
   it('Property 9: writeFrontmatterKey touches only the target managed key value', () => {
     fc.assert(
       fc.property(
-        specModelArb,
+        legacyDocumentArb,
         fc.constantFrom<ManagedKey>(...MANAGED_KEYS),
         fmValueArb,
         ({ model, presentManaged }, key, newValue) => {
-          const before = renderSpec(model);
+          const before = renderLegacyDocument(model);
           const result = writeFrontmatterKey(before, key, newValue);
 
           if (!presentManaged.includes(key)) {
@@ -312,7 +313,7 @@ describe('writer scope containment (property)', () => {
 
           // Parsed model: the target key holds the new value, every other
           // frontmatter key (managed and non-managed) is unchanged, and no
-          // todo, title, id, hint or overview byte moved.
+          // phase, title, id, hint or overview byte moved.
           const parsedBefore = parsePlan(before);
           const parsedAfter = parsePlan(after);
           assert.strictEqual(parsedAfter.frontmatter.get(key), newValue, 'target value applied');
@@ -330,14 +331,14 @@ describe('writer scope containment (property)', () => {
     );
   });
 
-  it('Property 9: aborts on an absent todo id leave the text unchanged', () => {
+  it('Property 9: aborts on an absent phase id leave the text unchanged', () => {
     fc.assert(
-      fc.property(specModelArb, fc.constantFrom<PhaseState>(...PHASE_STATES), ({ model }, state) => {
-        const before = renderSpec(model);
+      fc.property(legacyDocumentArb, fc.constantFrom<PhaseState>(...PHASE_STATES), ({ model }, state) => {
+        const before = renderLegacyDocument(model);
         // An id guaranteed not present: no generated id exceeds T999999.
         const absentId = 'T1000000';
         const result = writePhaseState(before, absentId, state);
-        assert.ok(!isOk(result), 'expected todo-not-found abort');
+        assert.ok(!isOk(result), 'expected phase-not-found abort');
       }),
       { numRuns: 100 },
     );

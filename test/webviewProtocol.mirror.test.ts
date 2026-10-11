@@ -55,7 +55,7 @@ function hardClone<T>(value: T): T {
   return value;
 }
 
-describe('webview protocol browser mirror (chat-interventions-auto-mode T04)', () => {
+describe('webview protocol browser mirror ', () => {
   let mirror: ProtocolMirror;
 
   before(() => {

@@ -5,7 +5,7 @@ import type { LaunchRequest } from '../src/adapter/adapter';
 import { ACCEPT_EDITS_MODE, READ_ONLY_ALLOWED_TOOLS, READ_ONLY_ROLES } from '../src/adapter/permissions';
 
 /**
- * T12 — focused coverage for the `createAdapterRegistry` / `isAgentId` seam
+ * focused coverage for the `createAdapterRegistry` / `isAgentId` seam
  * (src/adapter/index.ts). This is the lookup every dispatch site now depends
  * on to go from an unvalidated config agent string to a concrete adapter, and
  * it previously had no direct test coverage.

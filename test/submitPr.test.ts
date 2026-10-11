@@ -51,8 +51,9 @@ function write(repo: string, rel: string, contents: string): void {
   fs.writeFileSync(full, contents, 'utf8');
 }
 
-function specText(opts: { states: string[]; baseCommit: string; approvedRev?: string }): string {
-  const todos = opts.states.map((s, i) => `- [${s}] T0${i + 1} Step ${i + 1}`);
+// Legacy spec fixture: submitPr also reads existing documents under specs/.
+function legacySpecText(opts: { states: string[]; baseCommit: string; approvedRev?: string }): string {
+  const phases = opts.states.map((s, i) => `- [${s}] T0${i + 1} Step ${i + 1}`);
   return [
     '---',
     `name: ${SLUG}`,
@@ -71,7 +72,7 @@ function specText(opts: { states: string[]; baseCommit: string; approvedRev?: st
     '',
     '# TODOS',
     '',
-    ...todos,
+    ...phases,
     '',
   ].join('\n');
 }
@@ -107,13 +108,13 @@ function planText(baseCommit: string, approvedRev = ''): string {
 interface Repo {
   root: string;
   remote: string;
-  specsDir: string;
+  legacySpecsDir: string;
   baitonDir: string;
 }
 
 /**
- * A repo on `main` with one commit, a bare `origin`, and the spec branch checked
- * out with the spec (all todos in `states`) committed on it plus one code
+ * A repo on `main` with one commit, a bare `origin`, and the plan branch checked
+ * out with the plan (all phases in `states`) committed on it plus one code
  * change so the cumulative diff is non-empty.
  */
 function makeRepo(states: string[], withRemote = true): Repo {
@@ -135,16 +136,16 @@ function makeRepo(states: string[], withRemote = true): Repo {
   const baseCommit = git(root, 'rev-parse', 'HEAD').trim();
 
   git(root, 'checkout', '-q', '-b', BRANCH);
-  const specRel = `.baiton/specs/${SLUG}/spec.md`;
-  const unapproved = specText({ states, baseCommit });
+  const legacySpecRel = `.baiton/specs/${SLUG}/spec.md`;
+  const unapproved = legacySpecText({ states, baseCommit });
   const approvedRev = approvalHash(parsePlan(unapproved));
-  write(root, specRel, specText({ states, baseCommit, approvedRev }));
+  write(root, legacySpecRel, legacySpecText({ states, baseCommit, approvedRev }));
   write(root, `.baiton/specs/${SLUG}/plan.md`, '# plan\n');
   write(root, 'src/greeting.ts', 'export const greet = (n: string) => `hi ${n}`;\n');
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', `plan(${SLUG}): T01 execute attempt 1`);
 
-  return { root, remote, specsDir: path.join(root, '.baiton', 'specs'), baitonDir: path.join(root, '.baiton') };
+  return { root, remote, legacySpecsDir: path.join(root, '.baiton', 'specs'), baitonDir: path.join(root, '.baiton') };
 }
 
 class StubAdapter implements Adapter {
@@ -276,11 +277,11 @@ async function deliverDraft(h: Harness, draft: unknown): Promise<void> {
 const DRAFT = { title: 'Add greeting', body: 'Adds greet().\n\nVerified by tests.' };
 
 function readPlan(repo: Repo): ReturnType<typeof parsePlan> {
-  return parsePlan(fs.readFileSync(path.join(repo.specsDir, SLUG, 'spec.md'), 'utf8'));
+  return parsePlan(fs.readFileSync(path.join(repo.legacySpecsDir, SLUG, 'spec.md'), 'utf8'));
 }
 
 describe('submitPr (design section 8 "PR")', () => {
-  it('refuses while a todo is not done and launches nothing', async () => {
+  it('refuses while a phase is not done and launches nothing', async () => {
     const h = harness(makeRepo(['done', 'executed']));
     const result = await submitPr(SLUG, h.deps);
     assert.strictEqual(result.ok, false);
@@ -292,7 +293,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(h.pr.created.length, 0);
   });
 
-  it('refuses while a todo branch is unlanded, naming the todos', async () => {
+  it('refuses while a phase branch is unlanded, naming the phases', async () => {
     const h = harness(makeRepo(['done', 'done']), { unlandedPhases: async () => ['T01', 'T02'] });
     const result = await submitPr(SLUG, h.deps);
     assert.strictEqual(result.ok, false);
@@ -305,7 +306,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(h.pr.created.length, 0);
   });
 
-  it('reads unlanded todos from real todo branches', async () => {
+  it('reads unlanded phases from real phase branches', async () => {
     const repo = makeRepo(['done']);
     git(repo.root, 'branch', 'baiton-todo/greeting/T01');
     const lookup = (s: string) => unlandedPhases({ workspaceRoot: repo.root, git: createGitService(repo.root) }, s);
@@ -341,9 +342,9 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(h.terminals.created.length, 0);
   });
 
-  it('refuses when the spec branch is not checked out', async () => {
+  it('refuses when the plan branch is not checked out', async () => {
     const repo = makeRepo(['done']);
-    // A sibling branch carries the same spec, but it is not the spec's branch.
+    // A sibling branch carries the same plan, but it is not the plan's branch.
     git(repo.root, 'checkout', '-q', '-b', 'other');
     const h = harness(repo);
     const result = await submitPr(SLUG, h.deps);
@@ -415,7 +416,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.ok(brief.indexOf('# Role') < brief.indexOf('# Context'), 'context follows the role');
     assert.ok(brief.indexOf('# Context') < brief.indexOf('# Result file'), 'context precedes the result path');
 
-    // The PR was created against the spec's base from its branch.
+    // The PR was created against the plan's base from its branch.
     assert.deepStrictEqual(h.pr.lookedUp, [BRANCH]);
     assert.deepStrictEqual(h.pr.created, [{ base: 'main', head: BRANCH, title: DRAFT.title, body: DRAFT.body }]);
 
@@ -425,25 +426,25 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(git(h.repo.root, 'rev-parse', '--abbrev-ref', `${BRANCH}@{upstream}`).trim(), `origin/${BRANCH}`);
 
     // The metadata was recorded and committed; the draft persisted as pr.md.
-    const spec = readPlan(h.repo);
-    assert.strictEqual(spec.frontmatter.get('pr'), 'https://example.test/pull/42');
-    assert.strictEqual(spec.frontmatter.get('status'), 'pr');
+    const parsedPlan = readPlan(h.repo);
+    assert.strictEqual(parsedPlan.frontmatter.get('pr'), 'https://example.test/pull/42');
+    assert.strictEqual(parsedPlan.frontmatter.get('status'), 'pr');
     assert.strictEqual(git(h.repo.root, 'log', '-1', '--format=%s').trim(), `plan(${SLUG}): pr`);
     assert.strictEqual(git(h.repo.root, 'status', '--porcelain').trim(), '', 'tree is clean after recording');
-    assert.ok(fs.existsSync(path.join(h.repo.specsDir, SLUG, 'pr.md')));
+    assert.ok(fs.existsSync(path.join(h.repo.legacySpecsDir, SLUG, 'pr.md')));
 
     // The journal has one PR start and a completion with every step true.
-    const entries = parseJournal(path.join(h.repo.specsDir, SLUG, 'runs.jsonl'));
+    const entries = parseJournal(path.join(h.repo.legacySpecsDir, SLUG, 'runs.jsonl'));
     assert.strictEqual(entries.length, 1);
     assert.strictEqual(entries[0].stage, 'pr');
-    assert.strictEqual(entries[0].todoId, PR_PHASE_ID);
+    assert.strictEqual(entries[0].phaseId, PR_PHASE_ID);
     assert.strictEqual(entries[0].result, 'completed');
     assert.deepStrictEqual(entries[0].pr, { push: true, create: true, record: true });
   });
 
   it('submits a plan document, writes plan-scoped PR artifacts, and describes phases', async () => {
     const repo = makeRepo(['done']);
-    const legacyFile = path.join(repo.specsDir, SLUG, 'spec.md');
+    const legacyFile = path.join(repo.legacySpecsDir, SLUG, 'spec.md');
     const legacyBefore = fs.readFileSync(legacyFile, 'utf8');
     const baseCommit = git(repo.root, 'rev-parse', 'main').trim();
     const draft = planText(baseCommit);
@@ -493,7 +494,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(h.pr.created.length, 0, 'no PR is created after a rejected push');
     assert.strictEqual(readPlan(h.repo).frontmatter.get('pr'), '', 'pr key untouched');
     assert.strictEqual(readPlan(h.repo).frontmatter.get('status'), 'approved');
-    const entries = parseJournal(path.join(h.repo.specsDir, SLUG, 'runs.jsonl'));
+    const entries = parseJournal(path.join(h.repo.legacySpecsDir, SLUG, 'runs.jsonl'));
     assert.deepStrictEqual(entries[0].pr, { push: false, create: false, record: false });
   });
 
@@ -505,7 +506,7 @@ describe('submitPr (design section 8 "PR")', () => {
     assert.strictEqual(result.ok, false);
     if (result.ok) return;
     assert.strictEqual(result.error.kind, 'outcome');
-    const entries = parseJournal(path.join(h.repo.specsDir, SLUG, 'runs.jsonl'));
+    const entries = parseJournal(path.join(h.repo.legacySpecsDir, SLUG, 'runs.jsonl'));
     assert.strictEqual(entries[0].result, 'closed');
     assert.strictEqual(git(h.repo.remote, 'branch', '--list', BRANCH).trim(), '');
   });

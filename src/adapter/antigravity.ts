@@ -554,7 +554,7 @@ function defaultRunAntigravityModelsCli(options: { cwd?: string; timeoutMs: numb
  *    define a custom agent with one (`agy agent`/`agents` only lists agents).
  *    So a plan-writer, planner, plan-reviewer or pr-writer run on agy is
  *    expected to REFUSE to write its own `.baiton/runs/<run-id>/result.json`,
- *    exit 0, and be recorded by the queue as `closed (exit 0)` with the todo
+ *    exit 0, and be recorded by the queue as `closed (exit 0)` with the phase
  *    reverted. `--add-dir` widens the visible workspace; it does not lift plan
  *    mode's edit ban. This mirrors exactly the opencode bug fixed by moving
  *    that adapter off the built-in `--agent plan` onto Baiton-owned agents
@@ -591,7 +591,7 @@ function defaultRunAntigravityModelsCli(options: { cwd?: string; timeoutMs: numb
  *    (`src/engine/roleInstructions.ts`) is the ONLY place the constraints are
  *    stated — which is why `EXECUTOR_NO_GIT_INSTRUCTION` stays in the brief
  *    even though the executor profile now repeats it.
- *    TODO: investigate `agy --agent` / `agy agents` and, if agents can be
+ *    Follow-up: investigate `agy --agent` / `agy agents` and, if agents can be
  *    defined, translate the role profile here the way the opencode adapter
  *    does.
  * 7. The ask relay is a NATIVE hook installed from a file the launcher

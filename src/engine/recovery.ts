@@ -172,7 +172,7 @@ async function reconcileEntry(
     const action = await applyState(deps, entry, successState);
     return {
       runId: entry.runId,
-      phaseId: entry.todoId,
+      phaseId: entry.phaseId,
       stage: entry.stage,
       killedPid,
       action: action === 'wrote' ? 'replayed-state' : 'no-op',
@@ -188,7 +188,7 @@ async function reconcileEntry(
   const action = await applyState(deps, entry, revertTo, HOST_EXITED_NOTE);
   return {
     runId: entry.runId,
-    phaseId: entry.todoId,
+    phaseId: entry.phaseId,
     stage: entry.stage,
     killedPid,
     action:
@@ -270,7 +270,7 @@ async function applyState(
     return 'skipped';
   }
   try {
-    const wrote = await deps.planStore.writeState(deps.slug, entry.todoId, state, note);
+    const wrote = await deps.planStore.writeState(deps.slug, entry.phaseId, state, note);
     return wrote ? 'wrote' : 'skipped';
   } catch {
     return 'skipped';

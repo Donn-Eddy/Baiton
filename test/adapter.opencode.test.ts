@@ -123,47 +123,47 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
   const adapter = new OpencodeAdapter();
 
   it('fresh launch leads with run, has no -s/-c, and carries req.sessionId as --title (Req 3.1)', () => {
-    const spec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
-    assert.strictEqual(spec.shellArgs[0], 'run');
-    assert.ok(!spec.shellArgs.includes('-s'));
-    assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--session-id'));
-    assert.ok(findPair(spec.shellArgs, '--title', 'session-xyz') >= 0);
-    assert.strictEqual(spec.shellArgs.filter((a) => a === '--title').length, 1);
+    const launchSpec = adapter.launch(req({ resume: false, sessionId: 'session-xyz' }));
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.opencode);
+    assert.strictEqual(launchSpec.shellArgs[0], 'run');
+    assert.ok(!launchSpec.shellArgs.includes('-s'));
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--session-id'));
+    assert.ok(findPair(launchSpec.shellArgs, '--title', 'session-xyz') >= 0);
+    assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '--title').length, 1);
   });
 
   it('fresh launch with an empty sessionId emits no --title', () => {
-    const spec = adapter.launch(req({ resume: false, sessionId: '' }));
-    assert.ok(!spec.shellArgs.includes('--title'));
+    const launchSpec = adapter.launch(req({ resume: false, sessionId: '' }));
+    assert.ok(!launchSpec.shellArgs.includes('--title'));
   });
 
   it('resume with a resolved opencode id leads run -s <id> and no --title (Req 3.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: 'ses_prior' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 3), ['run', '-s', 'ses_prior']);
-    assert.ok(!spec.shellArgs.includes('-c'));
-    assert.ok(!spec.shellArgs.includes('--title'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: 'ses_prior' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 3), ['run', '-s', 'ses_prior']);
+    assert.ok(!launchSpec.shellArgs.includes('-c'));
+    assert.ok(!launchSpec.shellArgs.includes('--title'));
   });
 
   it('resume with an unresolved Baiton Session_Id falls back to run -c, never -s', () => {
-    const spec = adapter.launch(
+    const launchSpec = adapter.launch(
       req({ resume: true, resumeSessionId: 'd7dbb6f8-9168-4620-9e59-ddaa5bb15bd4' }),
     );
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['run', '-c']);
-    assert.ok(!spec.shellArgs.includes('-s'));
-    assert.ok(!spec.shellArgs.includes('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['run', '-c']);
+    assert.ok(!launchSpec.shellArgs.includes('-s'));
+    assert.ok(!launchSpec.shellArgs.includes('d7dbb6f8-9168-4620-9e59-ddaa5bb15bd4'));
   });
 
   it('resume with no prior Session_Id falls back to run -c (Req 3.2, 13.2)', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['run', '-c']);
-    assert.strictEqual(spec.shellArgs.filter((a) => a === '-c').length, 1);
-    assert.ok(!spec.shellArgs.includes('-s'));
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: undefined }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['run', '-c']);
+    assert.strictEqual(launchSpec.shellArgs.filter((a) => a === '-c').length, 1);
+    assert.ok(!launchSpec.shellArgs.includes('-s'));
   });
 
   it('resume with an empty-string prior Session_Id behaves as no prior id', () => {
-    const spec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
-    assert.deepStrictEqual(spec.shellArgs.slice(0, 2), ['run', '-c']);
+    const launchSpec = adapter.launch(req({ resume: true, resumeSessionId: '' }));
+    assert.deepStrictEqual(launchSpec.shellArgs.slice(0, 2), ['run', '-c']);
   });
 
   it('keeps the fresh and no-session-id-resume branches otherwise identical', () => {
@@ -184,8 +184,8 @@ describe('OpencodeAdapter launch session branches (Req 3.1, 3.2, 13.2, 13.3)', (
 
   it('appends the prompt as a bare trailing positional behind -i, with no -- separator', () => {
     const request = req();
-    const spec = adapter.launch(request);
-    const args = spec.shellArgs;
+    const launchSpec = adapter.launch(request);
+    const args = launchSpec.shellArgs;
     assert.strictEqual(args[args.length - 1], request.prompt);
     assert.strictEqual(args[args.length - 2], '-i');
     assert.ok(!args.includes('--'));
@@ -196,26 +196,26 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   const adapter = new OpencodeAdapter();
 
   it('builds run -s <id> --agent baiton-<role> -i with no prompt, model, or run id', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'ses_42' });
+    const launchSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'ses_42' });
 
-    assert.deepStrictEqual(spec.shellArgs, ['run', '-s', 'ses_42', '--agent', 'baiton-executor', '-i']);
-    assert.strictEqual(spec.shellPath, AGENT_BINARY.opencode);
+    assert.deepStrictEqual(launchSpec.shellArgs, ['run', '-s', 'ses_42', '--agent', 'baiton-executor', '-i']);
+    assert.strictEqual(launchSpec.shellPath, AGENT_BINARY.opencode);
 
-    assert.strictEqual(spec.shellArgs.length, 6);
-    assert.ok(!spec.shellArgs.includes('-m'));
-    assert.ok(!spec.shellArgs.includes('--model'));
-    assert.ok(!spec.shellArgs.includes('run-9'));
-    assert.ok(!spec.shellArgs.includes('--add-dir'));
+    assert.strictEqual(launchSpec.shellArgs.length, 6);
+    assert.ok(!launchSpec.shellArgs.includes('-m'));
+    assert.ok(!launchSpec.shellArgs.includes('--model'));
+    assert.ok(!launchSpec.shellArgs.includes('run-9'));
+    assert.ok(!launchSpec.shellArgs.includes('--add-dir'));
   });
 
   it('uses the role-specific Baiton agent for a read-only role', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'ses_1' });
-    assert.ok(findPair(spec.shellArgs, '--agent', 'baiton-planner') >= 0);
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'ses_1' });
+    assert.ok(findPair(launchSpec.shellArgs, '--agent', 'baiton-planner') >= 0);
   });
 
   it('degrades an unresolved Baiton Session_Id to -c rather than emitting -s', () => {
-    const spec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
-    assert.deepStrictEqual(spec.shellArgs, ['run', '-c', '--agent', 'baiton-executor', '-i']);
+    const launchSpec = adapter.attach({ role: 'executor', runId: 'run-9', sessionId: 'session-42' });
+    assert.deepStrictEqual(launchSpec.shellArgs, ['run', '-c', '--agent', 'baiton-executor', '-i']);
   });
 });
 
@@ -297,7 +297,7 @@ describe('OpencodeAdapter role -> --agent baiton-<role> mapping (Decision 4)', (
   }
 });
 
-/** Parse the single custom agent out of a spec's `OPENCODE_CONFIG_CONTENT`. */
+/** Parse the single custom agent out of a plan's `OPENCODE_CONFIG_CONTENT`. */
 function agentDefinition(
   env: Record<string, string> | undefined,
   agentName: string,
@@ -320,12 +320,12 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
   for (const role of ROLES) {
     it(`launch() for role ${role} defines one agent carrying the profile prompt and description`, () => {
       const profile = roleProfile(role);
-      const spec = adapter.launch(req({ role, runId: 'run-777' }));
+      const launchSpec = adapter.launch(req({ role, runId: 'run-777' }));
 
-      assert.ok(spec.env !== undefined);
-      assert.deepStrictEqual(Object.keys(spec.env as Record<string, string>), [OPENCODE_CONFIG_ENV]);
+      assert.ok(launchSpec.env !== undefined);
+      assert.deepStrictEqual(Object.keys(launchSpec.env as Record<string, string>), [OPENCODE_CONFIG_ENV]);
 
-      const agent = agentDefinition(spec.env, profile.agentName);
+      const agent = agentDefinition(launchSpec.env, profile.agentName);
       assert.strictEqual(agent.prompt, profile.systemPrompt);
       assert.strictEqual(agent.description, profile.description);
       assert.strictEqual(agent.mode, 'primary');
@@ -333,8 +333,8 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
 
     it(`launch() for role ${role} translates the profile's edit and bash rules`, () => {
       const profile = roleProfile(role);
-      const spec = adapter.launch(req({ role, runId: 'run-777' }));
-      const agent = agentDefinition(spec.env, profile.agentName);
+      const launchSpec = adapter.launch(req({ role, runId: 'run-777' }));
+      const agent = agentDefinition(launchSpec.env, profile.agentName);
 
       if (profile.write === 'workspace') {
         assert.deepStrictEqual(agent.permission.edit, { '*': 'allow' });
@@ -356,8 +356,8 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
   }
 
   it('attach() emits exactly the same config as launch() for the same role and run', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 's-1' });
-    assert.deepStrictEqual(spec.env, adapter.launch(req({ role: 'planner', runId: 'run-777' })).env);
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 's-1' });
+    assert.deepStrictEqual(launchSpec.env, adapter.launch(req({ role: 'planner', runId: 'run-777' })).env);
   });
 
   it('uses a workspace-relative run-dir pattern containing the run id verbatim', () => {
@@ -409,16 +409,16 @@ describe('OpencodeAdapter documented degrades (no claude permission flags, no --
 
   for (const role of ROLES) {
     it(`omits claude-only permission flags for role ${role} on launch`, () => {
-      const spec = adapter.launch(req({ role, runId: 'run-777' }));
+      const launchSpec = adapter.launch(req({ role, runId: 'run-777' }));
       for (const flag of forbidden) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
 
     it(`omits claude-only permission flags for role ${role} on attach`, () => {
-      const spec = adapter.attach({ role, runId: 'run-777', sessionId: 's-1' });
+      const launchSpec = adapter.attach({ role, runId: 'run-777', sessionId: 's-1' });
       for (const flag of forbidden) {
-        assert.ok(!spec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(spec.shellArgs)}`);
+        assert.ok(!launchSpec.shellArgs.includes(flag), `did not expect ${flag} in ${JSON.stringify(launchSpec.shellArgs)}`);
       }
     });
   }
@@ -442,7 +442,7 @@ describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
   const adapter = new OpencodeAdapter();
   const relay = askRelayDescriptor('/repo', 'run-123');
 
-  it('ignores the relay descriptor entirely: the whole launch spec is byte-identical', () => {
+  it('ignores the relay descriptor entirely: the whole launch plan is byte-identical', () => {
     // Decisive negative: opencode ships no native relay (README "Harness ask
     // relay (per-adapter probe findings)"; adapter doc comment, point 3).
     assert.deepStrictEqual(adapter.launch(req({ relay })), adapter.launch(req()));
@@ -474,8 +474,8 @@ describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
   });
 
   it('attach() installs no relay (it takes no descriptor at all)', () => {
-    const spec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'ses_1' });
-    assert.deepStrictEqual(spec.env, opencodeConfigEnv('planner', 'run-777'));
+    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'ses_1' });
+    assert.deepStrictEqual(launchSpec.env, opencodeConfigEnv('planner', 'run-777'));
   });
 
   for (const role of ROLES) {
@@ -497,12 +497,12 @@ describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
 });
 
 /**
- * Model discovery (model-selector-refresh T06). The parsers are pure, so they
+ * Model discovery . The parsers are pure, so they
  * are pinned directly; `discoverModels` is driven through the three injected
  * seams (`startServer`, `fetchModels`, `runModelsCli`) so no `opencode serve`
  * child is ever spawned and no socket is ever opened by this file.
  */
-describe('opencodeModelsFromApi (model-selector-refresh T06)', () => {
+describe('opencodeModelsFromApi ', () => {
   it('reads a bare array of strings', () => {
     assert.deepStrictEqual(opencodeModelsFromApi(['anthropic/claude-sonnet-5', 'openai/gpt-6']), [
       { id: 'anthropic/claude-sonnet-5', provider: 'anthropic' },
@@ -616,7 +616,7 @@ describe('opencodeModelsFromApi (model-selector-refresh T06)', () => {
   });
 });
 
-describe('opencodeModelsFromCliOutput (model-selector-refresh T06)', () => {
+describe('opencodeModelsFromCliOutput ', () => {
   it('reads a realistic multi-line listing in order', () => {
     const stdout = [
       'Available models:',
@@ -679,7 +679,7 @@ const VERBOSE_IDS = [
   'last/no-detail',
 ];
 
-describe('opencodeModelsFromVerboseOutput (codex-opencode-dropdown-fix T03)', () => {
+describe('opencodeModelsFromVerboseOutput ', () => {
   const entries = opencodeModelsFromVerboseOutput(VERBOSE_FIXTURE);
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
 
@@ -767,7 +767,7 @@ describe('opencodeModelsFromVerboseOutput (codex-opencode-dropdown-fix T03)', ()
   });
 });
 
-describe('mergeOpencodeModelSources (model-selector-refresh T06)', () => {
+describe('mergeOpencodeModelSources ', () => {
   const api = [{ id: 'a/b', label: 'A B' }, { id: 'c/d' }];
   const cli = [{ id: 'c/d', provider: 'c' }, { id: 'e/f', provider: 'e' }];
 
@@ -796,7 +796,7 @@ describe('mergeOpencodeModelSources (model-selector-refresh T06)', () => {
   });
 });
 
-describe('parseOpencodeServerUrl (model-selector-refresh T06)', () => {
+describe('parseOpencodeServerUrl ', () => {
   it('extracts the ephemeral URL from a realistic serve banner', () => {
     assert.strictEqual(
       parseOpencodeServerUrl('opencode server listening on http://127.0.0.1:52341\n'),
@@ -813,7 +813,7 @@ describe('parseOpencodeServerUrl (model-selector-refresh T06)', () => {
   });
 });
 
-describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
+describe('OpencodeAdapter.discoverModels ', () => {
   /** A provider-keyed `/api/model` payload the happy path answers with. */
   const API_PAYLOAD = {
     providers: {
@@ -1256,7 +1256,7 @@ describe('OpencodeAdapter.discoverModels (model-selector-refresh T06)', () => {
   });
 });
 
-describe('OpencodeAdapter /api/model API failure log (api-error-log T08)', () => {
+describe('OpencodeAdapter /api/model API failure log ', () => {
   const BASE_URL = 'http://127.0.0.1:4096';
   const API_PAYLOAD = { providers: { anthropic: { models: [{ id: 'claude-sonnet-5' }] } } };
 

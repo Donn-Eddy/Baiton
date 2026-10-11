@@ -508,7 +508,7 @@ export function normalizeModelSelection(value: unknown): ModelSelection | undefi
 // These are the exact strings the host-side provider router reports as a
 // disabled provider's `reason` (src/activation/providerRouter.ts). Keeping
 // them in the catalog lets the Chat webview render them without duplicating
-// wording: the webview todo imports this module rather than restating the
+// wording: the webview imports this module rather than restating the
 // text. The module stays import-free — these are strings and pure functions
 // only, no `vscode` and no modelClient dependency.
 

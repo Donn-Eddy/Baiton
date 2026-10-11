@@ -25,7 +25,7 @@ export const AGENT_BINARY: Record<AgentId, string> = {
 
 /**
  * The per-source ceiling an adapter's `discoverModels` must respect when
- * `ctx.timeoutMs` is not narrower; the discovery service (later todo) owns the
+ * `ctx.timeoutMs` is not narrower; a separate module owns the
  * real budget.
  */
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 8_000;
@@ -78,7 +78,7 @@ export const AGENT_CATALOG_SOURCE: Readonly<Partial<Record<AgentId, CatalogSourc
 };
 
 /**
- * Capability descriptor for an agent CLI in the configuration panel (T10).
+ * Capability descriptor for an agent CLI in the configuration panel.
  *
  * An empty list means free text (no dropdown, no membership check).
  * A non-empty list means an enumerated set rendered as a dropdown plus an

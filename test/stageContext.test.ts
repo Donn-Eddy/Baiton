@@ -28,8 +28,9 @@ const PLAN_MARK = 'PLANMARK';
 const REVIEW_MARK = 'REVIEWMARK';
 const EXEC_MARK = 'EXECMARK';
 
-/** A two-phase spec where `T02` depends on `T01`. */
-function makeSpec(): ParsedPlan {
+// Legacy spec fixture: stage context rendering must still read existing input.
+/** A two-phase legacy document where phase 2 depends on phase 1. */
+function makeLegacyDocument(): ParsedPlan {
   return parsePlan(
     [
       '---',
@@ -40,8 +41,8 @@ function makeSpec(): ParsedPlan {
       `Overview prose ${OVERVIEW_MARK}.`,
       '',
       '# TODOS',
-      '- [done] T01 First phase TODO-ONE',
-      '- [planned] T02 Second phase TODO-TWO (after T01)',
+      '- [done] T01 First phase PHASE-ONE',
+      '- [planned] T02 Second phase PHASE-TWO (after T01)',
       '',
     ].join('\n'),
   );
@@ -52,21 +53,21 @@ describe('buildStageContext', () => {
     it('carries the OVERVIEW, the phase line, and each after target execution summary', () => {
       const context = buildStageContext({
         stage: 'plan',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         afterExecutes: { T01: `Execution of T01 ${EXEC_MARK}` },
       });
 
       assert.ok(context.includes('# OVERVIEW'), 'plan carries the OVERVIEW heading');
       assert.ok(context.includes(OVERVIEW_MARK), 'plan carries the OVERVIEW text');
-      assert.ok(context.includes('TODO-TWO'), 'plan carries the target phase line');
+      assert.ok(context.includes('PHASE-TWO'), 'plan carries the target phase line');
       assert.ok(
         context.includes('## After target T01'),
         'plan carries a heading per after target',
       );
       assert.ok(context.includes(EXEC_MARK), "plan carries the after target's execution summary");
       assert.ok(
-        !context.includes('TODO-ONE'),
+        !context.includes('PHASE-ONE'),
         "plan does not carry another phase's own line",
       );
     });
@@ -74,13 +75,13 @@ describe('buildStageContext', () => {
     it('omits after targets with no execution summary on file', () => {
       const context = buildStageContext({
         stage: 'plan',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         afterExecutes: {},
       });
 
       assert.ok(context.includes(OVERVIEW_MARK), 'the OVERVIEW is still carried');
-      assert.ok(context.includes('TODO-TWO'), 'the phase line is still carried');
+      assert.ok(context.includes('PHASE-TWO'), 'the phase line is still carried');
       assert.ok(
         !context.includes('## After target'),
         'an after target with no artifact contributes nothing at all',
@@ -90,7 +91,7 @@ describe('buildStageContext', () => {
     it('yields just the OVERVIEW for a phase the plan does not carry', () => {
       const context = buildStageContext({
         stage: 'plan',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T99',
         afterExecutes: { T01: EXEC_MARK },
       });
@@ -105,13 +106,13 @@ describe('buildStageContext', () => {
     it('carries the OVERVIEW, the phase line and the plan under review', () => {
       const context = buildStageContext({
         stage: 'plan-review',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: `Plan body ${PLAN_MARK}`,
       });
 
       assert.ok(context.includes(OVERVIEW_MARK), 'plan-review carries the OVERVIEW');
-      assert.ok(context.includes('TODO-TWO'), 'plan-review carries the phase line');
+      assert.ok(context.includes('PHASE-TWO'), 'plan-review carries the phase line');
       assert.ok(context.includes('# Plan'), 'the plan is delimited by its own heading');
       assert.ok(context.includes(PLAN_MARK), 'plan-review carries the plan text');
     });
@@ -119,7 +120,7 @@ describe('buildStageContext', () => {
     it('names a phase that is absent from the plan', () => {
       const context = buildStageContext({
         stage: 'plan-review',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T99',
         phasePlan: PLAN_MARK,
       });
@@ -131,14 +132,14 @@ describe('buildStageContext', () => {
     it('carries the phase line and the plan but never the OVERVIEW', () => {
       const context = buildStageContext({
         stage: 'execute',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: `Plan body ${PLAN_MARK}`,
         attempt: 1,
         resume: false,
       });
 
-      assert.ok(context.includes('TODO-TWO'), 'execute carries the phase line');
+      assert.ok(context.includes('PHASE-TWO'), 'execute carries the phase line');
       assert.ok(context.includes(PLAN_MARK), 'execute carries the plan');
       assert.ok(!context.includes('# OVERVIEW'), 'execute carries no OVERVIEW heading');
       assert.ok(!context.includes(OVERVIEW_MARK), 'execute carries no OVERVIEW text');
@@ -147,7 +148,7 @@ describe('buildStageContext', () => {
     it('omits the latest review on the first attempt', () => {
       const context = buildStageContext({
         stage: 'execute',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
@@ -162,7 +163,7 @@ describe('buildStageContext', () => {
     it('carries the latest review from the second attempt on', () => {
       const context = buildStageContext({
         stage: 'execute',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
@@ -177,7 +178,7 @@ describe('buildStageContext', () => {
     it('carries the latest review on a resumed first attempt', () => {
       const context = buildStageContext({
         stage: 'execute',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: PLAN_MARK,
         latestReview: `Review body ${REVIEW_MARK}`,
@@ -193,14 +194,14 @@ describe('buildStageContext', () => {
     it('carries the phase line, plan, execution summary and the commit to inspect', () => {
       const context = buildStageContext({
         stage: 'review',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
         phasePlan: `Plan body ${PLAN_MARK}`,
         latestExecute: `Execution ${EXEC_MARK}`,
         executeCommit: 'abc1234',
       });
 
-      assert.ok(context.includes('TODO-TWO'), 'review carries the phase line');
+      assert.ok(context.includes('PHASE-TWO'), 'review carries the phase line');
       assert.ok(context.includes(PLAN_MARK), 'review carries the plan it judges against');
       assert.ok(context.includes(EXEC_MARK), 'review carries the execution summary');
       assert.ok(context.includes('abc1234'), 'review names the commit');
@@ -214,7 +215,7 @@ describe('buildStageContext', () => {
     it('says so when the plan and execute commit are not on file', () => {
       const context = buildStageContext({
         stage: 'review',
-        plan: makeSpec(),
+        plan: makeLegacyDocument(),
         phaseId: 'T02',
       });
 
