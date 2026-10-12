@@ -4,6 +4,7 @@ import {
   legalPlanActions,
   planContextValue,
   PlanAction,
+  PR_PARTIAL_STATUS,
 } from '../src/model/planActions';
 import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
@@ -37,6 +38,11 @@ const phaseStatesArb: fc.Arbitrary<PhaseState[]> = fc.oneof(
   fc.array(fc.constant<PhaseState>('done'), { minLength: 1, maxLength: 6 }),
 );
 
+const statusArb: fc.Arbitrary<string | undefined> = fc.option(
+  fc.constantFrom('draft', 'approved', 'in-progress', 'pr', 'pr-partial', 'done'),
+  { nil: undefined },
+);
+
 describe('planActions (property)', () => {
   it('legalPlanActions gates approve/submitPr/showPr on the derived facts', () => {
     fc.assert(
@@ -45,11 +51,21 @@ describe('planActions (property)', () => {
         fc.boolean(),
         prUrlArb,
         phaseStatesArb,
-        (approved, invalid, prUrl, phaseStates) => {
-          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
+        statusArb,
+        (approved, invalid, prUrl, phaseStates, status) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates, status });
 
           if (invalid) {
             assert.deepStrictEqual(actions, []);
+            return;
+          }
+
+          if (status === PR_PARTIAL_STATUS) {
+            assert.deepStrictEqual(actions, [
+              ...(approved && phaseStates.length > 0 && phaseStates.every((s) => s === 'done') ? ['submitPr'] : []),
+              ...(prUrl !== undefined ? ['showPr'] : []),
+            ]);
+            assert.strictEqual(actions.includes('approve'), false);
             return;
           }
 
@@ -85,8 +101,9 @@ describe('planActions (property)', () => {
         fc.boolean(),
         prUrlArb,
         phaseStatesArb,
-        (approved, invalid, prUrl, phaseStates) => {
-          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
+        statusArb,
+        (approved, invalid, prUrl, phaseStates, status) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates, status });
           assert.strictEqual(
             actions.includes('showPr'),
             !invalid && prUrl !== undefined,
@@ -104,8 +121,9 @@ describe('planActions (property)', () => {
         fc.boolean(),
         prUrlArb,
         phaseStatesArb,
-        (approved, invalid, prUrl, phaseStates) => {
-          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates });
+        statusArb,
+        (approved, invalid, prUrl, phaseStates, status) => {
+          const actions = legalPlanActions({ approved, invalid, prUrl, phaseStates, status });
           const contextValue = planContextValue(actions);
 
           // Begins with the fixed prefix the menu clauses share.
@@ -126,6 +144,32 @@ describe('planActions (property)', () => {
               `contextValue "${contextValue}" token match for "${action}" expected ${expected}`,
             );
           }
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('a partial plan with all phases done and current approval offers Submit PR beside a recorded PR', () => {
+    assert.deepStrictEqual(legalPlanActions({
+      approved: true,
+      invalid: false,
+      prUrl: 'https://example.com/org/repo/pull/7',
+      phaseStates: ['done'],
+      status: PR_PARTIAL_STATUS,
+    }), ['submitPr', 'showPr']);
+  });
+
+  it('every non-partial status preserves the original single-repo actions', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(), fc.boolean(), prUrlArb, phaseStatesArb,
+        statusArb.filter((status) => status !== PR_PARTIAL_STATUS),
+        (approved, invalid, prUrl, phaseStates, status) => {
+          assert.deepStrictEqual(
+            legalPlanActions({ approved, invalid, prUrl, phaseStates, status }),
+            legalPlanActions({ approved, invalid, prUrl, phaseStates }),
+          );
         },
       ),
       { numRuns: 200 },

@@ -9,6 +9,7 @@ export type ManagedKey =
   | 'branch'
   | 'approved_rev'
   | 'pr'
+  | 'prs'
   | 'status';
 
 /** All extension-managed frontmatter keys. */
@@ -18,6 +19,7 @@ export const MANAGED_KEYS: readonly ManagedKey[] = [
   'branch',
   'approved_rev',
   'pr',
+  'prs',
   'status',
 ] as const;
 

@@ -196,6 +196,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
         invalid: false,
         prUrl,
         phaseStates,
+        status: status.kind === 'set' ? status.value : undefined,
       }),
     children: { kind: 'phases', phases },
   };

@@ -24,8 +24,13 @@
  * inside the Plan action's review rounds and does not move the phase between
  * lifecycle states, so it has no row here (the queue drives review rounds while
  * the phase stays in `planning`).
+ *
+ * The plan-level PR helpers at the bottom describe whether every touched repo
+ * has a PR (`pr`) or only some do (`pr-partial`); these are plan states, not
+ * phase transitions.
  */
 import type { PhaseState } from '../model/phaseState';
+import { PR_PARTIAL_STATUS, PR_STATUS } from '../model/planActions';
 
 /**
  * A lifecycle action the user (or orchestrator) can trigger for a phase. These
@@ -243,4 +248,43 @@ export function stageForAction(action: TransitionAction): 'plan' | 'execute' | '
     default:
       return undefined;
   }
+}
+
+/** The plan frontmatter status a PR submission writes. */
+export type PlanPrStatus = 'pr' | 'pr-partial';
+
+/** One repo's submission outcome, reduced to what the state decision needs. */
+export interface RepoPrState {
+  readonly repo: string;
+  readonly ok: boolean;
+}
+
+/**
+ * The plan status after a submission: `pr` only when every touched repo has a
+ * PR (recorded earlier or succeeded now), `pr-partial` when at least one has
+ * a PR and at least one failed, or undefined when none has one.
+ */
+export function planPrStatus(
+  touched: readonly string[],
+  recorded: ReadonlySet<string>,
+  outcomes: readonly RepoPrState[],
+): PlanPrStatus | undefined {
+  if (touched.length === 0) return undefined;
+  const have = new Set(recorded);
+  for (const outcome of outcomes) {
+    if (outcome.ok) have.add(outcome.repo);
+  }
+  const successfulCount = touched.filter((repo) => have.has(repo)).length;
+  if (successfulCount === 0) return undefined;
+  return successfulCount === touched.length ? PR_STATUS : PR_PARTIAL_STATUS;
+}
+
+/** The touched repos still lacking a PR, in `touched` order. */
+export function reposToSubmit(touched: readonly string[], recorded: ReadonlySet<string>): string[] {
+  return touched.filter((repo) => !recorded.has(repo));
+}
+
+/** Whether a status allows retrying PR submission. */
+export function isPartialPrStatus(status: string | undefined): boolean {
+  return status?.trim() === PR_PARTIAL_STATUS;
 }

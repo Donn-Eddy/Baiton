@@ -69,6 +69,7 @@ import { validatePlan } from '../model/validator';
 import { RunMode, isRunMode } from '../model/mode';
 import { Stage, isStage } from '../model/stage';
 import { setFrontmatterKey } from '../model/writer';
+import { describeRepoPrs } from '../engine/prTool';
 import { DocumentLocation, locationFor, resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
@@ -898,7 +899,19 @@ function submitPrTool(services: ToolServices): Tool {
       if (!outcome.ok) {
         return { ok: false, error: outcome.error };
       }
-      return { ok: true, data: { slug, url: outcome.url, reused: outcome.reused, title: outcome.title } };
+      return {
+        ok: true,
+        data: {
+          slug,
+          url: outcome.url,
+          reused: outcome.reused,
+          title: outcome.title,
+          ...(outcome.prs !== undefined ? {
+            prs: outcome.prs,
+            prSummary: describeRepoPrs(outcome.prs.map((pr) => ({ repo: pr.repo, pr: { url: pr.url }, reused: pr.reused }))),
+          } : {}),
+        },
+      };
     },
   };
 }

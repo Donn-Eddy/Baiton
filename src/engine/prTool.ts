@@ -21,6 +21,49 @@ export interface PullRequest {
   number?: number;
 }
 
+/** One repo's PR as reported to the user or orchestrator. */
+export interface RepoPullRequest {
+  repo: string;
+  pr: PullRequest;
+  reused: boolean;
+}
+
+/** One repo whose push or PR creation failed. */
+export interface RepoPrFailureReport {
+  repo: string;
+  message: string;
+}
+
+/** Render each repo's PR and each failure on its own line. */
+export function describeRepoPrs(
+  prs: readonly RepoPullRequest[],
+  failures: readonly RepoPrFailureReport[] = [],
+): string {
+  const label = (repo: string): string => repo === '.' ? '(root)' : repo;
+  return [
+    ...prs.map(({ repo, pr, reused }) => `${label(repo)}: ${pr.url}${reused ? ' (reused)' : ''}`),
+    ...failures.map(({ repo, message }) => `${label(repo)}: failed — ${message}`),
+  ].join('\n');
+}
+
+/** Serialize per-repo PR URLs as one-line JSON in the supplied key order. */
+export function formatPrsValue(prs: readonly { repo: string; url: string }[]): string {
+  return JSON.stringify(Object.fromEntries(prs.map(({ repo, url }) => [repo, url])));
+}
+
+/** Parse a `prs:` value, ignoring malformed data and non-string values. */
+export function parsePrsValue(raw: string | undefined): Map<string, string> {
+  if (raw === undefined || raw.trim() === '') return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return new Map();
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return new Map();
+  return new Map(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
 /** What {@link PrTool.create} needs. */
 export interface CreatePrInput {
   base: string;

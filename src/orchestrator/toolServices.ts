@@ -106,5 +106,5 @@ export interface ToolServices {
 
 /** The `submit_pr` tool's view of the flow's result. */
 export type SubmitPrOutcome =
-  | { ok: true; url: string; reused: boolean; title: string }
+  | { ok: true; url: string; reused: boolean; title: string; prs?: readonly { repo: string; url: string; reused: boolean }[] }
   | { ok: false; error: string };

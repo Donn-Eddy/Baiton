@@ -72,13 +72,13 @@ const PHASE_STATES = [
 ] as const;
 
 /** The allowed frontmatter `status` values, per tech-sheet section 5. */
-const STATUS_VALUES = ['draft', 'approved', 'in-progress', 'review', 'pr', 'done'] as const;
+const STATUS_VALUES = ['draft', 'approved', 'in-progress', 'review', 'pr', 'pr-partial', 'done'] as const;
 
 /** The allowed frontmatter `mode` values, per tech-sheet section 5. */
 const MODE_VALUES = ['manual', 'auto'] as const;
 
 /** The frontmatter keys the extension owns and writes, per tech-sheet section 5. */
-const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr'] as const;
+const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr', 'prs'] as const;
 
 /**
  * The frontmatter `status` values that mean the plan is being driven rather
