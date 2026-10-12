@@ -18,6 +18,7 @@ import {
   LandPhaseSeam,
   RunPipelineSeam,
   RunQueueSeam,
+  PlanRepoSeam,
   SubAgentSeam,
 } from './seams';
 
@@ -77,6 +78,8 @@ export interface ToolServices {
    * registry; `draft_plan` then reports it as unavailable.
    */
   draftPlan?: DraftPlanSeam;
+  /** Optional nested-repo plan targets; absent means single-repo behaviour, byte-for-byte as today. */
+  planRepos?: PlanRepoSeam;
   /**
    * The plan-less run pipeline the `start_run` and `investigate` tools dispatch
    * into. Optional so a host that has not wired the run pipeline still builds a

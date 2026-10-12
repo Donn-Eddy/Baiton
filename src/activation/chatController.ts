@@ -82,6 +82,7 @@ import type {
   SubAgentRunner,
   SubAgentToolSurface,
   ToolRegistry,
+  PromptRepoContext,
 } from '../orchestrator';
 import {
   MissingConfigError,
@@ -308,6 +309,8 @@ export interface ChatControllerDeps {
   toolsFor(step: ConversationStep): ToolSpec[];
   /** Builds the guard context for a tool call (repo, legacy session root, restricted mode). */
   guardContext(): GuardContext;
+  /** Repository context for plan gather/drive prompts; absent for a single-repo workspace. */
+  repoContext?(): PromptRepoContext | undefined;
   /**
    * The pending-ask registry shared with the tool registry's seams. The host
    * creates one registry, wraps it in an `InterventionSeam` whose `present`
@@ -1395,10 +1398,10 @@ export class ChatController {
     const kind: ConversationKind =
       slug === undefined ? { kind: 'workspace' } : { kind: 'plan', slug };
     if (slug === undefined) {
-      return buildSystemPrompt(kind, undefined, mode);
+      return buildSystemPrompt(kind, undefined, mode, this.deps.repoContext?.());
     }
     const documentContent = await this.readPlanDocument(slug);
-    return buildSystemPrompt(kind, documentContent);
+    return buildSystemPrompt(kind, documentContent, mode, this.deps.repoContext?.());
   }
 
   /**

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createStageLock } from '../src/activation/engineFacade';
-import { createPlanDraftRunner, renderPlan } from '../src/engine/planDraft';
+import { createPlanDraftRunner, renderPlan, requirementsContext } from '../src/engine/planDraft';
 import type { PlanDraftOutcome } from '../src/engine/planDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
@@ -240,6 +240,19 @@ describe('plan-draft runner (unit)', () => {
     while (roots.length > 0) {
       fs.rmSync(roots.pop()!, { recursive: true, force: true });
     }
+  });
+
+  it('adds repository context only when the plan can target multiple repos', () => {
+    const requirements = 'Goal: update the API.';
+    const baseline = requirementsContext(requirements);
+    assert.strictEqual(requirementsContext(requirements, [{ path: '.', hasBaiton: true }]), baseline);
+    const contextual = requirementsContext(requirements, [
+      { path: '.', hasBaiton: true },
+      { path: 'packages/api', hasBaiton: true },
+    ]);
+    assert.ok(contextual.includes('## Repositories'));
+    assert.ok(contextual.includes('The plan is owned by `.`.'));
+    assert.ok(contextual.includes('- `packages/api`'));
   });
 
   it('launches the plan writer, writes the brief, and returns the run id immediately', async () => {

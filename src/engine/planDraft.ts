@@ -43,6 +43,8 @@ export interface PlanDraftRequest {
   slug: string;
   /** The requirements document the orchestrator assembled with the user. */
   requirements: string;
+  /** Repositories the new plan may target, with paths relative to its owner. */
+  repos?: readonly { path: string; hasBaiton: boolean }[];
 }
 
 /** How a plan draft ended, reported to the completion sink. */
@@ -209,7 +211,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
         ...(effort !== undefined ? { effort } : {}),
         resume: false,
         sessionId,
-        briefContext: requirementsContext(req.requirements),
+        briefContext: requirementsContext(req.requirements, req.repos),
       },
       { adapter, terminalHost: this.deps.terminalHost },
     );
@@ -436,8 +438,21 @@ function resolvePhaseAfter(
  * The Brief's context section for a plan draft: the requirements document the
  * orchestrator and the user agreed on, verbatim.
  */
-export function requirementsContext(requirements: string): string {
-  return ['## Requirements', '', requirements.trim()].join('\n');
+export function requirementsContext(
+  requirements: string,
+  repos?: readonly { path: string; hasBaiton: boolean }[],
+): string {
+  const sections = [['## Requirements', '', requirements.trim()].join('\n')];
+  if (repos !== undefined && repos.length > 1) {
+    sections.push([
+      '## Repositories',
+      '',
+      'The plan is owned by `.`. Phases may target it or a repo nested beneath it:',
+      '',
+      ...repos.map((repo) => `- \`${repo.path}\`${repo.path === '.' ? ' (owning repo)' : ''}`),
+    ].join('\n'));
+  }
+  return sections.join('\n\n');
 }
 
 /** A refusal, shaped as a {@link PlanDraftStart}. */

@@ -8,6 +8,7 @@ export * from './modelCatalog';
 export * from './interventions';
 export * from './autoMode';
 export * from './toolServices';
+export * from './planRepos';
 export * from './chatTranscript';
 export * from './transcriptReader';
 export * from './sessionStore';
