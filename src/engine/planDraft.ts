@@ -7,8 +7,8 @@
  *
  * It deliberately does not go through {@link RunQueue}: that queue is
  * phase-scoped and resolves lifecycle transitions. This runner drafts a whole
- * plan, but shares the queue's one-stage-per-repository guarantee in both
- * directions.
+ * plan, but shares the per-repo stage lock keyed by its `workspaceRoot` with
+ * the run pipeline. Drafts in unrelated repos do not block each other.
  *
  * Like the queue it probes the adapter before launching, journals a start and
  * completion record to `.baiton/plans/<slug>/runs.jsonl`, and leaves a failed
@@ -30,7 +30,7 @@ import type { ToolServices } from '../orchestrator/toolServices';
 import { locationFor } from '../storage/documentLocation';
 import { launchStage } from './launcher';
 import { awaitStageResult } from './resultFlow';
-import type { ResultWatcherFactory } from './runQueue';
+import type { RepoLockLease, RepoLocks, ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 
 /** The stage and role a plan draft always runs as. */
@@ -93,7 +93,9 @@ export interface PlanDraftDeps {
    */
   adapterForRole(role: Role): Adapter | undefined;
   /** True while a phase-scoped run queue has a stage in flight. */
-  isQueueRunning(): boolean;
+  isQueueRunning?(): boolean;
+  /** The per-repo stage lock map, shared with the run pipeline. The draft takes the lock keyed by `workspaceRoot` for its whole lifetime. */
+  repoLocks?: RepoLocks;
   /** Run-id generator; defaults to a slug/time composite. */
   newRunId?: (slug: string) => string;
   /** Session-id generator for the launch `--session-id`; defaults to a uuid. */
@@ -124,6 +126,7 @@ export function createPlanDraftRunner(deps: PlanDraftDeps): PlanDraftRunner {
 class DefaultPlanDraftRunner implements PlanDraftRunner {
   private readonly deps: PlanDraftDeps;
   private running = false;
+  private lease: RepoLockLease | undefined;
 
   constructor(deps: PlanDraftDeps) {
     this.deps = deps;
@@ -141,23 +144,34 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       });
     }
     // One stage per repository, from both directions (Req 20.1).
-    if (this.running || this.deps.isQueueRunning()) {
+    if (this.running || this.deps.isQueueRunning?.() === true) {
       return refuse({
         kind: 'busy',
         message: 'a stage is already running for this repository; try again after it finishes',
       });
     }
+    const lease = this.deps.repoLocks?.tryAcquire(this.deps.workspaceRoot, 'plan-draft');
+    if (this.deps.repoLocks !== undefined && lease === undefined) {
+      return refuse({
+        kind: 'busy',
+        message: 'a stage is already running for this repository; try again after it finishes',
+      });
+    }
+    const refuseHeld = (reason: PlanDraftRefusal): PlanDraftStart => {
+      lease?.release();
+      return refuse(reason);
+    };
     const baitonDir = this.deps.services.baitonDir;
     // Only an existing document blocks a retry; failed runs can leave their
     // plan directory and journal behind without preventing another draft.
     if (existsSync(locationFor(baitonDir, req.slug, 'plan').documentPath)) {
-      return refuse({
+      return refuseHeld({
         kind: 'duplicate-slug',
         message: `plan "${req.slug}" already exists`,
       });
     }
     if (existsSync(locationFor(baitonDir, req.slug, 'legacy-spec').documentPath)) {
-      return refuse({
+      return refuseHeld({
         kind: 'duplicate-slug',
         message: `legacy spec "${req.slug}" already exists`,
       });
@@ -166,7 +180,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
     // Resolve the plan-writer's configured adapter before probing (Req 14.1).
     const adapter = this.deps.adapterForRole(PLAN_WRITER_ROLE);
     if (adapter === undefined) {
-      return refuse({
+      return refuseHeld({
         kind: 'unknown-agent',
         message: 'role "plan-writer" is configured with an unsupported agent; update "roles.plan-writer.agent" in .baiton/config.json',
       });
@@ -175,7 +189,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
     // Probe the adapter before launching, exactly as the queue does (Req 14.2).
     const probe = await adapter.probe();
     if (!probe.ok) {
-      return refuse({
+      return refuseHeld({
         kind: 'probe-failed',
         message: `adapter probe failed: ${probe.reason ?? 'unknown reason'}`,
       });
@@ -200,13 +214,14 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       { adapter, terminalHost: this.deps.terminalHost },
     );
     if (!launched.ok) {
-      return refuse({
+      return refuseHeld({
         kind: 'launch-failed',
         message: `plan draft launch failed: ${launched.error.message}`,
       });
     }
 
     this.running = true;
+    this.lease = lease;
     const completed = this.awaitAndWrite(req, runId, sessionId, launched.value);
     return { ok: true, runId, completed };
   }
@@ -281,6 +296,8 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       };
     } finally {
       this.running = false;
+      this.lease?.release();
+      this.lease = undefined;
     }
 
     appendCompletion(journalPath, {
