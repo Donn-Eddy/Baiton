@@ -75,6 +75,7 @@ import type { Config } from '../config';
 import { createGitService } from '../git';
 import {
   createPrTool,
+  describeRepoPrs,
   createRepoLocks,
   createRunPipeline,
   createRunStore,
@@ -349,6 +350,8 @@ export interface CommandActivation {
   repos?: RepoSet;
   /** Per-repository Git service registry; absent in lightweight command test fixtures. */
   git?: GitServiceRegistry;
+  /** Per-repository configuration; absent in lightweight command test fixtures. */
+  repoConfigs?: ReadonlyMap<string, Config>;
   /**
    * The live configuration. Replaced wholesale on config save; all reads must
    * go through this object rather than a captured/destructured copy.
@@ -568,10 +571,43 @@ export function registerCommands(
         adapterForRole: adapterFor,
         unlandedPhases: async (s) =>
           unlandedPhasesAcross({ workspaceRoot: repoRoot, git }, s, await phaseTargets.forPlan(s)),
+        phaseTarget: async (s, id) => {
+          const target = await phaseTargets.forPhase(s, id);
+          return target.ok ? { ok: true, value: target.value } : { ok: false, error: target.error };
+        },
+        repoSettings: async (target) => {
+          const repoGit = activation.repoConfigs?.get(target.name)?.git;
+          const repoRemote = repoGit?.remote ?? readGitSettings().remote;
+          const repoBase = repoGit?.base ?? cfg().git.base;
+          let url: string;
+          try {
+            url = await target.git.remoteUrl(repoRemote);
+          } catch {
+            return { ok: false, error: `git remote "${repoRemote}" is not configured in repo ${target.name}` };
+          }
+          const repoKind = selectProvider(selection, url);
+          const repoExecutable = resolveProviderExecutable(repoKind, { override: readPrToolPath() });
+          if (repoExecutable === undefined) {
+            return {
+              ok: false,
+              error: `the "${repoKind}" CLI was not found on PATH or in the usual install directories; install it or set "baiton.pr.toolPath" to its location`,
+            };
+          }
+          return {
+            ok: true,
+            value: { remote: repoRemote, base: repoBase, pr: createPrTool({ kind: repoKind, executable: repoExecutable, repoRoot: target.root }) },
+          };
+        },
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
-        return { ok: true, url: result.pr.url, reused: result.reused, title: result.title };
+        return {
+          ok: true,
+          url: result.pr.url,
+          reused: result.reused,
+          title: result.title,
+          prs: result.prs.map((p) => ({ repo: p.repo, url: p.pr.url, reused: p.reused })),
+        };
       }
       return { ok: false, error: describeSubmitPrError(result.error) };
     } finally {
@@ -1664,9 +1700,12 @@ async function runSubmitPr(
     return;
   }
   const verb = outcome.reused ? 'reused' : 'opened';
-  surface.log(`Baiton: ${verb} PR ${outcome.url} for "${slug}"`);
+  const perRepo = outcome.prs === undefined
+    ? `${verb} PR ${outcome.url}`
+    : describeRepoPrs(outcome.prs.map((pr) => ({ repo: pr.repo, pr: { url: pr.url }, reused: pr.reused })));
+  surface.log(`Baiton: ${perRepo} for "${slug}"`);
   const open = await vscode.window.showInformationMessage(
-    `Baiton: ${verb} pull request for "${slug}": ${outcome.title}`,
+    `Baiton: ${verb} pull request${outcome.prs !== undefined && outcome.prs.length > 1 ? 's' : ''} for "${slug}": ${outcome.title}\n${perRepo}`,
     'Open PR',
   );
   if (open === 'Open PR') {
@@ -1792,6 +1831,12 @@ function describeSubmitPrError(error: SubmitPrError): string {
   if (error.kind === 'verify-failed') {
     const tail = error.output.trim().split('\n').slice(-20).join('\n');
     return `${error.message}\n${tail}`;
+  }
+  if (error.kind === 'partial') {
+    return `${error.message}\n${describeRepoPrs(
+      error.prs.map((p) => ({ repo: p.repo, pr: p.pr, reused: p.reused })),
+      error.failures.map((failure) => ({ repo: failure.repo, message: failure.error.message })),
+    )}`;
   }
   return error.message;
 }

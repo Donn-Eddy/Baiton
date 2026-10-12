@@ -104,9 +104,9 @@ const PHASE_STATES = [
   'done',
   'failed',
 ];
-const STATUS_VALUES = ['draft', 'approved', 'in-progress', 'review', 'pr', 'done'];
+const STATUS_VALUES = ['draft', 'approved', 'in-progress', 'review', 'pr', 'pr-partial', 'done'];
 const MODE_VALUES = ['manual', 'auto'];
-const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr'];
+const EXTENSION_WRITTEN_KEYS = ['base', 'base_commit', 'branch', 'approved_rev', 'pr', 'prs'];
 
 describe('buildSystemPrompt', () => {
   describe('role text (Req 11.1)', () => {

@@ -225,7 +225,10 @@ function validPlanDocument(state: PhaseState = 'pending'): string {
   ].join('\n');
 }
 
-describe('tree model (property)', () => {
+describe('tree model (property)', function () {
+  // The generated documents go through parsing, validation and tree building
+  // hundreds of times; give the property runs enough room on slower CI hosts.
+  this.timeout(15_000);
   it('builds plan nodes with P phases and records their kind', () => {
     const raw = [
       '## Endstate',
@@ -347,11 +350,17 @@ describe('tree model (property)', () => {
             invalid: false,
             prUrl: expectedPrUrl,
             phaseStates: parsed.phases.map((t) => t.state),
+            status: node.status.kind === 'set' ? node.status.value : undefined,
           }),
         );
 
         // Spelled out against the rules, independently of the function above.
-        if (expectedPrUrl !== undefined) {
+        if (node.status.kind === 'set' && node.status.value === 'pr-partial') {
+          assert.deepStrictEqual(node.actions, [
+            ...(approved && parsed.phases.length > 0 && parsed.phases.every((t) => t.state === 'done') ? ['submitPr'] : []),
+            ...(expectedPrUrl !== undefined ? ['showPr'] : []),
+          ]);
+        } else if (expectedPrUrl !== undefined) {
           assert.deepStrictEqual(node.actions, ['showPr']);
         } else {
           assert.strictEqual(node.actions.includes('approve'), !approved);
