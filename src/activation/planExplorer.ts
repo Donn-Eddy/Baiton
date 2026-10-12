@@ -7,16 +7,18 @@
  * the tree from disk, approval state, plan journals, and phase plans.
  *
  * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
- * `specs` root is
- * the legacy document root. Root clicks open the resolved plan document and
- * update the active plan. Inline actions use the existing command arguments
+ * `specs` root is the legacy document root. The three top-level roots are
+ * Active, Pending, and Completed groups, with plans beneath them. Plan clicks
+ * open the resolved plan document and update the active plan. Inline actions use the existing command arguments
  * and are hidden in Restricted Mode through package.json context clauses.
  */
 import * as vscode from 'vscode';
 import { resolveDocument } from '../storage/documentLocation';
 import type { PlanStore } from '../engine';
 import {
+  buildPlanGroups,
   buildPlanTree,
+  type PlanGroupNode,
   type PlanNode,
   type PhaseNode,
   type ErrorNode,
@@ -53,12 +55,13 @@ const REFRESH_DEBOUNCE_MS = 500;
 const CONTEXT_ERROR = 'baiton.planError';
 
 /**
- * One node in the tree: a plan root, a phase child, or an error child. This is
- * the element VS Code hands to the `view/item/context` command handlers, which read `node.slug`/`node.id` off it to invoke
- * `baiton.*` with the CodeLens argument order (design "PlanExplorer inline
- * actions"). Exported for that wiring and its {@link treeNodeTarget} helper.
+ * One node in the tree: a group heading, a plan root, a phase child, or an
+ * error child. Group and error nodes have no action target; plan and phase
+ * nodes supply the slug/id arguments used by `baiton.*` command handlers.
+ * Exported for that wiring and its {@link treeNodeTarget} helper.
  */
 export type TreeNode =
+  | { kind: 'group'; node: PlanGroupNode }
   | { kind: 'plan'; node: PlanNode }
   | { kind: 'phase'; node: PhaseNode }
   | { kind: 'error'; node: ErrorNode };
@@ -66,11 +69,14 @@ export type TreeNode =
 /**
  * The `[slug]` or `[slug, phaseId]` a `view/item/context` action forwards to the
  * matching `baiton.*` command from a clicked {@link TreeNode} (Req 5.2, 5.5,
- * 18.4). A plan root yields `[slug]` (Approve/Submit PR/Show PR); a phase yields `[slug, phaseId]`
- * (Plan/Execute/Review/Re-plan/Stop); an error child has no action.
+ * 18.4). A plan root yields `[slug]` (Approve/Submit PR/Show PR), a phase
+ * yields `[slug, phaseId]` (Plan/Execute/Review/Re-plan/Stop), and group or
+ * error nodes have no action.
  */
 export function treeNodeTarget(node: TreeNode): string[] | undefined {
   switch (node.kind) {
+    case 'group':
+      return undefined;
     case 'plan':
       return [node.node.slug];
     case 'phase':
@@ -92,12 +98,12 @@ export class PlanExplorer
   /** Fired to tell VS Code to re-query the tree (Req 6.1). */
   public readonly onDidChangeTreeData = this.emitter.event;
 
-  /** The current roots, recomputed from disk on each refresh (no cache, Req 6.3). */
-  private roots: PlanNode[] = [];
+  /** The three roots are always present; their plans are recomputed on refresh (Req 6.3). */
+  private groups: PlanGroupNode[] = buildPlanGroups([]);
 
   private readonly disposables: vscode.Disposable[] = [];
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
-  /** Guards against overlapping async refreshes clobbering `roots` out of order. */
+  /** Guards against overlapping async refreshes clobbering groups out of order. */
   private refreshSeq = 0;
 
   /**
@@ -170,8 +176,12 @@ export class PlanExplorer
 
   public getChildren(element?: TreeNode): TreeNode[] {
     if (element === undefined) {
-      // Roots: one per present plan, in the lister's ascending-slug order.
-      return this.roots.map((node) => ({ kind: 'plan', node }));
+      // The roots are always Active, Pending, Completed, even before refresh.
+      return this.groups.map((node) => ({ kind: 'group', node }) as const);
+    }
+    if (element.kind === 'group') {
+      // The lister's ascending-slug order is preserved inside each group.
+      return element.node.plans.map((node) => ({ kind: 'plan', node }) as const);
     }
     if (element.kind === 'plan') {
       const children = element.node.children;
@@ -186,6 +196,8 @@ export class PlanExplorer
 
   public getTreeItem(element: TreeNode): vscode.TreeItem {
     switch (element.kind) {
+      case 'group':
+        return this.groupItem(element.node);
       case 'plan':
         return this.planItem(element.node);
       case 'phase':
@@ -235,7 +247,7 @@ export class PlanExplorer
       // A newer refresh superseded this one while we awaited; drop this result.
       return;
     }
-    this.roots = buildPlanTree(inputs);
+    this.groups = buildPlanGroups(buildPlanTree(inputs));
     this.emitter.fire(undefined);
   }
 
@@ -249,6 +261,26 @@ export class PlanExplorer
   }
 
   // --- TreeItem mapping ----------------------------------------------------
+
+  /** A stable, action-free group heading with its plan count. */
+  private groupItem(node: PlanGroupNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      node.label,
+      node.kind === 'completed'
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.Expanded,
+    );
+    item.id = node.contextValue;
+    item.contextValue = node.contextValue;
+    item.description = String(node.plans.length);
+    const icon = node.kind === 'active'
+      ? 'play-circle'
+      : node.kind === 'pending'
+        ? 'circle-large-outline'
+        : 'pass';
+    item.iconPath = new vscode.ThemeIcon(icon);
+    return item;
+  }
 
   /**
    * A plan root item: `<slug>` plus its status (or an unset indication), an

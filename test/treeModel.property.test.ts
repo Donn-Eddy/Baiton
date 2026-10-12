@@ -5,6 +5,8 @@ import {
   validatePlan,
   isBlocked,
   buildPlanTree,
+  buildPlanGroups,
+  planGroupKind,
   legalPlanActions,
   PhaseState,
 } from '../src/model';
@@ -200,6 +202,29 @@ function renderLegacyDocument(fixture: LegacyDocumentFixture): string {
   return lines.join('\n');
 }
 
+function buildPlanNodeForTest(raw: string, approved = false, slug = 'demo') {
+  return buildPlanTree([{
+    slug,
+    raw,
+    approved,
+    sessions: new Set<string>(),
+    plans: new Set<string>(),
+  }])[0];
+}
+
+function validPlanDocument(state: PhaseState = 'pending'): string {
+  return [
+    '## Endstate',
+    'A working result.',
+    '## What needs changing',
+    'Implement the behavior.',
+    '## Limitations & constraints',
+    'Keep the public API stable.',
+    '# PHASES',
+    `- [${state}] P01 First phase`,
+  ].join('\n');
+}
+
 describe('tree model (property)', () => {
   it('builds plan nodes with P phases and records their kind', () => {
     const raw = [
@@ -298,6 +323,16 @@ describe('tree model (property)', () => {
         ]);
         const node = nodes[0];
 
+        assert.deepStrictEqual(node.phaseStates, parsed.phases.map((phase) => phase.state));
+        assert.strictEqual(
+          node.group,
+          planGroupKind({
+            status: node.status,
+            approved,
+            phaseStates: parsed.phases.map((phase) => phase.state),
+          }),
+        );
+
         // Derive the expectation from what the parser actually read, not from
         // the generator's intent: the random frontmatter may also carry `pr`.
         const rawPr = parsed.frontmatter.get('pr');
@@ -330,5 +365,112 @@ describe('tree model (property)', () => {
       }),
       { numRuns: 200 },
     );
+  });
+
+  it('assigns plan groups from status, approval, and phase states', () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          status: fc.oneof(
+            fc.constant({ kind: 'unset' as const }),
+            fc.constantFrom('done', 'draft', 'in-progress', 'Done').map((value) => ({ kind: 'set' as const, value })),
+          ),
+          approved: fc.boolean(),
+          phaseStates: fc.array(fc.constantFrom(...PHASE_STATES), { maxLength: 6 }),
+        }),
+        (facts) => {
+          const expected = facts.status.kind === 'set' && facts.status.value === 'done'
+            ? 'completed'
+            : facts.approved || facts.phaseStates.some((state) => state !== 'pending')
+              ? 'active'
+              : 'pending';
+          assert.strictEqual(planGroupKind(facts), expected);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('groups valid, invalid, and unreadable plans using the facts available', () => {
+    const done = ['---', 'status: done', '---', validPlanDocument()].join('\n');
+    const completed = buildPlanNodeForTest(done);
+    assert.strictEqual(completed.invalid, false);
+    assert.deepStrictEqual(completed.phaseStates, ['pending']);
+    assert.strictEqual(completed.group, 'completed');
+
+    const pendingRaw = validPlanDocument();
+    const pending = buildPlanNodeForTest(pendingRaw);
+    const approved = buildPlanNodeForTest(pendingRaw, true, 'approved');
+    const progressing = buildPlanNodeForTest(validPlanDocument('planning'), false, 'progressing');
+    assert.strictEqual(pending.group, 'pending');
+    assert.strictEqual(approved.group, 'active');
+    assert.strictEqual(progressing.group, 'active');
+
+    const invalidCompletedRaw = [
+      '---', 'status: done', '---',
+      '# OVERVIEW', 'Invalid because the phase ids repeat.',
+      '# TODOS', '- [pending] T01 First', '- [pending] T01 Duplicate',
+    ].join('\n');
+    const invalidCompleted = buildPlanNodeForTest(invalidCompletedRaw, false, 'invalid-done');
+    assert.strictEqual(invalidCompleted.invalid, true);
+    assert.deepStrictEqual(invalidCompleted.phaseStates, ['pending', 'pending']);
+    assert.strictEqual(invalidCompleted.group, 'completed');
+
+    const invalidActiveRaw = [
+      '# OVERVIEW', 'Invalid because the dependency is missing.',
+      '# TODOS', '- [executing] T01 First (after T99)',
+    ].join('\n');
+    const invalidActive = buildPlanNodeForTest(invalidActiveRaw, false, 'invalid-active');
+    assert.strictEqual(invalidActive.invalid, true);
+    assert.deepStrictEqual(invalidActive.phaseStates, ['executing']);
+    assert.strictEqual(invalidActive.group, 'active');
+
+    const unreadable = buildPlanTree([{
+      slug: 'unreadable',
+      readError: 'boom',
+      approved: false,
+      sessions: new Set<string>(),
+      plans: new Set<string>(),
+    }])[0];
+    const unreadableApproved = buildPlanTree([{
+      slug: 'unreadable-approved',
+      readError: 'boom',
+      approved: true,
+      sessions: new Set<string>(),
+      plans: new Set<string>(),
+    }])[0];
+    assert.deepStrictEqual(unreadable.phaseStates, []);
+    assert.strictEqual(unreadable.group, 'pending');
+    assert.deepStrictEqual(unreadableApproved.phaseStates, []);
+    assert.strictEqual(unreadableApproved.group, 'active');
+  });
+
+  it('builds all three groups in display order and preserves plan order', () => {
+    const nodes = [
+      buildPlanNodeForTest(validPlanDocument('planning'), false, 'active-first'),
+      buildPlanNodeForTest(validPlanDocument(), false, 'pending-first'),
+      buildPlanNodeForTest(['---', 'status: done', '---', validPlanDocument()].join('\n'), false, 'completed-first'),
+      buildPlanNodeForTest(validPlanDocument(), true, 'active-second'),
+      buildPlanNodeForTest(validPlanDocument(), false, 'pending-second'),
+      buildPlanNodeForTest(['---', 'status: done', '---', validPlanDocument()].join('\n'), false, 'completed-second'),
+    ];
+    const groups = buildPlanGroups(nodes);
+    assert.deepStrictEqual(groups.map((group) => group.kind), ['active', 'pending', 'completed']);
+    assert.deepStrictEqual(groups.map((group) => group.label), ['Active', 'Pending', 'Completed']);
+    assert.deepStrictEqual(groups.map((group) => group.contextValue), [
+      'baiton.planGroup.active', 'baiton.planGroup.pending', 'baiton.planGroup.completed',
+    ]);
+    assert.deepStrictEqual(groups.map((group) => group.plans.map((node) => node.slug)), [
+      ['active-first', 'active-second'],
+      ['pending-first', 'pending-second'],
+      ['completed-first', 'completed-second'],
+    ]);
+    const grouped = groups.flatMap((group) => group.plans);
+    assert.strictEqual(grouped.length, nodes.length);
+    assert.deepStrictEqual(grouped.map((node) => node.slug).sort(), nodes.map((node) => node.slug).sort());
+    for (const group of groups) {
+      assert.ok(group.plans.every((node) => node.group === group.kind));
+    }
+    assert.deepStrictEqual(buildPlanGroups([]).map((group) => group.plans), [[], [], []]);
   });
 });
