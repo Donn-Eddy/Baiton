@@ -39,6 +39,31 @@ export function createGitService(repoRoot: string): GitWorktreeService {
   return new ShellGitService(repoRoot);
 }
 
+/** A memoized per-repository collection of git services. */
+export interface GitServiceRegistry {
+  /** The single service bound to `repoRoot`, created on first use and reused after. */
+  forRepo(repoRoot: string): GitWorktreeService;
+}
+
+/** Create one git service per normalized repository root. */
+export function createGitServiceRegistry(
+  factory: (repoRoot: string) => GitWorktreeService = createGitService,
+): GitServiceRegistry {
+  const services = new Map<string, GitWorktreeService>();
+  return {
+    forRepo(repoRoot: string): GitWorktreeService {
+      const normalizedRoot = path.resolve(repoRoot);
+      const cached = services.get(normalizedRoot);
+      if (cached) {
+        return cached;
+      }
+      const service = factory(normalizedRoot);
+      services.set(normalizedRoot, service);
+      return service;
+    },
+  };
+}
+
 class ShellGitService implements GitWorktreeService {
   constructor(private readonly repoRoot: string) {}
 

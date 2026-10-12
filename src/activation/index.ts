@@ -13,5 +13,6 @@
  */
 export * from './engineVersion';
 export * from './workspace';
+export * from './repoDiscovery';
 export * from './executable';
 export * from './modelDiscovery';

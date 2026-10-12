@@ -10,8 +10,13 @@ import {
   canonicalizeRoot,
   resolveAgentExecutables,
   resolveExecutable,
+  discoverRepos,
+  reposWithBaiton,
   type WorkspaceContext,
-  type WorkspaceFolder,
+  type RepoSet,
+  type DiscoveryFs,
+  type DiscoveryFolder,
+  type WorkspaceRepos,
   type ExecutableLookup,
   type OverrideGetter,
   type AgentExecutables,
@@ -19,7 +24,8 @@ import {
 import { isErr } from './model/result';
 import { loadConfig, refreshGitignore } from './config';
 import type { Config } from './config';
-import { createGitService } from './git';
+import { createGitServiceRegistry } from './git';
+import type { GitServiceRegistry } from './git';
 import type { GitService } from './git';
 import { recoverJournal } from './engine';
 import { planJournalPaths } from './journal';
@@ -58,8 +64,8 @@ import { listDocumentSlugs, resolveDocument } from './storage/documentLocation';
  * Activation order (design "Activation / host"):
  *   1. Engine-version guard — refuse below {@link MINIMUM_VSCODE_VERSION} with a
  *      message (Req 23.3).
- *   2. Workspace resolution — a single folder, or the one multi-root folder
- *      containing `.baiton/`; refuse on zero or more than one (Req 22.3–22.5).
+ *   2. Repo discovery — walk every folder; primary = single folder, or first
+ *      `.baiton/` repo in a multi-root workspace (Req 22.3–22.5).
  *   3. Trust / restricted read — `vscode.workspace.isTrusted` becomes the
  *      context's `restricted` flag; under Restricted Mode all writes and
  *      dispatch are disabled (Req 22.1, 22.2).
@@ -101,6 +107,12 @@ export interface ActivationState {
    * change on config save; must never be destructured into a long-lived local.
    */
   executables: AgentExecutables;
+  /** Discovered repos for later multi-repo activation and command phases. */
+  readonly repos: RepoSet;
+  /** Successfully loaded configs keyed by stable repo name. */
+  readonly repoConfigs: ReadonlyMap<string, Config>;
+  /** A memoized git service bound to each repo root. */
+  readonly git: GitServiceRegistry;
 }
 
 /** The single resolved activation state, exposed for the command layer (task 15.2). */
@@ -292,18 +304,22 @@ async function completeActivation(
     return [];
   }
 
-  // 2. Workspace resolution (Req 22.3–22.5). Read the real workspace folders,
-  //    probe each for a `.baiton/` directory, and resolve the single root.
-  const folders = readWorkspaceFolders();
+  // 2. Repo discovery (Req 22.3–22.5). The folder roots are canonicalized at
+  //    ingress, and the pure walker skips Git internals and Baiton's state.
+  const repos = await discoverWorkspaceRepos();
+  if (repos.truncated) {
+    surface.log('Baiton repo discovery hit its depth or entry bound; some nested repos may not have been found.');
+  }
   // 3. Trust / restricted read (Req 22.1, 22.2). Restricted Mode = untrusted.
   const trusted = vscode.workspace.isTrusted;
 
-  const resolved = resolveWorkspace<vscode.Uri>(folders, trusted, baitonDirOf);
+  const resolved = resolveWorkspace<vscode.Uri>(repos, trusted, (fsPath) => vscode.Uri.file(fsPath));
   if (isErr(resolved)) {
     void vscode.window.showErrorMessage(resolved.error.message);
     return [NOT_ACTIVATED_NOTE(resolved.error.message)];
   }
-  const workspace = resolved.value;
+  const workspaceRepos: WorkspaceRepos<vscode.Uri> = resolved.value;
+  const workspace = workspaceRepos.primary;
 
   // 4. Config load (task 5.1). A refusal surfaces the offending detail; without
   //    a valid config the extension does not proceed to recovery/dispatch.
@@ -313,6 +329,23 @@ async function completeActivation(
     return [`Configuration saved, but could not be activated: ${configResult.error.message}`];
   }
   const config = configResult.value;
+  const repoConfigs = new Map<string, Config>([[workspace.repo.name, config]]);
+
+  // Child repo configurations are useful to later phases, but a broken child
+  // must not prevent the primary workspace from activating.
+  for (const repo of reposWithBaiton(repos)) {
+    if (repo.name === workspace.repo.name) {
+      continue;
+    }
+    const childConfigResult = await loadConfig(repo.baitonDir!);
+    if (isErr(childConfigResult)) {
+      surface.warn(
+        `Baiton could not load ${repo.name}/.baiton/config.json: ${childConfigResult.error.message}`,
+      );
+      continue;
+    }
+    repoConfigs.set(repo.name, childConfigResult.value);
+  }
 
   // Locate every configured agent's executable on PATH with a per-agent
   // settings override (Req 22.7). Roles may name different agents, so
@@ -331,8 +364,9 @@ async function completeActivation(
   // 5. Crash recovery (task 11.2, Req 21.3–21.7). Reconcile each plan's
   //    result-less journal entries. Skipped under Restricted Mode, which
   //    forbids the state writes recovery replays (Req 22.1).
+  const git = createGitServiceRegistry();
   if (!workspace.restricted) {
-    await runCrashRecovery(workspace, surface);
+    await runCrashRecovery(repos, git, surface);
   }
 
   // Keep `.baiton/.gitignore` current with the canonical exclusion list so a
@@ -340,14 +374,18 @@ async function completeActivation(
   // Baiton-owned artifacts (e.g. per-session chat transcripts). Skipped under
   // Restricted Mode, which forbids workspace writes (Req 22.1).
   if (!workspace.restricted) {
-    try {
-      await refreshGitignore(workspace.baitonDir.fsPath);
-    } catch (e) {
-      surface.warn(`Baiton could not refresh .baiton/.gitignore: ${describe(e)}.`);
+    for (const repo of reposWithBaiton(repos)) {
+      try {
+        await refreshGitignore(repo.baitonDir!);
+      } catch (e) {
+        surface.warn(
+          `Baiton could not refresh ${repo.name}/.baiton/.gitignore: ${describe(e)}.`,
+        );
+      }
     }
   }
 
-  const state: ActivationState = { workspace, config, executables };
+  const state: ActivationState = { workspace, config, executables, repos, repoConfigs, git };
   activationState = state;
 
   // Wire the command surface: per-stage triggers, approve/re-approve, the chat
@@ -388,42 +426,32 @@ export function deactivate(): void {
 
 // --- vscode-backed seams over the pure activation cores -------------------
 
-/**
- * Read the real workspace folders and, for each, whether it contains a
- * `.baiton/` directory (the multi-root disambiguator, Req 22.4). The presence
- * check is a synchronous filesystem probe on the host, which is where the
- * `extensionKind: "workspace"` extension runs (Req 22.6).
- *
- * This is Baiton's single ingress for the workspace path, so it is also where
- * the root is canonicalized ({@link canonicalizeRoot}): file-scheme uris are
- * replaced by their symlink-resolved spelling before the `.baiton/` probe, so
- * `WorkspaceContext.root`, `baitonDir`, and every downstream path agree with
- * the cwd a launched CLI will realpath for itself. Non-file schemes pass
- * through untouched.
- */
-function readWorkspaceFolders(): WorkspaceFolder<vscode.Uri>[] {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  return folders.map((folder) => {
-    const uri =
-      folder.uri.scheme === 'file'
-        ? vscode.Uri.file(canonicalizeRoot(folder.uri.fsPath))
-        : folder.uri;
-    return { uri, hasBaitonDir: hasBaitonDir(uri) };
-  });
-}
-
-/** Whether `<folder>/.baiton` exists and is a directory. */
-function hasBaitonDir(folder: vscode.Uri): boolean {
-  try {
-    return fs.statSync(baitonDirOf(folder).fsPath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** Derive `<root>/.baiton` for the workspace context (design "WorkspaceContext"). */
-function baitonDirOf(root: vscode.Uri): vscode.Uri {
-  return vscode.Uri.joinPath(root, '.baiton');
+/** Discover repos under all opened folders using the injected filesystem seam. */
+async function discoverWorkspaceRepos(): Promise<RepoSet> {
+  const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  const folders: DiscoveryFolder[] = workspaceFolders.map((folder) => ({
+    name: folder.name,
+    root: folder.uri.scheme === 'file'
+      ? canonicalizeRoot(folder.uri.fsPath)
+      : folder.uri.fsPath,
+  }));
+  const nonFileRoots = new Set(
+    workspaceFolders
+      .filter((folder) => folder.uri.scheme !== 'file')
+      .map((folder) => path.resolve(folder.uri.fsPath)),
+  );
+  const nodeDiscoveryFs: DiscoveryFs = {
+    readdir: async (dir) => {
+      if (nonFileRoots.has(path.resolve(dir))) {
+        return [];
+      }
+      return (await fsp.readdir(dir, { withFileTypes: true })).map((entry) => ({
+        name: entry.name,
+        kind: entry.isDirectory() ? 'dir' : entry.isFile() ? 'file' : 'other',
+      }));
+    },
+  };
+  return discoverRepos(folders, nodeDiscoveryFs);
 }
 
 /**
@@ -507,31 +535,37 @@ const resolveUsageCli = (cli: UsageCliName): string | undefined => {
  * rest still reconcile.
  */
 async function runCrashRecovery(
-  workspace: WorkspaceContext<vscode.Uri>,
+  repos: RepoSet,
+  gitRegistry: GitServiceRegistry,
   surface: Surface,
 ): Promise<void> {
-  const repoRoot = workspace.root.fsPath;
-  const baitonDir = workspace.baitonDir.fsPath;
-  const git = createGitService(repoRoot);
-
-  const slugs = listDocumentSlugs(baitonDir);
-
-  for (const slug of slugs) {
-    if (!planJournalPaths(baitonDir, slug).some((p) => fs.existsSync(p))) {
-      continue;
-    }
+  for (const repo of reposWithBaiton(repos)) {
     try {
-      await recoverJournal({
-        slug,
-        baitonDir,
-        git,
-        process: hostProcessControl,
-        planStore: { writeState: makeRecoveryWriteState(repoRoot, slug, git) },
-      });
+      const repoRoot = repo.root;
+      const baitonDir = repo.baitonDir!;
+      const git = gitRegistry.forRepo(repoRoot);
+      const slugs = listDocumentSlugs(baitonDir);
+
+      for (const slug of slugs) {
+        if (!planJournalPaths(baitonDir, slug).some((p) => fs.existsSync(p))) {
+          continue;
+        }
+        try {
+          await recoverJournal({
+            slug,
+            baitonDir,
+            git,
+            process: hostProcessControl,
+            planStore: { writeState: makeRecoveryWriteState(baitonDir, slug, git) },
+          });
+        } catch (e) {
+          surface.warn(
+            `Baiton crash recovery for ${repo.name} plan "${slug}" did not complete: ${describe(e)}.`,
+          );
+        }
+      }
     } catch (e) {
-      surface.warn(
-        `Baiton crash recovery for plan "${slug}" did not complete: ${describe(e)}.`,
-      );
+      surface.warn(`Baiton crash recovery for ${repo.name} did not complete: ${describe(e)}.`);
     }
   }
 }
@@ -574,12 +608,12 @@ const hostProcessControl: ProcessControl = {
  * state box (Req 6.1), and recovery notes are advisory.
  */
 function makeRecoveryWriteState(
-  repoRoot: string,
+  baitonDir: string,
   slug: string,
   git: GitService,
 ): (slug: string, phaseId: string, state: PhaseState, note?: string) => Promise<boolean> {
   return async (_slug: string, phaseId: string, state: PhaseState): Promise<boolean> => {
-    const documentPath = resolveDocument(path.join(repoRoot, '.baiton'), slug).documentPath;
+    const documentPath = resolveDocument(baitonDir, slug).documentPath;
     let current: string;
     try {
       current = await fsp.readFile(documentPath, 'utf8');
