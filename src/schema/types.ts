@@ -19,6 +19,8 @@ export interface PlanDraftPhase {
   after?: string[];
   /** Repository-relative files this phase is expected to start from. */
   files?: string[];
+  /** Target repo path relative to the owning repo; emitted only for a child repo. */
+  repo?: string;
 }
 
 /** The plan writer's structured output (Plan_Draft stage). */

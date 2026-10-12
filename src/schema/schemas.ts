@@ -25,7 +25,8 @@ import type {
  * Plan_Draft stage schema: the Endstate, What needs changing, and Limitations
  * & constraints prose sections plus a dependency-ordered phase list. Each phase
  * carries a title and, optionally, the 1-based positions of earlier phases it
- * depends on and the files it starts from. Unknown properties are rejected.
+ * depends on, the files it starts from, and a child-repo path. Unknown
+ * properties are rejected.
  */
 export const planDraftSchema: JSONSchemaType<PlanDraftResult> = {
   type: 'object',
@@ -45,6 +46,7 @@ export const planDraftSchema: JSONSchemaType<PlanDraftResult> = {
           title: { type: 'string', minLength: 1 },
           after: { type: 'array', items: { type: 'string' }, nullable: true },
           files: { type: 'array', items: { type: 'string' }, nullable: true },
+          repo: { type: 'string', nullable: true, minLength: 1, pattern: '^[^,;()\\n\\r]+$' },
         },
       },
     },

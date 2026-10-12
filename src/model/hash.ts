@@ -39,7 +39,9 @@ export function isBlocked(phase: Phase, all: Phase[]): boolean {
  * phase line whose state box has been blanked to `[]`, excluding all other
  * frontmatter and prose (Req 5.1). Blanking the state box makes the hash
  * invariant under lifecycle state changes while remaining sensitive to the
- * preamble and to any phase title, id or hints (design Property 7).
+ * preamble and to any phase title, id or hints (design Property 7). The
+ * `repo:` hint is part of the hinted content and is deliberately hashed as
+ * written, without path normalization.
  */
 export function approvalHash(plan: ParsedPlan): string {
   const blankedPhaseLines = plan.phases.map((phase) =>
@@ -53,7 +55,8 @@ export function approvalHash(plan: ParsedPlan): string {
  * with that phase's line (Req 18.5 / the Input_Rev definition). The state box is
  * blanked so the rev is stable across the state transitions that occur between
  * recording a plan and requesting Execute, while still tracking changes to the
- * preamble or to the phase's own title, id or hints.
+ * preamble or to the phase's own title, id or hints. A `repo:` hint is included
+ * exactly as written and is deliberately not normalized before hashing.
  *
  * Returns the empty string when no phase with `phaseId` exists in the plan.
  */
