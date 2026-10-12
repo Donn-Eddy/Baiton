@@ -4,9 +4,10 @@
  * It parses and validates plan.md and legacy spec.md documents with the shared
  * model cores, then groups plans as Active, Pending, or Completed and creates
  * phase or validation-error children in file order.
+ * Optional repo identity labels the owning plan and a phase's distinct target; non-actionable inputs expose no actions.
  */
 import { DocumentKind, parsePlan, Phase } from './parser';
-import { validatePlan } from './validator';
+import { resolvePhaseRepo, validatePlan, type RepoTopology } from './validator';
 import { isBlocked } from './hash';
 import { PhaseState } from './phaseState';
 import { legalActions, PhaseAction } from './phaseActions';
@@ -40,6 +41,8 @@ export function planGroupKind(facts: PlanGroupFacts): PlanGroupKind {
 export interface PhaseNode {
   slug: string;
   id: string;
+  /** Target repo, present only when it differs from the owning repo. */
+  repo?: string;
   title: string;
   state: PhaseState;
   blocked: boolean;
@@ -56,6 +59,8 @@ export interface ErrorNode {
 
 export interface PlanNode {
   slug: string;
+  /** Repository that owns this plan document, when supplied by the caller. */
+  repo?: string;
   kind: DocumentKind;
   status: PlanStatus;
   approved: boolean;
@@ -74,6 +79,12 @@ export interface PlanNode {
 /** Input for one plan document and the facts supplied by its store and journal. */
 export interface PlanInput {
   slug: string;
+  /** Repository that owns this plan document. */
+  repo?: string;
+  /** Discovered repository topology used to resolve phase repo hints. */
+  topology?: RepoTopology;
+  /** Whether this row's actions target a store that understands its repo. Defaults to true. */
+  actionable?: boolean;
   raw?: string;
   readError?: string;
   approved: boolean;
@@ -110,6 +121,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
     const kind = input.kind ?? 'plan';
     return {
       slug: input.slug,
+      ...(input.repo !== undefined ? { repo: input.repo } : {}),
       kind,
       status: { kind: 'unset' },
       approved: input.approved,
@@ -132,10 +144,11 @@ function buildPlanNode(input: PlanInput): PlanNode {
   const status = deriveStatus(parsed.frontmatter.get('status'));
   const phaseStates = parsed.phases.map((phase) => phase.state);
   const prUrl = derivePrUrl(parsed.frontmatter.get('pr'));
-  const errors = validatePlan(parsed, input.raw);
+  const errors = validatePlan(parsed, input.raw, input.topology);
   if (errors.length > 0) {
     return {
       slug: input.slug,
+      ...(input.repo !== undefined ? { repo: input.repo } : {}),
       kind: parsed.kind,
       status,
       approved: input.approved,
@@ -156,10 +169,19 @@ function buildPlanNode(input: PlanInput): PlanNode {
   }
 
   const phases = parsed.phases.map((phase) =>
-    buildPhaseNode(input.slug, phase, parsed.phases, input.sessions, input.plans),
+    buildPhaseNode(
+      input.slug,
+      phase,
+      parsed.phases,
+      input.sessions,
+      input.plans,
+      input.topology,
+      input.actionable !== false,
+    ),
   );
   return {
     slug: input.slug,
+    ...(input.repo !== undefined ? { repo: input.repo } : {}),
     kind: parsed.kind,
     status,
     approved: input.approved,
@@ -167,12 +189,14 @@ function buildPlanNode(input: PlanInput): PlanNode {
     phaseStates,
     invalid: false,
     prUrl,
-    actions: legalPlanActions({
-      approved: input.approved,
-      invalid: false,
-      prUrl,
-      phaseStates,
-    }),
+    actions: input.actionable === false
+      ? []
+      : legalPlanActions({
+        approved: input.approved,
+        invalid: false,
+        prUrl,
+        phaseStates,
+      }),
     children: { kind: 'phases', phases },
   };
 }
@@ -183,18 +207,22 @@ function buildPhaseNode(
   all: Phase[],
   sessions: ReadonlySet<string>,
   plans: ReadonlySet<string>,
+  topology: RepoTopology | undefined,
+  actionable: boolean,
 ): PhaseNode {
   const hasSession = sessions.has(phase.id);
   const hasPlan = plans.has(phase.id);
+  const binding = resolvePhaseRepo(phase.repo, topology);
   return {
     slug,
     id: phase.id,
+    ...(binding.ok && !binding.isOwner ? { repo: binding.target } : {}),
     title: phase.title,
     state: phase.state,
     blocked: isBlocked(phase, all),
     hasSession,
     hasPlan,
-    actions: legalActions(phase.state, hasSession, hasPlan),
+    actions: actionable ? legalActions(phase.state, hasSession, hasPlan) : [],
   };
 }
 

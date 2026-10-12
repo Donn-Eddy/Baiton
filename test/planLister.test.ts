@@ -2,7 +2,14 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listPhasePlans, listPlans, phasePlanPath } from '../src/activation/planLister';
+import {
+  listPhasePlans,
+  listPlans,
+  listPlansAcrossRepos,
+  phasePlanPath,
+  planListingRepos,
+} from '../src/activation/planLister';
+import type { RepoSet } from '../src/activation/repoDiscovery';
 
 describe('plan lister', () => {
   let root: string;
@@ -50,5 +57,73 @@ describe('plan lister', () => {
     assert.strictEqual(phasePlanPath(baitonDir, 'new', 'P01'), path.join(baitonDir, 'plans', 'new', 'phases', 'P01', 'plan.md'));
     assert.deepStrictEqual([...await listPhasePlans(baitonDir, 'legacy')], ['T01']);
     assert.deepStrictEqual([...await listPhasePlans(baitonDir, 'new')], ['P01']);
+  });
+
+  it('lists plans across repositories in source order and skips a missing source', async () => {
+    const childBaitonDir = path.join(root, 'packages', 'api', '.baiton');
+    const writeAt = (directory: string, relative: string, contents: string): void => {
+      const target = path.join(directory, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, contents);
+    };
+    writeAt(baitonDir, 'plans/alpha/plan.md', 'root alpha\n');
+    writeAt(baitonDir, 'specs/zeta/spec.md', 'root zeta\n');
+    writeAt(childBaitonDir, 'plans/alpha/plan.md', 'api alpha\n');
+    writeAt(childBaitonDir, 'plans/beta/plan.md', 'api beta\n');
+
+    const listed = await listPlansAcrossRepos([
+      { repo: '.', baitonDir },
+      { repo: 'packages/api', baitonDir: childBaitonDir },
+      { repo: 'missing', baitonDir: path.join(root, 'missing', '.baiton') },
+    ]);
+    assert.deepStrictEqual(
+      listed.map(({ repo, slug, baitonDir: owner }) => [repo, slug, owner]),
+      [
+        ['.', 'alpha', baitonDir],
+        ['.', 'zeta', baitonDir],
+        ['packages/api', 'alpha', childBaitonDir],
+        ['packages/api', 'beta', childBaitonDir],
+      ],
+    );
+    assert.deepStrictEqual(listed.map((entry) => entry.raw), [
+      'root alpha\n', 'root zeta\n', 'api alpha\n', 'api beta\n',
+    ]);
+  });
+
+  it('projects only repos with baiton directories and gives each the full topology', () => {
+    const rootRepo = {
+      name: '.', folderName: 'workspace', relPath: '', root,
+      baitonDir, hasGit: true, children: ['packages/api', 'packages/web'],
+    };
+    const apiRepo = {
+      name: 'packages/api', folderName: 'workspace', relPath: 'packages/api',
+      root: path.join(root, 'packages', 'api'), baitonDir: path.join(root, 'packages', 'api', '.baiton'),
+      hasGit: true, parent: '.', children: [],
+    };
+    const webRepo = {
+      name: 'packages/web', folderName: 'workspace', relPath: 'packages/web',
+      root: path.join(root, 'packages', 'web'), hasGit: true, parent: '.', children: [],
+    };
+    const set: RepoSet = {
+      repos: [rootRepo, apiRepo, webRepo],
+      folderRoots: [rootRepo],
+      truncated: false,
+    };
+
+    const sources = planListingRepos(set);
+    assert.deepStrictEqual(sources.map(({ repo, baitonDir: owner, topology }) => ({
+      repo,
+      baitonDir: owner,
+      owner: topology?.owner,
+      topologyRepos: topology?.repos.map((entry) => entry.name),
+    })), [
+      { repo: '.', baitonDir, owner: '.', topologyRepos: ['.', 'packages/api', 'packages/web'] },
+      {
+        repo: 'packages/api',
+        baitonDir: apiRepo.baitonDir,
+        owner: 'packages/api',
+        topologyRepos: ['.', 'packages/api', 'packages/web'],
+      },
+    ]);
   });
 });

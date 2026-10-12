@@ -33,6 +33,7 @@ import {
   type RunGroupNode,
   type RunNode,
 } from '../model';
+import type { RunTreeEntry } from '../model/runTreeModel';
 import type { Surface } from './surface';
 
 /**
@@ -74,6 +75,14 @@ export interface RunsPipelineFacts {
   cancel(): boolean;
 }
 
+/** A repository source for listing runs and deciding whether its rows are actionable. */
+export interface RunRepoSource {
+  repo: string;
+  store: RunStore;
+  runsDir: string;
+  actionable: boolean;
+}
+
 /**
  * The Runs {@link vscode.TreeDataProvider}. Construct it, {@link start} it,
  * register it as a tree data provider, and push it onto the subscriptions.
@@ -94,12 +103,14 @@ export class RunsExplorer implements vscode.TreeDataProvider<RunTreeNode>, vscod
    * @param runsDir  the absolute `.baiton/runs` directory (`runsRootDir(repoRoot)`).
    * @param pipeline the live-stage facts and the cancel entry point.
    * @param surface  the shared notification surface for listing failures.
+   * @param sources  optional repository sources; multi-repo mode starts with two or more.
    */
   constructor(
     private readonly store: RunStore,
     private readonly runsDir: string,
     private readonly pipeline: RunsPipelineFacts,
     private readonly surface: Surface,
+    private readonly sources?: readonly RunRepoSource[],
   ) {}
 
   /**
@@ -112,12 +123,23 @@ export class RunsExplorer implements vscode.TreeDataProvider<RunTreeNode>, vscod
    * writer of the same key would be redundant.
    */
   public start(): this {
-    const pattern = new vscode.RelativePattern(this.runsDir, '*/run.json');
-    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-    watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
-    watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
-    watcher.onDidDelete(() => this.scheduleRefresh(), undefined, this.disposables);
-    this.disposables.push(watcher);
+    if (this.multiRepo) {
+      for (const source of this.sources ?? []) {
+        const pattern = new vscode.RelativePattern(source.runsDir, '*/run.json');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
+        watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
+        watcher.onDidDelete(() => this.scheduleRefresh(), undefined, this.disposables);
+        this.disposables.push(watcher);
+      }
+    } else {
+      const pattern = new vscode.RelativePattern(this.runsDir, '*/run.json');
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
+      watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
+      watcher.onDidDelete(() => this.scheduleRefresh(), undefined, this.disposables);
+      this.disposables.push(watcher);
+    }
 
     // Pipeline events are authoritative and must not be debounced away: a
     // `stage-started` repaints the spinner immediately.
@@ -180,6 +202,12 @@ export class RunsExplorer implements vscode.TreeDataProvider<RunTreeNode>, vscod
    */
   public refreshNow(): void {
     const live = this.liveFact();
+    if (this.multiRepo) {
+      const entries = this.listAllSources();
+      this.groups = live !== undefined ? buildRunTree(entries, live) : buildRunTree(entries);
+      this.emitter.fire(undefined);
+      return;
+    }
     this.groups =
       live !== undefined ? buildRunTree(this.safeList(), live) : buildRunTree(this.safeList());
     this.emitter.fire(undefined);
@@ -196,6 +224,29 @@ export class RunsExplorer implements vscode.TreeDataProvider<RunTreeNode>, vscod
       this.surface.log(`Baiton: could not list runs: ${describe(e)}.`);
       return [];
     }
+  }
+
+  /** List each configured repository independently and merge runs newest-first. */
+  private listAllSources(): RunTreeEntry[] {
+    const entries: RunTreeEntry[] = [];
+    for (const source of this.sources ?? []) {
+      try {
+        entries.push(...source.store.list().map((manifest) => ({
+          manifest,
+          repo: source.repo,
+          actionable: source.actionable,
+        })));
+      } catch (e) {
+        this.surface.log(`Baiton: could not list runs in ${source.repo}: ${describe(e)}.`);
+      }
+    }
+    return entries.map((entry, index) => ({ entry, index }))
+      .sort((a, b) => compareRunCreatedAt(a.entry, b.entry) || a.index - b.index)
+      .map(({ entry }) => entry);
+  }
+
+  private get multiRepo(): boolean {
+    return (this.sources?.length ?? 0) > 1;
   }
 
   /** The stage in flight right now, reduced to the model's fact; undefined when idle. */
@@ -224,12 +275,32 @@ function groupItem(node: RunGroupNode): vscode.TreeItem {
  */
 function runItem(node: RunNode): vscode.TreeItem {
   const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
-  item.id = node.runId;
+  item.id = node.repo !== undefined ? `${node.repo}:${node.runId}` : node.runId;
   item.description = node.description;
   item.tooltip = node.tooltip;
   item.contextValue = node.contextValue;
   item.iconPath = new vscode.ThemeIcon(runIconId(node));
   return item;
+}
+
+/** Compare valid ISO timestamps descending; malformed timestamps keep stable input order. */
+function compareRunCreatedAt(a: RunTreeEntry, b: RunTreeEntry): number {
+  const aValid = isIsoTimestamp(a.manifest.createdAt);
+  const bValid = isIsoTimestamp(b.manifest.createdAt);
+  if (aValid && bValid) {
+    return a.manifest.createdAt === b.manifest.createdAt
+      ? 0
+      : a.manifest.createdAt > b.manifest.createdAt ? -1 : 1;
+  }
+  if (aValid !== bValid) {
+    return aValid ? -1 : 1;
+  }
+  return 0;
+}
+
+function isIsoTimestamp(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value));
 }
 
 /** The codicon id for a run: a spinner while a stage is in flight, else its outcome. */

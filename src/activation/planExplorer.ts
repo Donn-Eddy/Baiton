@@ -8,9 +8,11 @@
  *
  * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
  * `specs` root is the legacy document root. The three top-level roots are
- * Active, Pending, and Completed groups, with plans beneath them. Plan clicks
- * open the resolved plan document and update the active plan. Inline actions use the existing command arguments
- * and are hidden in Restricted Mode through package.json context clauses.
+ * Active, Pending, and Completed groups, with plans beneath them. Multiple
+ * repository sources are labeled by owner, while phase labels identify a
+ * distinct target repo. Plan clicks open the owning repository's document and
+ * update the active plan when that source is actionable. Inline actions are
+ * hidden in Restricted Mode through package.json context clauses.
  */
 import * as vscode from 'vscode';
 import { resolveDocument } from '../storage/documentLocation';
@@ -27,7 +29,13 @@ import {
 import { phaseContextValue } from '../model/phaseActions';
 import { planContextValue } from '../model/planActions';
 import { readPlanJournal, type JournalEntry } from '../journal';
-import { listPlans, listPhasePlans } from './planLister';
+import type { RepoTopology } from '../model/validator';
+import {
+  listPlans,
+  listPlansAcrossRepos,
+  listPhasePlans,
+  type RepoListedPlan,
+} from './planLister';
 import type { Surface } from './surface';
 
 /**
@@ -36,6 +44,29 @@ import type { Surface } from './surface';
  * surface is wired.
  */
 export type SetActivePlan = (slug: string | undefined) => void;
+
+/** A repository source for listing plan documents and their approval facts. */
+export interface PlanRepoSource {
+  repo: string;
+  baitonDir: string;
+  topology?: RepoTopology;
+  isApproved(slug: string): Promise<boolean>;
+  /** False for repos whose commands are not yet repo-aware. */
+  actionable: boolean;
+}
+
+/** Optional multi-repository sources for the Plan Explorer. */
+export interface PlanExplorerOptions {
+  sources?: () => readonly PlanRepoSource[];
+}
+
+interface ResolvedPlanRepoSource {
+  repo?: string;
+  baitonDir: string;
+  topology?: RepoTopology;
+  isApproved(slug: string): Promise<boolean>;
+  actionable: boolean;
+}
 
 /** The command id a tree item invokes to open the resolved plan document. */
 const OPEN_PLAN_COMMAND = 'baiton.planExplorer.openPlan';
@@ -105,6 +136,7 @@ export class PlanExplorer
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   /** Guards against overlapping async refreshes clobbering groups out of order. */
   private refreshSeq = 0;
+  private sourceSnapshot: readonly ResolvedPlanRepoSource[] | undefined;
 
   /**
    * @param baitonDir     absolute `.baiton/` directory; both document roots are scanned under it.
@@ -114,6 +146,7 @@ export class PlanExplorer
    *                     `baiton.restricted` context key the inline-action
    *                     `when` clauses negate to hide actions (Req 5.6, 5.7).
    * @param setActivePlan sink notified on a root click; optional when no chat surface is wired.
+   * @param options      optional repository sources for multi-repository listings.
    */
   constructor(
     private readonly baitonDir: string,
@@ -121,6 +154,7 @@ export class PlanExplorer
     private readonly surface: Surface,
     private readonly restricted: boolean,
     private readonly setActivePlan?: SetActivePlan,
+    private readonly options: PlanExplorerOptions = {},
   ) {}
 
   /**
@@ -140,20 +174,21 @@ export class PlanExplorer
     );
 
     this.disposables.push(
-      vscode.commands.registerCommand(OPEN_PLAN_COMMAND, (slug: string) =>
-        this.openPlan(slug),
+      vscode.commands.registerCommand(OPEN_PLAN_COMMAND, (slug: string, repo?: string) =>
+        this.openPlan(slug, repo),
       ),
     );
 
-    // The watcher observes both document roots; specs is the legacy root; each
-    // event schedules a single coalesced refresh (Req 6.1, 6.2, 6.4).
-    // Legacy: watch the former specs/ root so existing documents stay visible.
-    const pattern = new vscode.RelativePattern(this.baitonDir, '{plans,specs}/**');
-    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-    watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
-    watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
-    watcher.onDidDelete(() => this.scheduleRefresh(), undefined, this.disposables);
-    this.disposables.push(watcher);
+    // Each existing source is watched; a repo whose .baiton appears later is
+    // picked up after reload. All events share one coalesced refresh.
+    for (const source of this.sources()) {
+      const pattern = new vscode.RelativePattern(source.baitonDir, '{plans,specs}/**');
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      watcher.onDidCreate(() => this.scheduleRefresh(), undefined, this.disposables);
+      watcher.onDidChange(() => this.scheduleRefresh(), undefined, this.disposables);
+      watcher.onDidDelete(() => this.scheduleRefresh(), undefined, this.disposables);
+      this.disposables.push(watcher);
+    }
 
     void this.refresh();
     return this;
@@ -228,20 +263,37 @@ export class PlanExplorer
    */
   private async refresh(): Promise<void> {
     const seq = ++this.refreshSeq;
-    const listed = await listPlans(this.baitonDir);
+    const sources = this.sources();
+    const showRepoLabels = this.showRepoLabels;
+    const multiSource = showRepoLabels;
+    const listed = multiSource
+      ? await listPlansAcrossRepos(sources.map((source) => ({
+        repo: source.repo as string,
+        baitonDir: source.baitonDir,
+        topology: source.topology,
+      })))
+      : await listPlans(this.baitonDir);
     const inputs = await Promise.all(
-      listed.map(async (entry) => ({
-        slug: entry.slug,
-        raw: entry.raw,
-        readError: entry.readError,
-        // The approval fact comes from the store, never recomputed here (Req 2.4).
-        approved: await this.approvalFor(entry.slug),
-        // Phase ids with a recorded Session_Id, from the plan's own journal
-        // (Req 4.4); a plan with no journals reads back as no entries.
-        sessions: sessionSet(readPlanJournal(this.baitonDir, entry.slug)),
-        // Phase ids whose plan is on file, which gates the View plan action.
-        plans: await listPhasePlans(this.baitonDir, entry.slug),
-      })),
+      listed.map(async (entry) => {
+        const repoEntry = multiSource ? entry as RepoListedPlan : undefined;
+        const source = multiSource
+          ? sources.find((candidate) => candidate.repo === repoEntry?.repo) ?? sources[0]
+          : sources[0];
+        const ownerBaitonDir = repoEntry?.baitonDir ?? this.baitonDir;
+        return {
+          slug: entry.slug,
+          raw: entry.raw,
+          readError: entry.readError,
+          // The approval fact comes from the owning source, never recomputed here.
+          approved: await this.approvalFor(entry.slug, source),
+          // Journals and phase plans are always read from the owning repository.
+          sessions: sessionSet(readPlanJournal(ownerBaitonDir, entry.slug)),
+          plans: await listPhasePlans(ownerBaitonDir, entry.slug),
+          ...(showRepoLabels && source.repo !== undefined ? { repo: source.repo } : {}),
+          topology: source.topology,
+          actionable: source.actionable,
+        };
+      }),
     );
     if (seq !== this.refreshSeq) {
       // A newer refresh superseded this one while we awaited; drop this result.
@@ -251,13 +303,32 @@ export class PlanExplorer
     this.emitter.fire(undefined);
   }
 
-  /** The store's approval fact for a plan, treating a probe failure as unapproved. */
-  private async approvalFor(slug: string): Promise<boolean> {
+  /** The source's approval fact for a plan, treating a probe failure as unapproved. */
+  private async approvalFor(slug: string, source: ResolvedPlanRepoSource): Promise<boolean> {
     try {
-      return await this.planStore.isApproved(slug);
+      return await source.isApproved(slug);
     } catch {
       return false;
     }
+  }
+
+  /** Configured sources, or the legacy primary-repository source. */
+  private sources(): readonly ResolvedPlanRepoSource[] {
+    const configured = this.options.sources?.();
+    if (configured !== undefined && configured.length > 0) {
+      this.sourceSnapshot = configured;
+      return this.sourceSnapshot;
+    }
+    this.sourceSnapshot = [{
+      baitonDir: this.baitonDir,
+      isApproved: (slug) => this.planStore.isApproved(slug),
+      actionable: true,
+    }];
+    return this.sourceSnapshot;
+  }
+
+  private get showRepoLabels(): boolean {
+    return (this.sourceSnapshot ?? this.sources()).length > 1;
   }
 
   // --- TreeItem mapping ----------------------------------------------------
@@ -302,14 +373,21 @@ export class PlanExplorer
     item.command = {
       command: OPEN_PLAN_COMMAND,
       title: 'Open Plan',
-      arguments: [node.slug],
+      arguments: node.repo === undefined ? [node.slug] : [node.slug, node.repo],
     };
+    if (node.repo !== undefined) {
+      item.id = `${node.repo}:${node.slug}`;
+    }
     return item;
   }
 
   /** The `<status> · approved · invalid` description shown beside a plan root. */
   private planDescription(node: PlanNode): string {
-    const parts: string[] = [statusLabel(node.status)];
+    const parts: string[] = [];
+    if (node.repo !== undefined) {
+      parts.push(node.repo);
+    }
+    parts.push(statusLabel(node.status));
     if (node.approved) {
       parts.push('approved');
     }
@@ -323,6 +401,7 @@ export class PlanExplorer
   private planTooltip(node: PlanNode): string {
     const lines = [
       `Plan: ${node.slug}`,
+      ...(node.repo !== undefined ? [`Repo: ${node.repo}`] : []),
       `Status: ${statusLabel(node.status)}`,
       `Approved: ${node.approved ? 'yes' : 'no'}`,
       `Valid: ${node.invalid ? 'no' : 'yes'}`,
@@ -343,13 +422,17 @@ export class PlanExplorer
       `${node.id} ${node.title}`,
       vscode.TreeItemCollapsibleState.None,
     );
-    item.description = node.blocked ? `${node.state} · blocked` : node.state;
+    const phaseDescription = node.blocked ? `${node.state} · blocked` : node.state;
+    item.description = node.repo === undefined
+      ? phaseDescription
+      : `${phaseDescription} · ${node.repo}`;
     // `baiton.phase` plus one token per legal action (Req 4.1); the
     // `view/item/context` `when` clauses in `package.json` match on those
     // tokens with `\b<action>\b` so the tree and the menu cannot disagree.
     item.contextValue = phaseContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.blocked ? 'circle-slash' : 'circle-outline');
-    item.tooltip = `${node.id} ${node.title}\nState: ${node.state}\nBlocked: ${node.blocked ? 'yes' : 'no'}`;
+    item.tooltip = `${node.id} ${node.title}\nState: ${node.state}\nBlocked: ${node.blocked ? 'yes' : 'no'}` +
+      (node.repo !== undefined ? `\nRepo: ${node.repo}` : '');
     return item;
   }
 
@@ -374,18 +457,27 @@ export class PlanExplorer
    * When the file cannot be opened, surface an error and leave the active plan
    * unchanged (Req 2.7).
    */
-  private async openPlan(slug: string): Promise<void> {
-    const documentPath = resolveDocument(this.baitonDir, slug).documentPath;
+  private async openPlan(slug: string, repo?: string): Promise<void> {
+    const sources = this.sources();
+    const source = sources.find((candidate) => candidate.repo === repo) ??
+      sources.find((candidate) => candidate.baitonDir === this.baitonDir) ?? {
+        baitonDir: this.baitonDir,
+        isApproved: (name: string) => this.planStore.isApproved(name),
+        actionable: true,
+      };
+    const documentPath = resolveDocument(source.baitonDir, slug).documentPath;
     try {
       const doc = await vscode.workspace.openTextDocument(documentPath);
       await vscode.window.showTextDocument(doc, { preview: false });
     } catch (e) {
       this.surface.error(
-        `Baiton: could not open plan "${slug}": ${describe(e)}.`,
+        `Baiton: could not open plan "${slug}"${repo === undefined ? '' : ` in ${repo}`}: ${describe(e)}.`,
       );
       return; // Leave the active plan unchanged (Req 2.7).
     }
-    this.setActivePlan?.(slug);
+    if (source.actionable) {
+      this.setActivePlan?.(slug);
+    }
   }
 }
 
