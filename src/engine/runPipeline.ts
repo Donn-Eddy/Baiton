@@ -26,10 +26,9 @@
  * the plan pipeline would use one (the journal's `phaseId`, `awaitStageResult`'s
  * `phaseId`).
  *
- * It holds the one-stage-per-repository lock from both sides, exactly as
- * `planDraft.ts` does: `start()` refuses `busy` while a phase queue or the
- * plan-draft runner has a stage in flight (`isPlanBusy`), and `isRunning()` is
- * what activation feeds back to `RunQueueDeps.isExternallyBusy` (Req 20.1).
+ * The pipeline takes the per-repo lock (`RepoLocks`) keyed by its
+ * `workspaceRoot`, shared with the plan-draft runner. Phase queues never take
+ * that lock because they run in their own worktrees.
  *
  * Every expected failure is a returned value, never a throw, and everything
  * host-specific is injected — the per-role adapter lookup, the terminal host,
@@ -60,7 +59,7 @@ import {
   type RunState,
   type RunStore,
 } from './runStore';
-import type { AskWatcher, AskWatcherFactory, ResultWatcherFactory } from './runQueue';
+import type { AskWatcher, AskWatcherFactory, RepoLockLease, RepoLocks, ResultWatcherFactory } from './runQueue';
 import type { HostTerminal, TerminalHost } from './terminalHost';
 import type { Unsubscribe } from './resultWatcher';
 
@@ -227,6 +226,8 @@ export interface RunPipelineDeps {
   verify?: () => string | undefined;
   /** True while a plan queue or the plan-draft runner has a stage in flight. */
   isPlanBusy?: () => boolean;
+  /** The per-repo stage lock map, shared with the plan-draft runner. */
+  repoLocks?: RepoLocks;
   /** Factory for a git service bound to the run's worktree; injected for tests. */
   createService?: (dir: string) => GitWorktreeService;
   newRunId?: (mode: RunMode) => string;
@@ -267,6 +268,7 @@ type StageRun =
 class DefaultRunPipeline implements RunPipeline {
   private readonly deps: RunPipelineDeps;
   private activeRunId: string | undefined;
+  private lease: RepoLockLease | undefined;
   private stage: LiveRunStage | undefined;
   private cancelled = false;
   private readonly listeners = new Set<(event: RunPipelineEvent) => void>();
@@ -341,6 +343,17 @@ class DefaultRunPipeline implements RunPipeline {
         message: 'a stage is already running for this repository; try again after it finishes',
       });
     }
+    const lease = this.deps.repoLocks?.tryAcquire(this.deps.workspaceRoot, 'run-pipeline');
+    if (this.deps.repoLocks !== undefined && lease === undefined) {
+      return refuse({
+        kind: 'busy',
+        message: 'a stage is already running for this repository; try again after it finishes',
+      });
+    }
+    const refuseHeld = (reason: RunPipelineRefusal): RunPipelineStart => {
+      lease?.release();
+      return refuse(reason);
+    };
 
     // 3. The base the run branches from — needed by every mode, because the
     //    manifest requires a non-empty `baseBranch`/`baseHead` even for an
@@ -349,13 +362,13 @@ class DefaultRunPipeline implements RunPipeline {
     try {
       baseBranch = await this.deps.git.currentBranch();
     } catch (e) {
-      return refuse({
+      return refuseHeld({
         kind: 'detached-head',
         message: `Could not read the current branch of ${this.deps.workspaceRoot}: ${describe(e)}.`,
       });
     }
     if (baseBranch.length === 0 || baseBranch === 'HEAD') {
-      return refuse({
+      return refuseHeld({
         kind: 'detached-head',
         message:
           'Cannot start a run from a detached HEAD: check out a named branch first, because the ' +
@@ -364,7 +377,7 @@ class DefaultRunPipeline implements RunPipeline {
     }
     const baseHead = await this.deps.git.branchHead(baseBranch);
     if (baseHead === undefined) {
-      return refuse({
+      return refuseHeld({
         kind: 'no-base-head',
         message:
           `The branch ${baseBranch} has no commits yet, so there is nothing to branch from. ` +
@@ -387,7 +400,7 @@ class DefaultRunPipeline implements RunPipeline {
       baseHead,
     });
     if (!created.ok) {
-      return refuse({ kind: 'manifest', message: created.error.message });
+      return refuseHeld({ kind: 'manifest', message: created.error.message });
     }
     let manifest = created.value;
 
@@ -410,7 +423,7 @@ class DefaultRunPipeline implements RunPipeline {
           state: 'failed',
           outcome: { kind: 'failed', message: wt.error.message },
         });
-        return refuse({ kind: 'worktree', message: wt.error.message, error: wt.error });
+        return refuseHeld({ kind: 'worktree', message: wt.error.message, error: wt.error });
       }
       worktreeDir = wt.value.worktreeDir;
       const updated = this.deps.store.update(runId, {
@@ -422,6 +435,7 @@ class DefaultRunPipeline implements RunPipeline {
     }
 
     this.activeRunId = runId;
+    this.lease = lease;
     this.cancelled = false;
     this.commits = [];
     this.lastExecuteCommit = undefined;
@@ -455,6 +469,8 @@ class DefaultRunPipeline implements RunPipeline {
     } finally {
       this.activeRunId = undefined;
       this.stage = undefined;
+      this.lease?.release();
+      this.lease = undefined;
     }
 
     this.deps.onComplete?.(outcome);
