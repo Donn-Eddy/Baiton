@@ -1,12 +1,12 @@
 ---
 version: 1
 name: monorepo-support
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: b1172d339642bb14e741b8934f540126f3747ec1
+branch: baiton/monorepo-support
+approved_rev: 08f9f9c1537adae7e4b42fb8c262301c26a1603413d0f4be16a63839436d3a77
 ---
 
 # Endstate
