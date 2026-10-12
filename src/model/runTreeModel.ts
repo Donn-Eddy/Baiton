@@ -48,10 +48,19 @@ export interface LiveRunStageFact {
   attempt: number;
 }
 
+/** A run manifest with the repository identity and actionability supplied by its listing source. */
+export interface RunTreeEntry {
+  manifest: RunManifest;
+  repo?: string;
+  actionable?: boolean;
+}
+
 /** One run's node under the Active or Complete group. */
 export interface RunNode {
   /** The run id, which is also its directory name under `.baiton/runs/`. */
   runId: string;
+  /** The repo whose `.baiton/runs` holds the manifest; present only when supplied by the caller. */
+  repo?: string;
   /** The mode the run runs as; never 'plan'. */
   mode: RunMode;
   /** The confirmed work statement, whitespace-collapsed (NOT truncated). */
@@ -234,9 +243,13 @@ export function runContextValue(kind: RunGroupKind, actions: readonly RunAction[
 function buildTooltip(
   manifest: RunManifest,
   stage: { stage: RunStage; attempt: number } | undefined,
+  repo?: string,
 ): string {
   const statement = runStatementText(manifest.statement);
   const lines = [`${manifest.mode} run ${manifest.id}`];
+  if (repo !== undefined) {
+    lines.push(`Repo: ${repo}`);
+  }
   if (statement.length > 0) {
     lines.push(statement);
   }
@@ -256,27 +269,37 @@ function buildTooltip(
  * Optional fields are spread conditionally, the way `runStore.ts` spreads its
  * own, so an absent fact leaves the key absent rather than `undefined`.
  */
-export function buildRunNode(manifest: RunManifest, live?: LiveRunStageFact): RunNode {
+export function buildRunNode(
+  manifest: RunManifest,
+  live?: LiveRunStageFact,
+  opts?: { repo?: string; actionable?: boolean },
+): RunNode {
   const complete = isRunComplete(manifest.state);
   const stage = runStageFor(manifest, live);
   const hasWorktree = manifest.worktreeDir !== undefined;
-  const actions = legalRunActions({
-    state: manifest.state,
-    hasWorktree,
-    stageRunning: stage !== undefined,
-  });
+  const actions = opts?.actionable === false
+    ? []
+    : legalRunActions({
+      state: manifest.state,
+      hasWorktree,
+      stageRunning: stage !== undefined,
+    });
   const outcomeLabel = complete ? runOutcomeLabel(manifest) : undefined;
 
-  const description =
+  const runDescription =
     stage !== undefined
       ? `${manifest.mode} · ${stage.stage}` +
         (stage.attempt > 1 ? ` (attempt ${stage.attempt})` : '')
       : complete
         ? `${manifest.mode} · ${outcomeLabel as string}`
         : `${manifest.mode} · ${manifest.state}`;
+  const description = opts?.repo !== undefined
+    ? `${opts.repo} · ${runDescription}`
+    : runDescription;
 
   return {
     runId: manifest.id,
+    ...(opts?.repo !== undefined ? { repo: opts.repo } : {}),
     mode: manifest.mode,
     statement: runStatementText(manifest.statement),
     label: runStatementLabel(manifest.statement),
@@ -287,7 +310,7 @@ export function buildRunNode(manifest: RunManifest, live?: LiveRunStageFact): Ru
     ...(stage !== undefined ? { stage: stage.stage, attempt: stage.attempt } : {}),
     description,
     ...(outcomeLabel !== undefined ? { outcomeLabel } : {}),
-    tooltip: buildTooltip(manifest, stage),
+    tooltip: buildTooltip(manifest, stage, opts?.repo),
     hasWorktree,
     ...(manifest.worktreeDir !== undefined ? { worktreeDir: manifest.worktreeDir } : {}),
     actions,
@@ -305,17 +328,28 @@ export function buildRunNode(manifest: RunManifest, live?: LiveRunStageFact): Ru
  * shape.
  */
 export function buildRunTree(
-  manifests: readonly RunManifest[],
+  entries: readonly (RunManifest | RunTreeEntry)[],
   live?: LiveRunStageFact,
 ): RunGroupNode[] {
   const active: RunNode[] = [];
   const done: RunNode[] = [];
-  for (const manifest of manifests) {
-    const node = buildRunNode(manifest, live);
+  for (const entryOrManifest of entries) {
+    const entry = isRunTreeEntry(entryOrManifest)
+      ? entryOrManifest
+      : { manifest: entryOrManifest };
+    const node = buildRunNode(entry.manifest, live, {
+      repo: entry.repo,
+      actionable: entry.actionable,
+    });
     (node.complete ? done : active).push(node);
   }
   return [
     { kind: 'active', label: 'Active', contextValue: 'baiton.runGroup.active', runs: active },
     { kind: 'complete', label: 'Complete', contextValue: 'baiton.runGroup.complete', runs: done },
   ];
+}
+
+function isRunTreeEntry(value: RunManifest | RunTreeEntry): value is RunTreeEntry {
+  return typeof value === 'object' && value !== null &&
+    'manifest' in value && typeof value.manifest === 'object';
 }
