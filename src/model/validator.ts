@@ -1,4 +1,5 @@
 /** Pure validator for plan.md and the legacy spec.md document format. */
+import * as path from 'path';
 import {
   DocumentKind,
   ParsedPlan,
@@ -6,6 +7,7 @@ import {
   phaseIdPattern,
   phaseIdPrefix,
   trailingHintIdsOfOtherKind,
+  trailingRepoHintText,
 } from './parser';
 import { PHASE_STATES, isPhaseState } from './phaseState';
 
@@ -16,11 +18,29 @@ export interface PlanError {
   reason: string;
 }
 
+/** A discovered repository and its parent in the workspace repository tree. */
+export interface RepoTopologyEntry {
+  readonly name: string;
+  readonly root: string;
+  readonly parent?: string;
+}
+
+/** Repository topology for the document's owning repository. */
+export interface RepoTopology {
+  readonly owner: string;
+  readonly repos: readonly RepoTopologyEntry[];
+}
+
+/** Result of resolving a phase's optional `repo:` hint against a topology. */
+export type RepoBinding =
+  | { ok: true; target: string; isOwner: boolean }
+  | { ok: false; reason: 'invalid' | 'unknown' | 'sibling' | 'ancestor'; target?: string };
+
 const PHASE_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
 const CONFLICT_MARKERS = ['<<<<<<<', '=======', '>>>>>>>'];
 
 /** Validate a parsed plan against its raw text. Never mutates and never throws. */
-export function validatePlan(plan: ParsedPlan, raw: string): PlanError[] {
+export function validatePlan(plan: ParsedPlan, raw: string, topology?: RepoTopology): PlanError[] {
   const rawLines = raw.split('\n');
   const errors: PlanError[] = [];
   errors.push(...findConflictMarkers(rawLines));
@@ -28,7 +48,107 @@ export function validatePlan(plan: ParsedPlan, raw: string): PlanError[] {
   errors.push(...findDuplicateIds(plan.phases));
   errors.push(...findDependencyErrors(plan.phases, plan.kind));
   errors.push(...findForeignHintErrors(plan));
+  errors.push(...findRepoBindingErrors(plan, topology));
   errors.push(...findCycleErrors(plan.phases));
+  return errors;
+}
+
+/** Normalize a repo hint as a relative POSIX path, or reject absolute paths. */
+export function normalizeRepoHint(hint: string): string | undefined {
+  const trimmed = hint.trim().replace(/\\/g, '/');
+  if (trimmed.startsWith('/') || /^[A-Za-z]:/.test(trimmed)) return undefined;
+  const normalized = path.posix.normalize(trimmed).replace(/\/+$/, '');
+  return normalized === '' || normalized === './' ? '.' : normalized;
+}
+
+/** Resolve a repo hint and verify the target stays inside the owner's repo subtree. */
+export function resolvePhaseRepo(
+  hint: string | undefined,
+  topology: RepoTopology | undefined,
+): RepoBinding {
+  if (hint === undefined) return { ok: true, target: topology?.owner ?? '.', isOwner: true };
+  const normalized = normalizeRepoHint(hint);
+  if (normalized === undefined) return { ok: false, reason: 'invalid' };
+  const ownerName = topology?.owner ?? '.';
+  if (normalized === '.') return { ok: true, target: ownerName, isOwner: true };
+  if (topology === undefined) return { ok: false, reason: 'unknown' };
+  const owner = topology.repos.find((repo) => repo.name === topology.owner);
+  if (owner === undefined) return { ok: false, reason: 'unknown' };
+
+  const targetAbs = path.resolve(owner.root, ...normalized.split('/'));
+  const match = topology.repos.find((repo) => path.resolve(repo.root) === targetAbs);
+  if (match === undefined) {
+    // Climbing out of a nested repository can land in an intermediate folder
+    // before reaching the nearest discovered parent repo. Treat that as an
+    // ancestor binding, while ordinary undiscovered directories stay unknown.
+    if (targetAbs !== path.resolve(owner.root) && isPathInsideOrEqual(targetAbs, owner.root)) {
+      const parent = topology.repos.find((repo) => repo.name === owner.parent);
+      if (parent !== undefined) return { ok: false, reason: 'ancestor', target: parent.name };
+    }
+    return { ok: false, reason: 'unknown' };
+  }
+  if (match.name === owner.name) return { ok: true, target: match.name, isOwner: true };
+  if (walkToAncestor(topology, match.name, owner.name) !== undefined) {
+    return { ok: true, target: match.name, isOwner: false };
+  }
+  if (walkToAncestor(topology, owner.name, match.name) !== undefined) {
+    return { ok: false, reason: 'ancestor', target: match.name };
+  }
+  return { ok: false, reason: 'sibling', target: match.name };
+}
+
+function walkToAncestor(topology: RepoTopology, start: string, sought: string): string | undefined {
+  const byName = new Map(topology.repos.map((repo) => [repo.name, repo]));
+  const seen = new Set<string>();
+  let current: string | undefined = start;
+  while (current !== undefined && !seen.has(current)) {
+    if (current === sought) return current;
+    seen.add(current);
+    current = byName.get(current)?.parent;
+  }
+  return undefined;
+}
+
+function isPathInsideOrEqual(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function findRepoBindingErrors(plan: ParsedPlan, topology: RepoTopology | undefined): PlanError[] {
+  const errors: PlanError[] = [];
+  const noun = itemNoun(plan.kind);
+  for (const phase of plan.phases) {
+    if (phase.repo === undefined) {
+      const malformed = trailingRepoHintText(phase.title);
+      if (malformed !== undefined) {
+        errors.push({
+          line: phase.lineIndex + 1,
+          text: renderPhaseRef(phase),
+          reason: `malformed repo hint "${malformed}"; expected exactly one "repo: <path>" group`,
+        });
+      }
+      continue;
+    }
+    const binding = resolvePhaseRepo(phase.repo, topology);
+    if (binding.ok) continue;
+    const hint = phase.repo;
+    let reason: string;
+    switch (binding.reason) {
+      case 'invalid':
+        reason = `${noun} "${phase.id}" has an invalid repo hint "${hint}"; expected a path relative to the owning repo`;
+        break;
+      case 'unknown':
+        reason = `${noun} "${phase.id}" targets unknown repo "${hint}"; expected the owning repo or a repo nested beneath it`;
+        break;
+      case 'sibling':
+        reason = `${noun} "${phase.id}" targets repo "${binding.target}", which is a sibling of the owning repo "${topology?.owner ?? '.'}"; a phase may only target the owning repo or a repo nested beneath it`;
+        break;
+      case 'ancestor':
+        reason = `${noun} "${phase.id}" targets repo "${binding.target}", which is an ancestor of the owning repo "${topology?.owner ?? '.'}"; a phase may only target the owning repo or a repo nested beneath it`;
+        break;
+    }
+    errors.push({ line: phase.lineIndex + 1, text: renderPhaseRef(phase), reason });
+  }
   return errors;
 }
 

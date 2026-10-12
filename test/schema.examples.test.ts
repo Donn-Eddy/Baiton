@@ -45,6 +45,22 @@ describe('stage result schema examples (unit)', () => {
       assert.ok(isOk(result));
     });
 
+    it('accepts a valid child repo path on a phase', () => {
+      assert.ok(isOk(validatePlanDraftResult({
+        endstate: 'x', changes: 'x', constraints: 'x',
+        phases: [{ title: 'Work', repo: 'packages/api' }],
+      })));
+    });
+
+    for (const repo of ['', 'a;b', 5]) {
+      it(`rejects an invalid repo hint ${JSON.stringify(repo)}`, () => {
+        assert.ok(isErr(validatePlanDraftResult({
+          endstate: 'x', changes: 'x', constraints: 'x',
+          phases: [{ title: 'Work', repo }],
+        })));
+      });
+    }
+
     it('accepts a draft with an empty phase list', () => {
       assert.ok(isOk(validatePlanDraftResult({
         endstate: 'Nothing yet.', changes: 'Nothing yet.', constraints: 'Nothing yet.', phases: [],

@@ -302,6 +302,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       title: phase.title,
       ...(phase.after !== undefined ? { after: phase.after } : {}),
       ...(phase.files !== undefined ? { files: phase.files } : {}),
+      ...(phase.repo !== undefined ? { repo: phase.repo } : {}),
     }));
     const content = renderPlan(slug, {
       endstate: structured.endstate,
@@ -337,6 +338,7 @@ export interface RenderPlanPhase {
   title: string;
   after?: string[];
   files?: string[];
+  repo?: string;
 }
 
 /** The prose sections that precede the phases in a plan. */
@@ -385,9 +387,11 @@ export function renderPlan(
     const phase = typeof input === 'string' ? { title: input } : input;
     const after = resolvePhaseAfter(phase.after ?? [], index, idFor);
     const files = (phase.files ?? []).filter((file) => file.trim().length > 0);
+    const repo = phase.repo?.trim();
     const groups: string[] = [];
     if (after.length > 0) groups.push(`after ${after.join(', ')}`);
     if (files.length > 0) groups.push(`files: ${files.join(', ')}`);
+    if (repo && repo !== '.') groups.push(`repo: ${repo}`);
     const hint = groups.length > 0 ? ` (${groups.join('; ')})` : '';
     lines.push(`- [pending] ${idFor(index)} ${phase.title.trim()}${hint}`);
   });

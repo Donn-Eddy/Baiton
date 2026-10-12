@@ -2,7 +2,8 @@
  * Pure parser for plan.md and legacy spec.md documents.
  *
  * A plan has a preamble followed by `# PHASES` and `P##` phase lines. The
- * legacy spec.md format has `# OVERVIEW`, `# TODOS` and `T##` lines. The parser
+ * legacy spec.md format has `# OVERVIEW`, `# TODOS` and `T##` lines. Optional
+ * trailing hint groups include `after`, `files` and `repo:`. The parser
  * never throws; structural validity is the validator's job.
  */
 import { PhaseState, isPhaseState } from './phaseState';
@@ -28,6 +29,8 @@ export interface Phase {
   title: string;
   after: string[];
   files: string[];
+  /** Raw hint text naming the target repo relative to the owning repo root (`.` = owner); absent means the owner. */
+  repo?: string;
   lineIndex: number;
 }
 
@@ -170,8 +173,16 @@ function parsePhaseLine(line: string, lineIndex: number, kind: DocumentKind): Ph
   const id = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
   if (!phaseIdPattern(kind).test(id)) return undefined;
   const afterId = spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1);
-  const { title, after, files } = parseTitleAndHints(afterId, kind);
-  return { id, state: stateText, title, after, files, lineIndex };
+  const { title, after, files, repo } = parseTitleAndHints(afterId, kind);
+  return {
+    id,
+    state: stateText,
+    title,
+    after,
+    files,
+    ...(repo !== undefined ? { repo } : {}),
+    lineIndex,
+  };
 }
 
 /** Matches the leading `- [<state>] ` prefix of a phase line. */
@@ -180,7 +191,7 @@ const PHASE_PREFIX = /^- \[([^\]]*)\]\s+(.*)$/;
 function parseTitleAndHints(
   text: string,
   kind: DocumentKind,
-): { title: string; after: string[]; files: string[] } {
+): { title: string; after: string[]; files: string[]; repo?: string } {
   const trimmed = text.replace(/\s+$/, '');
   if (!trimmed.endsWith(')')) return { title: text.trim(), after: [], files: [] };
   const open = trimmed.lastIndexOf('(');
@@ -191,7 +202,18 @@ function parseTitleAndHints(
     title: trimmed.slice(0, open).trim(),
     after: parsed.after,
     files: parsed.files,
+    ...(parsed.repo !== undefined ? { repo: parsed.repo } : {}),
   };
+}
+
+/** Return the inner text of a trailing parenthetical containing a repo hint group. */
+export function trailingRepoHintText(title: string): string | undefined {
+  const trimmed = title.replace(/\s+$/, '');
+  if (!trimmed.endsWith(')')) return undefined;
+  const open = trimmed.lastIndexOf('(');
+  if (open === -1) return undefined;
+  const inner = trimmed.slice(open + 1, -1);
+  return /(^|;)\s*repo\s*:/i.test(inner) ? inner : undefined;
 }
 
 /** Return ids in a trailing after hint that uses the other document kind's ids. */
@@ -211,10 +233,11 @@ export function trailingHintIdsOfOtherKind(
 function parseHints(
   inner: string,
   idPattern: RegExp,
-): { after: string[]; files: string[] } | undefined {
+): { after: string[]; files: string[]; repo?: string } | undefined {
   const groups = inner.split(';');
   const after: string[] = [];
   const files: string[] = [];
+  let repo: string | undefined;
   let sawAny = false;
   for (const rawGroup of groups) {
     const group = rawGroup.trim();
@@ -235,9 +258,17 @@ function parseHints(
       sawAny = true;
       continue;
     }
+    const repoMatch = /^repo\s*:\s*(\S.*)$/i.exec(group);
+    if (repoMatch !== null) {
+      const value = repoMatch[1].trim();
+      if (repo !== undefined || value === '' || /[,;()\n\r]/.test(value)) return undefined;
+      repo = value;
+      sawAny = true;
+      continue;
+    }
     return undefined;
   }
-  return sawAny ? { after, files } : undefined;
+  return sawAny ? { after, files, ...(repo !== undefined ? { repo } : {}) } : undefined;
 }
 
 function matchGroup(group: string, keyword: string): string | undefined {

@@ -578,4 +578,22 @@ describe('renderPlan', () => {
     assert.deepStrictEqual(plan.phases[1].after, ['P01']);
     assert.deepStrictEqual(plan.phases[1].files, ['src/two.ts']);
   });
+
+  it('renders a child repo hint last and keeps owner or blank repo values implicit', () => {
+    const content = renderPlan(
+      'example',
+      { endstate: 'Done.', changes: 'Make changes.', constraints: 'Keep rules.' },
+      [
+        'First',
+        { title: 'Second', after: ['1'], files: ['a.ts'], repo: 'packages/api' },
+        { title: 'Owner repo', repo: '.' },
+        { title: 'Blank repo', repo: '  ' },
+      ],
+    );
+    assert.ok(content.includes('- [pending] P02 Second (after P01; files: a.ts; repo: packages/api)'));
+    assert.ok(content.includes('- [pending] P03 Owner repo\n'));
+    assert.ok(content.includes('- [pending] P04 Blank repo\n'));
+    assert.strictEqual(parsePlan(content).phases[1].repo, 'packages/api');
+    assert.strictEqual(parsePlan(content).phases[0].repo, undefined);
+  });
 });

@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import { approvalHash } from '../src/model/hash';
+import { parsePlan } from '../src/model/parser';
 import { isErr, isOk } from '../src/model/result';
 import { writeFrontmatterKey, writePhaseState } from '../src/model/writer';
 
@@ -65,6 +67,18 @@ describe('writer', () => {
             '- [executed] T01 First phase (after T02; files: a.ts, b.ts)',
           ),
         );
+      }
+    });
+
+    it('preserves a repo hint byte-for-byte and leaves the approval hash unchanged', () => {
+      const plan = ['# PHASES', '- [pending] P01 Do it (after P00; repo: packages/api)'].join('\n');
+      const beforeHash = approvalHash(parsePlan(plan));
+      const written = writePhaseState(plan, 'P01', 'planning', 'plan');
+      assert.ok(isOk(written));
+      if (isOk(written)) {
+        assert.strictEqual(written.value, plan.replace('[pending]', '[planning]'));
+        assert.strictEqual(parsePlan(written.value).phases[0].repo, 'packages/api');
+        assert.strictEqual(approvalHash(parsePlan(written.value)), beforeHash);
       }
     });
 

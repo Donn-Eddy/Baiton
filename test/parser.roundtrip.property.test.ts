@@ -32,6 +32,7 @@ interface PhaseModel {
   title: string;
   after: string[];
   files: string[];
+  repo?: string;
 }
 
 /**
@@ -78,6 +79,7 @@ function renderPhaseLine(t: PhaseModel): string {
   if (t.files.length > 0) {
     groups.push(`files: ${t.files.join(',')}`); // comma-separated paths (Req 3.5)
   }
+  if (t.repo !== undefined) groups.push(`repo: ${t.repo}`);
   if (groups.length > 0) {
     // `;` separates hint groups (Req 3.6).
     line += ` (${groups.join('; ')})`;
@@ -108,6 +110,13 @@ const pathArb: fc.Arbitrary<string> = fc
   .string({ minLength: 1, maxLength: 20 })
   .map((s) => s.replace(/[(),;\n\r]/g, '').trim())
   .filter((s) => s.length > 0);
+
+/** A repo hint path is one to three simple path segments, or the owner marker. */
+const repoSegmentArb = fc.stringMatching(/^[a-z0-9_-]{1,8}$/);
+const repoArb: fc.Arbitrary<string> = fc.oneof(
+  fc.constant('.'),
+  fc.array(repoSegmentArb, { minLength: 1, maxLength: 3 }).map((parts) => parts.join('/')),
+);
 
 /** A frontmatter key: non-empty, trimmed, no `:` or newline. */
 const fmKeyArb: fc.Arbitrary<string> = fc
@@ -158,6 +167,7 @@ const documentModelArb: fc.Arbitrary<DocumentModel> = fc
                   title: titleArb,
                   after: fc.subarray(ids),
                   files: fc.array(pathArb, { maxLength: 4 }),
+                  repo: fc.option(repoArb, { nil: undefined }),
                 })
                 .map((r) => ({ id, ...r }))
             )
@@ -217,9 +227,47 @@ describe('parser round trip (property)', () => {
           assert.strictEqual(actual.title, expected.title, 'phase title');
           assert.deepStrictEqual(actual.after, expected.after, 'phase after');
           assert.deepStrictEqual(actual.files, expected.files, 'phase files');
+          assert.strictEqual(actual.repo, expected.repo, 'phase repo');
+          if (expected.repo === undefined) {
+            assert.strictEqual('repo' in actual, false, 'hint-less phase has no repo property');
+          }
         }
       }),
       { numRuns: 200 }
     );
+  });
+
+  it('parses repo hint groups and preserves malformed repo parentheticals as titles', () => {
+    const parseOne = (line: string, kind: DocumentKind = 'plan'): Phase => {
+      const raw = kind === 'legacy-spec'
+        ? ['# OVERVIEW', 'Overview.', '# TODOS', line].join('\n')
+        : ['# PHASES', line].join('\n');
+      return parsePlan(raw, kind).phases[0];
+    };
+
+    const afterAndRepo = parseOne('- [pending] P01 Build (after P00; repo: packages/api)');
+    assert.deepStrictEqual(afterAndRepo.after, ['P00']);
+    assert.strictEqual(afterAndRepo.repo, 'packages/api');
+
+    const repoFirst = parseOne('- [pending] P01 Build (repo: a; files: x.ts)');
+    assert.strictEqual(repoFirst.repo, 'a');
+    assert.deepStrictEqual(repoFirst.files, ['x.ts']);
+
+    const prose = parseOne('- [pending] P01 Fix thing (repo cleanup)');
+    assert.strictEqual(prose.title, 'Fix thing (repo cleanup)');
+    assert.strictEqual('repo' in prose, false);
+
+    for (const parenthetical of ['(repo: a; repo: b)', '(repo: a, b)']) {
+      const malformed = parseOne(`- [pending] P01 Build ${parenthetical}`);
+      assert.strictEqual(malformed.title, `Build ${parenthetical}`);
+      assert.strictEqual('repo' in malformed, false);
+    }
+
+    const legacy = parseOne('- [pending] T01 Build (repo: a; repo: b)', 'legacy-spec');
+    assert.strictEqual(legacy.title, 'Build (repo: a; repo: b)');
+    assert.strictEqual('repo' in legacy, false);
+    const legacyRepo = parseOne('- [pending] T01 Build (after T02; repo: packages/api)', 'legacy-spec');
+    assert.strictEqual(legacyRepo.repo, 'packages/api');
+    assert.deepStrictEqual(legacyRepo.after, ['T02']);
   });
 });
