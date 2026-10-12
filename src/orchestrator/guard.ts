@@ -20,11 +20,12 @@
  * - **Restricted Mode** — while the workspace is untrusted, every mutating
  *   ("write") tool and every dispatch tool is disabled (Req 22.1, 22.2).
  *
- * The guard is a pure core: it takes the repository root, the `.baiton/` path,
+ * The guard is a pure core: it takes the target repository root, the `.baiton/` path,
  * and the restricted flag as plain injected values (never the `vscode` module),
  * so it is directly unit- and property-testable. The activation layer's
  * `WorkspaceContext` (design "Activation") satisfies {@link GuardWorkspace} by
- * passing its `root`/`baitonDir` `fsPath`s and `restricted` flag.
+ * passing its `root`/`baitonDir` `fsPath`s and `restricted` flag. A stage uses
+ * {@link guardWorkspaceForRepo} to bind containment to its target repository.
  */
 import * as fs from 'fs/promises';
 import { realpathSync } from 'fs';
@@ -47,7 +48,7 @@ export type ToolResult =
  * plus its Restricted Mode flag, so it can be adapted without this core
  * depending on the `vscode` module.
  *
- * - `repoRoot`   — absolute path of the repository root; read paths may not
+ * - `repoRoot`   — absolute path of the stage's TARGET repository root; read paths may not
  *                  resolve outside it (Req 9.3).
  * - `baitonDir`  — absolute path of `.baiton/`; mutating paths must resolve
  *                  under `plans/` or legacy `specs/` (Req 8.1).
@@ -58,6 +59,18 @@ export interface GuardWorkspace {
   repoRoot: string;
   baitonDir: string;
   restricted: boolean;
+}
+
+/** Build a guard bound only to a stage's target repo; containment never widens to a workspace folder or parent repo. Read containment is that repo root, and mutations are limited to its own `.baiton/plans` and `.baiton/specs`. */
+export function guardWorkspaceForRepo(
+  repo: { root: string; baitonDir?: string },
+  restricted: boolean,
+): GuardWorkspace {
+  return {
+    repoRoot: repo.root,
+    baitonDir: repo.baitonDir ?? path.join(repo.root, '.baiton'),
+    restricted,
+  };
 }
 
 /**
@@ -350,6 +363,11 @@ export class GuardContext {
   /** Absolute, normalized repository root. */
   public get repoRoot(): string {
     return this.workspace.repoRoot;
+  }
+
+  /** Absolute, normalized `.baiton/` directory. */
+  public get baitonDir(): string {
+    return this.workspace.baitonDir;
   }
 
   /**

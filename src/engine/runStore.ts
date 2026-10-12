@@ -1,7 +1,8 @@
 /**
  * Run manifest store (host-free core).
  *
- * One manifest per plan-less run, at `.baiton/runs/<run-id>/run.json`. A
+ * One RunStore is bound to one repo, with one manifest per plan-less run, at
+ * `.baiton/runs/<run-id>/run.json`. A
  * plan-less run has no plan document or phase, so the run id stands in for a phase id
  * everywhere the phase pipeline would use one: nothing in this module ever
  * touches `a plan document folder`.
@@ -197,7 +198,7 @@ export const RUN_MANIFEST_FILE = 'run.json';
 /** The journal's file name inside a run directory. */
 export const RUN_JOURNAL_FILE = 'runs.jsonl';
 
-/** The directory every run and every launch directory lives under. */
+/** The `.baiton/runs/` directory in the repo this run belongs to. */
 export function runsRootDir(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.baiton', 'runs');
 }
@@ -475,7 +476,7 @@ export function serializeRunManifest(manifest: RunManifest): string {
 
 /** How a {@link RunStore} is bound to a workspace and a clock. */
 export interface RunStoreOptions {
-  /** Absolute workspace root; `.baiton/runs/` is resolved under it. */
+  /** Root of the repo this run belongs to; use one RunStore per repo. */
   workspaceRoot: string;
   /** ISO-8601 clock for timestamps; injected for deterministic tests. */
   now?: () => string;

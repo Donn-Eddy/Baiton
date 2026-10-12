@@ -181,6 +181,11 @@ class ShellGitService implements GitWorktreeService {
     await this.runOrThrow(['worktree', 'add', '-b', branch, dir, fromCommit]);
   }
 
+  async addWorktreeOnBranch(dir: string, branch: string): Promise<void> {
+    // Unlike addWorktree, this never creates or resets a branch.
+    await this.runOrThrow(['worktree', 'add', dir, branch]);
+  }
+
   async listWorktrees(): Promise<readonly GitWorktree[]> {
     const out = await this.runOrThrow(['worktree', 'list', '--porcelain']);
     return parseWorktreeList(out);

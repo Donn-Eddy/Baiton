@@ -28,6 +28,7 @@ import type {
 } from '../engine';
 import { createQueueWorktreeSeam, createRunQueue } from '../engine';
 import type { GitWorktreeService } from '../git';
+import type { PhaseTargetResolver } from '../engine/phaseWorktree';
 import type {
   RunDispatchOutcome,
   RunDispatchRequest,
@@ -198,6 +199,8 @@ export type PhaseQueuesDeps = Omit<
   /** The one writer shared with the plan store so per-slug writes serialize. */
   planWriter: PlanBranchWriter;
   worktrees?: QueueWorktreeSeam;
+  /** Resolves each phase's target repo while leaving plan state owner-bound. */
+  targets?: PhaseTargetResolver;
 };
 
 /** A cache of run queues keyed by (slug, phase). */
@@ -218,13 +221,14 @@ export interface PhaseQueues {
  * their own worktrees, outside the repository lock.
  */
 export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
-  const { baitonDir, planWriter, worktrees, ...rest } = deps;
+  const { baitonDir, planWriter, worktrees, targets, ...rest } = deps;
   const seam =
     worktrees ??
     createQueueWorktreeSeam({
       workspaceRoot: deps.workspaceRoot,
       git: deps.git,
       writer: planWriter,
+      ...(targets ? { targets } : {}),
     });
   const queues = new Map<string, { slug: string; queue: RunQueue }>();
   return {

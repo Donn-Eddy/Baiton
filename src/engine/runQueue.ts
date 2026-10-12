@@ -52,7 +52,13 @@ import type { PhaseState } from '../model/phaseState';
 import type { GitService } from '../git';
 import { createGitService } from '../git/gitService';
 import { err, ok, type Result } from '../model/result';
-import { createPhaseWorktree, unlandedPhases, type PhaseWorktreeDeps } from './phaseWorktree';
+import {
+  createPhaseWorktree,
+  unlandedPhases,
+  unlandedPhasesAcross,
+  type PhaseTargetResolver,
+  type PhaseWorktreeDeps,
+} from './phaseWorktree';
 import type { PlanBranchWriter } from './planBranchWriter';
 import type { Adapter } from '../adapter';
 import type { HostTerminal } from './terminalHost';
@@ -392,13 +398,18 @@ export interface QueueWorktreeSeam {
 
 /** The real {@link QueueWorktreeSeam} over the phase-worktree lifecycle. */
 export function createQueueWorktreeSeam(
-  deps: PhaseWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'> },
+  deps: PhaseWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'>; targets?: PhaseTargetResolver },
 ): QueueWorktreeSeam {
   return {
     async ensure(slug, phaseId) {
       try {
         const run = async (): Promise<Result<PhaseStageWorkspace, string>> => {
-          const r = await createPhaseWorktree(deps, { slug, phaseId });
+          const target = deps.targets === undefined ? undefined : await deps.targets.forPhase(slug, phaseId);
+          if (target !== undefined && !target.ok) return err(target.error);
+          const r = await createPhaseWorktree(
+            target === undefined ? deps : { ...deps, target: target.value },
+            { slug, phaseId },
+          );
           if (!r.ok) {
             return err(r.error.message);
           }
@@ -410,7 +421,9 @@ export function createQueueWorktreeSeam(
         return err(describe(e));
       }
     },
-    unlanded: (slug) => unlandedPhases(deps, slug),
+    unlanded: async (slug) => deps.targets === undefined
+      ? unlandedPhases(deps, slug)
+      : unlandedPhasesAcross(deps, slug, await deps.targets.forPlan(slug)),
   };
 }
 

@@ -3,8 +3,8 @@
  *
  * {@link launchStage} performs the fixed handoff for one stage:
  *
- *   1. Resolve the run directory under the run root (the workspace root, or
- *      `input.cwd` when the caller launches into a run worktree) and the
+ *   1. Resolve the run directory under the run root (the owning repo root, or
+ *      `input.cwd` when the caller launches into a target-repo phase worktree) and the
  *      absolute `brief.md` / `result.json` paths.
  *   2. Write the Brief with its sections in the required order (Req 11.3) via
  *      {@link writeBrief}.
@@ -59,14 +59,14 @@ export const RESULT_FILE_NAME = 'result.json';
 
 /** Everything {@link launchStage} needs to write the Brief and launch. */
 export interface LaunchStageInput {
-  /** Absolute path of the workspace root; the terminal `cwd` (Req 11.2). */
+  /** Absolute path of the owning repo root; plan state and artifacts remain there. */
   workspaceRoot: string;
   /**
    * Optional absolute run root the launch resolves against: the terminal cwd
    * and the `.baiton/runs/<launch-id>/` brief, result and asks directories
-   * live under it instead of under `workspaceRoot`. Set by the plan-less run
-   * pipeline (`.baiton/worktrees/<run-id>/`) and by the run queue (the phase
-   * worktree `.baiton/worktrees/<slug>/<phaseId>/`) to launch a stage inside it, so the
+   * live under it instead of under `workspaceRoot`. For a phase this is the
+   * phase worktree, a checkout of the phase's TARGET repo. Set by the plan-less run
+   * pipeline (`.baiton/worktrees/<run-id>/`) and by the run queue to launch a stage inside it, so the
    * role profiles' RELATIVE run-dir grants (`.baiton/runs/<launch-id>/`) still
    * resolve to the same directory the launcher wrote. Absent, the launch is
    * byte-identical to a launch without the field.
@@ -140,6 +140,11 @@ export function initialPromptFor(briefPath: string): string {
   return `Read ${briefPath} and do what it says.`;
 }
 
+/** Stage run root: the target-repo worktree when a phase supplies `cwd`, otherwise its owning repo root. */
+export function stageRunRoot(input: Pick<LaunchStageInput, 'workspaceRoot' | 'cwd'>): string {
+  return input.cwd ?? input.workspaceRoot;
+}
+
 /**
  * The dependencies {@link launchStage} needs, injected so the function stays
  * host-independent: the adapter (launch args), the terminal host (creation),
@@ -180,14 +185,15 @@ export function launchStage(
   // The run root this launch resolves against: the workspace root, or the
   // caller's override (a run worktree). Validated the same way, so a bad
   // override halts before anything is written (Req 11.5).
-  let base = root;
+  let validatedCwd: string | undefined;
   if (input.cwd !== undefined) {
     const cwdCheck = resolveRoot(input.cwd);
     if (!cwdCheck.ok) {
       return cwdCheck;
     }
-    base = cwdCheck.value;
+    validatedCwd = cwdCheck.value;
   }
+  const base = stageRunRoot({ workspaceRoot: root, ...(validatedCwd === undefined ? {} : { cwd: validatedCwd }) });
 
   const runDir = path.join(base, '.baiton', 'runs', input.runId);
   const briefPath = path.join(runDir, BRIEF_FILE_NAME);

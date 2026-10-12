@@ -4,6 +4,7 @@
  * independent of VS Code and direct filesystem access.
  */
 import * as path from 'path';
+import type { RepoTopology } from '../model/validator';
 
 export type DirEntryKind = 'dir' | 'file' | 'other';
 
@@ -39,6 +40,18 @@ export interface RepoSet {
   /** One entry per input folder, in input order. */
   readonly folderRoots: readonly Repo[];
   readonly truncated: boolean;
+}
+
+/** Project discovered repositories into the pure topology used by plan validation and phase targeting. */
+export function repoTopologyFor(set: RepoSet, ownerName: string): RepoTopology {
+  return {
+    owner: ownerName,
+    repos: set.repos.map((repo) => ({
+      name: repo.name,
+      root: repo.root,
+      ...(repo.parent ? { parent: repo.parent } : {}),
+    })),
+  };
 }
 
 export interface DiscoveryOptions {

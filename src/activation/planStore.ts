@@ -4,16 +4,22 @@ import * as path from 'path';
 import { approvalHash, computeInputRev, isBlocked as deriveBlocked } from '../model/hash';
 import { parsePlan, type ParsedPlan } from '../model/parser';
 import { writePhaseState } from '../model/writer';
-import { isErr } from '../model/result';
+import { isErr, type Result } from '../model/result';
 import type { PhaseState } from '../model/phaseState';
 import type { Stage } from '../model/stage';
 import type { GitWorktreeService } from '../git';
+import type { RepoTopology } from '../model/validator';
 import { createPlanBranchWriter, type PlanBranchWriter, type PlanStore } from '../engine';
+import {
+  resolvePhaseTargetRoot,
+  type PhaseTargetRepo,
+  type PhaseTargetResolver,
+} from '../engine/phaseWorktree';
 import { persistencePathForStage, stageArtifactIsNumbered } from '../schema';
 import { resolveDocument } from '../storage/documentLocation';
 import { readPlanJournal, type JournalEntry } from '../journal';
 
-/** Build a PlanStore rooted at a repository's `.baiton` directory. */
+/** Build a PlanStore rooted at a repository's `.baiton` directory. Journals and all plan state always remain in this owning repo, even when a phase targets a child repo. */
 export function createPlanStore(
   baitonDir: string,
   git: GitWorktreeService,
@@ -114,6 +120,74 @@ export function createPlanStore(
         await fsp.mkdir(path.dirname(artifactPath), { recursive: true });
         await fsp.writeFile(artifactPath, contents, 'utf8');
       });
+    },
+  };
+}
+
+/** Dependencies for resolving phase targets while reading the owner's plan document. */
+export interface PhaseTargetResolverDeps {
+  /** The OWNING repo's `.baiton/`; the plan document is read from here. */
+  baitonDir: string;
+  /** The owning repo's canonical root. */
+  ownerRoot: string;
+  /** Live topology for the owner; undefined when discovery has not run (hint-less phases still resolve). */
+  topology: () => RepoTopology | undefined;
+  /** One git service per repo root (the activation GitServiceRegistry). */
+  gitFor: (repoRoot: string) => GitWorktreeService;
+}
+
+/** Create an owner-bound resolver for each phase's target repository. */
+export function createPhaseTargetResolver(deps: PhaseTargetResolverDeps): PhaseTargetResolver {
+  const ownerTarget = (): PhaseTargetRepo => ({
+    name: deps.topology()?.owner ?? '.',
+    root: deps.ownerRoot,
+    isOwner: true,
+    git: deps.gitFor(deps.ownerRoot),
+  });
+  const readPlan = async (slug: string): Promise<ParsedPlan | undefined> => {
+    try {
+      const documentPath = resolveDocument(deps.baitonDir, slug).documentPath;
+      return parsePlan(await fsp.readFile(documentPath, 'utf8'));
+    } catch {
+      return undefined;
+    }
+  };
+  const targetFor = (phase: ParsedPlan['phases'][number]): Result<PhaseTargetRepo, string> => {
+    const resolved = resolvePhaseTargetRoot(phase, deps.topology(), deps.ownerRoot);
+    if (!resolved.ok) return resolved;
+    return {
+      ok: true,
+      value: {
+        ...resolved.value,
+        git: deps.gitFor(resolved.value.isOwner ? deps.ownerRoot : resolved.value.root),
+      },
+    };
+  };
+
+  return {
+    async forPhase(slug, phaseId) {
+      const plan = await readPlan(slug);
+      const phase = plan?.phases.find((candidate) => candidate.id === phaseId);
+      return phase === undefined ? { ok: true, value: ownerTarget() } : targetFor(phase);
+    },
+    async forPlan(slug) {
+      try {
+        const owner = ownerTarget();
+        const targets: PhaseTargetRepo[] = [owner];
+        const roots = new Set([path.resolve(owner.root)]);
+        const plan = await readPlan(slug);
+        for (const phase of plan?.phases ?? []) {
+          const resolved = targetFor(phase);
+          if (!resolved.ok) continue;
+          const root = path.resolve(resolved.value.root);
+          if (roots.has(root)) continue;
+          roots.add(root);
+          targets.push(resolved.value);
+        }
+        return targets;
+      } catch {
+        return [ownerTarget()];
+      }
     },
   };
 }

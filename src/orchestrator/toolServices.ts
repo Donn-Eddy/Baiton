@@ -55,7 +55,9 @@ export interface ToolGitSettings {
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
  */
 export interface ToolServices {
+  /** The conversation's OWNING repo root; read containment and file enumeration come from the GuardContext bound to the stage target repo. */
   repoRoot: string;
+  /** The conversation's OWNING repo `.baiton/`; plan tools continue to read owner plans. */
   baitonDir: string;
   git: GitService;
   confirm: ConfirmSeam;
