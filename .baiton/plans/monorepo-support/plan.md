@@ -51,7 +51,7 @@ The Plan Explorer labels each plan with its owning repo and each phase with its 
 
 # PHASES
 
-- [executing] P01 Add repo discovery and repo identity, replacing single-root workspace resolution (files: src/activation/workspace.ts, src/extension.ts, src/git/gitService.ts, test/activation.gating.test.ts)
+- [executed] P01 Add repo discovery and repo identity, replacing single-root workspace resolution (files: src/activation/workspace.ts, src/extension.ts, src/git/gitService.ts, test/activation.gating.test.ts)
 - [pending] P02 Parse, write and hash the per-phase repo hint, and validate subtree-only bindings (after P01; files: src/model/parser.ts, src/model/writer.ts, src/model/hash.ts, src/model/validator.ts, src/engine/planDraft.ts, src/schema/schemas.ts, test/hash.approval.property.test.ts, test/parser.roundtrip.property.test.ts)
 - [pending] P03 Bind phase worktrees, git service, launch cwd and guard containment to each phase's target repo (after P02; files: src/engine/phaseWorktree.ts, src/engine/runWorktree.ts, src/engine/runStore.ts, src/engine/launcher.ts, src/engine/resultFlow.ts, src/engine/resultValidation.ts, src/engine/askRelay.ts, src/orchestrator/guard.ts, src/orchestrator/readTools.ts, src/orchestrator/toolServices.ts, src/activation/planStore.ts, src/journal/journal.ts)
 - [pending] P04 Replace the repository lock with a per-repo lock and repo-keyed queues in the engine facade (after P03; files: src/engine/runQueue.ts, src/engine/planDraft.ts, src/engine/runPipeline.ts, src/activation/engineFacade.ts, src/activation/commands.ts, test/engineFacade.resume.test.ts)
