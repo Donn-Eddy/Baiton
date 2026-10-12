@@ -12,6 +12,8 @@ import {
 import { subAgentDepthRefusal } from '../src/orchestrator/controlTools';
 import { ToolServices } from '../src/orchestrator/toolServices';
 import { createRunQueueSeam } from '../src/activation/engineFacade';
+import { createPlanRepoSeam } from '../src/orchestrator/planRepos';
+import type { Repo, RepoSet } from '../src/activation/repoDiscovery';
 import type { DispatchResult, RunQueue, RunRequest } from '../src/engine';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
@@ -519,6 +521,119 @@ describe('orchestrator registry and control tools', () => {
       assert.deepStrictEqual(draft.calls, [
         { slug: 'greeting', requirements: REQUIREMENTS },
       ]);
+    });
+
+    it('validates a child owner before confirmation and dispatches repos rebased to that owner', async () => {
+      const repoRoot = newRepo();
+      const childRoot = path.join(repoRoot, 'packages', 'api');
+      const nestedRoot = path.join(childRoot, 'internal');
+      const noBaitonRoot = path.join(repoRoot, 'packages', 'uninitialized');
+      for (const dir of [childRoot, nestedRoot, noBaitonRoot]) fs.mkdirSync(dir, { recursive: true });
+      const repoEntry = (input: Partial<Repo> & Pick<Repo, 'name' | 'root'>): Repo => ({
+        folderName: 'workspace', relPath: input.name, hasGit: false, children: [], ...input,
+      });
+      const entries = [
+        repoEntry({ name: '.', root: repoRoot, children: ['api', 'uninitialized'], baitonDir: path.join(repoRoot, '.baiton') }),
+        repoEntry({ name: 'api', root: childRoot, parent: '.', children: ['internal'], baitonDir: path.join(childRoot, '.baiton') }),
+        repoEntry({ name: 'internal', root: nestedRoot, parent: 'api', baitonDir: path.join(nestedRoot, '.baiton') }),
+        repoEntry({ name: 'uninitialized', root: noBaitonRoot, parent: '.' }),
+      ];
+      for (const entry of entries) if (entry.baitonDir !== undefined) fs.mkdirSync(entry.baitonDir, { recursive: true });
+      const set: RepoSet = { repos: entries, folderRoots: [entries[0]], truncated: false };
+      const planRepos = createPlanRepoSeam({
+        repos: () => set,
+        ownerRoot: repoRoot,
+        restricted: () => false,
+        gitFor: () => benignGit(),
+        exists: async (target) => fs.promises.access(target).then(() => true, () => false),
+      });
+      const confirm = recordingConfirm(true);
+      const draft = recordingDraft();
+      const registry = createToolRegistry({
+        ...makeServices(repoRoot, benignGit(), confirm, draft),
+        planRepos,
+      });
+      const result = await registry.call(
+        'draft_plan',
+        { slug: 'api-plan', request: REQUIREMENTS, repo: 'packages/api' },
+        'call-draft-child',
+        makeGuard(repoRoot),
+        'gather',
+      );
+      assert.strictEqual(result.ok, true);
+      assert.match(confirm.calls[0], /Draft plan "api-plan" in repo "packages\/api"/);
+      assert.deepStrictEqual(draft.calls, [{
+        slug: 'api-plan',
+        requirements: REQUIREMENTS,
+        repo: 'packages/api',
+        repos: [
+          { path: '.', name: 'api', hasBaiton: true },
+          { path: 'internal', name: 'internal', hasBaiton: true },
+        ],
+      }]);
+
+      const rootDraft = recordingDraft();
+      const rootRegistry = createToolRegistry({
+        ...makeServices(repoRoot, benignGit(), recordingConfirm(true), rootDraft),
+        planRepos,
+      });
+      const rootResult = await rootRegistry.call(
+        'draft_plan',
+        { slug: 'root-plan', request: REQUIREMENTS },
+        'call-draft-root',
+        makeGuard(repoRoot),
+        'gather',
+      );
+      assert.strictEqual(rootResult.ok, true);
+      assert.deepStrictEqual(rootDraft.calls, [{
+        slug: 'root-plan',
+        requirements: REQUIREMENTS,
+        repos: [
+          { path: '.', name: '.', hasBaiton: true },
+          { path: 'packages/api', name: 'api', hasBaiton: true },
+          { path: 'packages/api/internal', name: 'internal', hasBaiton: true },
+          { path: 'packages/uninitialized', name: 'uninitialized', hasBaiton: false },
+        ],
+      }]);
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    });
+
+    it('refuses invalid child targets before confirmation and refuses child targets without a seam', async () => {
+      const repoRoot = newRepo();
+      const childRoot = path.join(repoRoot, 'packages', 'api');
+      const noBaitonRoot = path.join(repoRoot, 'packages', 'uninitialized');
+      fs.mkdirSync(path.join(childRoot, '.baiton'), { recursive: true });
+      fs.mkdirSync(noBaitonRoot, { recursive: true });
+      const entries: Repo[] = [
+        { name: '.', folderName: 'workspace', relPath: '', root: repoRoot, baitonDir: path.join(repoRoot, '.baiton'), hasGit: false, children: ['api', 'uninitialized'] },
+        { name: 'api', folderName: 'workspace', relPath: 'packages/api', root: childRoot, baitonDir: path.join(childRoot, '.baiton'), hasGit: false, parent: '.', children: [] },
+        { name: 'uninitialized', folderName: 'workspace', relPath: 'packages/uninitialized', root: noBaitonRoot, hasGit: false, parent: '.', children: [] },
+      ];
+      const set: RepoSet = { repos: entries, folderRoots: [entries[0]], truncated: false };
+      const planRepos = createPlanRepoSeam({
+        repos: () => set,
+        ownerRoot: repoRoot,
+        restricted: () => false,
+        gitFor: () => benignGit(),
+        exists: async (target) => fs.promises.access(target).then(() => true, () => false),
+      });
+      for (const repoHint of ['../sibling', 'packages/uninitialized']) {
+        const confirm = recordingConfirm(true);
+        const draft = recordingDraft();
+        const registry = createToolRegistry({ ...makeServices(repoRoot, benignGit(), confirm, draft), planRepos });
+        const result = await registry.call('draft_plan', { slug: 'invalid', request: REQUIREMENTS, repo: repoHint }, `call-${repoHint}`, makeGuard(repoRoot), 'gather');
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual(confirm.calls.length, 0);
+        assert.strictEqual(draft.calls.length, 0);
+      }
+      const confirm = recordingConfirm(true);
+      const draft = recordingDraft();
+      const withoutSeam = createToolRegistry(makeServices(repoRoot, benignGit(), confirm, draft));
+      const refused = await withoutSeam.call('draft_plan', { slug: 'invalid', request: REQUIREMENTS, repo: 'packages/api' }, 'call-no-seam', makeGuard(repoRoot), 'gather');
+      assert.deepStrictEqual(refused, { ok: false, error: 'draft_plan: this workspace has no nested repos; omit "repo"' });
+      assert.strictEqual(confirm.calls.length, 0);
+      assert.strictEqual(draft.calls.length, 0);
+      fs.rmSync(repoRoot, { recursive: true, force: true });
     });
 
     it('on a decline dispatches nothing and writes nothing', async () => {

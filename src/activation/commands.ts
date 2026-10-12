@@ -98,6 +98,7 @@ import type {
   RunPipeline,
   RunQueue,
   PlanDraftOutcome,
+  PlanDraftRunner,
   SubmitPrError,
   TerminalHost,
 } from '../engine';
@@ -121,6 +122,7 @@ import {
   scriptPathCandidates,
   toolFamily,
   createToolRegistry,
+  createPlanRepoSeam,
   systemClock,
 } from '../orchestrator';
 import type {
@@ -140,6 +142,7 @@ import type {
   ToolRegistry,
   ToolServices,
   ToolSpec,
+  PlanRepoSeam,
 } from '../orchestrator';
 import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
@@ -435,6 +438,23 @@ export function registerCommands(
     log: (message) => surface.log(message),
   });
   const git = createGitService(repoRoot);
+  const planRepos = createPlanRepoSeam({
+    repos: () => activation.repos,
+    ownerRoot: repoRoot,
+    restricted: () => workspace.restricted,
+    gitFor: (root) =>
+      path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root),
+    exists: async (targetPath) => {
+      try {
+        await fs.promises.access(targetPath);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
   const ownerRepoName = (): string | undefined => {
     const repos = activation.repos;
     return repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(repoRoot))?.name;
@@ -689,6 +709,8 @@ export function registerCommands(
     interventionSeam,
     runPipelineSeam,
     landPhaseSeam,
+    undefined,
+    planRepos,
   );
   const planDraftRunner = createPlanDraftRunner({
     workspaceRoot: repoRoot,
@@ -701,14 +723,44 @@ export function registerCommands(
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
+  const planDraftRunners = new Map<string, PlanDraftRunner>([['.', planDraftRunner]]);
 
   // The tool registry (read + plan-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents, planRepos),
     draftPlan: {
       draft: async (req) => {
-        const started = await planDraftRunner.start(req);
+        let runner = planDraftRunner;
+        if (req.repo !== undefined && req.repo !== '.') {
+          const resolvedTarget = planRepos.target(req.repo);
+          if (!resolvedTarget.ok) return { kind: 'refused', reason: resolvedTarget.error };
+          const repoPath = resolvedTarget.target.info.path;
+          runner = planDraftRunners.get(repoPath) ?? createPlanDraftRunner({
+            workspaceRoot: resolvedTarget.target.root,
+            terminalHost,
+            watcherFactory,
+            services: {
+              ...draftServices,
+              repoRoot: resolvedTarget.target.root,
+              baitonDir: resolvedTarget.target.baitonDir,
+              git: resolvedTarget.target.git,
+            },
+            modelForRole: (role) => modelForRole(cfg(), role),
+            adapterForRole: adapterFor,
+            repoLocks,
+            onComplete: (outcome) => reportDraftOutcome(outcome),
+            report: (detail) => surface.warn(`Baiton: ${detail}`),
+          });
+          planDraftRunners.set(repoPath, runner);
+        }
+        const started = await runner.start({
+          slug: req.slug,
+          requirements: req.requirements,
+          ...(req.repos !== undefined
+            ? { repos: req.repos.map(({ path: repoPath, hasBaiton }) => ({ path: repoPath, hasBaiton })) }
+            : {}),
+        });
         if (started.ok) {
           return { kind: 'started', runId: started.runId };
         }
@@ -970,6 +1022,12 @@ export function registerCommands(
     registry,
     toolsFor: (phase) => toolsByStep.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
+    repoContext: () => {
+      const repos = planRepos.list();
+      return repos.length > 1
+        ? { repos: repos.map(({ path: repoPath, hasBaiton }) => ({ path: repoPath, hasBaiton })) }
+        : undefined;
+    },
     askRegistry,
     baitonDir,
     roundBound: () => readRoundBound(),
@@ -1178,7 +1236,7 @@ export function registerCommands(
     disposables,
     runningSlugs: () => {
       const running = phaseQueues.running().map((r) => `${r.slug}/${r.phaseId}`);
-      if (planDraftRunner.isRunning()) {
+      if ([...planDraftRunners.values()].some((runner) => runner.isRunning())) {
         running.push('(plan draft)');
       }
       const runId = runPipeline.currentRunId();
@@ -1991,6 +2049,7 @@ function buildToolServices(
   runPipeline: RunPipelineSeam,
   landPhase: LandPhaseSeam,
   subAgents?: SubAgentSeam,
+  planRepos?: PlanRepoSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -2006,6 +2065,7 @@ function buildToolServices(
     gitSettings: readGitSettings(),
     submitPr: submitPrForSlug,
     ...(subAgents !== undefined ? { subAgents } : {}),
+    ...(planRepos !== undefined ? { planRepos } : {}),
   };
 }
 

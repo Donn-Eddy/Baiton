@@ -48,6 +48,8 @@
  * For a plan conversation the prompt appends the current plan document content when
  * supplied (Req 11.5) and builds without it, without error, when absent
  * (Req 11.7).
+ * Optional repository context describes the owning repo and its descendants to
+ * gather/drive prompts; absent or single-repo context preserves the old prompt.
  */
 import { isPlanless, RunMode } from '../model/mode';
 import { parsePlan } from '../model/parser';
@@ -58,6 +60,37 @@ import { MAX_SUBAGENT_DEPTH } from './seams';
 export type ConversationKind =
   | { kind: 'workspace' }
   | { kind: 'plan'; slug: string };
+
+/** Repositories visible to a workspace conversation, with paths relative to its owner. */
+export interface PromptRepoContext {
+  readonly repos: readonly { readonly path: string; readonly hasBaiton: boolean }[];
+}
+
+/** Format the owner and descendants the orchestrator may plan into. */
+export function repoListText(ctx: PromptRepoContext): string {
+  const lines = ['Repositories in this workspace you may plan into (paths relative to this repo):'];
+  for (const repo of ctx.repos) {
+    if (repo.path === '.') {
+      lines.push('- `.` (this repo, owns this conversation\'s plans)');
+    } else {
+      lines.push(`- \`${repo.path}\`${repo.hasBaiton ? ' (has its own .baiton/)' : ''}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+export const REPO_GATHER_TEXT = [
+  'Choosing a repo:',
+  '- Pick the lowest repo that satisfies the task: the deepest repo that contains every file the work touches.',
+  '- When the work stays inside one child repo that has its own `.baiton/`, prefer a plan owned by that child: pass its path as `repo` to `draft_plan`.',
+  '- When the work spans this repo and its children, the plan stays here and the plan writer binds each phase confined to a child with a `repo: <path>` hint.',
+  '- A phase may target only the repo that owns its plan or a repo nested beneath it. Sibling and ancestor repos are refused; sibling repos never coordinate within one plan.',
+  '- `add_phase` and `edit_phase` take the same optional `repo`; omit it for the owning repo. Adding, changing or removing a phase\'s `repo` invalidates approval and that phase\'s input rev.',
+].join('\n');
+
+export const REPO_DRIVE_TEXT = 'Each phase runs in its target repo: the owning repo, or the repo its `repo:` hint names. Approval and the plan journal stay in the owning repo. `submit_pr` opens one pull request per repo the executed phases touched.';
+
+export const REPO_HINT_GRAMMAR_LINE = '- `repo: <path>` names the phase\'s target repo relative to the repo that owns the plan; omit it for the owning repo.';
 
 /** The eight allowed phase lifecycle states, per tech-sheet section 5. */
 const PHASE_STATES = [
@@ -368,12 +401,15 @@ const FRONTMATTER_TEXT = [
  * @param mode The conversation's mode. Absent or `plan` builds the prompt
  *   exactly as before; any other mode builds the run-step prompt for that
  *   mode. Ignored for a plan conversation, which is always Plan.
+ * @param repos The owning repo and descendants available for planning. A
+ *   single-repo context is ignored so existing prompts remain byte-identical.
  * @returns The assembled system-prompt text.
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
   documentContent?: string,
   mode: RunMode = 'plan',
+  repos?: PromptRepoContext,
 ): string {
   // The `run` step — every plan-less mode on a workspace conversation. The
   // guard is written as `mode !== 'plan'` rather than `isPlanless(mode)` so
@@ -402,7 +438,14 @@ export function buildSystemPrompt(
   // The step decides which job the prompt describes: gathering requirements
   // for a new (or still draft) plan, or driving an approved one (Req 11.1).
   sections.push(step === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
-  sections.push(STYLE_TEXT, PHASE_GRAMMAR_TEXT, FRONTMATTER_TEXT);
+  const hasMultipleRepos = repos !== undefined && repos.repos.length > 1;
+  if (hasMultipleRepos) {
+    sections.push([repoListText(repos), step === 'drive' ? REPO_DRIVE_TEXT : REPO_GATHER_TEXT].join('\n\n'));
+  }
+  const grammar = hasMultipleRepos
+    ? `${PHASE_GRAMMAR_TEXT}\n${REPO_HINT_GRAMMAR_LINE}`
+    : PHASE_GRAMMAR_TEXT;
+  sections.push(STYLE_TEXT, grammar, FRONTMATTER_TEXT);
 
   if (kind.kind === 'plan' && documentContent !== undefined) {
     sections.push(['Current plan document content:', '', documentContent].join('\n'));

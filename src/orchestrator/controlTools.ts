@@ -74,6 +74,7 @@ import { DocumentLocation, locationFor, resolveDocument } from '../storage/docum
 import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
 import { MAX_SUBAGENT_DEPTH } from './seams';
+import type { PlanRepoInfo, PlanRepoTarget } from './seams';
 import { ToolServices } from './toolServices';
 
 /** Build every control tool for the registry. */
@@ -201,7 +202,7 @@ function draftPlanTool(services: ToolServices): Tool {
   return {
     name: 'draft_plan',
     description:
-      'Hand an agreed request (endstate, what needs changing, limitations & constraints) to the plan-writer agent, which studies the repository and drafts the phased plan for a new slug.',
+      'Hand an agreed request to the plan-writer agent for a new slug. Optional `repo` is the repo that will own the plan, as a path relative to this repo; omit it for this repo.',
     mutating: false,
     steps: ['gather'],
     dispatch: true,
@@ -210,6 +211,7 @@ function draftPlanTool(services: ToolServices): Tool {
       properties: {
         slug: { type: 'string' },
         request: { type: 'string' },
+        repo: { type: 'string' },
       },
       required: ['slug', 'request'],
       additionalProperties: false,
@@ -217,6 +219,7 @@ function draftPlanTool(services: ToolServices): Tool {
     async run(args: unknown, tc: ToolContext): Promise<ToolResult> {
       const slug = readString(args, 'slug');
       const request = readString(args, 'request');
+      const requestedRepo = readString(args, 'repo');
       if (slug === undefined || request === undefined) {
         return {
           ok: false,
@@ -233,19 +236,34 @@ function draftPlanTool(services: ToolServices): Tool {
         return { ok: false, error: 'draft_plan is not available in this host' };
       }
 
-      // New drafts always write under plans/.
-      const newPlan = locationFor(services.baitonDir, slug, 'plan');
-      const resolved = await tc.ctx.resolveMutatingPath(newPlan.documentPath);
+      const repoHint = requestedRepo?.trim();
+      let target: PlanRepoTarget | undefined;
+      if (requestedRepo !== undefined && repoHint === '') {
+        return { ok: false, error: 'draft_plan: repo path must not be empty; omit "repo" for this repo' };
+      }
+      if (repoHint !== undefined && repoHint !== '.') {
+        if (services.planRepos === undefined) {
+          return { ok: false, error: 'draft_plan: this workspace has no nested repos; omit "repo"' };
+        }
+        const resolvedTarget = services.planRepos.target(repoHint);
+        if (!resolvedTarget.ok) return { ok: false, error: `draft_plan: ${resolvedTarget.error}` };
+        target = resolvedTarget.target;
+      }
+      const targetBaitonDir = target?.baitonDir ?? services.baitonDir;
+      const newPlan = locationFor(targetBaitonDir, slug, 'plan');
+      const resolved = target === undefined
+        ? await tc.ctx.resolveMutatingPath(newPlan.documentPath)
+        : await target.guard.resolveMutatingPath(newPlan.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
       // Legacy: refuse a slug with a spec.md so a draft cannot shadow it.
-      if (await exists(resolveDocument(services.baitonDir, slug).documentPath)) {
+      if (await exists(resolveDocument(targetBaitonDir, slug).documentPath)) {
         return { ok: false, error: `plan "${slug}" already exists` };
       }
 
       const confirmed = await services.confirm.confirm(
-        draftConfirmation(slug, request),
+        draftConfirmation(slug, request, target?.info.path),
       );
       if (!confirmed) {
         return {
@@ -254,7 +272,20 @@ function draftPlanTool(services: ToolServices): Tool {
         };
       }
 
-      const outcome = await services.draftPlan.draft({ slug, requirements: request });
+      let repoContextTarget = target;
+      if (repoContextTarget === undefined && services.planRepos !== undefined) {
+        const ownerTarget = services.planRepos.target('.');
+        if (ownerTarget.ok) repoContextTarget = ownerTarget.target;
+      }
+      const repos = services.planRepos === undefined || repoContextTarget === undefined
+        ? undefined
+        : reposForDraftOwner(services.planRepos.list(), repoContextTarget);
+      const outcome = await services.draftPlan.draft({
+        slug,
+        requirements: request,
+        ...(target !== undefined ? { repo: target.info.path } : {}),
+        ...(repos !== undefined && repos.length > 1 ? { repos } : {}),
+      });
       switch (outcome.kind) {
         case 'started':
           return { ok: true, data: { runId: outcome.runId } };
@@ -277,16 +308,46 @@ function draftPlanTool(services: ToolServices): Tool {
  * bounded summary of the request so the user sees what the plan writer is
  * being handed.
  */
-function draftConfirmation(slug: string, requirements: string): string {
+function draftConfirmation(slug: string, requirements: string, repo?: string): string {
   const trimmed = requirements.trim();
   const summary =
     trimmed.length > 1200 ? `${trimmed.slice(0, 1200)}\n…` : trimmed;
   return (
-    `Draft plan "${slug}" from this request? ` +
+    `Draft plan "${slug}"${repo !== undefined && repo !== '.' ? ` in repo "${repo}"` : ''} from this request? ` +
     'The configured plan-writer agent will study the repository and write the ' +
     'endstate, what needs changing, limitations & constraints, and phases.' +
     `\n\n${summary}`
   );
+}
+
+/** List the selected owner and its descendants, rebased to that owner's paths. */
+function reposForDraftOwner(
+  repos: readonly PlanRepoInfo[],
+  target: PlanRepoTarget,
+): readonly PlanRepoInfo[] | undefined {
+  const ownerEntry = target.topology.repos.find((repo) => repo.name === target.info.name);
+  if (ownerEntry === undefined) return undefined;
+  const isDescendant = (candidateName: string): boolean => {
+    const byName = new Map(target.topology.repos.map((repo) => [repo.name, repo]));
+    const seen = new Set<string>();
+    let current = byName.get(candidateName);
+    while (current !== undefined && !seen.has(current.name)) {
+      if (current.name === target.info.name) return true;
+      seen.add(current.name);
+      current = current.parent === undefined ? undefined : byName.get(current.parent);
+    }
+    return false;
+  };
+  const included = repos.flatMap((repo) => {
+    const entry = target.topology.repos.find((candidate) => candidate.name === repo.name);
+    if (entry === undefined || !isDescendant(repo.name)) return [];
+    return [{
+      path: path.relative(ownerEntry.root, entry.root).split(path.sep).join('/') || '.',
+      name: repo.name,
+      hasBaiton: repo.hasBaiton,
+    }];
+  });
+  return included.length > 1 ? included : undefined;
 }
 
 /** Whether a path exists on disk. */
