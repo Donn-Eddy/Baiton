@@ -34,12 +34,12 @@ import { PhaseState, isPhaseState } from '../model/phaseState';
 /** File name of every run journal (document-level and per-phase). */
 export const JOURNAL_FILE = 'runs.jsonl';
 
-/** Plan-level journal: plan-draft, PR and legacy phase entries. */
+/** Plan-level journal: plan-draft, PR and legacy phase entries. `baitonDir` is always the OWNING repo's `.baiton/`, even when a phase targets a child repo. */
 export function planJournalPathFor(baitonDir: string, slug: string): string {
   return join(resolveDocument(baitonDir, slug).dir, JOURNAL_FILE);
 }
 
-/** Per-phase journal in `phases/<id>/` (Legacy documents use `todos/<id>/`). */
+/** Per-phase journal in `phases/<id>/` (Legacy documents use `todos/<id>/`). `baitonDir` is always the OWNING repo's `.baiton/`; a child repo never receives a parent's plan entries. */
 export function phaseJournalPathFor(
   baitonDir: string,
   slug: string,
@@ -49,7 +49,7 @@ export function phaseJournalPathFor(
 }
 
 /**
- * Every journal file of a plan: its document-level path first (always
+ * Every journal file of a plan under the owning repo's `baitonDir`: its document-level path first (always
  * included; parsing tolerates a missing file), then each existing per-phase
  * journal in sorted phase-id order.
  */

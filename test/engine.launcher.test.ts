@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { launchStage } from '../src/engine/launcher';
+import { launchStage, stageRunRoot } from '../src/engine/launcher';
 import type { Adapter, LaunchRequest, LaunchSpec, ProbeResult, AgentId, RelayFile } from '../src/adapter/adapter';
 import { AdapterLaunchError } from '../src/adapter/adapter';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
@@ -87,6 +87,15 @@ describe('launchStage adapter refusal (launch-args)', () => {
     assert.ok(result.ok);
     assert.strictEqual(host.created.length, 1);
     assert.ok(fs.existsSync(path.join(root, '.baiton', 'runs', 'run-1', 'brief.md')));
+  });
+});
+
+describe('stageRunRoot', () => {
+  it('uses the target worktree when present and the owner root otherwise', () => {
+    const workspaceRoot = path.resolve('/repo/owner');
+    const cwd = path.join(workspaceRoot, '.baiton/worktrees/s/P03');
+    assert.strictEqual(stageRunRoot({ workspaceRoot, cwd }), cwd);
+    assert.strictEqual(stageRunRoot({ workspaceRoot }), workspaceRoot);
   });
 });
 

@@ -88,7 +88,7 @@ import {
   submitPr,
   phaseBranchFor,
   phaseWorktreeDirFor,
-  unlandedPhases,
+  unlandedPhasesAcross,
   documentKindFor,
 } from '../engine';
 import type {
@@ -145,7 +145,10 @@ import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
-import { createPlanStore } from './planStore';
+import { createPhaseTargetResolver, createPlanStore } from './planStore';
+import { repoTopologyFor } from './repoDiscovery';
+import type { RepoSet } from './repoDiscovery';
+import type { GitServiceRegistry } from '../git';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
 import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
@@ -342,6 +345,10 @@ function realpathOrUndefined(p: string): string | undefined {
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
   workspace: WorkspaceContext<vscode.Uri>;
+  /** Discovered repositories; absent in lightweight command test fixtures. */
+  repos?: RepoSet;
+  /** Per-repository Git service registry; absent in lightweight command test fixtures. */
+  git?: GitServiceRegistry;
   /**
    * The live configuration. Replaced wholesale on config save; all reads must
    * go through this object rather than a captured/destructured copy.
@@ -425,6 +432,23 @@ export function registerCommands(
     log: (message) => surface.log(message),
   });
   const git = createGitService(repoRoot);
+  const ownerRepoName = (): string | undefined => {
+    const repos = activation.repos;
+    return repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(repoRoot))?.name;
+  };
+  const phaseTargets = createPhaseTargetResolver({
+    baitonDir,
+    ownerRoot: repoRoot,
+    topology: () => {
+      const repos = activation.repos;
+      const owner = ownerRepoName();
+      return repos === undefined || owner === undefined ? undefined : repoTopologyFor(repos, owner);
+    },
+    gitFor: (root) =>
+      path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root),
+  });
   // One writer shared by the store, the queues and the worktree seam so state
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
@@ -453,6 +477,7 @@ export function registerCommands(
     workspaceRoot: repoRoot,
     baitonDir,
     git,
+    targets: phaseTargets,
     planWriter: planWriter,
     terminalHost,
     watcherFactory,
@@ -545,7 +570,8 @@ export function registerCommands(
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
-        unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repoRoot, git }, s),
+        unlandedPhases: async (s) =>
+          unlandedPhasesAcross({ workspaceRoot: repoRoot, git }, s, await phaseTargets.forPlan(s)),
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
@@ -570,10 +596,12 @@ export function registerCommands(
       }
       try {
         return await planWriter.apply(slug, async () => {
-          if ((await git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
+          const target = await phaseTargets.forPhase(slug, phaseId);
+          if (!target.ok) return { kind: 'refused' as const, reason: target.error };
+          if ((await target.value.git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
             return { kind: 'already-landed' as const };
           }
-          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId });
+          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git, target: target.value }, { slug, phaseId });
           if (landed.ok) {
             return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
           }

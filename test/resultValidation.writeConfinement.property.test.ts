@@ -5,6 +5,7 @@ import {
   allowedResultPath,
   isAllowedSubAgentWrite,
 } from '../src/engine/resultValidation';
+import { stageRunRoot } from '../src/engine/launcher';
 
 /**
  * Property test for sub-agent write confinement under `.baiton/`
@@ -153,5 +154,21 @@ describe('Sub-agent write confinement (property harness)', () => {
       }),
       { numRuns: 200 },
     );
+  });
+});
+
+describe('phase stage write confinement', () => {
+  it('allows only the target worktree run result, never the owner or target main checkout', () => {
+    const owner = path.resolve('/workspace/owner');
+    const worktree = path.join(owner, '.baiton/worktrees/s/P03');
+    const runRoot = stageRunRoot({ workspaceRoot: owner, cwd: worktree });
+    const runId = 'run-1';
+    assert.strictEqual(isAllowedSubAgentWrite(runRoot, runId, allowedResultPath(runRoot, runId)), true);
+    assert.strictEqual(isAllowedSubAgentWrite(runRoot, runId, allowedResultPath(owner, runId)), false);
+    assert.strictEqual(
+      isAllowedSubAgentWrite(runRoot, runId, path.join(owner, 'packages/api/.baiton/runs', runId, 'result.json')),
+      false,
+    );
+    assert.strictEqual(stageRunRoot({ workspaceRoot: owner }), owner);
   });
 });

@@ -225,6 +225,7 @@ class FakeGit implements GitWorktreeService {
     fs.mkdirSync(dir, { recursive: true });
     this.branchHeads.set(branch, fromCommit);
   }
+  async addWorktreeOnBranch(): Promise<void> {}
   async listWorktrees(): Promise<readonly GitWorktree[]> {
     return [];
   }

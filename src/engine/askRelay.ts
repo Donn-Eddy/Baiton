@@ -29,10 +29,11 @@ export const ASK_RELAY_VERSION = 1;
 
 /**
  * The absolute path of a run's `asks/` directory, computed from the workspace
- * root and run id. Mirrors `allowedResultPath` in `src/engine/resultValidation.ts`.
+ * stage run root and run id. For a phase this is the target-repo worktree.
+ * Mirrors `allowedResultPath` in `src/engine/resultValidation.ts`.
  */
-export function asksDirFor(workspaceRoot: string, runId: string): string {
-  return path.join(workspaceRoot, '.baiton', 'runs', runId, ASKS_DIR_NAME);
+export function asksDirFor(runRoot: string, runId: string): string {
+  return path.join(runRoot, '.baiton', 'runs', runId, ASKS_DIR_NAME);
 }
 
 /** The absolute path of an ask file inside an asks directory. */
@@ -438,12 +439,12 @@ export function responseFromAnswer(
 
 /**
  * The ask-relay descriptor handed to an adapter on launch, naming the run's
- * asks directory and the two file suffixes.
+ * asks directory under the stage run root and the two file suffixes.
  */
-export function askRelayDescriptor(workspaceRoot: string, runId: string): AskRelayDescriptor {
+export function askRelayDescriptor(runRoot: string, runId: string): AskRelayDescriptor {
   return {
     protocol: 'file-v1',
-    dir: asksDirFor(workspaceRoot, runId),
+    dir: asksDirFor(runRoot, runId),
     askSuffix: ASK_FILE_SUFFIX,
     responseSuffix: RESPONSE_FILE_SUFFIX,
     runId,
@@ -479,10 +480,11 @@ export const nodeAskRelayIo: AskRelayIo = {
 };
 
 /**
- * Create (idempotently) the run's asks directory and return its path.
+ * Create (idempotently) the run's asks directory beneath the stage run root
+ * (`stageRunRoot`; for a phase this is the target-repo worktree) and return it.
  */
-export function ensureAsksDir(workspaceRoot: string, runId: string, io: AskRelayIo = nodeAskRelayIo): string {
-  const dir = asksDirFor(workspaceRoot, runId);
+export function ensureAsksDir(runRoot: string, runId: string, io: AskRelayIo = nodeAskRelayIo): string {
+  const dir = asksDirFor(runRoot, runId);
   io.mkdir(dir);
   return dir;
 }
