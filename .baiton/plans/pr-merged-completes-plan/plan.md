@@ -1,12 +1,12 @@
 ---
 version: 1
 name: pr-merged-completes-plan
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 68401755f9865edd1177afcaf202aa32c426cf57
+branch: baiton/pr-merged-completes-plan
+approved_rev: 6bad46c54a6377d766aece21300d45b010178f29651dffbcf6009ce57dcce65b
 ---
 
 # Endstate
