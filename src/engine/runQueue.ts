@@ -52,7 +52,13 @@ import type { PhaseState } from '../model/phaseState';
 import type { GitService } from '../git';
 import { createGitService } from '../git/gitService';
 import { err, ok, type Result } from '../model/result';
-import { createPhaseWorktree, unlandedPhases, type PhaseWorktreeDeps } from './phaseWorktree';
+import {
+  createPhaseWorktree,
+  unlandedPhases,
+  unlandedPhasesAcross,
+  type PhaseTargetResolver,
+  type PhaseWorktreeDeps,
+} from './phaseWorktree';
 import type { PlanBranchWriter } from './planBranchWriter';
 import type { Adapter } from '../adapter';
 import type { HostTerminal } from './terminalHost';
@@ -77,6 +83,64 @@ import {
 import type { RunResultKind } from '../journal';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
+import * as path from 'path';
+
+/** Who holds a repo's one-stage lock. Phase queues never take it; they run in their own worktrees. */
+export type RepoLockHolder = 'plan-draft' | 'run-pipeline';
+
+/** A held lock. `release()` is idempotent. */
+export interface RepoLockLease {
+  readonly repo: string;
+  readonly holder: RepoLockHolder;
+  release(): void;
+}
+
+/** One lock per repo, keyed by its canonical root (`repoLockKey`). */
+export interface RepoLocks {
+  /** Take `repo`'s lock, or return undefined when it is already held. Synchronous, so check-and-take cannot race. */
+  tryAcquire(repo: string, holder: RepoLockHolder): RepoLockLease | undefined;
+  isHeld(repo: string): boolean;
+  holder(repo: string): RepoLockHolder | undefined;
+  /** Keys of every held lock, in acquisition order. */
+  heldRepos(): string[];
+}
+
+/** Canonical key shared by the stage lock map and repo-owned phase queues. */
+export function repoLockKey(root: string): string {
+  return path.resolve(root);
+}
+
+/** Create an in-memory, independently-held stage lock for each repository root. */
+export function createRepoLocks(): RepoLocks {
+  const held = new Map<string, { holder: RepoLockHolder; token: symbol }>();
+  return {
+    tryAcquire(repo, holder) {
+      const key = repoLockKey(repo);
+      if (held.has(key)) return undefined;
+      const token = Symbol(key);
+      held.set(key, { holder, token });
+      let released = false;
+      return {
+        repo: key,
+        holder,
+        release() {
+          if (released) return;
+          released = true;
+          if (held.get(key)?.token === token) held.delete(key);
+        },
+      };
+    },
+    isHeld(repo) {
+      return held.has(repoLockKey(repo));
+    },
+    holder(repo) {
+      return held.get(repoLockKey(repo))?.holder;
+    },
+    heldRepos() {
+      return [...held.keys()];
+    },
+  };
+}
 
 /**
  * A single dispatch request (design "Stage engine", `RunRequest`).
@@ -353,14 +417,10 @@ export interface RunQueueDeps {
    */
   newSessionId?: () => string;
   /**
-   * Reports a stage running outside this queue — today the plan-draft runner
-   * AND the plan-less run pipeline (`createRunPipeline`). Neither can be
-   * expressed as a queue request: both are repository-scoped rather than
-   * phase-scoped, so they have no `phaseId` and resolve no lifecycle transition.
-   * The queue refuses a dispatch as `busy` while this answers true, which keeps
-   * the one-stage-per-repository guarantee across all three paths (Req 20.1).
-   * Optional: the wiring decides whether plan-draft/run-pipeline still block; the
-   * per-phase wiring does not pass it.
+   * Reports a plan-draft or run-pipeline stage running outside this queue.
+   * Those stages take the per-repo lock (`RepoLocks`), but this optional seam
+   * remains available to direct queue users. Per-phase wiring still passes no
+   * `isExternallyBusy`, because phase queues run in their own worktrees.
    */
   isExternallyBusy?: () => boolean;
   /** The plan slug this queue serves; a request for another slug is refused. */
@@ -392,13 +452,18 @@ export interface QueueWorktreeSeam {
 
 /** The real {@link QueueWorktreeSeam} over the phase-worktree lifecycle. */
 export function createQueueWorktreeSeam(
-  deps: PhaseWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'> },
+  deps: PhaseWorktreeDeps & { writer?: Pick<PlanBranchWriter, 'apply'>; targets?: PhaseTargetResolver },
 ): QueueWorktreeSeam {
   return {
     async ensure(slug, phaseId) {
       try {
         const run = async (): Promise<Result<PhaseStageWorkspace, string>> => {
-          const r = await createPhaseWorktree(deps, { slug, phaseId });
+          const target = deps.targets === undefined ? undefined : await deps.targets.forPhase(slug, phaseId);
+          if (target !== undefined && !target.ok) return err(target.error);
+          const r = await createPhaseWorktree(
+            target === undefined ? deps : { ...deps, target: target.value },
+            { slug, phaseId },
+          );
           if (!r.ok) {
             return err(r.error.message);
           }
@@ -410,7 +475,9 @@ export function createQueueWorktreeSeam(
         return err(describe(e));
       }
     },
-    unlanded: (slug) => unlandedPhases(deps, slug),
+    unlanded: async (slug) => deps.targets === undefined
+      ? unlandedPhases(deps, slug)
+      : unlandedPhasesAcross(deps, slug, await deps.targets.forPlan(slug)),
   };
 }
 
@@ -560,8 +627,9 @@ class SerialRunQueue implements RunQueue {
    * {@link DispatchError} that has already been reported.
    */
   private async runOne(req: RunRequest): Promise<DispatchResult> {
-    // A stage running outside the queue (a plan draft or a plan-less run) holds
-    // the same one-stage-per-repository lock (Req 20.1).
+    // A plan-draft or run-pipeline stage running outside the queue holds the
+    // per-repo lock (`RepoLocks`, Req 20.1). Per-phase wiring still passes no
+    // `isExternallyBusy` because phase queues use their own worktrees.
     if (this.deps.isExternallyBusy?.() === true) {
       return this.refuse({
         kind: 'busy',

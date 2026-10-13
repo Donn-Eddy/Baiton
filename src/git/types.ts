@@ -161,6 +161,8 @@ export interface GitWorktreeService extends GitService {
    * starting at `fromCommit`.
    */
   addWorktree(dir: string, branch: string, fromCommit: string): Promise<void>;
+  /** Create a worktree at `dir` checked out on the EXISTING branch `branch` (no new branch). Rejects with a GitError when the branch is missing or already checked out elsewhere. */
+  addWorktreeOnBranch(dir: string, branch: string): Promise<void>;
   /**
    * Every worktree of this repository, the main worktree first (git's own
    * order).

@@ -105,7 +105,7 @@ function readPlanTool(services: ToolServices): Tool {
 }
 
 /** `list_files(glob)` — repository-relative paths matching a glob pattern. */
-function listFilesTool(services: ToolServices): Tool {
+function listFilesTool(_services: ToolServices): Tool {
   return {
     name: 'list_files',
     description: 'List repository-relative file paths matching the given glob pattern.',
@@ -123,7 +123,7 @@ function listFilesTool(services: ToolServices): Tool {
       if (glob === undefined) {
         return { ok: false, error: 'list_files requires a string "glob"' };
       }
-      const all = await walkFiles(services.repoRoot);
+      const all = await walkFiles(tc.ctx.repoRoot);
       const matched = all.filter((rel) => matchesGlob(rel, glob));
       const bounded = tc.ctx.boundRead(matched.join('\n'));
       const files = bounded.text === '' ? [] : bounded.text.split('\n');
@@ -198,7 +198,7 @@ function readFileTool(_services: ToolServices): Tool {
  * the file, 1-based line number and line text; the joined output is bounded to
  * the read cap (Req 9.4).
  */
-function searchTool(services: ToolServices): Tool {
+function searchTool(_services: ToolServices): Tool {
   return {
     name: 'search',
     description: 'Search repository file contents for lines matching a regular expression.',
@@ -227,12 +227,12 @@ function searchTool(services: ToolServices): Tool {
         return { ok: false, error: `search "pattern" is not a valid regular expression: ${pattern}` };
       }
 
-      const all = await walkFiles(services.repoRoot);
+      const all = await walkFiles(tc.ctx.repoRoot);
       const candidates = glob === undefined ? all : all.filter((rel) => matchesGlob(rel, glob));
 
       const matches: { file: string; line: number; text: string }[] = [];
       for (const rel of candidates) {
-        const abs = path.join(services.repoRoot, rel);
+        const abs = path.join(tc.ctx.repoRoot, rel);
         // Re-check containment through the guard so a candidate that resolves
         // outside the repo (e.g. via an existing symlinked ancestor) is skipped.
         const resolved = await tc.ctx.resolveReadPath(abs);

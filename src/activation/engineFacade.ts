@@ -5,13 +5,15 @@
  *
  * The facade derives the role, attempt/round index, and executor resume flag
  * from the stage and the merged plan journal, then dispatches one RunRequest.
- * Phase queues are keyed by (slug, phase), each using its own worktree, so
- * phases can run concurrently. The plan draft and plan-less pipeline still
- * share the repository lock; phase queues do not hold or wait on it.
+ * Phase queues are keyed by (owning repo, slug, phase), each using its own
+ * worktree, so phases can run concurrently. The plan draft and plan-less
+ * pipeline share a per-repo lock; unrelated repos do not block each other, and
+ * phase queues do not take that lock.
  *
  * The facade has no VS Code dependency. Commands and the run tool call it with
  * plain values, and the queue relays harness asks through its shared watcher.
  */
+import * as path from 'path';
 import type { RunMode } from '../model/mode';
 import type { Role } from '../model/role';
 import type { Stage } from '../model/stage';
@@ -26,8 +28,9 @@ import type {
   PlanBranchWriter,
   TransitionAction,
 } from '../engine';
-import { createQueueWorktreeSeam, createRunQueue } from '../engine';
+import { createQueueWorktreeSeam, createRunQueue, repoLockKey } from '../engine';
 import type { GitWorktreeService } from '../git';
+import type { PhaseTargetResolver } from '../engine/phaseWorktree';
 import type {
   RunDispatchOutcome,
   RunDispatchRequest,
@@ -174,9 +177,20 @@ export function dispatchTrigger(
   });
 }
 
-/** The cache key of a phase's run queue. */
-export function phaseQueueKey(slug: string, phaseId: string): string {
-  return `${slug}/${phaseId}`;
+/** The cache key of a phase queue, scoped to its canonical owning-repo root. */
+export function phaseQueueKey(repo: string, slug: string, phaseId: string): string {
+  return `${repoLockKey(repo)}\u0000${slug}/${phaseId}`;
+}
+
+/** Everything that differs per owning repo: plan state, journals and writes stay in its `.baiton/`. */
+export interface PhaseQueueOwner {
+  workspaceRoot: string;
+  baitonDir: string;
+  git: GitWorktreeService;
+  planWriter: PlanBranchWriter;
+  planStore: RunQueueDeps['planStore'];
+  worktrees?: QueueWorktreeSeam;
+  targets?: PhaseTargetResolver;
 }
 
 /** Dependencies shared by every per-phase queue; slug/phase/journal wiring is derived per queue. */
@@ -198,69 +212,115 @@ export type PhaseQueuesDeps = Omit<
   /** The one writer shared with the plan store so per-slug writes serialize. */
   planWriter: PlanBranchWriter;
   worktrees?: QueueWorktreeSeam;
+  /** Resolves each phase's target repo while leaving plan state owner-bound. */
+  targets?: PhaseTargetResolver;
+  /** Resolve a non-default owning repo by its root. */
+  owners?: (repoRoot: string) => PhaseQueueOwner | undefined;
 };
 
-/** A cache of run queues keyed by (slug, phase). */
+/** A cache of run queues keyed by (owning repo, slug, phase). */
 export interface PhaseQueues {
-  /** The phase's queue, created on first use. */
-  queueFor(slug: string, phaseId: string): RunQueue;
+  /** The phase's queue, created on first use; omitted repo selects the default owner. */
+  queueFor(slug: string, phaseId: string, repo?: string): RunQueue;
   /** The phase's queue if one exists; never creates one. */
-  find(slug: string, phaseId: string): RunQueue | undefined;
-  /** Every live run across all queues. */
-  running(): LiveRun[];
-  /** True when any queue (of `slug`, when given) has a stage in flight. */
-  isRunning(slug?: string): boolean;
+  find(slug: string, phaseId: string, repo?: string): RunQueue | undefined;
+  /** Every live run across all queues; repo is the canonical owning-repo root. */
+  running(): Array<LiveRun & { repo: string }>;
+  /**
+   * True when any queue of `slug` (any slug when omitted) and `repo` (any repo
+   * when omitted) has a stage in flight. This is the overview's `isRunning(repo,
+   * slug)` with repo last for backward compatibility. Omitting repo matches all
+   * repos, which is today's behaviour in single-repo workspaces and refuses
+   * conservatively elsewhere.
+   */
+  isRunning(slug?: string, repo?: string): boolean;
 }
 
 /**
- * One {@link RunQueue} per (slug, phase), all sharing one worktree seam and one
- * plan-branch writer. No queue is given `isExternallyBusy`: phase stages run in
- * their own worktrees, outside the repository lock.
+ * One {@link RunQueue} per (owning repo, slug, phase), with worktree seams
+ * shared within each owner. No queue is given `isExternallyBusy`: phase stages
+ * run in their own worktrees and do not take the per-repo lock.
  */
 export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
-  const { baitonDir, planWriter, worktrees, ...rest } = deps;
-  const seam =
-    worktrees ??
-    createQueueWorktreeSeam({
-      workspaceRoot: deps.workspaceRoot,
-      git: deps.git,
-      writer: planWriter,
-    });
-  const queues = new Map<string, { slug: string; queue: RunQueue }>();
+  const { baitonDir, git, planWriter, worktrees, targets, owners, ...rest } = deps;
+  const defaultRepo = repoLockKey(deps.workspaceRoot);
+  const defaultOwner: PhaseQueueOwner = {
+    workspaceRoot: deps.workspaceRoot,
+    baitonDir,
+    git,
+    planWriter,
+    planStore: deps.planStore,
+    ...(worktrees ? { worktrees } : {}),
+    ...(targets ? { targets } : {}),
+  };
+  const seams = new Map<string, QueueWorktreeSeam>();
+  const queues = new Map<string, { repo: string; slug: string; queue: RunQueue }>();
+
+  const ownerFor = (repo?: string): { repo: string; owner: PhaseQueueOwner } => {
+    const key = repo === undefined ? defaultRepo : repoLockKey(repo);
+    if (key === defaultRepo) return { repo: defaultRepo, owner: defaultOwner };
+    const owner = owners?.(key);
+    if (owner === undefined) throw new Error(`unknown owning repo "${key}"`);
+    return { repo: key, owner };
+  };
+
+  const seamFor = (repo: string, owner: PhaseQueueOwner): QueueWorktreeSeam => {
+    const cached = seams.get(repo);
+    if (cached !== undefined) return cached;
+    const seam =
+      owner.worktrees ??
+      createQueueWorktreeSeam({
+        workspaceRoot: owner.workspaceRoot,
+        git: owner.git,
+        writer: owner.planWriter,
+        ...(owner.targets ? { targets: owner.targets } : {}),
+      });
+    seams.set(repo, seam);
+    return seam;
+  };
+
   return {
-    queueFor(slug, phaseId) {
-      const key = phaseQueueKey(slug, phaseId);
+    queueFor(slug, phaseId, repoArg) {
+      const { repo, owner } = ownerFor(repoArg);
+      const key = phaseQueueKey(repo, slug, phaseId);
       const existing = queues.get(key);
-      if (existing !== undefined) {
-        return existing.queue;
-      }
+      if (existing !== undefined) return existing.queue;
       const queue = createRunQueue({
         ...rest,
+        workspaceRoot: owner.workspaceRoot,
+        git: owner.git,
+        planStore: owner.planStore,
         slug,
         phaseId,
-        worktrees: seam,
-        planWriter,
-        journalPath: planJournalPathFor(baitonDir, slug),
-        journalPathFor: (id) => phaseJournalPathFor(baitonDir, slug, id),
-        readJournal: () => readPlanJournal(baitonDir, slug),
+        worktrees: seamFor(repo, owner),
+        planWriter: owner.planWriter,
+        journalPath: planJournalPathFor(owner.baitonDir, slug),
+        journalPathFor: (id) => phaseJournalPathFor(owner.baitonDir, slug, id),
+        readJournal: () => readPlanJournal(owner.baitonDir, slug),
       });
-      queues.set(key, { slug, queue });
+      queues.set(key, { repo, slug, queue });
       return queue;
     },
-    find: (slug, phaseId) => queues.get(phaseQueueKey(slug, phaseId))?.queue,
+    find(slug, phaseId, repoArg) {
+      const repo = repoArg === undefined ? defaultRepo : repoLockKey(repoArg);
+      return queues.get(phaseQueueKey(repo, slug, phaseId))?.queue;
+    },
     running() {
-      const live: LiveRun[] = [];
-      for (const { queue } of queues.values()) {
+      const live: Array<LiveRun & { repo: string }> = [];
+      for (const { repo, queue } of queues.values()) {
         const run = queue.currentRun();
-        if (run !== undefined) {
-          live.push(run);
-        }
+        if (run !== undefined) live.push({ ...run, repo });
       }
       return live;
     },
-    isRunning(slug) {
+    isRunning(slug, repoArg) {
+      const repo = repoArg === undefined ? undefined : repoLockKey(repoArg);
       for (const entry of queues.values()) {
-        if ((slug === undefined || entry.slug === slug) && entry.queue.isRunning()) {
+        if (
+          (slug === undefined || entry.slug === slug) &&
+          (repo === undefined || entry.repo === repo) &&
+          entry.queue.isRunning()
+        ) {
           return true;
         }
       }
@@ -270,9 +330,12 @@ export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
 }
 
 /**
- * The repository lock after per-phase worktrees: the plan draft and plan-less
- * runs still exclude each other. Per-phase queues neither hold nor wait on it.
+ * Legacy one-stage lock callback seam. New wiring should share `RepoLocks`:
+ * plan drafts and plan-less runs take the lock for their repo, unrelated repos
+ * never block each other, and phase queues are keyed by (owning repo, slug,
+ * phase) and never take the lock.
  */
+/** @deprecated Use `createRepoLocks` to coordinate runners by repo root. */
 export function createStageLock(holders: {
   planDraftRunning: () => boolean;
   runRunning: () => boolean;
@@ -300,11 +363,12 @@ export function createRunQueueSeam(
   queueFor: (slug: string, phaseId: string) => RunQueue,
   baitonDir: string,
   adapterForRole: AdapterForRole,
+  repo?: string,
 ): RunQueueSeam {
   const inFlight = new Set<string>();
   return {
     async dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome> {
-      const key = phaseQueueKey(req.slug, req.phaseId);
+      const key = phaseQueueKey(repo ?? path.dirname(baitonDir), req.slug, req.phaseId);
       const queue = queueFor(req.slug, req.phaseId);
       if (inFlight.has(key) || queue.isRunning()) {
         return { kind: 'busy' };

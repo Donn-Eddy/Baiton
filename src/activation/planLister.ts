@@ -2,13 +2,28 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { DocumentKind } from '../model/parser';
+import type { RepoTopology } from '../model/validator';
 import { listDocumentSlugs, phaseArtifactDir, resolveDocument } from '../storage/documentLocation';
+import { repoTopologyFor, reposWithBaiton, type RepoSet } from './repoDiscovery';
 
 export interface ListedPlan {
   slug: string;
   kind: DocumentKind;
   raw?: string;
   readError?: string;
+}
+
+/** A repository root whose plan documents should be listed. */
+export interface PlanListingRepo {
+  repo: string;
+  baitonDir: string;
+  topology?: RepoTopology;
+}
+
+/** A listed plan tagged with the repository that owns its document. */
+export interface RepoListedPlan extends ListedPlan {
+  repo: string;
+  baitonDir: string;
 }
 
 /** Read each resolved document once, preserving ascending slug order. */
@@ -24,6 +39,35 @@ export async function listPlans(baitonDir: string): Promise<ListedPlan[]> {
     }
   }
   return listed;
+}
+
+/** List every repository's plans in source order, isolating failures per repository. */
+export async function listPlansAcrossRepos(
+  repos: readonly PlanListingRepo[],
+): Promise<RepoListedPlan[]> {
+  const listed: RepoListedPlan[] = [];
+  for (const repo of repos) {
+    try {
+      const plans = await listPlans(repo.baitonDir);
+      listed.push(...plans.map((plan) => ({
+        ...plan,
+        repo: repo.repo,
+        baitonDir: repo.baitonDir,
+      })));
+    } catch {
+      // One missing or unreadable repository must not hide the others.
+    }
+  }
+  return listed;
+}
+
+/** Project discovered repositories with `.baiton/` directories into plan sources. */
+export function planListingRepos(set: RepoSet): PlanListingRepo[] {
+  return reposWithBaiton(set).map((repo) => ({
+    repo: repo.name,
+    baitonDir: repo.baitonDir as string,
+    topology: repoTopologyFor(set, repo.name),
+  }));
 }
 
 function isNotFound(err: unknown): boolean {

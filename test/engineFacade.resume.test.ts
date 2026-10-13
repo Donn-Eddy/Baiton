@@ -2,13 +2,28 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { dispatchTrigger } from '../src/activation/engineFacade';
 import {
+  createPhaseQueues,
+  dispatchTrigger,
+  phaseQueueKey,
+  type PhaseQueueOwner,
+} from '../src/activation/engineFacade';
+import {
+  createRepoLocks,
   createRunQueue,
+  type QueueWorktreeSeam,
+  type RepoLocks,
   type RunQueueDeps,
   type ResultWatcherFactory,
   type PlanStore,
 } from '../src/engine/runQueue';
+import type { GitWorktreeService } from '../src/git';
+import { createPlanBranchWriter } from '../src/engine/planBranchWriter';
+import { createPlanDraftRunner } from '../src/engine/planDraft';
+import { createRunPipeline } from '../src/engine/runPipeline';
+import type { RunPipelineDeps } from '../src/engine/runPipeline';
+import type { RunStore } from '../src/engine/runStore';
+import type { ToolServices } from '../src/orchestrator';
 import type { CreateTerminalOptions, HostTerminal, TerminalHost } from '../src/engine/terminalHost';
 import type { ResultWatcher } from '../src/engine/resultWatcher';
 import { ClaudeAdapter } from '../src/adapter/claude';
@@ -266,6 +281,218 @@ describe('engine facade: executor resume by Session_Id (Req 3.2)', () => {
       `resume with no recorded session must fall back to -c: ${JSON.stringify(args)}`,
     );
     assert.ok(!args.includes('--resume'));
+  });
+});
+
+describe('repo locks', () => {
+  it('locks canonical roots independently and protects a re-acquired lock from a stale release', () => {
+    const locks = createRepoLocks();
+    const a = locks.tryAcquire('/w/a', 'plan-draft');
+    assert.ok(a);
+    assert.strictEqual(locks.tryAcquire('/w/a', 'run-pipeline'), undefined);
+    assert.strictEqual(locks.tryAcquire('/w/a/./', 'run-pipeline'), undefined);
+    assert.strictEqual(locks.holder('/w/a'), 'plan-draft');
+
+    const b = locks.tryAcquire('/w/b', 'run-pipeline');
+    const parent = locks.tryAcquire('/w', 'plan-draft');
+    const child = locks.tryAcquire('/w/packages/api', 'run-pipeline');
+    assert.ok(b && parent && child);
+    assert.deepStrictEqual(locks.heldRepos(), ['/w/a', '/w/b', '/w', '/w/packages/api']);
+
+    a.release();
+    assert.strictEqual(locks.isHeld('/w/a'), false);
+    const stale = locks.tryAcquire('/w/a', 'run-pipeline');
+    assert.ok(stale);
+    a.release();
+    assert.strictEqual(locks.holder('/w/a'), 'run-pipeline');
+    stale.release();
+    assert.strictEqual(locks.isHeld('/w/a'), false);
+    b.release();
+    parent.release();
+    child.release();
+  });
+});
+
+describe('phase queues keyed by owning repo', () => {
+  it('scopes queue identity, live status and journals to each owner', async () => {
+    const defaultRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-owner-default-'));
+    const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-owner-other-'));
+    const defaultBaitonDir = path.join(defaultRoot, '.baiton');
+    const otherBaitonDir = path.join(otherRoot, '.baiton');
+    fs.mkdirSync(defaultBaitonDir, { recursive: true });
+    fs.mkdirSync(otherBaitonDir, { recursive: true });
+
+    const defaultGit = { ...makeGit(), commitPaths: async () => 'commit' } as unknown as GitWorktreeService;
+    const otherGit = { ...makeGit(), commitPaths: async () => 'commit' } as unknown as GitWorktreeService;
+    const defaultWriter = createPlanBranchWriter({ baitonDir: defaultBaitonDir, git: defaultGit });
+    const otherWriter = createPlanBranchWriter({ baitonDir: otherBaitonDir, git: otherGit });
+    let resultListener: ((raw: string) => void) | undefined;
+    let onResultReady!: () => void;
+    const resultReady = new Promise<void>((resolve) => {
+      onResultReady = resolve;
+    });
+    const watcherFactory: ResultWatcherFactory = {
+      create(): ResultWatcher {
+        return {
+          onResult(listener): () => void {
+            resultListener = listener;
+            onResultReady();
+            return () => {
+              resultListener = undefined;
+            };
+          },
+          onTerminalClose(): () => void {
+            return () => {};
+          },
+          dispose(): void {
+            resultListener = undefined;
+          },
+        };
+      },
+    };
+    const worktreesFor = (root: string, git: GitWorktreeService): QueueWorktreeSeam => ({
+      ensure: async () => ok({ dir: root, git }),
+      unlanded: async () => [],
+    });
+    const otherOwner: PhaseQueueOwner = {
+      workspaceRoot: otherRoot,
+      baitonDir: otherBaitonDir,
+      git: otherGit,
+      planWriter: otherWriter,
+      planStore,
+      worktrees: worktreesFor(otherRoot, otherGit),
+    };
+    const queues = createPhaseQueues({
+      workspaceRoot: defaultRoot,
+      baitonDir: defaultBaitonDir,
+      git: defaultGit,
+      planWriter: defaultWriter,
+      worktrees: worktreesFor(defaultRoot, defaultGit),
+      planStore,
+      terminalHost: makeTerminalHost(),
+      watcherFactory,
+      modelForRole: () => ({ model: 'test-model' }),
+      adapterForRole: () => withStubbedProbe(new ClaudeAdapter()),
+      report: () => {},
+      owners: (root) => (path.resolve(root) === otherRoot ? otherOwner : undefined),
+    });
+
+    const defaultQueue = queues.queueFor('demo', 'P01');
+    assert.strictEqual(queues.queueFor('demo', 'P01', defaultRoot), defaultQueue);
+    assert.strictEqual(queues.find('demo', 'P01', otherRoot), undefined);
+    const otherQueue = queues.queueFor('demo', 'P01', otherRoot);
+    assert.notStrictEqual(otherQueue, defaultQueue);
+    assert.throws(() => queues.queueFor('demo', 'P01', '/unknown'), /unknown owning repo/);
+    assert.notStrictEqual(phaseQueueKey(defaultRoot, 'demo', 'P01'), phaseQueueKey(otherRoot, 'demo', 'P01'));
+    assert.strictEqual(phaseQueueKey(otherRoot, 'demo', 'P01'), phaseQueueKey(`${otherRoot}/./`, 'demo', 'P01'));
+
+    const dispatch = otherQueue.dispatch({
+      slug: 'demo',
+      phaseId: 'P01',
+      action: 'execute',
+      role: 'executor',
+      attempt: 1,
+      resume: false,
+    });
+    await resultReady;
+    assert.strictEqual(queues.isRunning('demo', otherRoot), true);
+    assert.strictEqual(queues.isRunning('demo', defaultRoot), false);
+    assert.strictEqual(queues.isRunning('demo'), true);
+    assert.strictEqual(queues.running()[0].repo, path.resolve(otherRoot));
+    const otherJournal = phaseJournalPathFor(otherBaitonDir, 'demo', 'P01');
+    const defaultJournal = phaseJournalPathFor(defaultBaitonDir, 'demo', 'P01');
+    assert.ok(fs.existsSync(otherJournal));
+    assert.ok(!fs.existsSync(defaultJournal));
+    assert.ok(readPlanJournal(otherBaitonDir, 'demo').some((entry) => entry.phaseId === 'P01'));
+
+    resultListener?.(JSON.stringify({ summary: 'done', files_changed: [], commands_run: [], notes: [] }));
+    await dispatch;
+    assert.strictEqual(queues.isRunning('demo', otherRoot), false);
+  });
+});
+
+describe('plan draft and run pipeline share the per-repo lock', () => {
+  it('refuses a same-repo lock, ignores another repo lock, and releases after a post-lock refusal', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-draft-lock-'));
+    const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-draft-other-'));
+    const baitonDir = path.join(root, '.baiton');
+    fs.mkdirSync(baitonDir, { recursive: true });
+    const repoLocks: RepoLocks = createRepoLocks();
+    const adapter = new ClaudeAdapter();
+    adapter.probe = async () => ({ version: 'stub', ok: false, reason: 'unavailable' });
+    const runner = createPlanDraftRunner({
+      workspaceRoot: root,
+      terminalHost: makeTerminalHost(),
+      watcherFactory: makeCompletingWatcherFactory(),
+      services: { baitonDir } as unknown as ToolServices,
+      modelForRole: () => ({ model: 'test-model' }),
+      adapterForRole: () => adapter,
+      repoLocks,
+    });
+
+    const runLease = repoLocks.tryAcquire(root, 'run-pipeline');
+    assert.ok(runLease);
+    const blocked = await runner.start({ slug: 'same-repo', requirements: 'Goal: run.' });
+    assert.strictEqual(blocked.ok, false);
+    if (!blocked.ok) assert.strictEqual(blocked.error.kind, 'busy');
+    runLease.release();
+
+    const otherLease = repoLocks.tryAcquire(otherRoot, 'run-pipeline');
+    assert.ok(otherLease);
+    const probeRefusal = await runner.start({ slug: 'probe-fails', requirements: 'Goal: draft.' });
+    assert.strictEqual(probeRefusal.ok, false);
+    if (!probeRefusal.ok) assert.strictEqual(probeRefusal.error.kind, 'probe-failed');
+    assert.strictEqual(repoLocks.isHeld(root), false, 'post-acquisition refusal releases the draft lock');
+    assert.strictEqual(repoLocks.isHeld(otherRoot), true, 'another repo keeps its own lock');
+    otherLease.release();
+  });
+
+  it('makes the pipeline refuse its own repo lock and release after detached-head refusal', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-pipeline-lock-'));
+    const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-pipeline-other-'));
+    const repoLocks = createRepoLocks();
+    const git = {
+      ...makeGit(),
+      currentBranch: async () => 'HEAD',
+    } as unknown as GitWorktreeService;
+    const deps: RunPipelineDeps = {
+      workspaceRoot: root,
+      git,
+      store: {} as RunStore,
+      terminalHost: makeTerminalHost(),
+      watcherFactory: makeCompletingWatcherFactory(),
+      modelForRole: () => ({ model: 'test-model' }),
+      adapterForRole: () => undefined,
+      repoLocks,
+    };
+    const pipeline = createRunPipeline(deps);
+    const draftLease = repoLocks.tryAcquire(root, 'plan-draft');
+    assert.ok(draftLease);
+    const blocked = await pipeline.start({
+      mode: 'investigate',
+      composerMode: 'default',
+      explicitMode: true,
+      statement: 'Question',
+      files: [],
+    });
+    assert.strictEqual(blocked.ok, false);
+    if (!blocked.ok) assert.strictEqual(blocked.error.kind, 'busy');
+    draftLease.release();
+
+    const otherLease = repoLocks.tryAcquire(otherRoot, 'plan-draft');
+    assert.ok(otherLease);
+    const detached = await pipeline.start({
+      mode: 'investigate',
+      composerMode: 'default',
+      explicitMode: true,
+      statement: 'Question',
+      files: [],
+    });
+    assert.strictEqual(detached.ok, false);
+    if (!detached.ok) assert.strictEqual(detached.error.kind, 'detached-head');
+    assert.strictEqual(repoLocks.isHeld(root), false, 'post-acquisition refusal releases the pipeline lock');
+    assert.strictEqual(repoLocks.isHeld(otherRoot), true, 'another repo keeps its own lock');
+    otherLease.release();
   });
 });
 

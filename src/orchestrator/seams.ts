@@ -33,6 +33,9 @@
 import { RunMode } from '../model/mode';
 import type { ToolCaller } from './guard';
 import { Stage } from '../model/stage';
+import type { GitService } from '../git';
+import type { RepoTopology } from '../model/validator';
+import type { GuardContext } from './guard';
 
 /**
  * A yes/no confirmation prompt shown to the user. `approve_plan` calls this
@@ -135,6 +138,47 @@ export interface DraftPlanRequest {
   slug: string;
   /** The agreed request the orchestrator assembled with the user. */
   requirements: string;
+  /** Owning repo path relative to the conversation repo; absent means that repo. */
+  repo?: string;
+  /** Repositories the plan writer may target, relative to the new plan owner. */
+  repos?: readonly PlanRepoInfo[];
+}
+
+/** One repo the conversation's owning repo may plan into: itself or a descendant. */
+export interface PlanRepoInfo {
+  /** Path relative to the conversation's owning repo root; '.' for the owner. */
+  readonly path: string;
+  /** Stable discovery name (RepoSet name). */
+  readonly name: string;
+  /** Whether the repo has its own `.baiton/` (can own plans). */
+  readonly hasBaiton: boolean;
+}
+
+/** Where a plan document of one repo is written and committed. */
+export interface PlanRepoTarget {
+  readonly info: PlanRepoInfo;
+  readonly root: string;
+  readonly baitonDir: string;
+  readonly git: GitService;
+  /** Topology whose owner is THIS repo, for validating phase `repo` hints. */
+  readonly topology: RepoTopology;
+  /** Guard bound to this repo; containment is this repo's own .baiton/plans and .baiton/specs only. */
+  readonly guard: GuardContext;
+}
+
+export type PlanRepoLookup =
+  | { kind: 'found'; target: PlanRepoTarget }
+  | { kind: 'missing' }
+  | { kind: 'ambiguous'; repos: readonly string[] };
+
+/** The plan-writing view of the owning repo and its descendants. */
+export interface PlanRepoSeam {
+  /** Owner first, then descendants in pre-order. Never siblings or ancestors. */
+  list(): readonly PlanRepoInfo[];
+  /** Resolve a repo path relative to the owner ('.' = owner) to a writable target. */
+  target(repoPath: string): { ok: true; target: PlanRepoTarget } | { ok: false; error: string };
+  /** Find the repo whose `.baiton/` holds the plan or legacy document for `slug`. */
+  locate(slug: string): Promise<PlanRepoLookup>;
 }
 
 /**

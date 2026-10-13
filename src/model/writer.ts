@@ -4,7 +4,7 @@
  * This module is the single seam for edit-ownership. The Extension owns exactly
  * two kinds of bytes in a plan document: the lifecycle `[state]` box of each phase
  * line and the extension-managed frontmatter keys. Everything else — OVERVIEW
- * prose, phase titles, hints, ids and non-managed frontmatter keys — belongs to
+ * prose, phase titles, the `after`/`files`/`repo` hints, ids and non-managed frontmatter keys — belongs to
  * the user or the Orchestrator and must never move (Req 6.1, 6.2).
  *
  * Both writers are pure `string -> Result<string, WriteError>` transforms.

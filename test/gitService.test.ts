@@ -346,6 +346,22 @@ describe('git service against a temp repo', () => {
       await assert.rejects(() => git$.addWorktree(newWorktreePath(), 'taken', base));
     });
 
+    it('checks out an existing branch without creating or resetting it', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      const base = await git$.resolveBaseCommit('main');
+      await git$.createPlanBranch('b', base);
+      const wt = newWorktreePath();
+
+      await git$.addWorktreeOnBranch(wt, 'b');
+
+      const added = (await git$.listWorktrees()).find((entry) => entry.branch === 'b');
+      assert.ok(added, 'the existing branch worktree should be listed');
+      assert.strictEqual(added.dir, fs.realpathSync(wt));
+      assert.strictEqual(await createGitService(wt).head(), base);
+      await assert.rejects(() => git$.addWorktreeOnBranch(newWorktreePath('taken'), 'main'));
+    });
+
     it('reports a locked worktree as locked', async () => {
       const repo = newRepo();
       const git$ = createGitService(repo);

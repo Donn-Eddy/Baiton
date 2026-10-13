@@ -70,6 +70,18 @@ export const EXECUTOR_NO_GIT_INSTRUCTION =
   'Do not commit, stash, or change branches. The extension manages all git ' +
   'operations; leave your changes in the working tree.';
 
+export const PLAN_WRITER_REPO_INSTRUCTION = [
+  'Repositories:',
+  '- When the context lists more than one repository, the plan is owned by the one marked as owning; every other listed repo is nested beneath it.',
+  '- Choose the lowest repository that satisfies each phase: the deepest one that contains every file the phase touches.',
+  '- Set a phase\'s `repo` only when the phase is confined to a nested child repository, as that child\'s path relative to the owning repository (for example `packages/api`). Omit `repo` for phases in the owning repository; never name a sibling or an ancestor.',
+  '- A phase\'s `files` are relative to its target repository.',
+  '- If every phase would target the same child repository, say in `constraints` that the plan belongs in that child repository.',
+  '- When the context lists no repositories, omit `repo` everywhere.',
+].join('\n');
+
+export const PLANNER_REPO_INSTRUCTION = 'When the phase line carries a `repo:` hint, the phase runs in that repository: the executor works in its root, and every file path in your plan is relative to it. Without the hint the phase runs in the repository that owns the plan.';
+
 /**
  * The plan writer's instructions: study the repository read-only and produce
  * three preamble sections plus a dependency-ordered phase list. The phase
@@ -103,6 +115,8 @@ export const PLAN_WRITER_INSTRUCTION = [
   '- `files` lists the repository-relative files the phase starts from.',
   '- Each phase should be a single, reviewable unit of work with a clear ' +
     'finish line.',
+  '',
+  PLAN_WRITER_REPO_INSTRUCTION,
 ].join('\n');
 
 /**
@@ -151,6 +165,8 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
       'the concrete edits to make in each, and the checks that decide the phase ' +
       'is done. Prefer specifics — function and symbol names, the shape of new ' +
       'code — over restating the goal.',
+    '',
+    PLANNER_REPO_INSTRUCTION,
     '',
     CONTEXT_IS_COMPLETE_INSTRUCTION,
   ].join('\n'),

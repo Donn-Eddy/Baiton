@@ -2,11 +2,18 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { resolveWorkspace, canonicalizeRoot } from '../src/activation/workspace';
+import type { WorkspaceRepos } from '../src/activation/workspace';
 import {
-  resolveWorkspace,
-  canonicalizeRoot,
-  WorkspaceFolder,
-} from '../src/activation/workspace';
+  discoverRepos,
+  repoByName,
+  repoFor,
+  isWithinSubtree,
+  reposWithBaiton,
+  type DiscoveryFs,
+} from '../src/activation/repoDiscovery';
+import { createGitServiceRegistry } from '../src/git/gitService';
+import type { GitWorktreeService } from '../src/git/types';
 import {
   engineVersionAtLeast,
   MINIMUM_VSCODE_VERSION,
@@ -33,8 +40,8 @@ import {
 } from '../src/usage/usageService';
 
 /**
- * Unit tests for workspace resolution, the engine-version guard, executable
- * resolution, and packaging gating.
+ * Unit tests for repo discovery and workspace resolution, the engine-version
+ * guard, executable resolution, and packaging gating.
  *
  * The three activation cores are pure functions with injected seams, so they
  * run without a VS Code host: workspace resolution takes an injected folder
@@ -44,9 +51,12 @@ import {
  * bounded scan of `node_modules` for native binaries.
  *
  * Coverage:
- * - resolveWorkspace: single-folder (Req 22.3); multi-root one .baiton root
- *   (Req 22.4); zero folders / zero .baiton roots / >1 .baiton roots refuse
- *   (Req 22.5); restricted = !trusted (Req 22.5-22.8, 22.1-22.2).
+ * - discoverRepos: nested Git/Baiton repos, gitfiles, skipped state/internal
+ *   directories, symlinks, bounds, multi-root naming, and overlapping roots.
+ * - repoFor / isWithinSubtree: deepest path owner and parent-chain membership.
+ * - resolveWorkspace: single-folder primary, multi-root Baiton selection,
+ *   missing roots, and restricted = !trusted.
+ * - createGitServiceRegistry: one memoized service per normalized repo root.
  * - canonicalizeRoot: a symlinked root resolves to the real directory; a
  *   missing path falls back to the input; the injected realpath seam is honoured
  *   (including a throwing one); and the regression the helper exists for — a
@@ -81,104 +91,331 @@ import {
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-/** A folder descriptor with an easily-asserted string uri. */
-function folder(uri: string, hasBaitonDir: boolean): WorkspaceFolder<string> {
-  return { uri, hasBaitonDir };
+type FakeDiscoveryFs = DiscoveryFs & { readonly calls: string[] };
+
+/** In-memory directory tree. Intermediate directories are inferred from keys. */
+function fakeFs(tree: Record<string, 'dir' | 'file' | 'link'>): FakeDiscoveryFs {
+  const entries = new Map(Object.entries(tree).map(([name, kind]) => [path.posix.normalize(name), kind]));
+  const calls: string[] = [];
+  return {
+    calls,
+    async readdir(dir: string) {
+      const parent = path.posix.normalize(dir);
+      calls.push(parent);
+      const isKnownDirectory = entries.get(parent) === 'dir'
+        || [...entries.keys()].some((candidate) => candidate.startsWith(`${parent.replace(/\/$/, '')}/`));
+      if (!isKnownDirectory) {
+        throw new Error(`Unknown directory: ${parent}`);
+      }
+      const children = new Map<string, 'dir' | 'file' | 'other'>();
+      for (const [absolutePath, kind] of entries) {
+        const relative = path.posix.relative(parent, absolutePath);
+        if (!relative || relative === '..' || relative.startsWith('../') || path.posix.isAbsolute(relative)) {
+          continue;
+        }
+        const [name, ...rest] = relative.split('/');
+        if (!name) {
+          continue;
+        }
+        if (rest.length > 0) {
+          children.set(name, 'dir');
+        } else {
+          children.set(name, kind === 'link' ? 'other' : kind);
+        }
+      }
+      return [...children].map(([name, kind]) => ({ name, kind }));
+    },
+  };
 }
 
-/** Derive `<root>/.baiton` for the injected joiner. */
-const makeBaitonDir = (root: string): string => `${root}/.baiton`;
+function nestedMonorepoFs(): FakeDiscoveryFs {
+  return fakeFs({
+    '/ws': 'dir',
+    '/ws/.git': 'dir',
+    '/ws/.baiton': 'dir',
+    '/ws/packages': 'dir',
+    '/ws/packages/api': 'dir',
+    '/ws/packages/api/.git': 'dir',
+    '/ws/packages/web': 'dir',
+    '/ws/packages/web/.git': 'file',
+    '/ws/packages/web/.baiton': 'dir',
+    '/ws/tools': 'dir',
+    '/ws/tools/x': 'dir',
+    '/ws/tools/x/.baiton': 'dir',
+  });
+}
 
-describe('resolveWorkspace (Req 22.3-22.8)', () => {
-  it('resolves a single-folder workspace to that folder (Req 22.3)', () => {
-    const r = resolveWorkspace([folder('/ws/only', false)], true, makeBaitonDir);
-    assert.ok(isOk(r));
-    if (isOk(r)) {
-      assert.strictEqual(r.value.root, '/ws/only');
-      assert.strictEqual(r.value.baitonDir, '/ws/only/.baiton');
-      assert.strictEqual(r.value.restricted, false);
+describe('discoverRepos and repo helpers', function () {
+  before(function () {
+    if (process.platform === 'win32') {
+      this.skip();
     }
   });
 
-  it('resolves a single folder even when it has no .baiton/ (Req 22.3)', () => {
-    // Whether the single folder is initialized is the config-load step's
-    // concern; resolution still selects it.
-    const r = resolveWorkspace([folder('/ws/fresh', false)], true, makeBaitonDir);
-    assert.ok(isOk(r));
-    if (isOk(r)) {
-      assert.strictEqual(r.value.root, '/ws/fresh');
-    }
+  it('always records a single folder root, even when it has no markers', async () => {
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], fakeFs({ '/ws': 'dir' }));
+    assert.deepStrictEqual(set.repos, [{
+      name: '.', folderName: 'ws', relPath: '', root: '/ws', hasGit: false, children: [],
+    }]);
+    assert.strictEqual(set.folderRoots[0], set.repos[0]);
+    assert.strictEqual(set.truncated, false);
   });
 
-  it('resolves multi-root to the single root containing .baiton/ (Req 22.4)', () => {
-    const r = resolveWorkspace(
-      [
-        folder('/ws/a', false),
-        folder('/ws/b', true),
-        folder('/ws/c', false),
-      ],
-      true,
-      makeBaitonDir,
+  it('finds nested git and .baiton repos, including a worktree gitfile', async () => {
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], nestedMonorepoFs());
+    assert.deepStrictEqual(set.repos.map((repo) => repo.name), [
+      '.', 'packages/api', 'packages/web', 'tools/x',
+    ]);
+    assert.deepStrictEqual(set.repos.map((repo) => repo.parent), [undefined, '.', '.', '.']);
+    assert.deepStrictEqual(set.repos[0].children, ['packages/api', 'packages/web', 'tools/x']);
+    assert.deepStrictEqual(set.repos.map((repo) => repo.hasGit), [true, true, true, false]);
+    assert.deepStrictEqual(reposWithBaiton(set).map((repo) => repo.name), [
+      '.', 'packages/web', 'tools/x',
+    ]);
+    assert.strictEqual(set.repos[2].baitonDir, '/ws/packages/web/.baiton');
+  });
+
+  it('uses the nearest discovered repo as the parent', async () => {
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], fakeFs({
+      '/ws': 'dir', '/ws/a': 'dir', '/ws/a/.git': 'dir',
+      '/ws/a/b': 'dir', '/ws/a/b/.git': 'dir',
+    }));
+    assert.strictEqual(repoByName(set, 'a/b')?.parent, 'a');
+    assert.deepStrictEqual(repoByName(set, 'a')?.children, ['a/b']);
+  });
+
+  it('skips node_modules, git internals, and all Baiton state directories', async () => {
+    const fs = fakeFs({
+      '/ws': 'dir',
+      '/ws/node_modules': 'dir', '/ws/node_modules/pkg': 'dir', '/ws/node_modules/pkg/.git': 'dir',
+      '/ws/.git': 'dir', '/ws/.git/config': 'file',
+      '/ws/.baiton': 'dir', '/ws/.baiton/worktrees': 'dir',
+      '/ws/.baiton/worktrees/slug': 'dir', '/ws/.baiton/worktrees/slug/P01': 'dir',
+      '/ws/.baiton/worktrees/slug/P01/.git': 'file',
+      '/ws/actual': 'dir', '/ws/actual/.git': 'dir',
+    });
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], fs);
+    assert.deepStrictEqual(set.repos.map((repo) => repo.name), ['.', 'actual']);
+    assert.ok(fs.calls.every((dir) =>
+      !dir.includes('/node_modules') && !dir.includes('/.git') && !dir.includes('/.baiton'),
+    ));
+  });
+
+  it('never descends into a symlinked directory', async () => {
+    const fs = fakeFs({
+      '/ws': 'dir', '/ws/link': 'link', '/ws/real': 'dir', '/ws/real/.git': 'dir',
+    });
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], fs);
+    assert.deepStrictEqual(set.repos.map((repo) => repo.name), ['.', 'real']);
+    assert.ok(!fs.calls.includes('/ws/link'));
+  });
+
+  it('honors depth and entry bounds and reports whether discovery was cut short', async () => {
+    const tree = {
+      '/ws': 'dir' as const,
+      '/ws/a': 'dir' as const,
+      '/ws/a/.git': 'dir' as const,
+      '/ws/a/b': 'dir' as const,
+      '/ws/a/b/.git': 'dir' as const,
+    };
+    const boundedDepth = await discoverRepos(
+      [{ name: 'ws', root: '/ws' }], fakeFs(tree), { maxDepth: 1 },
     );
-    assert.ok(isOk(r));
-    if (isOk(r)) {
-      assert.strictEqual(r.value.root, '/ws/b');
-      assert.strictEqual(r.value.baitonDir, '/ws/b/.baiton');
+    assert.deepStrictEqual(boundedDepth.repos.map((repo) => repo.name), ['.', 'a']);
+    assert.strictEqual(boundedDepth.truncated, true);
+
+    const boundedEntries = await discoverRepos(
+      [{ name: 'ws', root: '/ws' }], fakeFs(tree), { maxEntries: 1 },
+    );
+    assert.strictEqual(boundedEntries.truncated, true);
+
+    const unbounded = await discoverRepos([{ name: 'ws', root: '/ws' }], fakeFs(tree));
+    assert.strictEqual(unbounded.truncated, false);
+  });
+
+  it('names multiple roots, suffixes duplicate folder names, and deduplicates overlap', async () => {
+    const twoRoots = await discoverRepos([
+      { name: 'api', root: '/w/api' }, { name: 'web', root: '/w/web' },
+    ], fakeFs({
+      '/w/api': 'dir', '/w/web': 'dir', '/w/web/libs': 'dir',
+      '/w/web/libs/ui': 'dir', '/w/web/libs/ui/.git': 'dir',
+    }));
+    assert.deepStrictEqual(twoRoots.repos.map((repo) => repo.name), ['api', 'web', 'web/libs/ui']);
+
+    const duplicateNames = await discoverRepos([
+      { name: 'same', root: '/w/one' }, { name: 'same', root: '/w/two' },
+    ], fakeFs({
+      '/w/one': 'dir', '/w/two': 'dir', '/w/two/nested': 'dir',
+      '/w/two/nested/.git': 'dir',
+    }));
+    assert.deepStrictEqual(duplicateNames.repos.map((repo) => repo.name), [
+      'same', 'same~1', 'same~1/nested',
+    ]);
+
+    const overlap = await discoverRepos([
+      { name: 'ws', root: '/ws' }, { name: 'api', root: '/ws/packages/api' },
+    ], fakeFs({
+      '/ws': 'dir', '/ws/packages': 'dir', '/ws/packages/api': 'dir',
+      '/ws/packages/api/.git': 'dir',
+    }));
+    assert.strictEqual(overlap.folderRoots.length, 2);
+    assert.strictEqual(overlap.repos.length, 2);
+    assert.strictEqual(overlap.folderRoots[1].name, 'ws/packages/api');
+  });
+
+  it('resolves the deepest path repo and walks subtree membership by parent names', async () => {
+    const set = await discoverRepos([{ name: 'ws', root: '/ws' }], nestedMonorepoFs());
+    assert.strictEqual(repoFor(set, '/ws/packages/api/src/index.ts')?.name, 'packages/api');
+    assert.strictEqual(repoFor(set, '/ws/.baiton/worktrees/run/P01/file')?.name, '.');
+    assert.strictEqual(repoFor(set, '/ws')?.name, '.');
+    assert.strictEqual(repoFor(set, '/elsewhere/file'), undefined);
+    assert.strictEqual(repoByName(set, 'packages/api')?.root, '/ws/packages/api');
+    assert.strictEqual(isWithinSubtree(set, '.', 'packages/api'), true);
+    assert.strictEqual(isWithinSubtree(set, 'packages/api', 'packages/api'), true);
+    assert.strictEqual(isWithinSubtree(set, 'packages/api', 'packages/web'), false);
+    assert.strictEqual(isWithinSubtree(set, 'packages/api', '.'), false);
+    assert.strictEqual(isWithinSubtree(set, 'unknown', 'packages/api'), false);
+  });
+});
+
+describe('resolveWorkspace (Req 22.3-22.8)', function () {
+  before(function () {
+    if (process.platform === 'win32') {
+      this.skip();
     }
   });
 
-  it('refuses when no workspace folder is open (Req 22.5)', () => {
-    const r = resolveWorkspace([], true, makeBaitonDir);
+  const toUri = (fsPath: string): string => fsPath;
+  const discover = (folders: readonly { name: string; root: string }[], tree: Record<string, 'dir' | 'file' | 'link'>) =>
+    discoverRepos(folders, fakeFs(tree));
+
+  it('returns no-folder when there are no workspace folders', async () => {
+    const repos = await discover([], {});
+    const r = resolveWorkspace(repos, true, toUri);
     assert.ok(isErr(r));
     if (isErr(r)) {
       assert.strictEqual(r.error.kind, 'no-folder');
-      assert.match(r.error.message, /\.baiton\/ (directory|root)/);
+      assert.match(r.error.message, /\.baiton\/ directory/);
     }
   });
 
-  it('refuses multi-root with zero .baiton/ roots (Req 22.5)', () => {
-    const r = resolveWorkspace(
-      [folder('/ws/a', false), folder('/ws/b', false)],
-      true,
-      makeBaitonDir,
-    );
+  it('keeps a single uninitialized folder as primary and derives its baiton path', async () => {
+    const repos = await discover([{ name: 'fresh', root: '/ws/fresh' }], { '/ws/fresh': 'dir' });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.root, '/ws/fresh');
+      assert.strictEqual(r.value.primary.baitonDir, '/ws/fresh/.baiton');
+    }
+  });
+
+  it('keeps the single folder primary even when only a child has .baiton/', async () => {
+    const repos = await discover([{ name: 'ws', root: '/ws' }], {
+      '/ws': 'dir', '/ws/child': 'dir', '/ws/child/.baiton': 'dir',
+    });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.repo.name, '.');
+      assert.strictEqual(r.value.primary.root, '/ws');
+    }
+  });
+
+  it('selects the first .baiton folder root when multiple roots are initialized', async () => {
+    const repos = await discover([
+      { name: 'a', root: '/ws/a' }, { name: 'b', root: '/ws/b' },
+    ], { '/ws/a': 'dir', '/ws/a/.baiton': 'dir', '/ws/b': 'dir', '/ws/b/.baiton': 'dir' });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.root, '/ws/a');
+    }
+  });
+
+  it('selects the only initialized folder root in a multi-root workspace', async () => {
+    const repos = await discover([
+      { name: 'a', root: '/ws/a' }, { name: 'b', root: '/ws/b' },
+    ], { '/ws/a': 'dir', '/ws/b': 'dir', '/ws/b/.baiton': 'dir' });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.root, '/ws/b');
+    }
+  });
+
+  it('accepts several .baiton roots and prefers their first folder root', async () => {
+    const repos = await discover([
+      { name: 'a', root: '/ws/a' }, { name: 'b', root: '/ws/b' },
+    ], { '/ws/a': 'dir', '/ws/a/.baiton': 'dir', '/ws/b': 'dir', '/ws/b/.baiton': 'dir' });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.repo.name, 'a');
+      assert.strictEqual(r.value.repos, repos);
+    }
+  });
+
+  it('selects a nested Baiton repo when no folder root has .baiton/', async () => {
+    const repos = await discover([
+      { name: 'a', root: '/w/a' }, { name: 'b', root: '/w/b' },
+    ], {
+      '/w/a': 'dir', '/w/b': 'dir', '/w/b/libs': 'dir',
+      '/w/b/libs/ui': 'dir', '/w/b/libs/ui/.baiton': 'dir',
+    });
+    const r = resolveWorkspace(repos, true, toUri);
+    assert.ok(isOk(r));
+    if (isOk(r)) {
+      assert.strictEqual(r.value.primary.repo.name, 'b/libs/ui');
+    }
+  });
+
+  it('returns no-baiton-root for a multi-root workspace with no .baiton repo', async () => {
+    const repos = await discover([
+      { name: 'a', root: '/w/a' }, { name: 'b', root: '/w/b' },
+    ], { '/w/a': 'dir', '/w/b': 'dir' });
+    const r = resolveWorkspace(repos, true, toUri);
     assert.ok(isErr(r));
     if (isErr(r)) {
       assert.strictEqual(r.error.kind, 'no-baiton-root');
+      assert.match(r.error.message, /\.baiton\/ directory/);
+      assert.match(r.error.message, /Baiton: Initialize/);
     }
   });
 
-  it('refuses multi-root with more than one .baiton/ root, reporting the count (Req 22.5)', () => {
-    const r = resolveWorkspace(
-      [
-        folder('/ws/a', true),
-        folder('/ws/b', false),
-        folder('/ws/c', true),
-      ],
-      true,
-      makeBaitonDir,
-    );
-    assert.ok(isErr(r));
-    if (isErr(r)) {
-      assert.strictEqual(r.error.kind, 'multiple-baiton-roots');
-      if (r.error.kind === 'multiple-baiton-roots') {
-        assert.strictEqual(r.error.count, 2);
-      }
-    }
-  });
-
-  it('sets restricted = !trusted on the resolved context (Req 22.1, 22.2, 22.5-22.8)', () => {
-    const untrusted = resolveWorkspace([folder('/ws/only', false)], false, makeBaitonDir);
+  it('carries restricted mode on the workspace set and its primary repo', async () => {
+    const repos = await discover([{ name: 'a', root: '/w/a' }], {
+      '/w/a': 'dir', '/w/a/.baiton': 'dir',
+    });
+    const untrusted = resolveWorkspace(repos, false, toUri);
     assert.ok(isOk(untrusted));
     if (isOk(untrusted)) {
-      assert.strictEqual(untrusted.value.restricted, true);
+      const value: WorkspaceRepos<string> = untrusted.value;
+      assert.strictEqual(value.restricted, true);
+      assert.strictEqual(value.primary.restricted, true);
     }
-
-    const trusted = resolveWorkspace([folder('/ws/b', true), folder('/ws/a', false)], true, makeBaitonDir);
+    const trusted = resolveWorkspace(repos, true, toUri);
     assert.ok(isOk(trusted));
     if (isOk(trusted)) {
       assert.strictEqual(trusted.value.restricted, false);
+      assert.strictEqual(trusted.value.primary.restricted, false);
     }
+  });
+});
+
+describe('createGitServiceRegistry', () => {
+  it('memoizes one service per normalized repo root', () => {
+    const calls: string[] = [];
+    const makeService = (): GitWorktreeService => ({} as GitWorktreeService);
+    const registry = createGitServiceRegistry((root) => {
+      calls.push(root);
+      return makeService();
+    });
+    const a = registry.forRepo('/r/a');
+    assert.strictEqual(registry.forRepo('/r/a'), a);
+    assert.notStrictEqual(registry.forRepo('/r/b'), a);
+    assert.strictEqual(registry.forRepo('/r/a/'), a);
+    assert.strictEqual(calls.length, 2);
+    assert.deepStrictEqual(calls, [path.resolve('/r/a'), path.resolve('/r/b')]);
   });
 });
 

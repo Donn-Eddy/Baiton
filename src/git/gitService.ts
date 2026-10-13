@@ -39,6 +39,31 @@ export function createGitService(repoRoot: string): GitWorktreeService {
   return new ShellGitService(repoRoot);
 }
 
+/** A memoized per-repository collection of git services. */
+export interface GitServiceRegistry {
+  /** The single service bound to `repoRoot`, created on first use and reused after. */
+  forRepo(repoRoot: string): GitWorktreeService;
+}
+
+/** Create one git service per normalized repository root. */
+export function createGitServiceRegistry(
+  factory: (repoRoot: string) => GitWorktreeService = createGitService,
+): GitServiceRegistry {
+  const services = new Map<string, GitWorktreeService>();
+  return {
+    forRepo(repoRoot: string): GitWorktreeService {
+      const normalizedRoot = path.resolve(repoRoot);
+      const cached = services.get(normalizedRoot);
+      if (cached) {
+        return cached;
+      }
+      const service = factory(normalizedRoot);
+      services.set(normalizedRoot, service);
+      return service;
+    },
+  };
+}
+
 class ShellGitService implements GitWorktreeService {
   constructor(private readonly repoRoot: string) {}
 
@@ -154,6 +179,11 @@ class ShellGitService implements GitWorktreeService {
     // `-b` (not `-B`) is deliberate: an id collision must fail loudly rather
     // than silently reset an existing branch to `fromCommit`.
     await this.runOrThrow(['worktree', 'add', '-b', branch, dir, fromCommit]);
+  }
+
+  async addWorktreeOnBranch(dir: string, branch: string): Promise<void> {
+    // Unlike addWorktree, this never creates or resets a branch.
+    await this.runOrThrow(['worktree', 'add', dir, branch]);
   }
 
   async listWorktrees(): Promise<readonly GitWorktree[]> {

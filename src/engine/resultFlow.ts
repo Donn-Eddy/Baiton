@@ -82,10 +82,9 @@ export type ValidationReporter = (detail: string) => void;
 /** Everything {@link awaitStageResult} needs to run one stage's completion flow. */
 export interface AwaitStageResultInput {
   /**
-   * Absolute path of the workspace root; resolves the plan artifact path. The run
-   * queue passes the MAIN checkout root even when the stage ran in a phase
-   * worktree, so artifacts always land in the main checkout's document folder; the
-   * watcher's result path may be inside a worktree.
+   * Absolute OWNING repo root; resolves the plan artifact path. The run queue
+   * passes the owner's main checkout even when the stage ran in a target-repo
+   * phase worktree, so artifacts always land in the owner's document folder.
    */
   workspaceRoot: string;
   /** The plan slug whose resolved folder receives the artifact (Req 24.3). */
@@ -123,7 +122,7 @@ export interface AwaitStageResultDeps {
 
 /**
  * Compose the absolute path an accepted stage artifact is persisted to, under
- * the resolved document folder, from the stage's naming rule (Req 24.3). Exported so the
+ * the owning repo's resolved document folder, from the stage's naming rule (Req 24.3). Exported so the
  * queue and tests can assert the destination without re-deriving it.
  */
 export function artifactPathFor(

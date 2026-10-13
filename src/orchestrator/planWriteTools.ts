@@ -19,15 +19,17 @@
  *   `remove_phase` refuse a phase whose state is `done`, `failed`, or a running
  *   state (`planning`/`executing`/`reviewing`) (Req 9.8).
  *
- * Every write under either document root is committed on the plan branch as
- * `plan(<slug>): <id> <what>` before any subsequent stage, using the git
- * service seam (Req 17.1). A phase-scoped write uses that phase's id; a
- * plan-scoped write (overview) uses the slug as the `<id>` field.
+ * Tools write the plan in the repo whose `.baiton/` holds it and commit with
+ * that repo's git service. `add_phase` and `edit_phase` accept an optional
+ * `repo` hint for a nested target repo. Writes are committed as
+ * `plan(<slug>): <id> <what>` before any subsequent stage (Req 17.1).
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { DocumentKind, parsePlan, phaseIdPattern, phaseIdPrefix } from '../model/parser';
+import { normalizeRepoHint, resolvePhaseRepo, type RepoTopology } from '../model/validator';
 import { PhaseState } from '../model/phaseState';
+import type { GitService } from '../git';
 import { resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { ToolServices } from './toolServices';
@@ -89,7 +91,7 @@ function updateOverviewTool(services: ToolServices): Tool {
             : `plan "${slug}" has no preamble/PHASES (or legacy OVERVIEW/TODOS) structure to update`,
         };
       }
-      const write = await writeAndCommit(services, loaded.absolute, rewritten, slug, slug, 'update overview');
+      const write = await writeAndCommit(services, loaded.absolute, rewritten, slug, slug, 'update overview', loaded.target.git);
       if (!write.ok) {
         return write;
       }
@@ -106,7 +108,7 @@ function updateOverviewTool(services: ToolServices): Tool {
 function addPhaseTool(services: ToolServices): Tool {
   return {
     name: 'add_phase',
-    description: 'Append a new pending phase line to a plan with an id (P## for a plan, T## for a legacy spec), title and optional hints.',
+    description: 'Append a pending phase with an id, title and optional hints. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase\'s input rev.',
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
@@ -117,6 +119,7 @@ function addPhaseTool(services: ToolServices): Tool {
         title: { type: 'string' },
         after: { type: 'array', items: { type: 'string' } },
         files: { type: 'array', items: { type: 'string' } },
+        repo: { type: 'string' },
       },
       required: ['slug', 'id', 'title'],
       additionalProperties: false,
@@ -127,6 +130,7 @@ function addPhaseTool(services: ToolServices): Tool {
       const title = readString(args, 'title');
       const after = readStringArray(args, 'after') ?? [];
       const files = readStringArray(args, 'files') ?? [];
+      const repo = readString(args, 'repo');
       if (slug === undefined || id === undefined || title === undefined) {
         return { ok: false, error: 'add_phase requires a string "slug", "id", and "title"' };
       }
@@ -134,6 +138,8 @@ function addPhaseTool(services: ToolServices): Tool {
       if (!loaded.ok) {
         return loaded.error;
       }
+      const repoError = checkRepoHint(repo, loaded.target.topology, id, 'add_phase');
+      if (repoError !== undefined) return { ok: false, error: repoError };
       if (!phaseIdPattern(loaded.kind).test(id)) {
         return { ok: false, error: `add_phase "id" must be "${phaseIdPrefix(loaded.kind)}" followed by two or more digits: ${id}` };
       }
@@ -141,9 +147,9 @@ function addPhaseTool(services: ToolServices): Tool {
       if (plan.phases.some((phase) => phase.id === id)) {
         return { ok: false, error: `add_phase: phase "${id}" already exists in plan "${slug}"` };
       }
-      const line = renderPhaseLine('pending', id, title, after, files);
+      const line = renderPhaseLine('pending', id, title, after, files, repo);
       const updated = appendPhaseLine(loaded.content, line, loaded.kind);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `add ${id}`);
+      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `add ${id}`, loaded.target.git);
       if (!write.ok) {
         return write;
       }
@@ -160,7 +166,7 @@ function addPhaseTool(services: ToolServices): Tool {
 function editPhaseTool(services: ToolServices): Tool {
   return {
     name: 'edit_phase',
-    description: "Rewrite a phase's title and hints, preserving its state; refuses protected states.",
+    description: "Rewrite a phase's title and hints, preserving its state; refuses protected states. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase's input rev.",
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
@@ -171,6 +177,7 @@ function editPhaseTool(services: ToolServices): Tool {
         title: { type: 'string' },
         after: { type: 'array', items: { type: 'string' } },
         files: { type: 'array', items: { type: 'string' } },
+        repo: { type: 'string' },
       },
       required: ['slug', 'id'],
       additionalProperties: false,
@@ -200,10 +207,22 @@ function editPhaseTool(services: ToolServices): Tool {
       const title = readString(args, 'title') ?? phase.title;
       const after = readStringArray(args, 'after') ?? phase.after;
       const files = readStringArray(args, 'files') ?? phase.files;
+      let repo = phase.repo;
+      const repoArg = readString(args, 'repo');
+      if (repoArg !== undefined) {
+        const trimmedRepo = repoArg.trim();
+        if (repoArg === '' || trimmedRepo === '.') {
+          repo = undefined;
+        } else {
+          const repoError = checkRepoHint(repoArg, loaded.target.topology, id, 'edit_phase');
+          if (repoError !== undefined) return { ok: false, error: repoError };
+          repo = trimmedRepo;
+        }
+      }
       // Preserve the existing state; only the title and hints may change.
-      const newLine = renderPhaseLine(phase.state, id, title, after, files);
+      const newLine = renderPhaseLine(phase.state, id, title, after, files, repo);
       const updated = replaceLine(loaded.content, phase.lineIndex, newLine);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `edit ${id}`);
+      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `edit ${id}`, loaded.target.git);
       if (!write.ok) {
         return write;
       }
@@ -250,7 +269,7 @@ function removePhaseTool(services: ToolServices): Tool {
         };
       }
       const updated = deleteLine(loaded.content, phase.lineIndex);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `remove ${id}`);
+      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `remove ${id}`, loaded.target.git);
       if (!write.ok) {
         return write;
       }
@@ -271,14 +290,51 @@ async function loadPlanForWrite(
   slug: string,
   tc: ToolContext,
 ): Promise<
-  | { ok: true; absolute: string; content: string; kind: DocumentKind }
+  | {
+      ok: true;
+      absolute: string;
+      content: string;
+      kind: DocumentKind;
+      target: { baitonDir: string; git: GitService; topology?: RepoTopology; repoPath: string };
+    }
   | { ok: false; error: ToolResult }
 > {
   if (!isSlug(slug)) {
     return { ok: false, error: { ok: false, error: `invalid slug: ${slug}` } };
   }
-  const location = resolveDocument(services.baitonDir, slug);
-  const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
+  let target: { baitonDir: string; git: GitService; topology?: RepoTopology; repoPath: string } = {
+    baitonDir: services.baitonDir,
+    git: services.git,
+    topology: undefined,
+    repoPath: '.',
+  };
+  let guard = tc.ctx;
+  if (services.planRepos !== undefined) {
+    const located = await services.planRepos.locate(slug);
+    if (located.kind === 'ambiguous') {
+      return {
+        ok: false,
+        error: {
+          ok: false,
+          error: `plan "${slug}" exists in more than one nested repo (${located.repos.join(', ')}); open it from its own repo`,
+        },
+      };
+    }
+    if (located.kind === 'found') {
+      if (tc.ctx.restricted) {
+        return { ok: false, error: { ok: false, error: 'plan writes are disabled in Restricted Mode' } };
+      }
+      target = {
+        baitonDir: located.target.baitonDir,
+        git: located.target.git,
+        topology: located.target.topology,
+        repoPath: located.target.info.path,
+      };
+      if (located.target.info.path !== '.') guard = located.target.guard;
+    }
+  }
+  const location = resolveDocument(target.baitonDir, slug);
+  const resolved = await guard.resolveMutatingPath(location.documentPath);
   if (!resolved.ok) {
     return { ok: false, error: { ok: false, error: resolved.error.message } };
   }
@@ -288,7 +344,7 @@ async function loadPlanForWrite(
   } catch {
     return { ok: false, error: { ok: false, error: `plan "${slug}" was not found` } };
   }
-  return { ok: true, absolute: resolved.resolved, content, kind: location.kind };
+  return { ok: true, absolute: resolved.resolved, content, kind: location.kind, target };
 }
 
 /**
@@ -306,6 +362,7 @@ export async function writeAndCommit(
   slug: string,
   id: string,
   what: string,
+  git: GitService = services.git,
 ): Promise<{ ok: true; commit: string } | { ok: false; error: string }> {
   try {
     await fs.mkdir(path.dirname(absolute), { recursive: true });
@@ -314,7 +371,7 @@ export async function writeAndCommit(
     return { ok: false, error: `failed to write plan file: ${e instanceof Error ? e.message : String(e)}` };
   }
   try {
-    const commit = await services.git.commit(`plan(${slug}): ${id} ${what}`);
+    const commit = await git.commit(`plan(${slug}): ${id} ${what}`);
     return { ok: true, commit };
   } catch (e) {
     return { ok: false, error: gitCommitErrorMessage(e) };
@@ -328,6 +385,7 @@ function renderPhaseLine(
   title: string,
   after: string[],
   files: string[],
+  repo?: string,
 ): string {
   const groups: string[] = [];
   if (after.length > 0) {
@@ -336,8 +394,40 @@ function renderPhaseLine(
   if (files.length > 0) {
     groups.push(`files: ${files.join(', ')}`);
   }
+  const repoPath = repo?.trim();
+  if (repoPath && repoPath !== '.') groups.push(`repo: ${repoPath}`);
   const hint = groups.length > 0 ? ` (${groups.join('; ')})` : '';
   return `- [${state}] ${id} ${title.trim()}${hint}`;
+}
+
+/** Validate the optional phase target before writing a hint the parser rejects. */
+function checkRepoHint(
+  hint: string | undefined,
+  topology: RepoTopology | undefined,
+  id: string,
+  toolName: 'add_phase' | 'edit_phase',
+): string | undefined {
+  if (hint === undefined) return undefined;
+  const trimmed = hint.trim();
+  if (trimmed.length === 0) return `${toolName}: repo hint must not be empty; use "." to target the owning repo`;
+  if (/[,;()\n\r]/.test(trimmed)) {
+    return `${toolName}: phase "${id}" has a malformed repo hint "${hint}"; repo paths cannot contain commas, semicolons, parentheses or newlines`;
+  }
+  const binding = resolvePhaseRepo(hint, topology);
+  if (binding.ok) return undefined;
+  if (topology === undefined && normalizeRepoHint(hint) !== '.') {
+    return `${toolName}: repo hints need a workspace with nested repos; omit "repo"`;
+  }
+  switch (binding.reason) {
+    case 'invalid':
+      return `${toolName}: phase "${id}" has an invalid repo hint "${hint}"; expected a path relative to the owning repo`;
+    case 'unknown':
+      return `${toolName}: phase "${id}" targets unknown repo "${hint}"; expected the owning repo or a repo nested beneath it`;
+    case 'sibling':
+      return `${toolName}: phase "${id}" targets repo "${binding.target}", which is a sibling of the owning repo "${topology?.owner ?? '.'}"; a phase may only target the owning repo or a repo nested beneath it`;
+    case 'ancestor':
+      return `${toolName}: phase "${id}" targets repo "${binding.target}", which is an ancestor of the owning repo "${topology?.owner ?? '.'}"; a phase may only target the owning repo or a repo nested beneath it`;
+  }
 }
 
 /**

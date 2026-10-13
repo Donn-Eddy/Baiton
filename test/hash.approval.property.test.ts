@@ -37,7 +37,10 @@ interface PhaseModel {
   title: string;
   after: string[];
   files: string[];
+  repo?: string;
 }
+
+type ContentMutation = 'preamble' | 'title' | 'id' | 'after' | 'files' | 'repo-add' | 'repo-change' | 'repo-remove';
 
 /** Renders a {@link DocumentModel} to canonical document text `parsePlan` consumes. */
 function renderDocument(model: DocumentModel): string {
@@ -74,6 +77,7 @@ function renderPhaseLine(t: PhaseModel): string {
   if (t.files.length > 0) {
     groups.push(`files: ${t.files.join(',')}`);
   }
+  if (t.repo !== undefined) groups.push(`repo: ${t.repo}`);
   if (groups.length > 0) {
     line += ` (${groups.join('; ')})`;
   }
@@ -101,6 +105,12 @@ const pathArb: fc.Arbitrary<string> = fc
   .string({ minLength: 1, maxLength: 20 })
   .map((s) => s.replace(/[(),;\n\r]/g, '').trim())
   .filter((s) => s.length > 0);
+
+const repoSegmentArb = fc.stringMatching(/^[a-z0-9_-]{1,8}$/);
+const repoArb: fc.Arbitrary<string> = fc.oneof(
+  fc.constant('.'),
+  fc.array(repoSegmentArb, { minLength: 1, maxLength: 3 }).map((parts) => parts.join('/')),
+);
 
 /**
  * A preamble prose line that cannot be mistaken for a section header or a
@@ -130,6 +140,7 @@ const documentModelArb: fc.Arbitrary<DocumentModel> = fc
             title: titleArb,
             after: fc.subarray(ids),
             files: fc.array(pathArb, { maxLength: 4 }),
+            repo: fc.option(repoArb, { nil: undefined }),
           })
           .map((r) => ({ id, ...r })),
       ),
@@ -152,6 +163,32 @@ const statesArb = (n: number): fc.Arbitrary<PhaseState[]> =>
 // --- Property --------------------------------------------------------------
 
 describe('approval hash (property)', () => {
+  it('keeps hint-less documents byte-identical to the pre-change hash payload', () => {
+    const hintlessModelArb = documentModelArb.map((model) => ({
+      ...model,
+      phases: model.phases.map((phase) => ({ ...phase, repo: undefined })),
+    }));
+    fc.assert(
+      fc.property(hintlessModelArb, (model) => {
+        const phaseLines = model.phases.map(renderPhaseLine);
+        const parsed = parsePlan(renderDocument(model));
+        const blankedLines = phaseLines.map((line) => line.replace(/^(- )\[[^\]]*\]/, '$1[]'));
+        const expectedApprovalHash = createHash('sha256')
+          .update([parsed.preamble, ...blankedLines].join('\n'), 'utf8')
+          .digest('hex');
+        assert.strictEqual(approvalHash(parsed), expectedApprovalHash);
+        for (let i = 0; i < parsed.phases.length; i++) {
+          const expectedInputRev = createHash('sha256')
+            .update([parsed.preamble, blankedLines[i]].join('\n'), 'utf8')
+            .digest('hex');
+          assert.strictEqual(computeInputRev(parsed, parsed.phases[i].id), expectedInputRev);
+          assert.strictEqual('repo' in parsed.phases[i], false);
+        }
+      }),
+      { numRuns: 200 },
+    );
+  });
+
   it('preserves the pre-change legacy hash payload exactly', () => {
     const raw = [
       '# OVERVIEW',
@@ -212,20 +249,27 @@ describe('approval hash (property)', () => {
   it('changes when the preamble, a title, an id, or hints change', () => {
     fc.assert(
       fc.property(
-        documentModelArb.chain((model) =>
-          fc.record({
-            model: fc.constant(model),
-            // Which kind of content mutation to apply.
-            kind: fc.constantFrom<'preamble' | 'title' | 'id' | 'after' | 'files'>(
-              'preamble',
-              'title',
-              'id',
-              'after',
-              'files',
-            ),
-            idx: fc.nat({ max: Math.max(0, model.phases.length - 1) }),
-          }),
-        ),
+        documentModelArb.chain((fixedModel) => {
+            const kinds: ContentMutation[] = ['preamble', 'title', 'id', 'after', 'files'];
+            if (fixedModel.phases.some((phase) => phase.repo === undefined)) kinds.push('repo-add');
+            if (fixedModel.phases.some((phase) => phase.repo !== undefined)) {
+              kinds.push('repo-change', 'repo-remove');
+            }
+            return fc.constantFrom(...kinds).chain((kind) => {
+              const validIndices = fixedModel.phases
+                .map((phase, index) => ({ phase, index }))
+                .filter(({ phase }) => kind === 'repo-add'
+                  ? phase.repo === undefined
+                  : kind === 'repo-change' || kind === 'repo-remove'
+                    ? phase.repo !== undefined
+                    : true)
+                .map(({ index }) => index);
+              const idxArb = kind.startsWith('repo-')
+                ? fc.constantFrom(...validIndices)
+                : fc.nat({ max: Math.max(0, fixedModel.phases.length - 1) });
+              return idxArb.map((idx) => ({ model: fixedModel, kind, idx }));
+            });
+        }),
         ({ model, kind, idx }) => {
           const baseHash = approvalHash(parsePlan(renderDocument(model)));
           const mutated = mutateContent(model, kind, idx);
@@ -241,6 +285,37 @@ describe('approval hash (property)', () => {
       { numRuns: 200 },
     );
   });
+
+  it('changes only the targeted phase input rev for repo hint mutations', () => {
+    fc.assert(
+      fc.property(
+        documentModelArb.chain((model) => {
+          const kinds: ContentMutation[] = [];
+          if (model.phases.some((phase) => phase.repo === undefined)) kinds.push('repo-add');
+          if (model.phases.some((phase) => phase.repo !== undefined)) kinds.push('repo-change', 'repo-remove');
+          return fc.constantFrom(...kinds).chain((kind) => {
+            const validIndices = model.phases
+              .map((phase, index) => ({ phase, index }))
+              .filter(({ phase }) => kind === 'repo-add' ? phase.repo === undefined : phase.repo !== undefined)
+              .map(({ index }) => index);
+            return fc.constantFrom(...validIndices).map((idx) => ({ model, kind, idx }));
+          });
+        }),
+        ({ model, kind, idx }) => {
+          const original = parsePlan(renderDocument(model));
+          const mutatedModel = mutateContent(model, kind, idx);
+          const mutated = parsePlan(renderDocument(mutatedModel));
+          const targetId = model.phases[idx].id;
+          assert.notStrictEqual(computeInputRev(mutated, targetId), computeInputRev(original, targetId));
+          for (const phase of original.phases) {
+            if (phase.id === targetId) continue;
+            assert.strictEqual(computeInputRev(mutated, phase.id), computeInputRev(original, phase.id));
+          }
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
 });
 
 /**
@@ -250,7 +325,7 @@ describe('approval hash (property)', () => {
  */
 function mutateContent(
   model: DocumentModel,
-  kind: 'preamble' | 'title' | 'id' | 'after' | 'files',
+  kind: ContentMutation,
   idx: number,
 ): DocumentModel {
   const phases = model.phases.map((t) => ({ ...t, after: [...t.after], files: [...t.files] }));
@@ -284,6 +359,15 @@ function mutateContent(
       break;
     case 'files':
       phases[idx].files = [...phases[idx].files, 'extra.ts'];
+      break;
+    case 'repo-add':
+      phases[idx].repo = 'packages/zz';
+      break;
+    case 'repo-change':
+      phases[idx].repo = `${phases[idx].repo}x`;
+      break;
+    case 'repo-remove':
+      delete phases[idx].repo;
       break;
   }
 

@@ -51,9 +51,9 @@
  * "dispatch modes"), supplies the resulting `RunPipelineSeam` to the tool
  * registry (`start_run` / `investigate`) and to the chat's Investigate promote
  * flow, remembers the composer's Mode select in `workspaceState` under
- * {@link CHAT_MODE_KEY}. It caches one run queue per (slug, phase), each running
- * its stages in the phase's worktree, so different phases run concurrently; only
- * the plan draft and the plan-less run pipeline still exclude each other.
+ * {@link CHAT_MODE_KEY}. It caches one run queue per (owning repo, slug, phase),
+ * each running its stages in the phase's worktree, so different phases run
+ * concurrently; the plan draft and plan-less pipeline share a per-repo lock.
  *
  * Probe-failure, invalid-result, git, and recovery errors are surfaced through
  * the shared {@link Surface}: chat/tool errors as tool results, command
@@ -75,6 +75,8 @@ import type { Config } from '../config';
 import { createGitService } from '../git';
 import {
   createPrTool,
+  describeRepoPrs,
+  createRepoLocks,
   createRunPipeline,
   createRunStore,
   createPlanBranchWriter,
@@ -88,7 +90,7 @@ import {
   submitPr,
   phaseBranchFor,
   phaseWorktreeDirFor,
-  unlandedPhases,
+  unlandedPhasesAcross,
   documentKindFor,
 } from '../engine';
 import type {
@@ -96,6 +98,7 @@ import type {
   RunPipeline,
   RunQueue,
   PlanDraftOutcome,
+  PlanDraftRunner,
   SubmitPrError,
   TerminalHost,
 } from '../engine';
@@ -119,6 +122,7 @@ import {
   scriptPathCandidates,
   toolFamily,
   createToolRegistry,
+  createPlanRepoSeam,
   systemClock,
 } from '../orchestrator';
 import type {
@@ -138,6 +142,7 @@ import type {
   ToolRegistry,
   ToolServices,
   ToolSpec,
+  PlanRepoSeam,
 } from '../orchestrator';
 import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
@@ -145,14 +150,16 @@ import { canonicalizeRoot } from './workspace';
 import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
-import { createPlanStore } from './planStore';
+import { createPhaseTargetResolver, createPlanStore } from './planStore';
+import { repoTopologyFor } from './repoDiscovery';
+import type { RepoSet } from './repoDiscovery';
+import type { GitServiceRegistry } from '../git';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
 import { createVscodeResultWatcherFactory } from './vscodeResultWatcher';
 import { createVscodeAskWatcherFactory } from './vscodeAskWatcher';
 import {
   createRunPipelineSeam,
   createRunQueueSeam,
-  createStageLock,
   createPhaseQueues,
   dispatchTrigger,
   STAGE_ROLE,
@@ -342,6 +349,12 @@ function realpathOrUndefined(p: string): string | undefined {
 /** The minimal activation state the command layer consumes. */
 export interface CommandActivation {
   workspace: WorkspaceContext<vscode.Uri>;
+  /** Discovered repositories; absent in lightweight command test fixtures. */
+  repos?: RepoSet;
+  /** Per-repository Git service registry; absent in lightweight command test fixtures. */
+  git?: GitServiceRegistry;
+  /** Per-repository configuration; absent in lightweight command test fixtures. */
+  repoConfigs?: ReadonlyMap<string, Config>;
   /**
    * The live configuration. Replaced wholesale on config save; all reads must
    * go through this object rather than a captured/destructured copy.
@@ -425,6 +438,40 @@ export function registerCommands(
     log: (message) => surface.log(message),
   });
   const git = createGitService(repoRoot);
+  const planRepos = createPlanRepoSeam({
+    repos: () => activation.repos,
+    ownerRoot: repoRoot,
+    restricted: () => workspace.restricted,
+    gitFor: (root) =>
+      path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root),
+    exists: async (targetPath) => {
+      try {
+        await fs.promises.access(targetPath);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  const ownerRepoName = (): string | undefined => {
+    const repos = activation.repos;
+    return repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(repoRoot))?.name;
+  };
+  const phaseTargets = createPhaseTargetResolver({
+    baitonDir,
+    ownerRoot: repoRoot,
+    topology: () => {
+      const repos = activation.repos;
+      const owner = ownerRepoName();
+      return repos === undefined || owner === undefined ? undefined : repoTopologyFor(repos, owner);
+    },
+    gitFor: (root) =>
+      path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root),
+  });
   // One writer shared by the store, the queues and the worktree seam so state
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
@@ -447,12 +494,12 @@ export function registerCommands(
   // in the phase's worktree. Manual mode runs one stage per trigger per phase and
   // the queue refuses a second while one is running (Req 19.1, 20.1). Every
   // refusal/halt is surfaced through the shared Surface (Req 5.3, 10.3, 14.5,
-  // 19.1). Phase queues sit outside the
-  // repository lock.
+  // 19.1). Phase queues sit outside the per-repo stage lock.
   const phaseQueues: PhaseQueues = createPhaseQueues({
     workspaceRoot: repoRoot,
     baitonDir,
     git,
+    targets: phaseTargets,
     planWriter: planWriter,
     terminalHost,
     watcherFactory,
@@ -462,20 +509,17 @@ export function registerCommands(
     adapterForRole: adapterFor,
     report: (error) => surface.reportDispatchError(error),
   });
-  const queueFor = (slug: string, phaseId: string): RunQueue => phaseQueues.queueFor(slug, phaseId);
+  const queueFor = (slug: string, phaseId: string): RunQueue => phaseQueues.queueFor(slug, phaseId, repoRoot);
 
-  // The repository lock after per-phase worktrees: the plan draft and plan-less
-  // runs exclude each other. Per-phase stages run concurrently in their own
-  // worktrees and neither block nor are blocked by them.
-  const stageLock = createStageLock({
-    planDraftRunning: () => planDraftRunner.isRunning(),
-    runRunning: () => runPipeline.isRunning(),
-  });
+  // One stage-lock per repo, shared by every plan-draft runner and run pipeline;
+  // phase queues never take it.
+  const repoLocks = createRepoLocks();
 
   // The plan-less run pipeline (design "dispatch modes"): Bug/Quick/Refactor
   // drive plan -> execute -> review in a per-run worktree, Investigate answers a
   // question read-only. It is run-scoped, so it sits beside the phase-scoped
-  // queues rather than inside one; it excludes only the plan draft. Manifests, journals and rendered artifacts live
+  // queues rather than inside one; it shares the per-repo stage lock with the
+  // plan-draft runner, while phase queues remain independent. Manifests, journals and rendered artifacts live
   // under `.baiton/runs/<run-id>/`; nothing is written under the legacy `.baiton/specs/` root.
   const runStore = createRunStore({ workspaceRoot: repoRoot });
   const runPipeline: RunPipeline = createRunPipeline({
@@ -490,9 +534,7 @@ export function registerCommands(
     // Read per run off the live config, like every other config read here.
     execAttempts: () => cfg().limits.exec_attempts,
     verify: () => cfg().git.verify,
-    // A plan-less run refuses only while the plan draft runs; per-phase stages
-    // run in their own worktrees and do not block it.
-    isPlanBusy: () => stageLock.runPipelineBusy(),
+    repoLocks,
     onComplete: (outcome) => surface.log(`Baiton: run ${outcome.runId} ${outcome.state}: ${outcome.message}`),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
@@ -506,9 +548,11 @@ export function registerCommands(
   // queue. One in-flight submission per plan; it also refuses while that
   // plan's queue is running a stage, and while any phase of the plan is
   // unlanded (checked inside submitPr).
+  const prKeyFor = (slug: string): string => `${repoRoot}\u0000${slug}`;
   const prInFlight = new Set<string>();
   const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
-    if (prInFlight.has(slug) || phaseQueues.isRunning(slug)) {
+    const prKey = prKeyFor(slug);
+    if (prInFlight.has(prKey) || phaseQueues.isRunning(slug, repoRoot)) {
       return { ok: false, error: `plan "${slug}" already has a run in progress` };
     }
     const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
@@ -532,7 +576,7 @@ export function registerCommands(
           `install it or set "baiton.pr.toolPath" to its location`,
       };
     }
-    prInFlight.add(slug);
+    prInFlight.add(prKey);
     try {
       const result = await submitPr(slug, {
         workspaceRoot: repoRoot,
@@ -545,15 +589,49 @@ export function registerCommands(
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
-        unlandedPhases: (s) => unlandedPhases({ workspaceRoot: repoRoot, git }, s),
+        unlandedPhases: async (s) =>
+          unlandedPhasesAcross({ workspaceRoot: repoRoot, git }, s, await phaseTargets.forPlan(s)),
+        phaseTarget: async (s, id) => {
+          const target = await phaseTargets.forPhase(s, id);
+          return target.ok ? { ok: true, value: target.value } : { ok: false, error: target.error };
+        },
+        repoSettings: async (target) => {
+          const repoGit = activation.repoConfigs?.get(target.name)?.git;
+          const repoRemote = repoGit?.remote ?? readGitSettings().remote;
+          const repoBase = repoGit?.base ?? cfg().git.base;
+          let url: string;
+          try {
+            url = await target.git.remoteUrl(repoRemote);
+          } catch {
+            return { ok: false, error: `git remote "${repoRemote}" is not configured in repo ${target.name}` };
+          }
+          const repoKind = selectProvider(selection, url);
+          const repoExecutable = resolveProviderExecutable(repoKind, { override: readPrToolPath() });
+          if (repoExecutable === undefined) {
+            return {
+              ok: false,
+              error: `the "${repoKind}" CLI was not found on PATH or in the usual install directories; install it or set "baiton.pr.toolPath" to its location`,
+            };
+          }
+          return {
+            ok: true,
+            value: { remote: repoRemote, base: repoBase, pr: createPrTool({ kind: repoKind, executable: repoExecutable, repoRoot: target.root }) },
+          };
+        },
         reportInvalid: (detail) => surface.warn(`Baiton: ${detail}`),
       });
       if (result.ok) {
-        return { ok: true, url: result.pr.url, reused: result.reused, title: result.title };
+        return {
+          ok: true,
+          url: result.pr.url,
+          reused: result.reused,
+          title: result.title,
+          prs: result.prs.map((p) => ({ repo: p.repo, url: p.pr.url, reused: p.reused })),
+        };
       }
       return { ok: false, error: describeSubmitPrError(result.error) };
     } finally {
-      prInFlight.delete(slug);
+      prInFlight.delete(prKey);
     }
   };
 
@@ -562,7 +640,7 @@ export function registerCommands(
   // land never interleaves with a state commit for another phase of the plan.
   const landPhaseSeam: LandPhaseSeam = {
     land: async ({ slug, phaseId }) => {
-      if (prInFlight.has(slug)) {
+      if (prInFlight.has(prKeyFor(slug))) {
         return { kind: 'refused', reason: `a pull request is being submitted for plan "${slug}"` };
       }
       if (queueFor(slug, phaseId).isRunning()) {
@@ -570,10 +648,12 @@ export function registerCommands(
       }
       try {
         return await planWriter.apply(slug, async () => {
-          if ((await git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
+          const target = await phaseTargets.forPhase(slug, phaseId);
+          if (!target.ok) return { kind: 'refused' as const, reason: target.error };
+          if ((await target.value.git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(repoRoot, slug)))) === undefined) {
             return { kind: 'already-landed' as const };
           }
-          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git }, { slug, phaseId });
+          const landed = await landPhaseWorktree({ workspaceRoot: repoRoot, git, target: target.value }, { slug, phaseId });
           if (landed.ok) {
             return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
           }
@@ -592,7 +672,8 @@ export function registerCommands(
   // The plan-draft runner (the harness writes the plan): the
   // orchestrator gathers requirements and calls `draft_plan`, which dispatches
   // here. It is plan-scoped, so it runs beside the phase-scoped queues rather
-  // than through one; it excludes only a run without a plan. Its completion
+  // than through one; it shares the per-repo stage lock with the run pipeline.
+  // Its completion
   // sink is bound after the ChatController exists.
   let reportDraftOutcome: (outcome: PlanDraftOutcome) => void = () => {};
   // Every human-in-the-loop ask — the approve/draft/submit confirmations today —
@@ -628,6 +709,8 @@ export function registerCommands(
     interventionSeam,
     runPipelineSeam,
     landPhaseSeam,
+    undefined,
+    planRepos,
   );
   const planDraftRunner = createPlanDraftRunner({
     workspaceRoot: repoRoot,
@@ -636,19 +719,48 @@ export function registerCommands(
     services: draftServices,
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
-    // Refuses only while a plan-less run is in flight; phase queues don't count.
-    isQueueRunning: () => stageLock.planDraftBusy(),
+    repoLocks,
     onComplete: (outcome) => reportDraftOutcome(outcome),
     report: (detail) => surface.warn(`Baiton: ${detail}`),
   });
+  const planDraftRunners = new Map<string, PlanDraftRunner>([['.', planDraftRunner]]);
 
   // The tool registry (read + plan-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents, planRepos),
     draftPlan: {
       draft: async (req) => {
-        const started = await planDraftRunner.start(req);
+        let runner = planDraftRunner;
+        if (req.repo !== undefined && req.repo !== '.') {
+          const resolvedTarget = planRepos.target(req.repo);
+          if (!resolvedTarget.ok) return { kind: 'refused', reason: resolvedTarget.error };
+          const repoPath = resolvedTarget.target.info.path;
+          runner = planDraftRunners.get(repoPath) ?? createPlanDraftRunner({
+            workspaceRoot: resolvedTarget.target.root,
+            terminalHost,
+            watcherFactory,
+            services: {
+              ...draftServices,
+              repoRoot: resolvedTarget.target.root,
+              baitonDir: resolvedTarget.target.baitonDir,
+              git: resolvedTarget.target.git,
+            },
+            modelForRole: (role) => modelForRole(cfg(), role),
+            adapterForRole: adapterFor,
+            repoLocks,
+            onComplete: (outcome) => reportDraftOutcome(outcome),
+            report: (detail) => surface.warn(`Baiton: ${detail}`),
+          });
+          planDraftRunners.set(repoPath, runner);
+        }
+        const started = await runner.start({
+          slug: req.slug,
+          requirements: req.requirements,
+          ...(req.repos !== undefined
+            ? { repos: req.repos.map(({ path: repoPath, hasBaiton }) => ({ path: repoPath, hasBaiton })) }
+            : {}),
+        });
         if (started.ok) {
           return { kind: 'started', runId: started.runId };
         }
@@ -821,7 +933,7 @@ export function registerCommands(
       activation,
       baitonDir,
       repoRoot,
-      (slug, phaseId) => phaseQueues.find(slug, phaseId),
+      (slug, phaseId) => phaseQueues.find(slug, phaseId, repoRoot),
       adapterFor,
       terminalHost,
       surface,
@@ -910,6 +1022,12 @@ export function registerCommands(
     registry,
     toolsFor: (phase) => toolsByStep.get(phase) ?? [],
     guardContext: () => guardContextFor(workspace),
+    repoContext: () => {
+      const repos = planRepos.list();
+      return repos.length > 1
+        ? { repos: repos.map(({ path: repoPath, hasBaiton }) => ({ path: repoPath, hasBaiton })) }
+        : undefined;
+    },
     askRegistry,
     baitonDir,
     roundBound: () => readRoundBound(),
@@ -1118,7 +1236,7 @@ export function registerCommands(
     disposables,
     runningSlugs: () => {
       const running = phaseQueues.running().map((r) => `${r.slug}/${r.phaseId}`);
-      if (planDraftRunner.isRunning()) {
+      if ([...planDraftRunners.values()].some((runner) => runner.isRunning())) {
         running.push('(plan draft)');
       }
       const runId = runPipeline.currentRunId();
@@ -1640,9 +1758,12 @@ async function runSubmitPr(
     return;
   }
   const verb = outcome.reused ? 'reused' : 'opened';
-  surface.log(`Baiton: ${verb} PR ${outcome.url} for "${slug}"`);
+  const perRepo = outcome.prs === undefined
+    ? `${verb} PR ${outcome.url}`
+    : describeRepoPrs(outcome.prs.map((pr) => ({ repo: pr.repo, pr: { url: pr.url }, reused: pr.reused })));
+  surface.log(`Baiton: ${perRepo} for "${slug}"`);
   const open = await vscode.window.showInformationMessage(
-    `Baiton: ${verb} pull request for "${slug}": ${outcome.title}`,
+    `Baiton: ${verb} pull request${outcome.prs !== undefined && outcome.prs.length > 1 ? 's' : ''} for "${slug}": ${outcome.title}\n${perRepo}`,
     'Open PR',
   );
   if (open === 'Open PR') {
@@ -1768,6 +1889,12 @@ function describeSubmitPrError(error: SubmitPrError): string {
   if (error.kind === 'verify-failed') {
     const tail = error.output.trim().split('\n').slice(-20).join('\n');
     return `${error.message}\n${tail}`;
+  }
+  if (error.kind === 'partial') {
+    return `${error.message}\n${describeRepoPrs(
+      error.prs.map((p) => ({ repo: p.repo, pr: p.pr, reused: p.reused })),
+      error.failures.map((failure) => ({ repo: failure.repo, message: failure.error.message })),
+    )}`;
   }
   return error.message;
 }
@@ -1922,6 +2049,7 @@ function buildToolServices(
   runPipeline: RunPipelineSeam,
   landPhase: LandPhaseSeam,
   subAgents?: SubAgentSeam,
+  planRepos?: PlanRepoSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -1929,7 +2057,7 @@ function buildToolServices(
     git,
     confirm,
     intervention,
-    runQueue: createRunQueueSeam(queueFor, baitonDir, adapterForRole),
+    runQueue: createRunQueueSeam(queueFor, baitonDir, adapterForRole, repoRoot),
     runPipeline,
     landPhase,
     clock: systemClock,
@@ -1937,6 +2065,7 @@ function buildToolServices(
     gitSettings: readGitSettings(),
     submitPr: submitPrForSlug,
     ...(subAgents !== undefined ? { subAgents } : {}),
+    ...(planRepos !== undefined ? { planRepos } : {}),
   };
 }
 

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createStageLock } from '../src/activation/engineFacade';
-import { createPlanDraftRunner, renderPlan } from '../src/engine/planDraft';
+import { createPlanDraftRunner, renderPlan, requirementsContext } from '../src/engine/planDraft';
 import type { PlanDraftOutcome } from '../src/engine/planDraft';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
@@ -240,6 +240,19 @@ describe('plan-draft runner (unit)', () => {
     while (roots.length > 0) {
       fs.rmSync(roots.pop()!, { recursive: true, force: true });
     }
+  });
+
+  it('adds repository context only when the plan can target multiple repos', () => {
+    const requirements = 'Goal: update the API.';
+    const baseline = requirementsContext(requirements);
+    assert.strictEqual(requirementsContext(requirements, [{ path: '.', hasBaiton: true }]), baseline);
+    const contextual = requirementsContext(requirements, [
+      { path: '.', hasBaiton: true },
+      { path: 'packages/api', hasBaiton: true },
+    ]);
+    assert.ok(contextual.includes('## Repositories'));
+    assert.ok(contextual.includes('The plan is owned by `.`.'));
+    assert.ok(contextual.includes('- `packages/api`'));
   });
 
   it('launches the plan writer, writes the brief, and returns the run id immediately', async () => {
@@ -577,5 +590,23 @@ describe('renderPlan', () => {
     assert.deepStrictEqual(plan.phases[0].files, []);
     assert.deepStrictEqual(plan.phases[1].after, ['P01']);
     assert.deepStrictEqual(plan.phases[1].files, ['src/two.ts']);
+  });
+
+  it('renders a child repo hint last and keeps owner or blank repo values implicit', () => {
+    const content = renderPlan(
+      'example',
+      { endstate: 'Done.', changes: 'Make changes.', constraints: 'Keep rules.' },
+      [
+        'First',
+        { title: 'Second', after: ['1'], files: ['a.ts'], repo: 'packages/api' },
+        { title: 'Owner repo', repo: '.' },
+        { title: 'Blank repo', repo: '  ' },
+      ],
+    );
+    assert.ok(content.includes('- [pending] P02 Second (after P01; files: a.ts; repo: packages/api)'));
+    assert.ok(content.includes('- [pending] P03 Owner repo\n'));
+    assert.ok(content.includes('- [pending] P04 Blank repo\n'));
+    assert.strictEqual(parsePlan(content).phases[1].repo, 'packages/api');
+    assert.strictEqual(parsePlan(content).phases[0].repo, undefined);
   });
 });

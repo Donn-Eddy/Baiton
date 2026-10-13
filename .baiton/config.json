@@ -28,7 +28,12 @@
     },
     "pr-writer": {
       "agent": "opencode",
-      "model": "opencode/space-bunny-free",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "effort": "medium"
+    },
+    "plan-writer": {
+      "agent": "claude",
+      "model": "claude-opus-5-5",
       "effort": "medium"
     }
   },

@@ -30,6 +30,7 @@ import { isRunId, runBranchFor, runWorktreeDirFor } from './runStore';
 export const RUN_WORKTREES_DIR = 'worktrees';
 
 /** The directory every run worktree lives under. */
+/** Resolve the run worktree root under the repo this run belongs to. */
 export function runWorktreesRootDir(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.baiton', RUN_WORKTREES_DIR);
 }
@@ -59,7 +60,7 @@ export function createRunGitService(
 
 /** How the run worktree operations are bound to a workspace and to git. */
 export interface RunWorktreeDeps {
-  /** Absolute workspace root; `.baiton/worktrees/` resolves under it. */
+  /** Root of the repo this run belongs to; one RunWorktreeDeps per repo. */
   workspaceRoot: string;
   /** Service bound to the MAIN checkout (`createGitService(workspaceRoot)`). */
   git: GitWorktreeService;

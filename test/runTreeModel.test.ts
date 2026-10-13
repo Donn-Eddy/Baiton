@@ -72,6 +72,30 @@ describe('runTreeModel', () => {
       assert.deepStrictEqual(groups[1].runs.map((r) => r.runId), ['b', 'd']);
     });
 
+    it('labels repository entries and suppresses actions when their source is not actionable', () => {
+      const m = manifest({ state: 'done' });
+      const [active, complete] = buildRunTree([{
+        manifest: m,
+        repo: 'packages/api',
+        actionable: false,
+      }]);
+      assert.strictEqual(active.runs.length, 0);
+      assert.strictEqual(complete.runs.length, 1);
+      const node = complete.runs[0];
+      assert.strictEqual(node.repo, 'packages/api');
+      assert.ok(node.description.startsWith('packages/api · '));
+      assert.strictEqual(node.tooltip.split('\n')[1], 'Repo: packages/api');
+      assert.deepStrictEqual(node.actions, []);
+      assert.strictEqual(node.contextValue, 'baiton.run.complete');
+    });
+
+    it('keeps plain manifest input identical to the direct node builder', () => {
+      const m = manifest({ state: 'done' });
+      const [, complete] = buildRunTree([m]);
+      assert.deepStrictEqual(complete.runs[0], buildRunNode(m));
+      assert.strictEqual(complete.runs[0].repo, undefined);
+    });
+
     it('does not throw for degenerate manifests', () => {
       assert.doesNotThrow(() => {
         const groups = buildRunTree([

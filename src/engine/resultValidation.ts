@@ -76,11 +76,12 @@ export function describeValidationError(error: ResultValidationError): string {
 
 /**
  * The single write location a sub-agent is permitted under `.baiton/`: exactly
- * its own `runs/<run-id>/result.json` (Req 24.1). Returns the absolute path,
- * computed from the workspace root and run id.
+ * its own `runs/<run-id>/result.json` (Req 24.1). `runRoot` is the stage run
+ * root (`stageRunRoot`): the target-repo worktree for a phase stage. A result
+ * under the owner root or any parent repo is denied.
  */
-export function allowedResultPath(workspaceRoot: string, runId: string): string {
-  return path.join(workspaceRoot, '.baiton', 'runs', runId, 'result.json');
+export function allowedResultPath(runRoot: string, runId: string): string {
+  return path.join(runRoot, '.baiton', 'runs', runId, 'result.json');
 }
 
 /**
@@ -93,16 +94,17 @@ export function allowedResultPath(workspaceRoot: string, runId: string): string 
  * exact-equality check, so a sibling run's result, the brief, a nested path, or
  * a traversal such as `runs/<run-id>/../<other>/result.json` is denied. Any
  * path that does not resolve under `.baiton/` at all is likewise not this
- * confinement's concern and returns false.
+ * confinement's concern and returns false. For a phase, `runRoot` is its
+ * target-repo worktree; owner and parent repo result paths are denied.
  */
 export function isAllowedSubAgentWrite(
-  workspaceRoot: string,
+  runRoot: string,
   runId: string,
   target: string,
 ): boolean {
-  const allowed = path.resolve(allowedResultPath(workspaceRoot, runId));
+  const allowed = path.resolve(allowedResultPath(runRoot, runId));
   const resolvedTarget = path.resolve(
-    path.isAbsolute(target) ? target : path.join(workspaceRoot, target),
+    path.isAbsolute(target) ? target : path.join(runRoot, target),
   );
   return resolvedTarget === allowed;
 }

@@ -18,6 +18,7 @@ import {
   LandPhaseSeam,
   RunPipelineSeam,
   RunQueueSeam,
+  PlanRepoSeam,
   SubAgentSeam,
 } from './seams';
 
@@ -55,7 +56,9 @@ export interface ToolGitSettings {
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
  */
 export interface ToolServices {
+  /** The conversation's OWNING repo root; read containment and file enumeration come from the GuardContext bound to the stage target repo. */
   repoRoot: string;
+  /** The conversation's OWNING repo `.baiton/`; plan tools continue to read owner plans. */
   baitonDir: string;
   git: GitService;
   confirm: ConfirmSeam;
@@ -75,6 +78,8 @@ export interface ToolServices {
    * registry; `draft_plan` then reports it as unavailable.
    */
   draftPlan?: DraftPlanSeam;
+  /** Optional nested-repo plan targets; absent means single-repo behaviour, byte-for-byte as today. */
+  planRepos?: PlanRepoSeam;
   /**
    * The plan-less run pipeline the `start_run` and `investigate` tools dispatch
    * into. Optional so a host that has not wired the run pipeline still builds a
@@ -104,5 +109,5 @@ export interface ToolServices {
 
 /** The `submit_pr` tool's view of the flow's result. */
 export type SubmitPrOutcome =
-  | { ok: true; url: string; reused: boolean; title: string }
+  | { ok: true; url: string; reused: boolean; title: string; prs?: readonly { repo: string; url: string; reused: boolean }[] }
   | { ok: false; error: string };
