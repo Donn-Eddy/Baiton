@@ -29,6 +29,7 @@ import type { Role } from '../src/model/role';
 import { parseJournal } from '../src/journal';
 import { parsePlan } from '../src/model/parser';
 import { approvalHash } from '../src/model/hash';
+import { setFrontmatterKey } from '../src/model/writer';
 import { GITIGNORE_CONTENTS } from '../src/config/gitignore';
 
 /**
@@ -146,6 +147,14 @@ function makeRepo(states: string[], withRemote = true): Repo {
   git(root, 'commit', '-q', '-m', `plan(${SLUG}): T01 execute attempt 1`);
 
   return { root, remote, legacySpecsDir: path.join(root, '.baiton', 'specs'), baitonDir: path.join(root, '.baiton') };
+}
+
+function markSubmitted(repo: Repo, status: 'pr' | 'pr-partial', url = 'https://example.test/pull/42'): void {
+  const file = path.join(repo.legacySpecsDir, SLUG, 'spec.md');
+  let text = fs.readFileSync(file, 'utf8');
+  text = setFrontmatterKey(setFrontmatterKey(text, 'pr', url), 'status', status);
+  fs.writeFileSync(file, text, 'utf8');
+  git(repo.root, 'commit', '-q', '-am', `plan(${SLUG}): pr`);
 }
 
 class StubAdapter implements Adapter {
@@ -281,6 +290,63 @@ function readPlan(repo: Repo): ReturnType<typeof parsePlan> {
 }
 
 describe('submitPr (design section 8 "PR")', () => {
+  it('refuses a pr plan whose recorded PRs are all merged', async () => {
+    const repo = makeRepo(['done']);
+    markSubmitted(repo, 'pr');
+    const file = path.join(repo.legacySpecsDir, SLUG, 'spec.md');
+    const before = fs.readFileSync(file, 'utf8');
+    const seen: string[][] = [];
+    const h = harness(repo, {
+      prsMerged: async (urls) => {
+        seen.push([...urls]);
+        return true;
+      },
+    });
+
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /already been merged/);
+      assert.ok(result.error.message.includes('https://example.test/pull/42'));
+    }
+    assert.deepStrictEqual(seen, [['https://example.test/pull/42']]);
+    assert.strictEqual(h.terminals.created.length, 0);
+    assert.deepStrictEqual(h.pr.lookedUp, []);
+    assert.deepStrictEqual(h.pr.created, []);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
+  });
+
+  it('leaves the flow unchanged when merged state is unknown', async () => {
+    for (const checker of [
+      async () => { throw new Error('offline'); },
+      async () => false,
+    ]) {
+      const h = harness(makeRepo(['done']), { prsMerged: checker });
+      markSubmitted(h.repo, 'pr');
+      const pending = submitPr(SLUG, h.deps);
+      (await awaitWatcher(h)).emitClose(1);
+      const result = await pending;
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) assert.notStrictEqual(result.error.kind, 'not-ready');
+    }
+  });
+
+  it('never consults the checker when status is not pr/pr-partial or no URL is recorded', async () => {
+    const cases = [makeRepo(['done']), makeRepo(['done'])];
+    markSubmitted(cases[1], 'pr', '');
+    let calls = 0;
+    for (const repo of cases) {
+      const h = harness(repo, { prsMerged: async () => { calls += 1; return true; } });
+      const pending = submitPr(SLUG, h.deps);
+      (await awaitWatcher(h)).emitClose(1);
+      const result = await pending;
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) assert.notStrictEqual(result.error.kind, 'not-ready');
+    }
+    assert.strictEqual(calls, 0);
+  });
+
   it('refuses while a phase is not done and launches nothing', async () => {
     const h = harness(makeRepo(['done', 'executed']));
     const result = await submitPr(SLUG, h.deps);

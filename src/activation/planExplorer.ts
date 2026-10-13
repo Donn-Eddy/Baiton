@@ -4,7 +4,9 @@
  * The explorer lists both document roots: `.baiton/plans/<slug>/plan.md` and
  * the legacy `.baiton/specs/<slug>/spec.md`. `listPlans` and `resolveDocument`
  * prefer the plans root when a slug exists in both locations. Refreshes derive
- * the tree from disk, approval state, plan journals, and phase plans.
+ * the tree from disk, approval state, plan journals, and phase plans. Completed
+ * also includes `pr`/`pr-partial` plans whose recorded requests all read merged,
+ * derived through an injected checker and never persisted.
  *
  * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
  * `specs` root is the legacy document root. The three top-level roots are
@@ -17,6 +19,9 @@
 import * as vscode from 'vscode';
 import { resolveDocument } from '../storage/documentLocation';
 import type { PlanStore } from '../engine';
+import { parsePrsValue } from '../engine/prTool';
+import { recordedPrUrls } from '../engine/transitions';
+import { parsePlan } from '../model/parser';
 import {
   buildPlanGroups,
   buildPlanTree,
@@ -27,7 +32,7 @@ import {
   type PlanStatus,
 } from '../model/treeModel';
 import { phaseContextValue } from '../model/phaseActions';
-import { planContextValue } from '../model/planActions';
+import { planContextValue, PR_PARTIAL_STATUS, PR_STATUS } from '../model/planActions';
 import { readPlanJournal, type JournalEntry } from '../journal';
 import type { RepoTopology } from '../model/validator';
 import {
@@ -58,7 +63,27 @@ export interface PlanRepoSource {
 /** Optional multi-repository sources for the Plan Explorer. */
 export interface PlanExplorerOptions {
   sources?: () => readonly PlanRepoSource[];
+  /**
+   * Consulted at most once per owning repo + slug + URL set per explorer
+   * instance; refresh never awaits it. It is only called for plans whose
+   * trimmed status is `pr`/`pr-partial` and whose recorded URL set is non-empty.
+   */
+  prsMerged?: PrsMergedChecker;
 }
+
+/** What the explorer asks the PR-state checker about one plan. */
+export interface PrsMergedQuery {
+  slug: string;
+  /** The repository that owns the plan document; undefined for the primary (single-source) repo. */
+  repo?: string;
+  /** The recorded URL set: `recordedPrUrls(pr, prs)`, non-empty. */
+  urls: readonly string[];
+  /** For URLs recorded under `prs:`, the repo key they were recorded for; URLs absent here belong to the owning repo. */
+  repoForUrl: ReadonlyMap<string, string>;
+}
+
+/** Resolves true only when every recorded request reads merged; may reject (treated as not merged). */
+export type PrsMergedChecker = (query: PrsMergedQuery) => Promise<boolean>;
 
 interface ResolvedPlanRepoSource {
   repo?: string;
@@ -137,6 +162,11 @@ export class PlanExplorer
   /** Guards against overlapping async refreshes clobbering groups out of order. */
   private refreshSeq = 0;
   private sourceSnapshot: readonly ResolvedPlanRepoSource[] | undefined;
+  /** Per-session PR completeness memo, keyed by owning repo + slug + URL set; holds in-flight checks too. */
+  private readonly prsMergedMemo = new Map<string, { merged?: boolean }>();
+  /** Plans (repo + slug) whose PR check failure has already been logged this session. */
+  private readonly prsMergedLogged = new Set<string>();
+  private disposed = false;
 
   /**
    * @param baitonDir     absolute `.baiton/` directory; both document roots are scanned under it.
@@ -196,6 +226,7 @@ export class PlanExplorer
 
   /** Dispose the watcher, the command, and any pending debounce timer. */
   public dispose(): void {
+    this.disposed = true;
     if (this.debounceTimer !== undefined) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
@@ -286,6 +317,11 @@ export class PlanExplorer
           readError: entry.readError,
           // The approval fact comes from the owning source, never recomputed here.
           approved: await this.approvalFor(entry.slug, source),
+          prsMerged: this.prsMergedFor(
+            entry.slug,
+            source.repo,
+            entry.readError === undefined ? entry.raw : undefined,
+          ),
           // Journals and phase plans are always read from the owning repository.
           sessions: sessionSet(readPlanJournal(ownerBaitonDir, entry.slug)),
           plans: await listPhasePlans(ownerBaitonDir, entry.slug),
@@ -301,6 +337,70 @@ export class PlanExplorer
     }
     this.groups = buildPlanGroups(buildPlanTree(inputs));
     this.emitter.fire(undefined);
+  }
+
+  /** Derive merged PR completeness without waiting for network or CLI work. */
+  private prsMergedFor(slug: string, repo: string | undefined, raw: string | undefined): boolean {
+    const checker = this.options.prsMerged;
+    if (checker === undefined || raw === undefined) return false;
+
+    let frontmatter: Map<string, string>;
+    try {
+      frontmatter = parsePlan(raw).frontmatter;
+    } catch {
+      return false;
+    }
+    const status = frontmatter.get('status')?.trim();
+    if (status !== PR_STATUS && status !== PR_PARTIAL_STATUS) return false;
+
+    const prs = frontmatter.get('prs');
+    const urls = recordedPrUrls(frontmatter.get('pr'), prs);
+    if (urls.length === 0) return false;
+
+    const key = [repo ?? '', slug, ...urls].join('\u0000');
+    const existing = this.prsMergedMemo.get(key);
+    if (existing !== undefined) return existing.merged === true;
+
+    const repoForUrl = new Map([...parsePrsValue(prs)].map(([name, url]) => [url.trim(), name]));
+    const entry: { merged?: boolean } = {};
+    this.prsMergedMemo.set(key, entry);
+
+    let check: Promise<boolean>;
+    try {
+      check = Promise.resolve(checker({
+        slug,
+        ...(repo !== undefined ? { repo } : {}),
+        urls,
+        repoForUrl,
+      }));
+    } catch (e) {
+      check = Promise.reject(e);
+    }
+    void check.then(
+      (merged) => {
+        entry.merged = merged === true;
+        if (entry.merged && !this.disposed) void this.refresh();
+      },
+      (e: unknown) => {
+        entry.merged = false;
+        this.logPrsMergedFailure(slug, repo, e);
+      },
+    );
+    return false;
+  }
+
+  /** Log a failed PR lookup once per plan without raising a notification. */
+  private logPrsMergedFailure(slug: string, repo: string | undefined, e: unknown): void {
+    const id = `${repo ?? ''}\u0000${slug}`;
+    if (this.prsMergedLogged.has(id) || this.disposed) return;
+    this.prsMergedLogged.add(id);
+    try {
+      this.surface.log(
+        `Baiton: could not read PR state for plan "${slug}"${repo === undefined ? '' : ` in ${repo}`}: ${describe(e)}.`,
+      );
+    } catch {
+      // Logging must never escape.
+    }
   }
 
   /** The source's approval fact for a plan, treating a probe failure as unapproved. */
