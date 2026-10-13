@@ -6,7 +6,8 @@
  *
  *   1. Reads the resolved plan and refuses unless every phase is `done` and landed (no phase branch remains), the approval
  *      hash is current, the plan carries `branch`/`base_commit`, that branch
- *      is checked out, and the tree is clean.
+ *      is checked out, and the tree is clean; refuses a `pr`/`pr-partial` plan
+ *      whose recorded requests all read merged.
  *   2. Runs `git.verify` when configured; a failure halts with its output.
  *   3. Groups done phases by target repo and launches one pr-writer with a
  *      diff for each repo that still needs a PR.
@@ -29,8 +30,8 @@ import type { GitService } from '../git';
 import { appendCompletion, appendStart, planJournalPathFor, readPlanJournal } from '../journal';
 import type { PrCompletion, RunResultKind } from '../journal';
 import { approvalHash } from '../model/hash';
-import { isPartialPrStatus, planPrStatus, reposToSubmit } from './transitions';
-import { PR_PARTIAL_STATUS } from '../model/planActions';
+import { isPartialPrStatus, planPrStatus, recordedPrUrls, reposToSubmit } from './transitions';
+import { PR_PARTIAL_STATUS, PR_STATUS } from '../model/planActions';
 import type { Result } from '../model/result';
 import { parsePlan } from '../model/parser';
 import type { Role } from '../model/role';
@@ -121,6 +122,13 @@ export interface SubmitPrDeps {
    * The phase ids of `slug` whose branch still exists (not yet landed); the readiness check refuses while any remain.
    */
   unlandedPhases?: (slug: string) => Promise<readonly string[]>;
+  /**
+   * Whether every recorded PR/MR URL of the plan reads merged. Consulted only for
+   * `pr`/`pr-partial` plans with a non-empty recorded URL set; `repoForUrl` maps
+   * URLs recorded under `prs:` to their repo key (absent = owner repo). A
+   * rejection or `false` is treated as not merged, leaving today's flow intact.
+   */
+  prsMerged?: (urls: readonly string[], repoForUrl: ReadonlyMap<string, string>) => Promise<boolean>;
   /** Resolve one phase's repo target; absent means every phase targets the owner. */
   phaseTarget?: (slug: string, phaseId: string) => Promise<Result<PrRepoTarget, string>>;
   /** Resolve remote/base/provider settings for a child target repo. */
@@ -607,6 +615,19 @@ async function checkReady(
   const status = (plan.frontmatter.get('status') ?? '').trim();
   if (status === 'done') {
     return fail({ kind: 'not-ready', message: `plan "${slug}" is already done` });
+  }
+
+  const checkPrsMerged = deps.prsMerged;
+  if (checkPrsMerged !== undefined && (status === PR_STATUS || status === PR_PARTIAL_STATUS)) {
+    const prs = plan.frontmatter.get('prs');
+    const urls = recordedPrUrls(plan.frontmatter.get('pr'), prs);
+    if (urls.length > 0) {
+      const repoForUrl = new Map([...parsePrsValue(prs)].map(([name, url]) => [url.trim(), name] as const));
+      const merged = await safe(async () => checkPrsMerged(urls, repoForUrl), false);
+      if (merged === true) {
+        return fail({ kind: 'not-ready', message: `plan "${slug}" has already been merged (${urls.join(', ')})` });
+      }
+    }
   }
 
   const recorded = (plan.frontmatter.get('approved_rev') ?? '').trim();

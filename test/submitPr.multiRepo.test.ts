@@ -289,6 +289,47 @@ describe('submitPr multi-repo flow', () => {
     assert.match(git(h.world.child.remote, 'branch', '--list', BRANCH), /baiton\/multi/);
   });
 
+  it('refuses resubmitting a multi-repo plan whose PRs are all merged', async () => {
+    const h = harness(makeWorld());
+    const pending = submitPr(SLUG, h.deps);
+    const first = await draftAndFinish(h, pending);
+    assert.strictEqual(first.ok, true, JSON.stringify(first));
+    if (!first.ok) return;
+
+    const calls: Array<{ urls: string[]; repoForUrl: Map<string, string> }> = [];
+    h.deps.prsMerged = async (urls, repoForUrl) => {
+      calls.push({ urls: [...urls], repoForUrl: new Map(repoForUrl) });
+      return true;
+    };
+    const planBefore = fs.readFileSync(h.world.planPath, 'utf8');
+    const commitBefore = git(h.world.owner.root, 'log', '-1', '--format=%s').trim();
+    const ownerLookups = h.ownerPr.lookedUp.length;
+    const childLookups = h.childPr.lookedUp.length;
+    const ownerCreates = h.ownerPr.created.length;
+    const childCreates = h.childPr.created.length;
+
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /already been merged/);
+    }
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual(calls[0].urls, [
+      'https://example.test/owner/pull/1',
+      'https://example.test/api/pull/2',
+    ]);
+    assert.strictEqual(calls[0].repoForUrl.get('https://example.test/owner/pull/1'), '.');
+    assert.strictEqual(calls[0].repoForUrl.get('https://example.test/api/pull/2'), 'packages/api');
+    assert.strictEqual(h.watchers.created.length, 1);
+    assert.strictEqual(h.ownerPr.lookedUp.length, ownerLookups);
+    assert.strictEqual(h.childPr.lookedUp.length, childLookups);
+    assert.strictEqual(h.ownerPr.created.length, ownerCreates);
+    assert.strictEqual(h.childPr.created.length, childCreates);
+    assert.strictEqual(fs.readFileSync(h.world.planPath, 'utf8'), planBefore);
+    assert.strictEqual(git(h.world.owner.root, 'log', '-1', '--format=%s').trim(), commitBefore);
+  });
+
   it('records a partial result and retry submits only the failed child repo', async () => {
     const h = harness(makeWorld());
     h.childPr.failCreate = true;
@@ -319,6 +360,60 @@ describe('submitPr multi-repo flow', () => {
       ['.', 'https://example.test/owner/pull/1'],
       ['packages/api', 'https://example.test/api/pull/2'],
     ]);
+  });
+
+  it('keeps the partial retry when merged state is unknown', async () => {
+    for (const checker of [
+      async () => false,
+      async () => { throw new Error('offline'); },
+    ]) {
+      const h = harness(makeWorld());
+      h.childPr.failCreate = true;
+      const firstPending = submitPr(SLUG, h.deps);
+      const first = await draftAndFinish(h, firstPending);
+      assert.strictEqual(first.ok, false);
+      if (first.ok || first.error.kind !== 'partial') return;
+      assert.strictEqual(readPlan(h.world).frontmatter.get('status'), 'pr-partial');
+
+      h.deps.prsMerged = checker;
+      h.childPr.failCreate = false;
+      const retryPending = submitPr(SLUG, h.deps);
+      const retry = await draftAndFinish(h, retryPending, 2);
+      assert.strictEqual(retry.ok, true, JSON.stringify(retry));
+      assert.strictEqual(readPlan(h.world).frontmatter.get('status'), 'pr');
+      assert.strictEqual(h.ownerPr.lookedUp.length, 1);
+      assert.strictEqual(h.ownerPr.created.length, 1);
+      assert.strictEqual(h.childPr.lookedUp.length, 2);
+      assert.strictEqual(h.childPr.created.length, 2);
+    }
+  });
+
+  it('refuses a pr-partial plan when its recorded PR is merged', async () => {
+    const h = harness(makeWorld());
+    h.childPr.failCreate = true;
+    const firstPending = submitPr(SLUG, h.deps);
+    const first = await draftAndFinish(h, firstPending);
+    assert.strictEqual(first.ok, false);
+    if (first.ok || first.error.kind !== 'partial') return;
+
+    h.deps.prsMerged = async () => true;
+    const before = fs.readFileSync(h.world.planPath, 'utf8');
+    const ownerLookups = h.ownerPr.lookedUp.length;
+    const childLookups = h.childPr.lookedUp.length;
+    const ownerCreates = h.ownerPr.created.length;
+    const childCreates = h.childPr.created.length;
+    const result = await submitPr(SLUG, h.deps);
+    assert.strictEqual(result.ok, false);
+    if (!result.ok) {
+      assert.strictEqual(result.error.kind, 'not-ready');
+      assert.match(result.error.message, /already been merged/);
+    }
+    assert.strictEqual(h.watchers.created.length, 1);
+    assert.strictEqual(h.ownerPr.lookedUp.length, ownerLookups);
+    assert.strictEqual(h.childPr.lookedUp.length, childLookups);
+    assert.strictEqual(h.ownerPr.created.length, ownerCreates);
+    assert.strictEqual(h.childPr.created.length, childCreates);
+    assert.strictEqual(fs.readFileSync(h.world.planPath, 'utf8'), before);
   });
 
   it('submits a child-only plan and chooses the child URL as primary', async () => {

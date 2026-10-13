@@ -552,6 +552,52 @@ export function registerCommands(
     (detail) => surface.warn(`Baiton: ${detail}`),
   );
 
+  /** The PR tool for a repo root over its configured remote, or undefined when pr.tool, the remote or the CLI cannot be resolved. Read-only; not gated on Restricted Mode. */
+  const prToolForRoot = async (root: string, remote: string): Promise<PrTool | undefined> => {
+    const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
+    if (!isPrToolSelection(selection)) return undefined;
+    try {
+      const rootGit = path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root);
+      const remoteUrl = await rootGit.remoteUrl(remote);
+      const kind = selectProvider(selection, remoteUrl);
+      const executable = resolveProviderExecutable(kind, { override: readPrToolPath() });
+      return executable === undefined ? undefined : createPrTool({ kind, executable, repoRoot: root });
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Whether every recorded PR/MR of a plan reads merged; unresolvable repo/provider or any failure -> not merged. */
+  const prsMergedForPlan: PrsMergedChecker = async ({ repo, urls, repoForUrl }) => {
+    const rootFor = (name: string | undefined): string | undefined =>
+      name === undefined || name === ownerRepoName()
+        ? repoRoot
+        : activation.repos?.repos.find((r) => r.name === name)?.root;
+    const remoteFor = (name: string | undefined): string =>
+      (name !== undefined ? activation.repoConfigs?.get(name)?.git?.remote : undefined) ??
+      readGitSettings().remote;
+    const tools = new Map<string, Promise<PrTool | undefined>>();
+    const toolFor = (name: string | undefined): Promise<PrTool | undefined> => {
+      const root = rootFor(name);
+      if (root === undefined) return Promise.resolve(undefined);
+      const key = path.resolve(root);
+      let tool = tools.get(key);
+      if (tool === undefined) {
+        tool = prToolForRoot(root, remoteFor(name)).catch(() => undefined);
+        tools.set(key, tool);
+      }
+      return tool;
+    };
+    const observed = new Map<string, PrState>(await Promise.all(urls.map(async (url): Promise<[string, PrState]> => {
+      const tool = await toolFor(repoForUrl.get(url) ?? repo);
+      const state = await tool?.stateByUrl?.(url).catch(() => 'unknown' as const);
+      return [url, state ?? 'unknown'];
+    })));
+    return planPrsMerged(urls, observed);
+  };
+
   // Submit PR (design section 8): the per-plan flow over the same seams as the
   // queue. One in-flight submission per plan; it also refuses while that
   // plan's queue is running a stage, and while any phase of the plan is
@@ -599,6 +645,7 @@ export function registerCommands(
         adapterForRole: adapterFor,
         unlandedPhases: async (s) =>
           unlandedPhasesAcross({ workspaceRoot: repoRoot, git }, s, await phaseTargets.forPlan(s)),
+        prsMerged: (urls, repoForUrl) => prsMergedForPlan({ slug, urls, repoForUrl }),
         phaseTarget: async (s, id) => {
           const target = await phaseTargets.forPhase(s, id);
           return target.ok ? { ok: true, value: target.value } : { ok: false, error: target.error };
@@ -641,52 +688,6 @@ export function registerCommands(
     } finally {
       prInFlight.delete(prKey);
     }
-  };
-
-  /** The PR tool for a repo root over its configured remote, or undefined when pr.tool, the remote or the CLI cannot be resolved. Read-only; not gated on Restricted Mode. */
-  const prToolForRoot = async (root: string, remote: string): Promise<PrTool | undefined> => {
-    const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
-    if (!isPrToolSelection(selection)) return undefined;
-    try {
-      const rootGit = path.resolve(root) === path.resolve(repoRoot)
-        ? git
-        : activation.git?.forRepo(root) ?? createGitService(root);
-      const remoteUrl = await rootGit.remoteUrl(remote);
-      const kind = selectProvider(selection, remoteUrl);
-      const executable = resolveProviderExecutable(kind, { override: readPrToolPath() });
-      return executable === undefined ? undefined : createPrTool({ kind, executable, repoRoot: root });
-    } catch {
-      return undefined;
-    }
-  };
-
-  /** Whether every recorded PR/MR of a plan reads merged; unresolvable repo/provider or any failure -> not merged. */
-  const prsMergedForPlan: PrsMergedChecker = async ({ repo, urls, repoForUrl }) => {
-    const rootFor = (name: string | undefined): string | undefined =>
-      name === undefined || name === ownerRepoName()
-        ? repoRoot
-        : activation.repos?.repos.find((r) => r.name === name)?.root;
-    const remoteFor = (name: string | undefined): string =>
-      (name !== undefined ? activation.repoConfigs?.get(name)?.git?.remote : undefined) ??
-      readGitSettings().remote;
-    const tools = new Map<string, Promise<PrTool | undefined>>();
-    const toolFor = (name: string | undefined): Promise<PrTool | undefined> => {
-      const root = rootFor(name);
-      if (root === undefined) return Promise.resolve(undefined);
-      const key = path.resolve(root);
-      let tool = tools.get(key);
-      if (tool === undefined) {
-        tool = prToolForRoot(root, remoteFor(name)).catch(() => undefined);
-        tools.set(key, tool);
-      }
-      return tool;
-    };
-    const observed = new Map<string, PrState>(await Promise.all(urls.map(async (url): Promise<[string, PrState]> => {
-      const tool = await toolFor(repoForUrl.get(url) ?? repo);
-      const state = await tool?.stateByUrl?.(url).catch(() => 'unknown' as const);
-      return [url, state ?? 'unknown'];
-    })));
-    return planPrsMerged(urls, observed);
   };
 
   // land_phase (per-phase worktrees): merge a done phase's branch into the plan
