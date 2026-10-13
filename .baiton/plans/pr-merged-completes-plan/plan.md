@@ -79,4 +79,4 @@ Extend `test/prTool.test.ts` (new argument shapes for both CLIs, URL parsing, st
 - [done] P02 Add the pure all-recorded-PRs-merged rule and recorded-URL-set helper beside planPrStatus (after P01; files: src/engine/transitions.ts, src/engine/prTool.ts, test/transitions.prStatus.test.ts)
 - [done] P03 Thread the merged fact through planGroupKind, buildPlanNode and legalPlanActions (files: src/model/treeModel.ts, src/model/planActions.ts, test/treeModel.property.test.ts, test/planActions.property.test.ts)
 - [done] P04 Derive and memoise PR completeness in the Plan Explorer refresh and wire the checker from commands (after P01, P02, P03; files: src/activation/planExplorer.ts, src/activation/commands.ts, test/planExplorer.test.ts)
-- [reviewing] P05 Refuse Submit PR for a plan whose recorded PRs are all merged (after P02, P04; files: src/engine/submitPr.ts, src/activation/commands.ts, test/submitPr.test.ts, test/submitPr.multiRepo.test.ts)
+- [done] P05 Refuse Submit PR for a plan whose recorded PRs are all merged (after P02, P04; files: src/engine/submitPr.ts, src/activation/commands.ts, test/submitPr.test.ts, test/submitPr.multiRepo.test.ts)
