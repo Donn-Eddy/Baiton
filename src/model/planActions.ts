@@ -17,12 +17,17 @@ export interface PlanActionInput {
   phaseStates: readonly PhaseState[];
   /** Trimmed frontmatter status, when present. */
   status?: string;
+  /** True when every recorded PR/MR URL reads merged (derived, never persisted). Absent or false keeps today's actions. */
+  prsMerged?: boolean;
 }
 
-/** Return legal actions in deterministic order: approve, submitPr, showPr. A partial plan offers Submit PR as a retry beside Show PR. */
+/** Return legal actions in deterministic order: approve, submitPr, showPr. A partial plan offers Submit PR as a retry beside Show PR. A plan whose recorded PRs all read merged offers Show PR only. */
 export function legalPlanActions(input: PlanActionInput): PlanAction[] {
   if (input.invalid) {
     return [];
+  }
+  if (input.prsMerged === true) {
+    return input.prUrl !== undefined ? ['showPr'] : [];
   }
   if (input.status === PR_PARTIAL_STATUS) {
     const actions: PlanAction[] = [];

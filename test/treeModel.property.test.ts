@@ -400,6 +400,95 @@ describe('tree model (property)', function () {
     );
   });
 
+  it('groups merged pr/pr-partial plans as completed and leaves other statuses alone', () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          status: fc.oneof(
+            fc.constant({ kind: 'unset' as const }),
+            fc.constantFrom('done', 'draft', 'approved', 'in-progress', 'pr', 'pr-partial', 'Done', 'PR')
+              .map((value) => ({ kind: 'set' as const, value })),
+          ),
+          approved: fc.boolean(),
+          phaseStates: fc.array(fc.constantFrom(...PHASE_STATES), { maxLength: 6 }),
+          prsMerged: fc.option(fc.boolean(), { nil: undefined }),
+        }),
+        (facts) => {
+          const expected = facts.status.kind === 'set' && facts.status.value === 'done'
+            ? 'completed'
+            : facts.prsMerged === true && facts.status.kind === 'set' &&
+              (facts.status.value === 'pr' || facts.status.value === 'pr-partial')
+              ? 'completed'
+              : facts.approved || facts.phaseStates.some((state) => state !== 'pending')
+                ? 'active'
+                : 'pending';
+          assert.strictEqual(planGroupKind(facts), expected);
+          assert.strictEqual(
+            planGroupKind({ ...facts, prsMerged: undefined }),
+            planGroupKind({ status: facts.status, approved: facts.approved, phaseStates: facts.phaseStates }),
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('buildPlanNode threads the merged fact into group and actions', () => {
+    const mergedPrUrl = 'https://example.com/o/r/pull/1';
+    for (const status of ['pr', 'pr-partial']) {
+      const raw = [
+        '---', `status: ${status}`, `pr: ${mergedPrUrl}`, '---', validPlanDocument('done'),
+      ].join('\n');
+      const merged = buildPlanTree([{
+        slug: `merged-${status}`,
+        raw,
+        approved: true,
+        sessions: new Set<string>(),
+        plans: new Set<string>(),
+        prsMerged: true,
+      }])[0];
+      assert.strictEqual(merged.group, 'completed');
+      assert.deepStrictEqual(merged.actions, ['showPr']);
+      assert.deepStrictEqual(merged.status, { kind: 'set', value: status });
+      assert.strictEqual(merged.prUrl, mergedPrUrl);
+      assert.strictEqual(merged.prsMerged, true);
+
+      const ordinary = buildPlanNodeForTest(raw, true);
+      assert.strictEqual(ordinary.group, 'active');
+      assert.deepStrictEqual(ordinary.actions, status === 'pr-partial' ? ['submitPr', 'showPr'] : ['showPr']);
+      assert.strictEqual('prsMerged' in ordinary, false);
+    }
+
+    const approvedRaw = ['---', 'status: approved', '---', validPlanDocument()].join('\n');
+    const approvedWithFact = buildPlanTree([{
+      slug: 'approved-with-fact', raw: approvedRaw, approved: false,
+      sessions: new Set<string>(), plans: new Set<string>(), prsMerged: true,
+    }])[0];
+    const approvedWithoutFact = buildPlanNodeForTest(approvedRaw);
+    assert.strictEqual(approvedWithFact.group, approvedWithoutFact.group);
+    assert.deepStrictEqual(approvedWithFact.actions, approvedWithoutFact.actions);
+
+    const doneRaw = ['---', 'status: done', '---', validPlanDocument()].join('\n');
+    const doneWithFact = buildPlanTree([{
+      slug: 'done-with-fact', raw: doneRaw, approved: false,
+      sessions: new Set<string>(), plans: new Set<string>(), prsMerged: true,
+    }])[0];
+    assert.strictEqual(doneWithFact.group, 'completed');
+
+    const invalidPrRaw = [
+      '---', 'status: pr', `pr: ${mergedPrUrl}`, '---',
+      '# OVERVIEW', 'Invalid because the phase ids repeat.',
+      '# TODOS', '- [pending] T01 First', '- [pending] T01 Duplicate',
+    ].join('\n');
+    const invalidMerged = buildPlanTree([{
+      slug: 'invalid-merged-pr', raw: invalidPrRaw, approved: true,
+      sessions: new Set<string>(), plans: new Set<string>(), prsMerged: true,
+    }])[0];
+    assert.strictEqual(invalidMerged.invalid, true);
+    assert.strictEqual(invalidMerged.group, 'completed');
+    assert.deepStrictEqual(invalidMerged.actions, []);
+  });
+
   it('groups valid, invalid, and unreadable plans using the facts available', () => {
     const done = ['---', 'status: done', '---', validPlanDocument()].join('\n');
     const completed = buildPlanNodeForTest(done);

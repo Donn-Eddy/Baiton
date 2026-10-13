@@ -5,6 +5,7 @@ import {
   planContextValue,
   PlanAction,
   PR_PARTIAL_STATUS,
+  PR_STATUS,
 } from '../src/model/planActions';
 import { PHASE_STATES, PhaseState } from '../src/model/phaseState';
 
@@ -169,6 +170,57 @@ describe('planActions (property)', () => {
           assert.deepStrictEqual(
             legalPlanActions({ approved, invalid, prUrl, phaseStates, status }),
             legalPlanActions({ approved, invalid, prUrl, phaseStates }),
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('a merged plan offers Show PR only, even when partial and ready to retry', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        prUrlArb,
+        phaseStatesArb,
+        fc.constantFrom(PR_STATUS, PR_PARTIAL_STATUS),
+        (approved, prUrl, phaseStates, status) => {
+          assert.deepStrictEqual(
+            legalPlanActions({ approved, invalid: false, prUrl, phaseStates, status, prsMerged: true }),
+            prUrl !== undefined ? ['showPr'] : [],
+          );
+          assert.deepStrictEqual(
+            legalPlanActions({ approved, invalid: true, prUrl, phaseStates, status, prsMerged: true }),
+            [],
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+
+    assert.deepStrictEqual(legalPlanActions({
+      approved: true,
+      invalid: false,
+      prUrl: 'https://example.com/org/repo/pull/7',
+      phaseStates: ['done'],
+      status: PR_PARTIAL_STATUS,
+      prsMerged: true,
+    }), ['showPr']);
+  });
+
+  it('an absent or false merged fact preserves today\'s actions', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.boolean(),
+        prUrlArb,
+        phaseStatesArb,
+        statusArb,
+        (approved, invalid, prUrl, phaseStates, status) => {
+          const input = { approved, invalid, prUrl, phaseStates, status };
+          assert.deepStrictEqual(
+            legalPlanActions({ ...input, prsMerged: false }),
+            legalPlanActions({ ...input }),
           );
         },
       ),
