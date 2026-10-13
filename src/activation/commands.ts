@@ -84,6 +84,7 @@ import {
   DEFAULT_PR_TOOL,
   isPrToolSelection,
   landPhaseWorktree,
+  planPrsMerged,
   resolveProviderExecutable,
   runsRootDir,
   selectProvider,
@@ -101,6 +102,8 @@ import type {
   PlanDraftRunner,
   SubmitPrError,
   TerminalHost,
+  PrState,
+  PrTool,
 } from '../engine';
 import {
   latestStart,
@@ -171,7 +174,12 @@ import { ChatController } from './chatController';
 import { listDocumentSlugs, resolveDocument } from '../storage/documentLocation';
 import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
-import { PlanExplorer, treeNodeTarget, type TreeNode } from './planExplorer';
+import {
+  PlanExplorer,
+  treeNodeTarget,
+  type PrsMergedChecker,
+  type TreeNode,
+} from './planExplorer';
 import {
   RunsExplorer,
   RUNS_VIEW_ID,
@@ -633,6 +641,52 @@ export function registerCommands(
     } finally {
       prInFlight.delete(prKey);
     }
+  };
+
+  /** The PR tool for a repo root over its configured remote, or undefined when pr.tool, the remote or the CLI cannot be resolved. Read-only; not gated on Restricted Mode. */
+  const prToolForRoot = async (root: string, remote: string): Promise<PrTool | undefined> => {
+    const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
+    if (!isPrToolSelection(selection)) return undefined;
+    try {
+      const rootGit = path.resolve(root) === path.resolve(repoRoot)
+        ? git
+        : activation.git?.forRepo(root) ?? createGitService(root);
+      const remoteUrl = await rootGit.remoteUrl(remote);
+      const kind = selectProvider(selection, remoteUrl);
+      const executable = resolveProviderExecutable(kind, { override: readPrToolPath() });
+      return executable === undefined ? undefined : createPrTool({ kind, executable, repoRoot: root });
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Whether every recorded PR/MR of a plan reads merged; unresolvable repo/provider or any failure -> not merged. */
+  const prsMergedForPlan: PrsMergedChecker = async ({ repo, urls, repoForUrl }) => {
+    const rootFor = (name: string | undefined): string | undefined =>
+      name === undefined || name === ownerRepoName()
+        ? repoRoot
+        : activation.repos?.repos.find((r) => r.name === name)?.root;
+    const remoteFor = (name: string | undefined): string =>
+      (name !== undefined ? activation.repoConfigs?.get(name)?.git?.remote : undefined) ??
+      readGitSettings().remote;
+    const tools = new Map<string, Promise<PrTool | undefined>>();
+    const toolFor = (name: string | undefined): Promise<PrTool | undefined> => {
+      const root = rootFor(name);
+      if (root === undefined) return Promise.resolve(undefined);
+      const key = path.resolve(root);
+      let tool = tools.get(key);
+      if (tool === undefined) {
+        tool = prToolForRoot(root, remoteFor(name)).catch(() => undefined);
+        tools.set(key, tool);
+      }
+      return tool;
+    };
+    const observed = new Map<string, PrState>(await Promise.all(urls.map(async (url): Promise<[string, PrState]> => {
+      const tool = await toolFor(repoForUrl.get(url) ?? repo);
+      const state = await tool?.stateByUrl?.(url).catch(() => 'unknown' as const);
+      return [url, state ?? 'unknown'];
+    })));
+    return planPrsMerged(urls, observed);
   };
 
   // land_phase (per-phase worktrees): merge a done phase's branch into the plan
@@ -1158,6 +1212,7 @@ export function registerCommands(
     surface,
     workspace.restricted,
     (slug) => chatController.setActivePlan(slug),
+    { prsMerged: prsMergedForPlan },
   ).start();
   disposables.push(
     vscode.window.registerTreeDataProvider(PLAN_EXPLORER_VIEW_ID, explorer),

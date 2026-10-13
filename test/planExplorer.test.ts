@@ -11,6 +11,7 @@ import { phaseContextValue } from '../src/model/phaseActions';
 import { planContextValue } from '../src/model/planActions';
 import type { RepoTopology } from '../src/model/validator';
 import type { Surface } from '../src/activation/surface';
+import type { PrsMergedQuery } from '../src/activation/planExplorer';
 
 type PlanExplorerModule = typeof import('../src/activation/planExplorer');
 let mod: PlanExplorerModule;
@@ -56,10 +57,52 @@ function waitFor(predicate: () => boolean, label: string): Promise<void> {
   });
 }
 
-describe('PlanExplorer', () => {
+describe('PlanExplorer', function () {
+  this.timeout(8000);
   let root: string;
   let baitonDir: string;
   let explorer: InstanceType<PlanExplorerModule['PlanExplorer']> | undefined;
+
+  function writePlan(slug: string, frontmatterLines: string[]): string {
+    const target = path.join(baitonDir, 'plans', slug, 'plan.md');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, ['---', ...frontmatterLines, '---', validPlan()].join('\n'));
+    return target;
+  }
+
+  function groupSlugs(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const group of explorer?.getChildren() ?? []) {
+      if (group.kind !== 'group') continue;
+      out[group.node.kind] = explorer!.getChildren(group)
+        .flatMap((node) => node.kind === 'plan' ? [node.node.slug] : []);
+    }
+    return out;
+  }
+
+  function fireChange(): void {
+    const fake = (globalThis as unknown as {
+      __vscodeFake: { watchers: Array<{ change?: () => void; disposed: boolean }> };
+    }).__vscodeFake;
+    for (const watcher of fake.watchers) {
+      if (!watcher.disposed) watcher.change?.();
+    }
+  }
+
+  function waitForTreeChange(): Promise<void> {
+    return new Promise((resolve) => {
+      const subscription = explorer!.onDidChangeTreeData(() => {
+        subscription.dispose();
+        resolve();
+      });
+    });
+  }
+
+  async function refreshAfterChange(): Promise<void> {
+    const changed = waitForTreeChange();
+    fireChange();
+    await changed;
+  }
 
   before(async () => {
     const repoRoot = process.cwd();
@@ -118,13 +161,12 @@ describe('PlanExplorer', () => {
           return documentPath;
         },
         createFileSystemWatcher: () => {
-          const watcher = { disposed: false };
+          const watcher: { create?: () => void; change?: () => void; del?: () => void; disposed: boolean } = { disposed: false };
           watchers.push(watcher);
-          const on = () => ({ dispose: () => undefined });
           return {
-            onDidCreate: on,
-            onDidChange: on,
-            onDidDelete: on,
+            onDidCreate: (cb: () => void) => { watcher.create = cb; return { dispose: () => undefined }; },
+            onDidChange: (cb: () => void) => { watcher.change = cb; return { dispose: () => undefined }; },
+            onDidDelete: (cb: () => void) => { watcher.del = cb; return { dispose: () => undefined }; },
             dispose: () => { watcher.disposed = true; },
           };
         },
@@ -363,5 +405,154 @@ describe('PlanExplorer', () => {
     assert.ok(invalid);
     assert.strictEqual(invalid.kind, 'plan');
     assert.ok(explorer.getChildren(invalid).some((node) => node.kind === 'error'));
+  });
+
+  it('groups a pr plan Completed when its recorded PRs all read merged, without writing the document', async () => {
+    const url = 'https://github.com/o/r/pull/1';
+    const planPath = writePlan('merged', ['status: pr', `pr: ${url}`]);
+    writePlan('prdone', ['status: done', `pr: ${url}`]);
+    writePlan('prnourl', ['status: pr']);
+    const before = fs.readFileSync(planPath);
+    const calls: PrsMergedQuery[] = [];
+    const warnings: string[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: (m: string) => warnings.push(m), log: (m: string) => warnings.push(m) } as unknown as Surface,
+      false,
+      undefined,
+      { prsMerged: async (query) => { calls.push(query); return true; } },
+    ).start();
+
+    await waitFor(() => groupSlugs().completed?.includes('merged') === true, 'the merged PR plan');
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].slug, 'merged');
+    assert.deepStrictEqual(calls[0].urls, [url]);
+    assert.strictEqual(calls[0].repo, undefined);
+    assert.deepStrictEqual(groupSlugs().completed, ['merged', 'prdone']);
+    const completed = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'completed')!;
+    const plan = explorer.getChildren(completed).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'merged')!;
+    assert.strictEqual(explorer.getTreeItem(plan).contextValue, planContextValue(['showPr']));
+    assert.strictEqual(explorer.getTreeItem(plan).description, 'pr');
+    assert.deepStrictEqual(fs.readFileSync(planPath), before);
+    assert.deepStrictEqual(warnings, []);
+  });
+
+  it('memoises the check per URL set and re-arms when the URL set changes', async () => {
+    const firstUrl = 'https://github.com/o/r/pull/1';
+    const secondUrl = 'https://github.com/o/r/pull/2';
+    writePlan('merged', ['status: pr', `pr: ${firstUrl}`]);
+    const calls: PrsMergedQuery[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { prsMerged: async (query) => { calls.push(query); return true; } },
+    ).start();
+    await waitFor(() => groupSlugs().completed?.includes('merged') === true, 'the initial merged PR plan');
+
+    await refreshAfterChange();
+    await refreshAfterChange();
+    assert.strictEqual(calls.length, 1);
+
+    writePlan('merged', ['status: pr', `pr: ${secondUrl}`]);
+    await refreshAfterChange();
+    await waitFor(() => calls.length === 2 && groupSlugs().completed?.includes('merged') === true, 'the changed PR URL check');
+    assert.deepStrictEqual(calls.map((call) => call.urls), [[firstUrl], [secondUrl]]);
+  });
+
+  it('does not block refresh on a hung check', async () => {
+    const url = 'https://github.com/o/r/pull/1';
+    writePlan('waiting', ['status: pr', `pr: ${url}`]);
+    const calls: PrsMergedQuery[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { prsMerged: (query) => { calls.push(query); return new Promise<boolean>(() => {}); } },
+    ).start();
+    await waitFor(() => groupSlugs().pending?.includes('alpha') === true &&
+      groupSlugs().pending?.includes('beta') === true, 'the initial plan rows with a pending PR check');
+    assert.strictEqual(calls.length, 1);
+    assert.ok(!groupSlugs().completed?.includes('waiting'));
+
+    await refreshAfterChange();
+    assert.strictEqual(calls.length, 1);
+  });
+
+  it('treats failed and synchronously thrown checks as not merged and logs once', async () => {
+    const url = 'https://github.com/o/r/pull/1';
+    writePlan('failed', ['status: pr', `pr: ${url}`]);
+    writePlan('syncfailed', ['status: pr', `pr: ${url.replace('/1', '/2')}`]);
+    const calls: PrsMergedQuery[] = [];
+    const warnings: string[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: (m: string) => warnings.push(m), log: (m: string) => warnings.push(m) } as unknown as Surface,
+      false,
+      undefined,
+      { prsMerged: (query) => {
+        calls.push(query);
+        if (query.slug === 'syncfailed') throw new Error('sync offline');
+        return Promise.reject(new Error('offline'));
+      } },
+    ).start();
+    await waitFor(() => warnings.length === 2, 'the PR check failure logs');
+    assert.deepStrictEqual(warnings.map((message) => message.includes('syncfailed') ? 'syncfailed' : 'failed').sort(), ['failed', 'syncfailed']);
+    assert.strictEqual(calls.length, 2);
+    assert.ok(!groupSlugs().completed?.includes('failed'));
+    assert.ok(!groupSlugs().completed?.includes('syncfailed'));
+
+    await refreshAfterChange();
+    await refreshAfterChange();
+    assert.strictEqual(warnings.length, 2);
+    assert.strictEqual(calls.length, 2);
+  });
+
+  it('requires every recorded URL in prs to be merged', async () => {
+    const firstUrl = 'https://github.com/o/r/pull/1';
+    const secondUrl = 'https://github.com/o/api/pull/3';
+    writePlan('multi', [
+      'status: pr-partial',
+      `pr: ${firstUrl}`,
+      `prs: {".":"${firstUrl}","packages/api":"${secondUrl}"}`,
+    ]);
+    const calls: PrsMergedQuery[] = [];
+    const surface = { error: () => undefined, warn: () => undefined, log: () => undefined } as unknown as Surface;
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      surface,
+      false,
+      undefined,
+      { prsMerged: async (query) => { calls.push(query); return query.urls.every((url) => !url.endsWith('/3')); } },
+    ).start();
+    await waitFor(() => calls.length === 1 && groupSlugs().pending?.includes('multi') === true, 'the partial PR plan check');
+    assert.deepStrictEqual(calls[0].urls, [firstUrl, secondUrl]);
+    assert.strictEqual(calls[0].repoForUrl.get(secondUrl), 'packages/api');
+    assert.ok(!groupSlugs().completed?.includes('multi'));
+
+    explorer.dispose();
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      surface,
+      false,
+      undefined,
+      { prsMerged: async () => true },
+    ).start();
+    await waitFor(() => groupSlugs().completed?.includes('multi') === true, 'the completed partial PR plan');
+    const completed = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'completed')!;
+    const plan = explorer.getChildren(completed).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'multi')!;
+    assert.strictEqual(explorer.getTreeItem(plan).contextValue, planContextValue(['showPr']));
   });
 });
