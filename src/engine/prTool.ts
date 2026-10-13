@@ -1,8 +1,9 @@
 /**
  * The pull/merge-request tool seam (design section 8, "PR"), provider
  * agnostic. The submit flow needs two operations — find an open request for a
- * head branch, and create one — so {@link PrTool} is that small. Two backends
- * ship, both driving the vendor's CLI: `gh` for GitHub and `glab` for GitLab.
+ * head branch, and create one — and a read-only state lookup used to derive
+ * plan completion, so {@link PrTool} stays small. Two backends ship, both
+ * driving the vendor's CLI: `gh` for GitHub and `glab` for GitLab.
  * `config.pr.tool` picks one, or `auto` detects it from the remote URL. The
  * executable is resolved from a settings override, then PATH, then the usual
  * install directories the extension host's PATH often lacks (Homebrew,
@@ -79,16 +80,99 @@ export interface PrToolError {
   stderr: string;
 }
 
+/** A request's lifecycle state as read from the provider; `unknown` when it cannot be established. */
+export type PrState = 'open' | 'merged' | 'closed' | 'unknown';
+
 export interface PrTool {
   /** The open request whose head is `branch`, or `undefined` when none. */
   findOpenByHead(branch: string): Promise<PullRequest | undefined>;
   /** Create a request; resolves it, rejects with a {@link PrToolError}. */
   create(input: CreatePrInput): Promise<PullRequest>;
+  /**
+   * The state of the request at `url`. Never rejects: an unparsable URL, a CLI
+   * failure (missing executable, offline, non-zero exit) or unrecognised output
+   * all resolve `'unknown'`. Optional so hand-written fakes need not implement
+   * it; callers treat an absent method as `'unknown'`.
+   */
+  stateByUrl?(url: string): Promise<PrState>;
 }
 
 /** The supported providers, named after their CLIs. */
 export type PrProviderKind = 'gh' | 'glab';
 export const PR_PROVIDERS: readonly PrProviderKind[] = ['gh', 'glab'] as const;
+
+/** A recorded request URL split into what the CLIs' `--repo` flags and view commands need. */
+export interface ParsedPrUrl {
+  kind: PrProviderKind;
+  host: string;
+  repoPath: string;
+  number: number;
+}
+
+/** Parse a GitHub pull-request or GitLab merge-request URL; `undefined` otherwise. */
+export function parsePrUrl(url: string): ParsedPrUrl | undefined {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url.trim());
+  } catch {
+    return undefined;
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    return undefined;
+  }
+
+  const segments = parsedUrl.pathname.replace(/\/$/, '').split('/').filter((part) => part.length > 0);
+  const gitlabIndex = segments.findIndex((part, index) => part === '-' && segments[index + 1] === 'merge_requests');
+  if (gitlabIndex >= 1 && gitlabIndex + 2 === segments.length - 1 && /^\d+$/.test(segments[gitlabIndex + 2])) {
+    const number = Number(segments[gitlabIndex + 2]);
+    if (number > 0 && Number.isFinite(number)) {
+      return {
+        kind: 'glab',
+        host: parsedUrl.host,
+        repoPath: segments.slice(0, gitlabIndex).join('/'),
+        number,
+      };
+    }
+    return undefined;
+  }
+
+  if (segments.length === 4 && segments[2] === 'pull' && /^\d+$/.test(segments[3])) {
+    const number = Number(segments[3]);
+    if (segments[0].length > 0 && segments[1].length > 0 && number > 0 && Number.isFinite(number)) {
+      return { kind: 'gh', host: parsedUrl.host, repoPath: `${segments[0]}/${segments[1]}`, number };
+    }
+  }
+  return undefined;
+}
+
+/** `gh pr view --json state` output → PrState: OPEN/MERGED/CLOSED (case-insensitive); anything else unknown. */
+export function parseGhPrState(stdout: string): PrState {
+  const state = parseStateField(stdout);
+  return state === 'open' || state === 'merged' || state === 'closed' ? state : 'unknown';
+}
+
+/** `glab mr view --output json` output → PrState: opened→open, merged, closed and locked→closed; anything else unknown. */
+export function parseGlabMrState(stdout: string): PrState {
+  const state = parseStateField(stdout);
+  if (state === 'opened') return 'open';
+  if (state === 'merged') return 'merged';
+  if (state === 'closed' || state === 'locked') return 'closed';
+  return 'unknown';
+}
+
+function parseStateField(stdout: string): string | undefined {
+  const trimmed = stdout.trim();
+  if (trimmed.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const state = (parsed as Record<string, unknown>).state;
+  return typeof state === 'string' ? state.toLowerCase() : undefined;
+}
 
 /** The `config.pr.tool` value: a provider, or `auto` to detect from the remote. */
 export type PrToolSelection = PrProviderKind | 'auto';
@@ -235,6 +319,18 @@ function ghTool(cli: (args: string[]) => Promise<string>): PrTool {
       ]);
       return parseCreatedPr(out);
     },
+    async stateByUrl(url) {
+      const parsed = parsePrUrl(url);
+      if (parsed === undefined || parsed.kind !== 'gh') return 'unknown';
+      try {
+        const out = await cli([
+          'pr', 'view', String(parsed.number), '--repo', `${parsed.host}/${parsed.repoPath}`, '--json', 'state',
+        ]);
+        return parseGhPrState(out);
+      } catch {
+        return 'unknown';
+      }
+    },
   };
 }
 
@@ -256,6 +352,18 @@ function glabTool(cli: (args: string[]) => Promise<string>): PrTool {
         '--yes',
       ]);
       return parseCreatedPr(out);
+    },
+    async stateByUrl(url) {
+      const parsed = parsePrUrl(url);
+      if (parsed === undefined || parsed.kind !== 'glab') return 'unknown';
+      try {
+        const out = await cli([
+          'mr', 'view', String(parsed.number), '--repo', parsed.repoPath, '--output', 'json',
+        ]);
+        return parseGlabMrState(out);
+      } catch {
+        return 'unknown';
+      }
     },
   };
 }
