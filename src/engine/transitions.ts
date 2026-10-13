@@ -27,10 +27,13 @@
  *
  * The plan-level PR helpers at the bottom describe whether every touched repo
  * has a PR (`pr`) or only some do (`pr-partial`); these are plan states, not
- * phase transitions.
+ * phase transitions. They also derive whether every recorded request has been
+ * merged, a derived plan fact used for grouping and never persisted.
  */
 import type { PhaseState } from '../model/phaseState';
 import { PR_PARTIAL_STATUS, PR_STATUS } from '../model/planActions';
+import { parsePrsValue } from './prTool';
+import type { PrState } from './prTool';
 
 /**
  * A lifecycle action the user (or orchestrator) can trigger for a phase. These
@@ -287,4 +290,30 @@ export function reposToSubmit(touched: readonly string[], recorded: ReadonlySet<
 /** Whether a status allows retrying PR submission. */
 export function isPartialPrStatus(status: string | undefined): boolean {
   return status?.trim() === PR_PARTIAL_STATUS;
+}
+
+/**
+ * The plan's recorded request URLs: the `pr:` value followed by every `prs:`
+ * value in key order, trimmed, with empties and duplicates dropped. The
+ * explorer and the submit readiness check both derive the set here so they
+ * agree on what "every recorded request" means.
+ */
+export function recordedPrUrls(pr: string | undefined, prs: string | undefined): string[] {
+  const urls: string[] = [];
+  const add = (raw: string | undefined): void => {
+    const url = raw?.trim();
+    if (url && !urls.includes(url)) urls.push(url);
+  };
+  add(pr);
+  for (const url of parsePrsValue(prs).values()) add(url);
+  return urls;
+}
+
+/**
+ * Whether a plan's PRs are all merged: true only when at least one URL is
+ * recorded and every recorded URL is observed `merged`. A missing
+ * observation, or `open` / `closed` / `unknown`, counts as not merged.
+ */
+export function planPrsMerged(recorded: readonly string[], observed: ReadonlyMap<string, PrState>): boolean {
+  return recorded.length > 0 && recorded.every((url) => observed.get(url) === 'merged');
 }
