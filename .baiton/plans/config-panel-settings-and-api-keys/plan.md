@@ -78,4 +78,4 @@ Both return `Thenable<unknown>`, so adapt them to `Promise<void> | void`. The pa
 - [done] P04 Add .baiton/config.local.json as a merged overlay in loadConfig, migrating to it instead of config.json (files: src/config/loadConfig.ts, test/config.test.ts, test/config.overlay.test.ts)
 - [done] P05 Gitignore the local config and seed it from Initialize instead of config.json (after P04; files: src/config/gitignore.ts, src/config/initialize.ts, src/extension.ts, test/config.gitignore.test.ts, test/config.test.ts)
 - [done] P06 Point panel saves, tokens, reset and the watcher at config.local.json and relabel the panel's config path (after P05; files: src/config/configDocument.ts, src/activation/configPanelController.ts, src/activation/configPanel.ts, media/config.html, test/configPanel.document.test.ts, test/configPanel.controller.test.ts, test/configPanel.view.test.ts)
-- [pending] P07 Document the local config overlay and the new toolbar buttons in README (after P06; files: README.md)
+- [planning] P07 Document the local config overlay and the new toolbar buttons in README (after P06; files: README.md)
