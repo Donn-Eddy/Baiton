@@ -74,7 +74,7 @@ Both return `Thenable<unknown>`, so adapt them to `Promise<void> | void`. The pa
 # PHASES
 
 - [done] P01 Add openSettings/manageApiKeys messages and host-free controller seams with unit tests (files: src/config/configPanel.ts, src/activation/configPanelController.ts, test/configPanel.controller.test.ts)
-- [planned] P02 Pass the seams through registerConfigPanel and wire them to openSettings and setProviderApiKey in extension.ts (after P01; files: src/activation/configPanel.ts, src/extension.ts, test/configPanel.view.test.ts, test/activation.gating.test.ts)
+- [executing] P02 Pass the seams through registerConfigPanel and wire them to openSettings and setProviderApiKey in extension.ts (after P01; files: src/activation/configPanel.ts, src/extension.ts, test/configPanel.view.test.ts, test/activation.gating.test.ts)
 - [pending] P04 Add .baiton/config.local.json as a merged overlay in loadConfig, migrating to it instead of config.json (files: src/config/loadConfig.ts, test/config.test.ts, test/config.overlay.test.ts)
 - [pending] P05 Gitignore the local config and seed it from Initialize instead of config.json (after P04; files: src/config/gitignore.ts, src/config/initialize.ts, src/extension.ts, test/config.gitignore.test.ts, test/config.test.ts)
 - [pending] P06 Point panel saves, tokens, reset and the watcher at config.local.json and relabel the panel's config path (after P05; files: src/config/configDocument.ts, src/activation/configPanelController.ts, src/activation/configPanel.ts, media/config.html, test/configPanel.document.test.ts, test/configPanel.controller.test.ts, test/configPanel.view.test.ts)
