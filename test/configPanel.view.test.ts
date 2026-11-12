@@ -411,6 +411,12 @@ describe('Config Panel view and reveal command ', () => {
     }
   });
 
+  it('labels the local overlay as the configuration path', () => {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'media', 'config.html'), 'utf8');
+    assert.ok(html.includes('<span id="config-path">.baiton/config.local.json</span>'));
+    assert.ok(!html.includes('>.baiton/config.json<'));
+  });
+
   it('revealConfigPanel executes the focus command and shows unavailable message on rejection', async () => {
     let executedCommand: string | undefined;
     const infoMessages: string[] = [];

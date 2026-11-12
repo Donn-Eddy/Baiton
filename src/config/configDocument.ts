@@ -1,18 +1,22 @@
 /**
  * Config Panel document I/O.
  *
- * The panel reads the raw `.baiton/config.json` document itself — rather than
- * going through {@link loadConfig} — so unknown keys and the exact on-disk
- * text survive a round trip. Writes are guarded by a content-hash "token":
- * the caller passes back the token it loaded with, and a write is refused if
- * the file changed on disk since. This narrows, but does not close, the
- * window between reading the token and the atomic rename; a file watcher
- * is the other half of the story.
+ * The panel reads the committed `.baiton/config.json` baseline and the
+ * gitignored `.baiton/config.local.json` overlay, shows their merged result,
+ * and only ever writes the local file. A content-hash token guards the local
+ * file. The watcher also checks the baseline token so baseline changes reach
+ * the panel.
  */
 import * as fs from 'fs/promises';
 import { createHash } from 'crypto';
 import { Result, ok, err } from '../model';
-import { DirLike, configFilePath, writeJsonAtomic } from './loadConfig';
+import {
+  DirLike,
+  configFilePath,
+  localConfigFilePath,
+  mergeConfigLayers,
+  writeJsonAtomic,
+} from './loadConfig';
 
 /**
  * The conflict token of a file that does not exist. Using this as
@@ -33,12 +37,23 @@ export function configToken(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/** The raw config document as loaded: exact text, parsed object, and token. */
+/**
+ * The effective config document as loaded. `path` is always the local file;
+ * `text` is its exact text (empty when only the baseline exists); `doc` is the
+ * merged effective document; and `token` is the local text's configToken or
+ * ABSENT_TOKEN when the local file is absent.
+ */
 export interface ConfigDocument {
   path: string;
   text: string;
   doc: Record<string, unknown>;
   token: string;
+  /**
+   * configToken of the committed `.baiton/config.json` baseline at read time,
+   * ABSENT_TOKEN when it does not exist; set by readConfigDocument only
+   * (writeConfigDocument never reads or writes the baseline).
+   */
+  baselineToken?: string;
 }
 
 /**
@@ -47,7 +62,7 @@ export interface ConfigDocument {
  * loader's classification (and reuse its message wording so the panel's error
  * state reads like the rest of the extension), while `conflict`/`io` are
  * write-side outcomes that have no loader equivalent. The `conflict` error
- * carries the current on-disk `token` so the webview's Reload action can
+ * carries the current on-disk local token so the webview's Reload action can
  * adopt it without a second read.
  */
 export type ConfigDocumentError =
@@ -57,95 +72,108 @@ export type ConfigDocumentError =
   | { kind: 'io'; path: string; message: string };
 
 /**
- * Reads and parses `<baitonDir>/config.json`, returning the exact file text,
- * the parsed object, and a {@link configToken} for it. Never throws for an
- * expected failure — same contract as {@link loadConfig}. A missing file is
- * `absent`; malformed JSON or a parsed non-object is `unparseable`; any other
- * read failure is `io`.
+ * Reads the committed baseline and local overlay, returning the exact local
+ * file text and the merged effective document. Never throws for an expected
+ * failure. A missing layer is allowed; the result is `absent` only when both
+ * files are missing. Malformed JSON or a parsed non-object is `unparseable`
+ * and names the exact file that failed; any other read failure is `io`.
  */
 export async function readConfigDocument(
   baitonDir: DirLike,
 ): Promise<Result<ConfigDocument, ConfigDocumentError>> {
-  const p = configFilePath(baitonDir);
+  const localPath = localConfigFilePath(baitonDir);
+  const baselinePath = configFilePath(baitonDir);
 
-  let text: string;
-  try {
-    text = await fs.readFile(p, 'utf8');
-  } catch (e) {
-    if (isNotFound(e)) {
-      return err({
-        kind: 'absent',
-        path: p,
-        message: `No configuration found at ${p}. Run "Baiton: Initialize" first.`,
-      });
+  const baselineTextResult = await readLayerText(baselinePath);
+  if (!baselineTextResult.ok) {
+    return baselineTextResult;
+  }
+  const localTextResult = await readLayerText(localPath);
+  if (!localTextResult.ok) {
+    return localTextResult;
+  }
+  const baselineText = baselineTextResult.value;
+  const localText = localTextResult.value;
+
+  if (baselineText === undefined && localText === undefined) {
+    return err({
+      kind: 'absent',
+      path: localPath,
+      message: `No configuration found at ${localPath} or ${baselinePath}. Run "Baiton: Initialize" first.`,
+    });
+  }
+
+  let baseline: Record<string, unknown> | undefined;
+  if (baselineText !== undefined) {
+    const parsedBaseline = parseLayer(baselinePath, baselineText);
+    if (!parsedBaseline.ok) {
+      return parsedBaseline;
     }
-    return err({ kind: 'io', path: p, message: `Could not read configuration at ${p}: ${describe(e)}.` });
+    baseline = parsedBaseline.value;
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return err({
-      kind: 'unparseable',
-      path: p,
-      message: `Configuration at ${p} is not valid JSON: ${describe(e)}.`,
-    });
+  let local: Record<string, unknown> | undefined;
+  if (localText !== undefined) {
+    const parsedLocal = parseLayer(localPath, localText);
+    if (!parsedLocal.ok) {
+      return parsedLocal;
+    }
+    local = parsedLocal.value;
   }
 
-  if (!isObject(parsed)) {
-    return err({
-      kind: 'unparseable',
-      path: p,
-      message: `Configuration at ${p} must be a JSON object.`,
-    });
-  }
+  const doc = baseline === undefined
+    ? local!
+    : local === undefined
+      ? baseline
+      : mergeConfigLayers(baseline, local);
 
-  return ok({ path: p, text, doc: parsed, token: configToken(text) });
+  return ok({
+    path: localPath,
+    text: localText ?? '',
+    doc,
+    token: localText === undefined ? ABSENT_TOKEN : configToken(localText),
+    baselineToken: baselineText === undefined ? ABSENT_TOKEN : configToken(baselineText),
+  });
 }
 
 /**
- * Reads just the text of `<baitonDir>/config.json` and returns its
- * {@link configToken}, or {@link ABSENT_TOKEN} when the file does not exist.
- * The primitive the write path and (later) the file watcher use, so neither
- * has to parse to learn whether the file moved under it.
+ * Reads just `<baitonDir>/config.local.json` and returns its
+ * {@link configToken}, or {@link ABSENT_TOKEN} when the local file does not
+ * exist. `<baitonDir>/config.json` is never read here; the token guards the
+ * file this panel writes.
  */
 export async function readConfigToken(
   baitonDir: DirLike,
 ): Promise<Result<string, ConfigDocumentError>> {
-  const p = configFilePath(baitonDir);
-  let text: string;
-  try {
-    text = await fs.readFile(p, 'utf8');
-  } catch (e) {
-    if (isNotFound(e)) {
-      return ok(ABSENT_TOKEN);
-    }
-    return err({ kind: 'io', path: p, message: `Could not read configuration at ${p}: ${describe(e)}.` });
-  }
-  return ok(configToken(text));
+  return readTokenAt(localConfigFilePath(baitonDir));
+}
+
+/** Reads the token of the committed `<baitonDir>/config.json` baseline. */
+export async function readBaselineToken(
+  baitonDir: DirLike,
+): Promise<Result<string, ConfigDocumentError>> {
+  return readTokenAt(configFilePath(baitonDir));
 }
 
 /** Options for {@link writeConfigDocument}. */
 export interface WriteConfigOptions {
   /**
-   * The token the caller last loaded. When present, the write is refused with
-   * a `conflict` error unless the file's current token still matches. When
-   * omitted, the write proceeds unconditionally (the Overwrite and
-   * Reset-to-defaults path).
+   * The local-file token the caller last loaded. When present, the write is
+   * refused with a `conflict` error unless the current local token still
+   * matches. When omitted, the write proceeds unconditionally (the Overwrite
+   * and Reset-to-defaults path).
    */
   expectedToken?: string;
 }
 
 /**
- * Writes `value` to `<baitonDir>/config.json` atomically, optionally guarded
- * by {@link WriteConfigOptions.expectedToken}. When the token is stale,
- * nothing is written and the file is left byte-for-byte unchanged. On
- * success, recomputes the text exactly as {@link writeJsonAtomic} wrote it —
+ * Writes `value` to `<baitonDir>/config.local.json` atomically, optionally
+ * guarded by {@link WriteConfigOptions.expectedToken}. It never reads or
+ * writes `<baitonDir>/config.json`. When the token is stale, nothing is
+ * written and the local file is left byte-for-byte unchanged. On success,
+ * recomputes the text exactly as {@link writeJsonAtomic} wrote it —
  * `JSON.stringify(value, null, 2) + '\n'` — so the caller gets the post-write
- * token without re-reading the file. The serialization is duplicated with
- * `writeJsonAtomic` on purpose, to avoid widening that function's return
- * type; a test pins the two together.
+ * token without re-reading the file.
  *
  * The token check narrows, not closes, the window between reading the token
  * and the atomic rename (TOCTOU); this is accepted, not solved, here.
@@ -155,7 +183,7 @@ export async function writeConfigDocument(
   value: unknown,
   options?: WriteConfigOptions,
 ): Promise<Result<ConfigDocument, ConfigDocumentError>> {
-  const p = configFilePath(baitonDir);
+  const p = localConfigFilePath(baitonDir);
 
   if (options?.expectedToken !== undefined) {
     const currentResult = await readConfigToken(baitonDir);
@@ -181,6 +209,59 @@ export async function writeConfigDocument(
 
   const text = `${JSON.stringify(value, null, 2)}\n`;
   return ok({ path: p, text, doc: JSON.parse(text) as Record<string, unknown>, token: configToken(text) });
+}
+
+/** Reads one layer's exact text, allowing a missing file. */
+async function readLayerText(
+  p: string,
+): Promise<Result<string | undefined, ConfigDocumentError>> {
+  try {
+    return ok(await fs.readFile(p, 'utf8'));
+  } catch (e) {
+    if (isNotFound(e)) {
+      return ok(undefined);
+    }
+    return err({ kind: 'io', path: p, message: `Could not read configuration at ${p}: ${describe(e)}.` });
+  }
+}
+
+/** Parses a layer and attributes any shape or syntax error to its own path. */
+function parseLayer(
+  p: string,
+  text: string,
+): Result<Record<string, unknown>, ConfigDocumentError> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return err({
+      kind: 'unparseable',
+      path: p,
+      message: `Configuration at ${p} is not valid JSON: ${describe(e)}.`,
+    });
+  }
+
+  if (!isObject(parsed)) {
+    return err({
+      kind: 'unparseable',
+      path: p,
+      message: `Configuration at ${p} must be a JSON object.`,
+    });
+  }
+
+  return ok(parsed);
+}
+
+/** Reads and hashes one file, returning ABSENT_TOKEN for ENOENT. */
+async function readTokenAt(p: string): Promise<Result<string, ConfigDocumentError>> {
+  try {
+    return ok(configToken(await fs.readFile(p, 'utf8')));
+  } catch (e) {
+    if (isNotFound(e)) {
+      return ok(ABSENT_TOKEN);
+    }
+    return err({ kind: 'io', path: p, message: `Could not read configuration at ${p}: ${describe(e)}.` });
+  }
 }
 
 /** Whether a value is a non-null, non-array object. */
