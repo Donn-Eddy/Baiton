@@ -49,7 +49,7 @@ export const CONFIG_PANEL_REQUIRE_WORKSPACE_MESSAGE =
 /** Static HTML shell filename located under `media/`. */
 const CONFIG_HTML = 'config.html';
 
-/** Coalesce watcher events on .baiton/config.json within this window. */
+/** Coalesce watcher events on .baiton/config.json or .baiton/config.local.json within this window. */
 export const EXTERNAL_CHANGE_DEBOUNCE_MS = 250;
 
 /**
@@ -219,6 +219,18 @@ export interface RegisterConfigPanelDeps {
     baitonDir: string,
     config: Config,
   ): Promise<readonly string[]> | readonly string[];
+  /**
+   * Opens VS Code Settings filtered to the Baiton orchestrator settings. Optional: a caller
+   * that omits it (test/configPanel.view.test.ts) gets a silent no-op for the panel's
+   * "More settings…" button. `src/extension.ts` binds it to
+   * `workbench.action.openSettings` with `${SETTINGS_NS}.orchestrator`.
+   */
+  openSettings?(): Promise<void> | void;
+  /**
+   * Runs the provider API-key flow (`baiton.setProviderApiKey` with no argument). Optional;
+   * omitted → silent no-op. A rejection is logged by the controller and never changes panel state.
+   */
+  manageApiKeys?(): Promise<void> | void;
 }
 
 /**
@@ -290,10 +302,14 @@ export function registerConfigPanel(deps: RegisterConfigPanelDeps): vscode.Dispo
         deps.applyConfig !== undefined
           ? (cfg) => deps.applyConfig!(baitonDir, cfg)
           : undefined,
+      openSettings:
+        deps.openSettings !== undefined ? () => deps.openSettings!() : undefined,
+      manageApiKeys:
+        deps.manageApiKeys !== undefined ? () => deps.manageApiKeys!() : undefined,
       log: deps.log,
     });
 
-    const pattern = new vscode.RelativePattern(baitonDir, 'config.json');
+    const pattern = new vscode.RelativePattern(baitonDir, '{config.json,config.local.json}');
     watcher = vscode.workspace.createFileSystemWatcher(pattern);
 
     const schedule = () => {
