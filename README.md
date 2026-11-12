@@ -241,7 +241,9 @@ its transcript. A transcript from before sessions existed (`.baiton/chat.jsonl`
 or `.baiton/plans/<slug>/chat.jsonl`) is migrated into the new layout as one
 session the first time the view opens that conversation, and an empty one is
 removed. All of these paths are covered by `.baiton/.gitignore`, which also
-excludes `/runs/` and `/worktrees/` — everything a plan-less run owns.
+excludes `/runs/` and `/worktrees/` — everything a plan-less run owns. It also
+excludes `/config.local.json` and `/.config*json.*.tmp` for local configuration
+and its atomic-write temporary files.
 
 ### Interventions in chat
 
@@ -307,7 +309,7 @@ The orchestrator gathers and agrees the requirements; the configured
 
 Only one stage runs per repository, so a plan draft, a phase stage and a
 plan-less run's stage never run at the same time. A `plan-writer` entry missing
-from an existing `.baiton/config.json` is filled in from the `planner` entry. After the draft
+from the configuration is filled in from the `planner` entry. After the draft
 lands you can refine it in chat with `update_overview`, `add_phase`, `edit_phase`
 and `remove_phase`.
 
@@ -396,7 +398,7 @@ back to execute, bounded by `limits.exec_attempts`; a `pass` marks it `done`.
 Execute commits in the worktree with a `Run-Id: <run-id>` trailer
 (`RUN_ID_TRAILER` in `src/engine/runPipeline.ts`). Investigate reuses the
 existing `reviewer` role — read plus shell, writes confined to the run directory
-— so `.baiton/config.json` needs no new role and no migration. Cancelling
+— so the configuration needs no new role and no migration. Cancelling
 disposes the running stage's terminal and records `cancelled`, and deliberately
 LEAVES the worktree and the branch in place for inspection.
 
@@ -610,7 +612,7 @@ documented in **Harness ask relay (per-adapter probe findings)** below.
 
 Existing `.baiton/specs/<slug>/spec.md` documents with `# OVERVIEW`, `# TODOS`, `T##` ids and `todos/<id>/` artifacts remain supported for listing, validation and runs. Their phase branches keep the `baiton-todo/<slug>/<id>` namespace.
 
-For compatibility, a `roles.spec-writer` key in `config.json` is read as `plan-writer`; an explicit `plan-writer` entry takes precedence when both are present. A persisted mode `spec` loads as `plan`. When a slug exists under both document roots, `.baiton/plans/` takes precedence. New documents are written under `.baiton/plans/`; nothing new is written under `.baiton/specs/`.
+For compatibility, a `roles.spec-writer` key in the configuration is read as `plan-writer`; an explicit `plan-writer` entry takes precedence when both are present. A persisted mode `spec` loads as `plan`. When a slug exists under both document roots, `.baiton/plans/` takes precedence. New documents are written under `.baiton/plans/`; nothing new is written under `.baiton/specs/`.
 
 ### Providers and models
 
@@ -662,7 +664,8 @@ Zen, share one row), then takes the value in a masked input. A non-empty submit
 stores the trimmed value and confirms without ever showing it; an empty submit
 clears an existing key, or reports that nothing changed when none was stored;
 dismissing either box changes nothing and says nothing; a storage failure
-leaves the previous value untouched and reports an error.
+leaves the previous value untouched and reports an error. The command is also
+available from the Configuration view's **Manage API keys…** button.
 
 **Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) stays
 registered as an alias so existing key bindings keep working. The
@@ -804,33 +807,88 @@ The configuration form is the **Configuration** section of the Baiton view in th
   saving is never blocked by it.
 - **Preservation of unmanaged keys** — every key outside the form's managed set
   (`version`, `pr`, `git.verify`, custom or unrecognized keys, and out-of-set
-  agent, model, or effort values) is preserved on save. Written JSON is formatted
-  with two-space indentation and a trailing newline.
+  agent, model, or effort values) is preserved on save. The panel saves the full
+  effective (merged) document to `.baiton/config.local.json` and leaves
+  `.baiton/config.json` byte-for-byte untouched. Written JSON is formatted with
+  two-space indentation and a trailing newline.
 - **Inline and host-side validation** — fields validate as you type with inline
   error indicators, and the host re-validates the submitted form before writing,
   guaranteeing the webview cannot write a configuration that the extension
   loader would reject. Effort validates against each agent's closed set of supported
   levels when applicable; models remain open and advisory with full support for
   custom variants via "Other…".
-- **The reset path** — the Configuration view and **Baiton: Open Config Panel** are registered before the
-  extension's configuration-loading gate, so the view works even when
-  `.baiton/config.json` is absent or unparseable. In that state the view
-  displays the error and offers **Reset to defaults**, which confirms with a
-  modal prompt and writes the default configuration, discarding any unparseable
-  contents.
+- **The reset path** — the Configuration view and **Baiton: Open Config Panel**
+  are registered before the extension's configuration-loading gate, so the view
+  remains available when neither `.baiton/config.json` nor
+  `.baiton/config.local.json` exists, or when either file fails to parse (the
+  error names the file that failed). The view offers **Reset to defaults** for
+  recovery; it confirms with a modal prompt, writes the default configuration
+  to `.baiton/config.local.json`, and never touches `.baiton/config.json`.
+- **Toolbar** — Save, Reload, Reset…, **More settings…** and **Manage API keys…**.
+  **More settings…** opens VS Code Settings filtered to `baiton.orchestrator`
+  (`workbench.action.openSettings`), the same destination as the Chat view's
+  inline-error **open settings** fix. **Manage API keys…** runs **Baiton: Set
+  Provider API Key** (`baiton.setProviderApiKey`) with no provider argument. It
+  shows the provider quick pick with `API key set` / `No API key set` on each
+  row, then a masked input; submitting an empty value clears the key. This flow
+  changes an existing key or adds a first key, and provider availability
+  refreshes as usual. Both buttons work in every panel state, including after a
+  load failure and while a load or save is in flight, and neither changes the
+  form, unsaved edits or Save's enablement. No key value or set/not-set flag
+  reaches the webview. `baiton.setProviderApiKey` is registered only after
+  activation succeeds; in an uninitialized folder or after failed activation,
+  **Manage API keys…** logs the failure and does nothing, leaving the panel
+  usable.
 - **External changes and conflict handling** — the panel watches
-  `.baiton/config.json` while open. If the file changes on disk, a pristine form
-  reloads automatically; a form with unsaved edits displays a conflict banner
-  offering to reload and discard edits or keep editing. Saving against a file
-  modified since it was loaded is refused with conflict options to reload or
-  overwrite.
+  `.baiton/config.local.json` (the file it edits and which holds the conflict
+  token) and `.baiton/config.json` while open, so edits to the committed baseline
+  are noticed too. If either file changes on disk, a pristine form reloads
+  automatically; a form with unsaved edits displays a conflict banner offering
+  to reload and discard edits or keep editing. Saving against a file modified
+  since it was loaded is refused with conflict options to reload or overwrite.
 - **Live configuration hot-reload** — saving applies the updated configuration
   to the running extension in place without requiring a window reload. Any
   factor that cannot take effect immediately is reported in the save outcome:
   stages already running keep the model, effort, and agent they launched with
   (new settings apply to the next run), missing agent CLI binaries are flagged,
   and saving in a window opened for a different folder than the activated
-  workspace folder writes the file without updating the running session.
+  workspace folder writes `.baiton/config.local.json` without updating the
+  running session.
+
+#### Local config overlay
+
+Configuration uses two files. `.baiton/config.local.json` is personal and
+gitignored; it is the only configuration file the Config Panel and
+**Initialize** (`baiton.initialize`) write. `.baiton/config.json` is an optional
+committed team baseline that Baiton only reads. Configuration writes therefore
+never appear as a git change.
+
+`loadConfig` reads either file when present, then deep-merges the local document
+over the baseline: objects merge key by key, while arrays and scalars are
+replaced. It validates the merged result. Baseline only, local only and both
+files all load; when neither exists, the workspace is not initialized and the
+view points to **Initialize**.
+
+**Initialize** seeds `config.local.json` from the defaults, never overwrites an
+existing local file, leaves any existing `config.json` alone and creates no
+tracked `config.json`. A version migration persists its migrated document to
+`config.local.json`, never to the baseline. A parse error names the exact file
+that failed; a validation error names `config.local.json`, the file the panel
+can fix.
+
+The local file holds the full effective document after a panel save. That means
+its values continue to shadow the baseline if a later commit updates
+`config.json`. Delete `config.local.json` to pick up the baseline again. **Reset
+to defaults** writes defaults, not baseline values; you can then re-edit the
+local document as needed.
+
+`.baiton/.gitignore` (`GITIGNORE_CONTENTS` in `src/config/gitignore.ts`) includes
+`/config.local.json` and `/.config*json.*.tmp` for atomic-write temporary files.
+`refreshGitignore` applies these entries to existing workspaces at activation,
+so no `git rm --cached` or manual step is needed. A repository that already
+tracks `config.json` keeps it as a read-only baseline. API keys are unchanged:
+they stay in SecretStorage and were already local; see [Per-provider API
+keys](#per-provider-api-keys).
 
 #### Agent Model & Effort Discovery (CLI Probing & Architecture)
 
@@ -917,7 +975,7 @@ module as the offline fallback.
   lists, and every later refresh reaches an open panel as an in-place
   `optionsChanged` option update that never re-posts `loaded` and never disturbs
   unsaved edits, focus or caret position.
-- **What survives**: existing `.baiton/config.json` values and the persisted
+- **What survives**: existing configuration values and the persisted
   `ModelSelection` always round-trip. An agent, model or effort that is
   configured but missing from a refreshed list is appended to the dropdown and
   stays editable and saveable, and the config panel shows a per-agent
