@@ -21,6 +21,8 @@ import { isErr, isOk } from '../src/model/result';
  * - loadConfig version gating (newer refused, older with no migration path
  *   failing while leaving the file unchanged) — Req 2.5, 2.6, 2.8.
  * - loadConfig absent / unparseable / missing-section naming — Req 2.7, 25.1.
+ * - Config overlay merging and local-only migration persistence — see
+ *   `test/config.overlay.test.ts`.
  * - initialize not overwriting an existing config.json while still ensuring
  *   `.gitignore` — Req 1.3.
  * - initialize rolling back its own creations on a write failure and preserving
@@ -83,6 +85,7 @@ describe('config service and Initialize command', () => {
       }
       // Req 2.5: the config file is left unchanged.
       assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'config.local.json')), false);
     });
 
     it('fails migration for an older version with no upgrade path and leaves the file unchanged', async function () {
@@ -125,6 +128,7 @@ describe('config service and Initialize command', () => {
       assert.ok(isErr(result), 'version 0 should be refused');
       assert.strictEqual(result.error.kind, 'invalid-version');
       assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'config.local.json')), false);
     });
 
     it('rejects a non-integer / absent version as invalid-version', async () => {
@@ -247,11 +251,10 @@ describe('config service and Initialize command', () => {
       assert.ok(isErr(result), 'a missing config should be refused');
       assert.strictEqual(result.error.kind, 'absent');
       if (result.error.kind === 'absent') {
-        assert.ok(
-          result.error.path.endsWith(path.join(dir, 'config.json')) ||
-            result.error.path === path.join(dir, 'config.json'),
-          'the error should name the expected config path',
-        );
+        assert.strictEqual(result.error.path, path.join(dir, 'config.local.json'));
+        assert.ok(result.error.message.includes('Initialize'));
+        assert.ok(result.error.message.includes('config.local.json'));
+        assert.ok(result.error.message.includes('config.json'));
       }
     });
 
@@ -263,6 +266,7 @@ describe('config service and Initialize command', () => {
 
       assert.ok(isErr(result), 'malformed JSON should be refused');
       assert.strictEqual(result.error.kind, 'unparseable');
+      assert.strictEqual(result.error.path, path.join(dir, 'config.json'));
     });
 
     it('names the missing "roles" section', async () => {

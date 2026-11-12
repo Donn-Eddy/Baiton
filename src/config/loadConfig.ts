@@ -1,5 +1,6 @@
 /**
- * Config service: load, validate and migrate `.baiton/config.json`
+ * Config service: load, validate and migrate `.baiton/config.json` plus the
+ * gitignored `.baiton/config.local.json` overlay
  * (Requirement 2, Requirement 23.5/23.6).
  *
  * The design signature is `loadConfig(baitonDir: vscode.Uri)`. To keep this
@@ -9,11 +10,14 @@
  *
  * - A newer `version` is refused and the required extension version reported
  *   (Req 2.5).
- * - An older `version` is migrated in place and persisted before loading
- *   (Req 2.6); a migration or persist failure leaves the original untouched and
- *   refuses (Req 2.8).
- * - An absent, unparseable, or missing-section file is refused with the
- *   offending section named (Req 2.7).
+ * - The optional committed `config.json` baseline is read-only for the
+ *   extension. The optional gitignored `config.local.json` overlay is deep-
+ *   merged over it: local objects win key by key, while local arrays and
+ *   scalars replace baseline values. The merged document is validated.
+ * - An older `version` is migrated and persisted to the local file before
+ *   loading (Req 2.6); a migration or persist failure refuses (Req 2.8).
+ * - An absent, unparseable, or missing-section configuration is refused with
+ *   the offending section named (Req 2.7); absent means neither layer exists.
  * - `version` absent or not equal to 1 (after any migration) is rejected as an
  *   unsupported version (Req 23.6); the returned `Config.version` is pinned to
  *   1 (Req 23.5).
@@ -57,55 +61,66 @@ function toDir(baitonDir: DirLike): string {
 }
 
 /**
- * The single place that spells the `config.json` filename: resolves a
- * {@link DirLike} `.baiton/` directory to the absolute path of the config file
- * it contains.
+ * The optional committed team baseline, read-only for the extension.
  */
 export function configFilePath(baitonDir: DirLike): string {
   return path.join(toDir(baitonDir), 'config.json');
 }
 
 /**
- * Loads and validates `<baitonDir>/config.json`, migrating and persisting an
- * older version first. Returns a validated {@link Config} or a
- * {@link ConfigError} describing why loading was refused. Never throws for an
- * expected failure (missing/unparseable/invalid file); unexpected I/O errors on
- * read surface as an `unparseable`/`absent` error as appropriate.
+ * The personal, gitignored overlay the extension writes.
  */
-export async function loadConfig(
-  baitonDir: DirLike,
-): Promise<Result<Config, ConfigError>> {
-  const configPath = configFilePath(baitonDir);
+export function localConfigFilePath(baitonDir: DirLike): string {
+  return path.join(toDir(baitonDir), 'config.local.json');
+}
 
-  // Read the file. A missing file is `absent`; any other read error is treated
-  // as unparseable/unreadable (Req 2.7).
+/**
+ * Deep-merges the local overlay over the committed baseline: plain objects
+ * merge key by key (recursively), arrays and scalars from `local` replace the
+ * baseline's value. Neither input is mutated; keys present on only one side
+ * are kept.
+ */
+export function mergeConfigLayers(
+  baseline: Record<string, unknown>,
+  local: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...baseline };
+  for (const [key, value] of Object.entries(local)) {
+    if (key === '__proto__') {
+      continue;
+    }
+    const prev = out[key];
+    out[key] = isObject(prev) && isObject(value) ? mergeConfigLayers(prev, value) : value;
+  }
+  return out;
+}
+
+/** Reads and parses one config layer. `undefined` means the file does not exist. */
+async function readLayer(
+  filePath: string,
+): Promise<Result<Record<string, unknown> | undefined, ConfigError>> {
   let raw: string;
   try {
-    raw = await fs.readFile(configPath, 'utf8');
+    raw = await fs.readFile(filePath, 'utf8');
   } catch (e) {
     if (isNotFound(e)) {
-      return err({
-        kind: 'absent',
-        path: configPath,
-        message: `No configuration found at ${configPath}. Run "Baiton: Initialize" first.`,
-      });
+      return ok(undefined);
     }
     return err({
       kind: 'unparseable',
-      path: configPath,
-      message: `Could not read configuration at ${configPath}: ${describe(e)}.`,
+      path: filePath,
+      message: `Could not read configuration at ${filePath}: ${describe(e)}.`,
     });
   }
 
-  // Parse JSON (Req 2.7).
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
     return err({
       kind: 'unparseable',
-      path: configPath,
-      message: `Configuration at ${configPath} is not valid JSON: ${describe(e)}.`,
+      path: filePath,
+      message: `Configuration at ${filePath} is not valid JSON: ${describe(e)}.`,
     });
   }
 
@@ -113,9 +128,46 @@ export async function loadConfig(
     return err({
       kind: 'missing-section',
       section: 'root',
-      message: `Configuration at ${configPath} must be a JSON object.`,
+      message: `Configuration at ${filePath} must be a JSON object.`,
     });
   }
+  return ok(parsed);
+}
+
+/**
+ * Loads and validates the optional committed `<baitonDir>/config.json`
+ * baseline plus optional gitignored `<baitonDir>/config.local.json` overlay.
+ * The layers are deep-merged with local values winning (objects merge key by
+ * key; arrays and scalars are replaced), then validated. An older version is
+ * migrated and persisted to the local file only. Returns a validated
+ * {@link Config} or a
+ * {@link ConfigError} describing why loading was refused. Never throws for an
+ * expected failure (missing/unparseable/invalid files); absent is returned
+ * only when neither layer exists. Unexpected I/O errors surface as an
+ * `unparseable` error.
+ */
+export async function loadConfig(
+  baitonDir: DirLike,
+): Promise<Result<Config, ConfigError>> {
+  const baselinePath = configFilePath(baitonDir);
+  const localPath = localConfigFilePath(baitonDir);
+  const baseline = await readLayer(baselinePath);
+  if (!baseline.ok) return baseline;
+  const local = await readLayer(localPath);
+  if (!local.ok) return local;
+  if (baseline.value === undefined && local.value === undefined) {
+    return err({
+      kind: 'absent',
+      path: localPath,
+      message: `No configuration found at ${localPath} or ${baselinePath}. Run "Baiton: Initialize" first.`,
+    });
+  }
+  const parsed = baseline.value === undefined
+    ? local.value!
+    : local.value === undefined
+      ? baseline.value
+      : mergeConfigLayers(baseline.value, local.value);
+  const namedPath = local.value !== undefined ? localPath : baselinePath;
 
   // Version gate (Req 2.5, 2.6, 23.6).
   const versionResult = readVersion(parsed);
@@ -131,7 +183,7 @@ export async function loadConfig(
       found: version,
       supported: SUPPORTED_VERSION,
       message:
-        `Configuration at ${configPath} declares version ${version}, but this ` +
+        `Configuration at ${namedPath} declares version ${version}, but this ` +
         `build supports version ${SUPPORTED_VERSION}. Install ${REQUIRED_EXTENSION_VERSION_HINT} ` +
         `to load it.`,
     });
@@ -140,7 +192,7 @@ export async function loadConfig(
   if (version < SUPPORTED_VERSION) {
     // Migrate an older config to the supported version and persist it before
     // loading (Req 2.6). On any failure, leave the original untouched (Req 2.8).
-    const migrated = await migrateAndPersist(configPath, doc, version);
+    const migrated = await migrateAndPersist(localPath, doc, version);
     if (!migrated.ok) {
       return migrated;
     }
@@ -194,29 +246,37 @@ function readVersion(doc: Record<string, unknown>): Result<number, ConfigError> 
 }
 
 /**
- * Migrates an older configuration document to the supported version and
- * persists it in place before it is loaded (Req 2.6). There is currently no
- * pre-1 schema, so any `version` below the supported version has no defined
- * upgrade path; migration therefore fails and the original file is left
- * unchanged (Req 2.8). The stepwise structure is the seam a later schema
- * bump plugs into.
+ * Version-to-version migration steps, keyed by the source version. Each returns
+ * the document bumped to the next version. Empty in the first pass because the
+ * supported version is the minimum; a later schema change registers its
+ * upgrade here.
  */
-async function migrateAndPersist(
-  configPath: string,
+const MIGRATIONS: Record<number, (doc: Record<string, unknown>) => Record<string, unknown>> = {};
+
+/**
+ * Migrates an older configuration document and persists it to the target file
+ * before it is loaded (Req 2.6). There is currently no pre-1 schema, so any
+ * `version` below the supported version has no defined upgrade path; migration
+ * therefore fails without changing the target file (Req 2.8).
+ * @internal Exported for tests; production callers go through loadConfig.
+ */
+export async function migrateAndPersist(
+  targetPath: string,
   doc: Record<string, unknown>,
   from: number,
+  migrations: Record<number, (doc: Record<string, unknown>) => Record<string, unknown>> = MIGRATIONS,
 ): Promise<Result<Record<string, unknown>, ConfigError>> {
   let current = doc;
   let currentVersion = from;
 
   while (currentVersion < SUPPORTED_VERSION) {
-    const step = MIGRATIONS[currentVersion];
+    const step = migrations[currentVersion];
     if (!step) {
       return err({
         kind: 'migration-failed',
         from,
         message:
-          `Configuration at ${configPath} declares version ${from}, which this ` +
+          `Configuration at ${targetPath} declares version ${from}, which this ` +
           `build cannot migrate to version ${SUPPORTED_VERSION}. The file was left unchanged.`,
       });
     }
@@ -228,37 +288,30 @@ async function migrateAndPersist(
         kind: 'migration-failed',
         from,
         message:
-          `Migrating configuration at ${configPath} from version ${from} failed: ` +
+          `Migrating configuration at ${targetPath} from version ${from} failed: ` +
           `${describe(e)}. The file was left unchanged.`,
       });
     }
   }
 
   // Persist the migrated document before loading it (Req 2.6). A write failure
-  // leaves the original untouched because the write is atomic-by-replace: we
-  // only rename the temp file over the original once it is fully written.
+  // leaves any prior file untouched because the write is atomic-by-replace: we
+  // only rename the temp file over the target once it is fully written.
   try {
-    await writeJsonAtomic(configPath, current);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await writeJsonAtomic(targetPath, current);
   } catch (e) {
     return err({
       kind: 'migration-failed',
       from,
       message:
-        `Could not persist the migrated configuration at ${configPath}: ` +
+        `Could not persist the migrated configuration at ${targetPath}: ` +
         `${describe(e)}. The file was left unchanged.`,
     });
   }
 
   return ok(current);
 }
-
-/**
- * Version-to-version migration steps, keyed by the source version. Each returns
- * the document bumped to the next version. Empty in the first pass because the
- * supported version is the minimum; a later schema change registers its
- * upgrade here.
- */
-const MIGRATIONS: Record<number, (doc: Record<string, unknown>) => Record<string, unknown>> = {};
 
 /**
  * Roles added after a `config.json` shape shipped, mapped to the role whose
