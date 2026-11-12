@@ -249,6 +249,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
       log: (m) => surface.log(m),
       applyConfig: scopedApplyConfig,
+      // Toolbar buttons. The panel is registered ahead of the activation gate, but
+      // `baiton.setProviderApiKey` is only registered inside `registerCommands`, so in an
+      // uninitialised folder or after a failed activation `executeCommand` rejects; the
+      // controller logs that and the panel stays usable. Same settings target as the Chat
+      // view's inline-error "open settings" fix (`triggerFix` in activation/commands.ts).
+      openSettings: async () => {
+        await vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          `${SETTINGS_NS}.orchestrator`,
+        );
+      },
+      manageApiKeys: async () => {
+        await vscode.commands.executeCommand(COMMANDS.setProviderApiKey);
+      },
     }),
   );
   context.subscriptions.push(registerConfigPanelCommand());
