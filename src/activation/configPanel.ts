@@ -49,7 +49,9 @@ export const CONFIG_PANEL_REQUIRE_WORKSPACE_MESSAGE =
 /** Static HTML shell filename located under `media/`. */
 const CONFIG_HTML = 'config.html';
 
-/** Coalesce watcher events on .baiton/config.json or .baiton/config.local.json within this window. */
+/** A change to the local file the panel edits, or to the committed baseline,
+ * schedules notifyExternalChange().
+ */
 export const EXTERNAL_CHANGE_DEBOUNCE_MS = 250;
 
 /**

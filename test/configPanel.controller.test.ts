@@ -66,7 +66,7 @@ import type {
 import { formFromConfig } from '../src/config/configPanel';
 import { ABSENT_TOKEN, configToken } from '../src/config/configDocument';
 import { defaultConfig, defaultConfigJson } from '../src/config/defaultConfig';
-import { configFilePath, loadConfig } from '../src/config/loadConfig';
+import { configFilePath, localConfigFilePath, loadConfig } from '../src/config/loadConfig';
 import type { Config } from '../src/config/types';
 import { agentCapabilities } from '../src/adapter';
 import type { AgentCapabilities } from '../src/adapter';
@@ -104,6 +104,11 @@ describe('ConfigPanelController ', () => {
   }
 
   function writeConfigFile(dir: string, text: string): void {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(localConfigFilePath(dir), text, 'utf8');
+  }
+
+  function writeBaselineFile(dir: string, text: string): void {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(configFilePath(dir), text, 'utf8');
   }
@@ -189,6 +194,26 @@ describe('ConfigPanelController ', () => {
       assert.strictEqual(msg2.kind, 'unparseable');
       assert.strictEqual(msg2.canReset, true);
     }
+
+    const dir3 = newDir();
+    writeBaselineFile(dir3, '{ corrupt baseline');
+    const webview3 = new RecordingWebview();
+    const controller3 = new ConfigPanelController({
+      webview: webview3,
+      baitonDir: dir3,
+      agentIds: ['claude'],
+      confirmReset: async () => false,
+      log: () => {},
+    });
+    controller3.start();
+    await webview3.send({ type: 'ready' });
+    const msg3 = webview3.messages[0];
+    assert.strictEqual(msg3.type, 'loadFailed');
+    if (msg3.type === 'loadFailed') {
+      assert.strictEqual(msg3.kind, 'unparseable');
+      assert.strictEqual(msg3.canReset, false);
+      assert.ok(msg3.message.includes(configFilePath(dir3)));
+    }
   });
 
   it('3. load -> change a role model -> save -> saved; preserves unknown keys, pr, indentation and newline', async () => {
@@ -238,7 +263,7 @@ describe('ConfigPanelController ', () => {
     const savedMsg = webview.messages[1];
     assert.strictEqual(savedMsg.type, 'saved');
 
-    const fileTextOnDisk = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+    const fileTextOnDisk = fs.readFileSync(localConfigFilePath(dir), 'utf8');
     assert.ok(fileTextOnDisk.endsWith('\n'), 'file must end with trailing newline');
     const parsed = JSON.parse(fileTextOnDisk);
     assert.strictEqual(parsed.roles.planner.model, 'new-planner-model');
@@ -296,7 +321,7 @@ describe('ConfigPanelController ', () => {
       assert.ok(hasPlannerModelError, 'must report roles.planner.model error path');
     }
 
-    const fileAfter = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+    const fileAfter = fs.readFileSync(localConfigFilePath(dir), 'utf8');
     assert.strictEqual(fileAfter, initialText, 'file on disk must remain byte-for-byte unchanged');
   });
 
@@ -326,7 +351,7 @@ describe('ConfigPanelController ', () => {
       external_extra_key: 'external_value',
     };
     const externalText = `${JSON.stringify(externalDoc, null, 2)}\n`;
-    fs.writeFileSync(path.join(dir, 'config.json'), externalText, 'utf8');
+    fs.writeFileSync(localConfigFilePath(dir), externalText, 'utf8');
 
     // Attempt save with original loaded token -> conflict refusal
     const editedForm = { ...loadedMsg.form };
@@ -352,7 +377,7 @@ describe('ConfigPanelController ', () => {
     }
 
     // External edit is still on disk
-    assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), externalText);
+    assert.strictEqual(fs.readFileSync(localConfigFilePath(dir), 'utf8'), externalText);
 
     // Replay same save with overwrite: true
     await webview.send({
@@ -366,7 +391,7 @@ describe('ConfigPanelController ', () => {
     const savedMsg = webview.messages[2];
     assert.strictEqual(savedMsg.type, 'saved');
 
-    const fileAfterOverwrite = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+    const fileAfterOverwrite = fs.readFileSync(localConfigFilePath(dir), 'utf8');
     const parsedAfter = JSON.parse(fileAfterOverwrite);
     assert.strictEqual(parsedAfter.roles.executor.model, 'executor-updated-model');
     assert.strictEqual(parsedAfter.external_extra_key, 'external_value');
@@ -374,12 +399,17 @@ describe('ConfigPanelController ', () => {
 
   it('6. reset: declined -> no write; accepted -> defaultConfigJson() on disk; reset into nonexistent dir creates dir', async () => {
     const dir = newDir();
+    assert.ok(RESET_CONFIRM_MESSAGE.includes('.baiton/config.local.json'));
+    assert.ok(ACTIVATION_VALUES_NOTE.includes('.baiton/config.local.json'));
     const customConfig = {
       ...defaultConfig(),
       unmanaged: 123,
     };
     const customText = `${JSON.stringify(customConfig, null, 2)}\n`;
+    const baselineConfig = { ...defaultConfig(), committedSetting: 'keep' };
+    const baselineText = `${JSON.stringify(baselineConfig, null, 2)}\n`;
     writeConfigFile(dir, customText);
+    writeBaselineFile(dir, baselineText);
 
     let confirmAnswer = false;
     let confirmCalls = 0;
@@ -400,7 +430,8 @@ describe('ConfigPanelController ', () => {
     // 1. Reset declined
     await webview.send({ type: 'reset' });
     assert.strictEqual(confirmCalls, 1);
-    assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), customText);
+    assert.strictEqual(fs.readFileSync(localConfigFilePath(dir), 'utf8'), customText);
+    assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
     assert.strictEqual(webview.messages.length, 1);
     assert.strictEqual(webview.messages[0].type, 'loaded');
 
@@ -409,7 +440,8 @@ describe('ConfigPanelController ', () => {
     await webview.send({ type: 'reset' });
     assert.strictEqual(confirmCalls, 2);
     const expectedDefaults = defaultConfigJson();
-    assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), expectedDefaults);
+    assert.strictEqual(fs.readFileSync(localConfigFilePath(dir), 'utf8'), expectedDefaults);
+    assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
     assert.strictEqual(webview.messages.length, 2);
     assert.strictEqual(webview.messages[1].type, 'loaded');
 
@@ -427,9 +459,10 @@ describe('ConfigPanelController ', () => {
     controller3.start();
     await webview3.send({ type: 'reset' });
     assert.strictEqual(
-      fs.readFileSync(path.join(nonExistentSubdir, 'config.json'), 'utf8'),
+      fs.readFileSync(localConfigFilePath(nonExistentSubdir), 'utf8'),
       expectedDefaults,
     );
+    assert.ok(!fs.existsSync(configFilePath(nonExistentSubdir)));
     assert.strictEqual(webview3.messages.length, 1);
     assert.strictEqual(webview3.messages[0].type, 'loaded');
   });
@@ -716,7 +749,7 @@ describe('ConfigPanelController ', () => {
       assert.strictEqual(webview.messages.length, 1);
 
       // Delete the file
-      fs.rmSync(configFilePath(dir));
+      fs.rmSync(localConfigFilePath(dir));
 
       await controller.notifyExternalChange();
       assert.strictEqual(webview.messages.length, 2);
@@ -779,10 +812,11 @@ describe('ConfigPanelController ', () => {
       assert.strictEqual(saveFailedMsg.type, 'saveFailed');
       if (saveFailedMsg.type === 'saveFailed') {
         assert.strictEqual(saveFailedMsg.reason, 'conflict');
+        assert.ok(saveFailedMsg.message.includes(localConfigFilePath(dir)));
       }
 
       // External edit remains intact on disk
-      assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), externalText);
+      assert.strictEqual(fs.readFileSync(localConfigFilePath(dir), 'utf8'), externalText);
     });
 
     it('after dispose() nothing is posted by notifyExternalChange or webview messages', async () => {
@@ -1305,7 +1339,7 @@ describe('ConfigPanelController ', () => {
 
           assert.strictEqual(webview.messages.length, 2);
           assert.strictEqual(webview.messages[1].type, 'saved');
-          const parsed = JSON.parse(fs.readFileSync(configFilePath(dir), 'utf8'));
+          const parsed = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
           assert.strictEqual(parsed.roles.planner.model, 'model-after-one-way-message');
         });
 
@@ -1324,7 +1358,7 @@ describe('ConfigPanelController ', () => {
           assert.ok(logs.at(-1)?.includes('boom-sync'));
           await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
           assert.strictEqual(webview.messages.at(-1)?.type, 'saved');
-          assert.ok(fs.readFileSync(configFilePath(dir), 'utf8').length > 0);
+          assert.ok(fs.readFileSync(localConfigFilePath(dir), 'utf8').length > 0);
         });
 
         it('logs a rejected promise and posts nothing; a following save still works', async () => {
@@ -1342,7 +1376,7 @@ describe('ConfigPanelController ', () => {
           assert.ok(logs.at(-1)?.includes('boom-async'));
           await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
           assert.strictEqual(webview.messages.at(-1)?.type, 'saved');
-          assert.ok(fs.readFileSync(configFilePath(dir), 'utf8').length > 0);
+          assert.ok(fs.readFileSync(localConfigFilePath(dir), 'utf8').length > 0);
         });
 
         it('is a silent no-op when the seam is unwired', async () => {
@@ -1381,11 +1415,11 @@ describe('ConfigPanelController ', () => {
 
         it('does not reload or change the config file', async () => {
           const { dir, webview } = await startLoaded(() => {});
-          const fileBefore = fs.readFileSync(configFilePath(dir), 'utf8');
+          const fileBefore = fs.readFileSync(localConfigFilePath(dir), 'utf8');
 
           await webview.send(oneWayMessage());
 
-          assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), fileBefore);
+          assert.strictEqual(fs.readFileSync(localConfigFilePath(dir), 'utf8'), fileBefore);
           assert.strictEqual(webview.messages.length, 1);
           assert.strictEqual(webview.messages.filter((message) => message.type === 'loaded').length, 1);
         });
@@ -1423,6 +1457,228 @@ describe('ConfigPanelController ', () => {
       await webview.send({ type: 'manageApiKeys' });
 
       assert.strictEqual(webview.messages.length, 0);
+    });
+
+    describe('11. local overlay', () => {
+      it('baseline-only load and save writes the full effective document to the local file', async () => {
+        const dir = newDir();
+        const baseline = { ...defaultConfig(), baselineUnknown: { keep: true } };
+        const baselineText = `${JSON.stringify(baseline, null, 2)}\n`;
+        writeBaselineFile(dir, baselineText);
+        const webview = new RecordingWebview();
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+
+        const loaded = webview.messages[0];
+        assert.strictEqual(loaded.type, 'loaded');
+        if (loaded.type !== 'loaded') {
+          return;
+        }
+        assert.strictEqual(loaded.token, ABSENT_TOKEN);
+        assert.strictEqual(loaded.form.git.remote, baseline.git.remote);
+        const form = { ...loaded.form };
+        form.roles = {
+          ...form.roles,
+          planner: { ...form.roles.planner, model: 'baseline-save-model' },
+        };
+        await webview.send({ type: 'save', form, token: loaded.token });
+
+        assert.strictEqual(webview.messages[1]?.type, 'saved');
+        assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
+        const local = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
+        assert.deepStrictEqual(local.baselineUnknown, { keep: true });
+        assert.strictEqual(local.roles.planner.model, 'baseline-save-model');
+      });
+
+      it('local values win on load and saves leave the committed baseline unchanged', async () => {
+        const dir = newDir();
+        const baseline = { ...defaultConfig(), baselineUnknown: 'preserved' };
+        const baselineText = `${JSON.stringify(baseline, null, 2)}\n`;
+        const localText = '{"git":{"base":"develop"},"localUnknown":true}\n';
+        writeBaselineFile(dir, baselineText);
+        writeConfigFile(dir, localText);
+        const webview = new RecordingWebview();
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+
+        const loaded = webview.messages[0];
+        assert.strictEqual(loaded.type, 'loaded');
+        if (loaded.type !== 'loaded') {
+          return;
+        }
+        assert.strictEqual(loaded.form.git.remote, baseline.git.remote);
+        assert.strictEqual(loaded.form.git.base, 'develop');
+        await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
+
+        assert.strictEqual(webview.messages[1]?.type, 'saved');
+        assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
+        const local = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
+        assert.strictEqual(local.localUnknown, true);
+        assert.strictEqual(local.baselineUnknown, 'preserved');
+      });
+
+      it('stale local tokens conflict and overwrite succeeds without changing the baseline', async () => {
+        const dir = newDir();
+        const baselineText = defaultConfigJson();
+        const initialLocal = `${JSON.stringify({ ...defaultConfig(), localUnknown: 1 }, null, 2)}\n`;
+        writeBaselineFile(dir, baselineText);
+        writeConfigFile(dir, initialLocal);
+        const webview = new RecordingWebview();
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+        const loaded = webview.messages[0];
+        assert.strictEqual(loaded.type, 'loaded');
+        if (loaded.type !== 'loaded') {
+          return;
+        }
+
+        const externalText = `${JSON.stringify({ ...defaultConfig(), externalUnknown: 2 }, null, 2)}\n`;
+        writeConfigFile(dir, externalText);
+        const form = { ...loaded.form };
+        form.git = { ...form.git, base: 'edited' };
+        await webview.send({ type: 'save', form, token: loaded.token });
+        const conflict = webview.messages[1];
+        assert.strictEqual(conflict?.type, 'saveFailed');
+        if (conflict?.type === 'saveFailed') {
+          assert.strictEqual(conflict.reason, 'conflict');
+          assert.ok(conflict.message.includes(localConfigFilePath(dir)));
+        }
+        assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
+
+        await webview.send({ type: 'save', form, token: loaded.token, overwrite: true });
+        assert.strictEqual(webview.messages[2]?.type, 'saved');
+        assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
+        const local = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
+        assert.strictEqual(local.externalUnknown, 2);
+        assert.strictEqual(local.git.base, 'edited');
+      });
+
+      it('notifies on baseline changes with the unchanged local token and ignores byte-identical rewrites', async () => {
+        const dir = newDir();
+        const baselineText = defaultConfigJson();
+        const localText = defaultConfigJson();
+        writeBaselineFile(dir, baselineText);
+        writeConfigFile(dir, localText);
+        const webview = new RecordingWebview();
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+        const loaded = webview.messages[0];
+        assert.strictEqual(loaded.type, 'loaded');
+        if (loaded.type !== 'loaded') {
+          return;
+        }
+
+        writeBaselineFile(dir, baselineText);
+        writeConfigFile(dir, localText);
+        await controller.notifyExternalChange();
+        assert.strictEqual(webview.messages.length, 1);
+
+        const changedBaseline = `${JSON.stringify({ ...defaultConfig(), baselineChanged: true }, null, 2)}\n`;
+        writeBaselineFile(dir, changedBaseline);
+        await controller.notifyExternalChange();
+        assert.strictEqual(webview.messages.length, 2);
+        const external = webview.messages[1];
+        assert.strictEqual(external?.type, 'externalChange');
+        if (external?.type === 'externalChange') {
+          assert.strictEqual(external.token, loaded.token);
+        }
+      });
+
+      it('notifies when the baseline is deleted from a baseline-only workspace', async () => {
+        const dir = newDir();
+        writeBaselineFile(dir, defaultConfigJson());
+        const webview = new RecordingWebview();
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+        assert.strictEqual(webview.messages[0]?.type, 'loaded');
+        fs.rmSync(configFilePath(dir));
+
+        await controller.notifyExternalChange();
+        assert.strictEqual(webview.messages[1]?.type, 'externalChange');
+        const external = webview.messages[1];
+        if (external?.type === 'externalChange') {
+          assert.strictEqual(external.token, ABSENT_TOKEN);
+        }
+        await webview.send({ type: 'load' });
+        const failed = webview.messages[2];
+        assert.strictEqual(failed?.type, 'loadFailed');
+        if (failed?.type === 'loadFailed') {
+          assert.strictEqual(failed.kind, 'absent');
+          assert.strictEqual(failed.canReset, true);
+        }
+      });
+
+      it('suppresses watcher notifications while a save is still applying', async () => {
+        const dir = newDir();
+        writeConfigFile(dir, defaultConfigJson());
+        const webview = new RecordingWebview();
+        let enteredApply!: () => void;
+        let releaseApply!: () => void;
+        const applyEntered = new Promise<void>((resolve) => { enteredApply = resolve; });
+        const applyGate = new Promise<void>((resolve) => { releaseApply = resolve; });
+        const controller = new ConfigPanelController({
+          webview,
+          baitonDir: dir,
+          agentIds: ['claude'],
+          confirmReset: async () => false,
+          applyConfig: async () => {
+            enteredApply();
+            await applyGate;
+            return [];
+          },
+          log: () => {},
+        });
+        controller.start();
+        await webview.send({ type: 'ready' });
+        const loaded = webview.messages[0];
+        assert.strictEqual(loaded?.type, 'loaded');
+        if (loaded?.type !== 'loaded') {
+          return;
+        }
+
+        const saving = webview.send({ type: 'save', form: loaded.form, token: loaded.token });
+        await applyEntered;
+        await controller.notifyExternalChange();
+        assert.strictEqual(webview.messages.length, 1);
+        releaseApply();
+        await saving;
+        assert.strictEqual(webview.messages[1]?.type, 'saved');
+      });
     });
   });
 });
