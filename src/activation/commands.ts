@@ -1361,8 +1361,8 @@ async function runInitialize(surface: Surface): Promise<void> {
     return;
   }
   const detail = result.value.createdConfig
-    ? 'created .baiton/ with a default config.json'
-    : 'ensured .baiton/ layout (existing config.json left unchanged)';
+    ? 'created .baiton/ with a default config.local.json'
+    : 'ensured .baiton/ layout (existing configuration left unchanged)';
   surface.info(`Baiton: Initialize ${detail}.`);
 }
 
