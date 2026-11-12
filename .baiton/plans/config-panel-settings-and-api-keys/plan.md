@@ -1,12 +1,12 @@
 ---
 version: 1
 name: config-panel-settings-and-api-keys
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 01b75cb67794f2dbff580f7dac78dba06c792d25
+branch: baiton/config-panel-settings-and-api-keys
+approved_rev: 90377d9cfbf5b10abd755fdd52fc52ab0082f20aa4c2c200ca87fc114966aa69
 ---
 
 # Endstate
