@@ -7,6 +7,12 @@ import * as path from 'path';
  *
  * The file excludes, relative to the `.baiton/` directory:
  * - `.lock`                    — the (deferred) lock file, never versioned.
+ * - `config.local.json`        — the personal, gitignored config overlay the
+ *                                Config Panel and Initialize write; the
+ *                                committed `config.json` baseline stays tracked.
+ * - `.config*json.*.tmp`       — sibling temp files `writeJsonAtomic` renames
+ *                                over the config, ignored so an interrupted
+ *                                write never appears in git status.
  * - `chat.jsonl`               — the legacy single workspace transcript, kept
  *                                so a pre-sessions checkout stays ignored until
  *                                it is migrated away.
@@ -18,8 +24,9 @@ import * as path from 'path';
  * - `specs/<slug>/...`        — Legacy spec artifacts.
  *
  * Patterns are anchored with a leading `/` where they must match only at the
- * `.baiton/` root (`.lock`, `chat.jsonl`, `runs/`, `worktrees/`) so an
- * identically named file deeper in the tree is not swept up unintentionally.
+ * `.baiton/` root (`.lock`, `config.local.json`, `.config*json.*.tmp`,
+ * `chat.jsonl`, `runs/`, `worktrees/`) so an identically named file deeper in
+ * the tree is not swept up unintentionally.
  * The Legacy patterns use a wildcard segment to cover every `specs/<slug>/`
  * folder.
  */
@@ -28,6 +35,8 @@ import * as path from 'path';
 export const GITIGNORE_CONTENTS = [
   '# Baiton-owned files that must never be committed.',
   '/.lock',
+  '/config.local.json',
+  '/.config*json.*.tmp',
   '/chat.jsonl',
   '/chat/',
   '/runs/',
