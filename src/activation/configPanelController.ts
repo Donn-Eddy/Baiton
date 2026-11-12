@@ -3,8 +3,9 @@
  *
  * This is the host-free half driven by the {@link ConfigPanelHostToWebview} and
  * {@link ConfigPanelWebviewToHost} message unions defined in
- * `src/config/configPanel.ts`. Every host capability — modal confirm and
- * live-config apply — arrives as an injected seam.
+ * `src/config/configPanel.ts`. Every host capability — modal confirm,
+ * live-config apply, opening settings and managing API keys — arrives as an
+ * injected seam.
  *
  * The controller carries no `vscode` import (matching `chatController.ts`, which
  * imports only `path`, `fs/promises` and host-free cores), which makes the whole
@@ -99,6 +100,16 @@ export interface ConfigPanelControllerDeps {
   onDidChangeCapabilities?(listener: () => void): { dispose(): void };
   confirmReset(message: string): Promise<boolean>;
   applyConfig?: ApplyConfig;
+  /**
+   * Opens the host's settings UI (wired in extension.ts to `workbench.action.openSettings` filtered to `${SETTINGS_NS}.orchestrator`).
+   * Fire-and-forget: the controller posts nothing back and changes no state. A throw or rejection is logged, never surfaced as `saveFailed`. Absent → the message is a silent no-op.
+   */
+  openSettings?(): Promise<void> | void;
+  /**
+   * Starts the provider API-key flow (wired in extension.ts to `baiton.setProviderApiKey` with no argument).
+   * Same contract as {@link openSettings}: one-way, state-free, errors logged only, absent → silent no-op.
+   */
+  manageApiKeys?(): Promise<void> | void;
   log(message: string): void;
 }
 
@@ -106,7 +117,9 @@ export interface ConfigPanelControllerDeps {
  * Host-free controller for the configuration panel. Handles `ready`, `load`,
  * `save` (host-side re-validation, conflict refusal, atomic write),
  * `reset` (modal confirm, directory creation, default write), and post-save
- * hot-reload notifications.
+ * hot-reload notifications. `openSettings` and `manageApiKeys` are one-way
+ * hand-offs to optional injected seams; nothing is posted back, controller
+ * state is untouched, and a failing seam is only logged.
  */
 export class ConfigPanelController {
   private doc: Record<string, unknown> | undefined;
@@ -241,6 +254,12 @@ export class ConfigPanelController {
       case 'reset':
         await this.reset();
         break;
+      case 'openSettings':
+        await this.invokeSeam('openSettings', this.deps.openSettings);
+        break;
+      case 'manageApiKeys':
+        await this.invokeSeam('manageApiKeys', this.deps.manageApiKeys);
+        break;
       default: {
         const unrecognised = msg as { type?: unknown };
         this.deps.log(
@@ -248,6 +267,22 @@ export class ConfigPanelController {
         );
         break;
       }
+    }
+  }
+
+  /** Calls an optional one-way host seam. Never posts, never touches doc/token/form/writing, never loads; errors are logged only. */
+  private async invokeSeam(
+    name: 'openSettings' | 'manageApiKeys',
+    seam: (() => Promise<void> | void) | undefined,
+  ): Promise<void> {
+    if (seam === undefined) {
+      return;
+    }
+    try {
+      await seam.call(this.deps);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.deps.log(`ConfigPanelController: ${name} failed: ${message}`);
     }
   }
 

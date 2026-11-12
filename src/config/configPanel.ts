@@ -166,7 +166,11 @@ export type ConfigPanelWebviewToHost =
   /** The user asked to save; `overwrite` is set when the user chose Overwrite after a conflict. */
   | { type: 'save'; form: ConfigForm; token: string; overwrite?: boolean }
   /** The user confirmed "Reset to defaults"; the host writes `defaultConfigJson()`. */
-  | { type: 'reset' };
+  | { type: 'reset' }
+  /** The user clicked "More settings…"; the host opens VS Code Settings filtered to the orchestrator namespace. One-way: no reply is posted. */
+  | { type: 'openSettings' }
+  /** The user clicked "Manage API keys…"; the host runs the provider API-key command with no provider argument. One-way: no reply is posted, and no key data crosses into the webview. */
+  | { type: 'manageApiKeys' };
 
 /**
  * The dropdown option sets for the form: the installed agent ids plus any

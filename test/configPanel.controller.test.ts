@@ -44,6 +44,9 @@
  *    configured model dropped by a refresh still listed and still saveable, `start()`
  *    twice subscribing once, silence after `dispose()`, and a real `CatalogStore`
  *    driving the whole path through `agentCapabilities(store.table())`.
+ * 10. `openSettings` / `manageApiKeys`: one call and no post/state change, sync and
+ *     async failures logged only, absent seams silent, usable after `loadFailed`,
+ *     and no config-file reads or writes.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -1229,6 +1232,197 @@ describe('ConfigPanelController ', () => {
         second.options.byAgent.claude.models,
         first.options.byAgent.claude.models,
       );
+    });
+  });
+
+  describe('10. openSettings / manageApiKeys seams', () => {
+    for (const [type, key] of [
+      ['openSettings', 'openSettings'],
+      ['manageApiKeys', 'manageApiKeys'],
+    ] as const) {
+      describe(type, () => {
+        function oneWayMessage(): ConfigPanelWebviewToHost {
+          return type === 'openSettings' ? { type: 'openSettings' } : { type: 'manageApiKeys' };
+        }
+
+        function makeController(
+          dir: string,
+          webview: RecordingWebview,
+          logs: string[],
+          seam?: () => Promise<void> | void,
+        ): ConfigPanelController {
+          return new ConfigPanelController({
+            webview,
+            baitonDir: dir,
+            agentIds: ['claude'],
+            confirmReset: async () => false,
+            ...(seam === undefined ? {} : { [key]: seam }),
+            log: (message) => logs.push(message),
+          });
+        }
+
+        async function startLoaded(seam?: () => Promise<void> | void): Promise<{
+          dir: string;
+          webview: RecordingWebview;
+          logs: string[];
+          loaded: Extract<ConfigPanelHostToWebview, { type: 'loaded' }>;
+        }> {
+          const dir = newDir();
+          writeConfigFile(dir, defaultConfigJson());
+          const webview = new RecordingWebview();
+          const logs: string[] = [];
+          const controller = makeController(dir, webview, logs, seam);
+          controller.start();
+          await webview.send({ type: 'ready' });
+          assert.strictEqual(webview.messages.length, 1);
+          const loaded = webview.messages[0];
+          assert.strictEqual(loaded.type, 'loaded');
+          if (loaded.type !== 'loaded') {
+            throw new Error('Expected loaded message.');
+          }
+          return { dir, webview, logs, loaded };
+        }
+
+        it('calls the seam exactly once, posts nothing, and preserves loaded state for save', async () => {
+          let calls = 0;
+          const { dir, webview, logs, loaded } = await startLoaded(() => {
+            calls += 1;
+          });
+          const previousLogCount = logs.length;
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(calls, 1);
+          assert.strictEqual(webview.messages.length, 1);
+          assert.ok(!logs.slice(previousLogCount).some((line) => line.includes('unrecognised')));
+
+          const editedForm = { ...loaded.form };
+          editedForm.roles = {
+            ...editedForm.roles,
+            planner: { ...editedForm.roles.planner, model: 'model-after-one-way-message' },
+          };
+          await webview.send({ type: 'save', form: editedForm, token: loaded.token });
+
+          assert.strictEqual(webview.messages.length, 2);
+          assert.strictEqual(webview.messages[1].type, 'saved');
+          const parsed = JSON.parse(fs.readFileSync(configFilePath(dir), 'utf8'));
+          assert.strictEqual(parsed.roles.planner.model, 'model-after-one-way-message');
+        });
+
+        it('logs a synchronous throw and posts nothing; a following save still works', async () => {
+          const { dir, webview, logs, loaded } = await startLoaded(() => {
+            throw new Error('boom-sync');
+          });
+          const previousMessageCount = webview.messages.length;
+          const previousLogs = logs.length;
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(webview.messages.length, previousMessageCount);
+          assert.strictEqual(logs.length, previousLogs + 1);
+          assert.ok(logs.at(-1)?.includes('ConfigPanelController:'));
+          assert.ok(logs.at(-1)?.includes('boom-sync'));
+          await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
+          assert.strictEqual(webview.messages.at(-1)?.type, 'saved');
+          assert.ok(fs.readFileSync(configFilePath(dir), 'utf8').length > 0);
+        });
+
+        it('logs a rejected promise and posts nothing; a following save still works', async () => {
+          const { dir, webview, logs, loaded } = await startLoaded(async () => {
+            throw new Error('boom-async');
+          });
+          const previousMessageCount = webview.messages.length;
+          const previousLogs = logs.length;
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(webview.messages.length, previousMessageCount);
+          assert.strictEqual(logs.length, previousLogs + 1);
+          assert.ok(logs.at(-1)?.includes('ConfigPanelController:'));
+          assert.ok(logs.at(-1)?.includes('boom-async'));
+          await webview.send({ type: 'save', form: loaded.form, token: loaded.token });
+          assert.strictEqual(webview.messages.at(-1)?.type, 'saved');
+          assert.ok(fs.readFileSync(configFilePath(dir), 'utf8').length > 0);
+        });
+
+        it('is a silent no-op when the seam is unwired', async () => {
+          const { webview, logs } = await startLoaded();
+          const previousMessageCount = webview.messages.length;
+          const previousLogs = [...logs];
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(webview.messages.length, previousMessageCount);
+          assert.deepStrictEqual(logs, previousLogs);
+        });
+
+        it('works after loadFailed without triggering another load', async () => {
+          const dir = newDir();
+          const webview = new RecordingWebview();
+          const logs: string[] = [];
+          let calls = 0;
+          const controller = makeController(dir, webview, logs, () => {
+            calls += 1;
+          });
+          controller.start();
+          await webview.send({ type: 'ready' });
+          assert.strictEqual(webview.messages.length, 1);
+          assert.strictEqual(webview.messages[0].type, 'loadFailed');
+          if (webview.messages[0].type === 'loadFailed') {
+            assert.strictEqual(webview.messages[0].kind, 'absent');
+          }
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(calls, 1);
+          assert.strictEqual(webview.messages.length, 1);
+          assert.ok(!logs.some((line) => line.includes('unrecognised')));
+        });
+
+        it('does not reload or change the config file', async () => {
+          const { dir, webview } = await startLoaded(() => {});
+          const fileBefore = fs.readFileSync(configFilePath(dir), 'utf8');
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), fileBefore);
+          assert.strictEqual(webview.messages.length, 1);
+          assert.strictEqual(webview.messages.filter((message) => message.type === 'loaded').length, 1);
+        });
+
+        it('is callable before ready and posts nothing', async () => {
+          const dir = newDir();
+          const webview = new RecordingWebview();
+          const logs: string[] = [];
+          let calls = 0;
+          const controller = makeController(dir, webview, logs, () => {
+            calls += 1;
+          });
+          controller.start();
+
+          await webview.send(oneWayMessage());
+
+          assert.strictEqual(calls, 1);
+          assert.strictEqual(webview.messages.length, 0);
+        });
+      });
+    }
+
+    it('webview.send accepts both one-way message literals', async () => {
+      const webview = new RecordingWebview();
+      const controller = new ConfigPanelController({
+        webview,
+        baitonDir: newDir(),
+        agentIds: ['claude'],
+        confirmReset: async () => false,
+        log: () => {},
+      });
+      controller.start();
+
+      await webview.send({ type: 'openSettings' });
+      await webview.send({ type: 'manageApiKeys' });
+
+      assert.strictEqual(webview.messages.length, 0);
     });
   });
 });
