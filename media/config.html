@@ -19,7 +19,8 @@
   framework is used; the view is plain markup plus media/config.js. All colors
   come from VS Code theme CSS variables so the view follows the active theme.
 
-  The per-role controls are built entirely by media/config.js; this file only
+  media/config.js builds one table row per role into #roles-body, with the
+  agent, model and effort controls each in their own column cell. This file
   supplies the shell and the styling they land in. Every agent renders its model
   as a dropdown plus an "Other…" entry once a model list exists — OpenCode
   included — and the free-text input beside the dropdown is the fallback shown
@@ -87,21 +88,63 @@
         white-space: nowrap;
       }
 
-      fieldset {
-        border: 1px solid var(--vscode-panel-border);
-        border-radius: 3px;
-        margin: 0 0 calc(var(--baiton-gap) * 2) 0;
-        padding: var(--baiton-gap) calc(var(--baiton-gap) * 1.5);
-      }
-
-      legend {
-        padding: 0 4px;
-        color: var(--vscode-foreground);
-      }
-
       table {
         width: 100%;
         border-collapse: collapse;
+      }
+
+      .config-section {
+        margin: 0 0 calc(var(--baiton-gap) * 2) 0;
+      }
+
+      .section-heading {
+        margin: 0 0 var(--baiton-gap) 0;
+        font-size: 1em;
+        font-weight: 600;
+        color: var(--vscode-foreground);
+        padding-bottom: 2px;
+        border-bottom: 1px solid var(--vscode-panel-border);
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+      }
+
+      #roles-table {
+        table-layout: fixed;
+      }
+
+      #roles-table th[scope='row'] {
+        white-space: nowrap;
+        width: 7em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #roles-table td {
+        min-width: 0;
+      }
+
+      #roles-table td .field-error,
+      #roles-table td .stale-note,
+      #roles-table td .doc-link {
+        overflow-wrap: anywhere;
+      }
+
+      #roles-table tbody tr + tr th,
+      #roles-table tbody tr + tr td {
+        border-top: 1px solid var(--vscode-panel-border);
+      }
+
+      @media (max-width: 360px) {
+        #roles-table th,
+        #roles-table td {
+          padding: 2px 3px;
+        }
+
+        #roles-table th[scope='row'] {
+          width: 5.5em;
+        }
       }
 
       th,
@@ -282,12 +325,6 @@
         background: none;
         color: var(--vscode-textLink-activeForeground);
       }
-      .role-group {
-        border: 1px solid var(--vscode-panel-border);
-        border-radius: 3px;
-        margin: 0 0 var(--baiton-gap) 0;
-        padding: var(--baiton-gap);
-      }
     </style>
   </head>
   <body>
@@ -315,13 +352,25 @@
     </div>
 
     <form id="config-form">
-      <fieldset id="roles-fieldset">
-        <legend>Roles</legend>
-        <div id="roles-body"></div>
-      </fieldset>
+      <section id="roles-section" class="config-section">
+        <h2 class="section-heading">Roles</h2>
+        <div class="table-scroll">
+          <table id="roles-table">
+            <thead>
+              <tr>
+                <th scope="col" id="roles-col-role">Role</th>
+                <th scope="col" id="roles-col-agent">Agent</th>
+                <th scope="col" id="roles-col-model">Model</th>
+                <th scope="col" id="roles-col-effort">Effort</th>
+              </tr>
+            </thead>
+            <tbody id="roles-body"></tbody>
+          </table>
+        </div>
+      </section>
 
-      <fieldset id="limits-fieldset">
-        <legend>Limits</legend>
+      <section id="limits-section" class="config-section">
+        <h2 class="section-heading">Limits</h2>
         <div class="field-row">
           <label for="limit-plan_review_rounds">Plan review rounds</label>
           <input
@@ -364,10 +413,10 @@
           <span class="hint">1&ndash;1440</span>
           <div id="error-limits-stall_notice_minutes" class="field-error" data-error-for="limits.stall_notice_minutes"></div>
         </div>
-      </fieldset>
+      </section>
 
-      <fieldset id="git-fieldset">
-        <legend>Git</legend>
+      <section id="git-section" class="config-section">
+        <h2 class="section-heading">Git</h2>
         <div class="field-row">
           <label for="git-remote">Remote</label>
           <input id="git-remote" type="text" data-path="git.remote" aria-describedby="error-git-remote" />
@@ -378,7 +427,7 @@
           <input id="git-base" type="text" data-path="git.base" aria-describedby="error-git-base" />
           <div id="error-git-base" class="field-error" data-error-for="git.base"></div>
         </div>
-      </fieldset>
+      </section>
     </form>
 
     <!-- No sanitizer and no markdown vendor are loaded: this view writes only
