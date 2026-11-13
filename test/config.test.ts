@@ -21,10 +21,12 @@ import { isErr, isOk } from '../src/model/result';
  * - loadConfig version gating (newer refused, older with no migration path
  *   failing while leaving the file unchanged) — Req 2.5, 2.6, 2.8.
  * - loadConfig absent / unparseable / missing-section naming — Req 2.7, 25.1.
- * - initialize not overwriting an existing config.json while still ensuring
- *   `.gitignore` — Req 1.3.
+ * - Config overlay merging and local-only migration persistence — see
+ *   `test/config.overlay.test.ts`.
+ * - initialize seeding the local config only when no local or committed
+ *   baseline configuration exists, while preserving existing files — Req 1.3.
  * - initialize rolling back its own creations on a write failure and preserving
- *   a pre-existing config.json — Req 1.5.
+ *   pre-existing config files — Req 1.5.
  */
 
 /** Build a config document object at a given version with valid sections. */
@@ -83,6 +85,7 @@ describe('config service and Initialize command', () => {
       }
       // Req 2.5: the config file is left unchanged.
       assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'config.local.json')), false);
     });
 
     it('fails migration for an older version with no upgrade path and leaves the file unchanged', async function () {
@@ -125,6 +128,7 @@ describe('config service and Initialize command', () => {
       assert.ok(isErr(result), 'version 0 should be refused');
       assert.strictEqual(result.error.kind, 'invalid-version');
       assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'config.local.json')), false);
     });
 
     it('rejects a non-integer / absent version as invalid-version', async () => {
@@ -247,11 +251,10 @@ describe('config service and Initialize command', () => {
       assert.ok(isErr(result), 'a missing config should be refused');
       assert.strictEqual(result.error.kind, 'absent');
       if (result.error.kind === 'absent') {
-        assert.ok(
-          result.error.path.endsWith(path.join(dir, 'config.json')) ||
-            result.error.path === path.join(dir, 'config.json'),
-          'the error should name the expected config path',
-        );
+        assert.strictEqual(result.error.path, path.join(dir, 'config.local.json'));
+        assert.ok(result.error.message.includes('Initialize'));
+        assert.ok(result.error.message.includes('config.local.json'));
+        assert.ok(result.error.message.includes('config.json'));
       }
     });
 
@@ -263,6 +266,7 @@ describe('config service and Initialize command', () => {
 
       assert.ok(isErr(result), 'malformed JSON should be refused');
       assert.strictEqual(result.error.kind, 'unparseable');
+      assert.strictEqual(result.error.path, path.join(dir, 'config.json'));
     });
 
     it('names the missing "roles" section', async () => {
@@ -315,7 +319,7 @@ describe('config service and Initialize command', () => {
     });
   });
 
-  describe('initialize no-overwrite of existing config.json (Req 1.3)', () => {
+  describe('initialize local config seeding (Req 1.3)', () => {
     it('leaves an existing config.json untouched but still ensures .gitignore', async () => {
       const dir = newDir();
       const baitonDir = path.join(dir, '.baiton');
@@ -335,6 +339,7 @@ describe('config service and Initialize command', () => {
         fs.readFileSync(path.join(baitonDir, 'config.json'), 'utf8'),
         existing,
       );
+      assert.strictEqual(fs.existsSync(path.join(baitonDir, 'config.local.json')), false);
       // .gitignore is ensured with the required exclusions.
       const gitignore = fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8');
       assert.strictEqual(gitignore, GITIGNORE_CONTENTS);
@@ -344,7 +349,7 @@ describe('config service and Initialize command', () => {
       assert.ok(!fs.existsSync(path.join(baitonDir, 'specs')), 'specs/ should not be created');
     });
 
-    it('writes a default config.json on a fresh directory', async () => {
+    it('seeds config.local.json from the defaults on a fresh directory and creates no config.json', async () => {
       const dir = newDir();
       const baitonDir = path.join(dir, '.baiton');
 
@@ -356,9 +361,47 @@ describe('config service and Initialize command', () => {
         assert.strictEqual(result.value.ensuredGitignore, true);
       }
       assert.strictEqual(
-        fs.readFileSync(path.join(baitonDir, 'config.json'), 'utf8'),
+        fs.readFileSync(path.join(baitonDir, 'config.local.json'), 'utf8'),
         defaultConfigJson(),
       );
+      assert.strictEqual(fs.existsSync(path.join(baitonDir, 'config.json')), false);
+      assert.strictEqual(fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8'), GITIGNORE_CONTENTS);
+      assert.ok(isOk(await loadConfig(baitonDir)), 'the local-only config should load');
+    });
+
+    it('leaves an existing config.local.json untouched', async () => {
+      const dir = newDir();
+      const baitonDir = path.join(dir, '.baiton');
+      const existing = configJson({ ...configDoc(SUPPORTED_VERSION), custom: 'mine' });
+      fs.mkdirSync(baitonDir, { recursive: true });
+      fs.writeFileSync(path.join(baitonDir, 'config.local.json'), existing, 'utf8');
+
+      const result = await initialize(baitonDir);
+
+      assert.ok(isOk(result), 'initialize should preserve an existing local config');
+      if (isOk(result)) {
+        assert.strictEqual(result.value.createdConfig, false);
+        assert.strictEqual(result.value.ensuredGitignore, true);
+      }
+      assert.strictEqual(fs.readFileSync(path.join(baitonDir, 'config.local.json'), 'utf8'), existing);
+      assert.strictEqual(fs.existsSync(path.join(baitonDir, 'config.json')), false);
+      assert.strictEqual(fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8'), GITIGNORE_CONTENTS);
+    });
+
+    it('is idempotent', async () => {
+      const dir = newDir();
+      const baitonDir = path.join(dir, '.baiton');
+
+      const first = await initialize(baitonDir);
+      const second = await initialize(baitonDir);
+
+      assert.ok(isOk(first));
+      assert.ok(isOk(second));
+      if (isOk(first) && isOk(second)) {
+        assert.strictEqual(first.value.createdConfig, true);
+        assert.strictEqual(second.value.createdConfig, false);
+      }
+      assert.strictEqual(fs.readFileSync(path.join(baitonDir, 'config.local.json'), 'utf8'), defaultConfigJson());
     });
   });
 
@@ -385,6 +428,23 @@ describe('config service and Initialize command', () => {
         fs.readFileSync(path.join(baitonDir, 'config.json'), 'utf8'),
         existing,
       );
+      assert.strictEqual(fs.existsSync(path.join(baitonDir, 'config.local.json')), false);
+    });
+
+    it('preserves a pre-existing config.local.json and never creates config.json', async () => {
+      const dir = newDir();
+      const baitonDir = path.join(dir, '.baiton');
+      const existing = configJson({ ...configDoc(SUPPORTED_VERSION), custom: 'local-value' });
+      fs.mkdirSync(baitonDir, { recursive: true });
+      fs.writeFileSync(path.join(baitonDir, 'config.local.json'), existing, 'utf8');
+      fs.mkdirSync(path.join(baitonDir, '.gitignore'));
+
+      const result = await initialize(baitonDir);
+
+      assert.ok(isErr(result), 'the blocked .gitignore write should be surfaced');
+      assert.strictEqual(result.error.kind, 'write-failed');
+      assert.strictEqual(fs.readFileSync(path.join(baitonDir, 'config.local.json'), 'utf8'), existing);
+      assert.strictEqual(fs.existsSync(path.join(baitonDir, 'config.json')), false);
     });
 
     it('rolls back created directories and files when a write fails on a fresh tree', async function () {
@@ -419,6 +479,11 @@ describe('config service and Initialize command', () => {
         fs.existsSync(path.join(baitonDir, 'config.json')),
         false,
         'no config.json should have been created',
+      );
+      assert.strictEqual(
+        fs.existsSync(path.join(baitonDir, 'config.local.json')),
+        false,
+        'no config.local.json should have been created',
       );
       assert.strictEqual(
         fs.existsSync(path.join(baitonDir, '.gitignore')),

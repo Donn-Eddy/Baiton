@@ -69,8 +69,9 @@ import { listDocumentSlugs, resolveDocument } from './storage/documentLocation';
  *   3. Trust / restricted read — `vscode.workspace.isTrusted` becomes the
  *      context's `restricted` flag; under Restricted Mode all writes and
  *      dispatch are disabled (Req 22.1, 22.2).
- *   4. Config load — validate `.baiton/config.json` (task 5.1's `loadConfig`),
- *      then resolve one executable per distinct agent id named in
+ *   4. Config load — validate the effective configuration (`.baiton/config.json`
+ *      baseline merged with the gitignored `.baiton/config.local.json`) via
+ *      task 5.1's `loadConfig`, then resolve one executable per distinct agent id named in
  *      `config.roles` (Req 22.7, 22.8, 14.5).
  *   5. Crash recovery — reconcile every result-less journal entry per plan
  *      (task 11.2's `recoverJournal`).
@@ -96,7 +97,8 @@ export interface ActivationState {
   /** The resolved workspace the extension operates on (Req 22.3–22.5). */
   readonly workspace: WorkspaceContext<vscode.Uri>;
   /**
-   * The validated configuration loaded from `.baiton/config.json`.
+   * The validated effective configuration loaded from `.baiton/config.json`
+   * and the gitignored `.baiton/config.local.json` overlay.
    * Replaced wholesale by the refresh step on config save; must never be
    * destructured into a long-lived local.
    */
@@ -202,7 +204,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Register the Config Panel WebviewView provider and the reveal command
   // ahead of the gate as well. `activate` returns early on a workspace-resolution
   // or config-load failure, and the view's error state plus Reset to defaults
-  // is exactly what repairs an absent or unparseable `.baiton/config.json`.
+  // is exactly what repairs an absent or unparseable `.baiton/config.local.json`.
   const adapterRegistry = createAdapterRegistry();
 
   // The model catalog and its discovery service, also ahead of the gate: model
@@ -249,6 +251,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
       log: (m) => surface.log(m),
       applyConfig: scopedApplyConfig,
+      // Toolbar buttons. The panel is registered ahead of the activation gate, but
+      // `baiton.setProviderApiKey` is only registered inside `registerCommands`, so in an
+      // uninitialised folder or after a failed activation `executeCommand` rejects; the
+      // controller logs that and the panel stays usable. Same settings target as the Chat
+      // view's inline-error "open settings" fix (`triggerFix` in activation/commands.ts).
+      openSettings: async () => {
+        await vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          `${SETTINGS_NS}.orchestrator`,
+        );
+      },
+      manageApiKeys: async () => {
+        await vscode.commands.executeCommand(COMMANDS.setProviderApiKey);
+      },
     }),
   );
   context.subscriptions.push(registerConfigPanelCommand());
@@ -321,6 +337,22 @@ async function completeActivation(
   const workspaceRepos: WorkspaceRepos<vscode.Uri> = resolved.value;
   const workspace = workspaceRepos.primary;
 
+  // Keep `.baiton/.gitignore` current before the config-load gate: the Config
+  // Panel is available on load failure and can write `config.local.json`, so
+  // older workspaces must ignore that file before the panel saves it. Skipped
+  // under Restricted Mode, which forbids workspace writes (Req 22.1).
+  if (!workspace.restricted) {
+    for (const repo of reposWithBaiton(repos)) {
+      try {
+        await refreshGitignore(repo.baitonDir!);
+      } catch (e) {
+        surface.warn(
+          `Baiton could not refresh ${repo.name}/.baiton/.gitignore: ${describe(e)}.`,
+        );
+      }
+    }
+  }
+
   // 4. Config load (task 5.1). A refusal surfaces the offending detail; without
   //    a valid config the extension does not proceed to recovery/dispatch.
   const configResult = await loadConfig(workspace.baitonDir.fsPath);
@@ -340,7 +372,7 @@ async function completeActivation(
     const childConfigResult = await loadConfig(repo.baitonDir!);
     if (isErr(childConfigResult)) {
       surface.warn(
-        `Baiton could not load ${repo.name}/.baiton/config.json: ${childConfigResult.error.message}`,
+        `Baiton could not load the ${repo.name}/.baiton configuration: ${childConfigResult.error.message}`,
       );
       continue;
     }
@@ -367,22 +399,6 @@ async function completeActivation(
   const git = createGitServiceRegistry();
   if (!workspace.restricted) {
     await runCrashRecovery(repos, git, surface);
-  }
-
-  // Keep `.baiton/.gitignore` current with the canonical exclusion list so a
-  // workspace initialized by an older build does not start tracking newer
-  // Baiton-owned artifacts (e.g. per-session chat transcripts). Skipped under
-  // Restricted Mode, which forbids workspace writes (Req 22.1).
-  if (!workspace.restricted) {
-    for (const repo of reposWithBaiton(repos)) {
-      try {
-        await refreshGitignore(repo.baitonDir!);
-      } catch (e) {
-        surface.warn(
-          `Baiton could not refresh ${repo.name}/.baiton/.gitignore: ${describe(e)}.`,
-        );
-      }
-    }
   }
 
   const state: ActivationState = { workspace, config, executables, repos, repoConfigs, git };

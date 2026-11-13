@@ -8,8 +8,9 @@ import { GITIGNORE_CONTENTS, refreshGitignore } from '../src/config/gitignore';
  * Unit tests for `refreshGitignore`, the activation-time step that keeps a
  * workspace's `.baiton/.gitignore` in sync with the canonical exclusion list
  * after the extension is upgraded, and for `GITIGNORE_CONTENTS` itself —
- * including the `/worktrees/` pattern, without which every run worktree created
- * under `.baiton/worktrees/` would make `git status` dirty.
+ * including the `/config.local.json`, atomic temp-file, and `/worktrees/`
+ * patterns, without which private config or run worktrees could make `git
+ * status` dirty.
  */
 describe('refreshGitignore', () => {
   let dir: string;
@@ -63,6 +64,18 @@ describe('refreshGitignore', () => {
     assert.strictEqual(await refreshGitignore(dir), 'rewritten');
     assert.strictEqual(fs.readFileSync(target, 'utf8'), GITIGNORE_CONTENTS);
   });
+
+  it('rewrites a .gitignore from a build without the config.local.json patterns', async () => {
+    const target = path.join(dir, '.gitignore');
+    const stale = GITIGNORE_CONTENTS.split('\n')
+      .filter((line) => line !== '/config.local.json' && line !== '/.config*json.*.tmp')
+      .join('\n');
+    assert.notStrictEqual(stale, GITIGNORE_CONTENTS);
+    fs.writeFileSync(target, stale, 'utf8');
+
+    assert.strictEqual(await refreshGitignore(dir), 'rewritten');
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), GITIGNORE_CONTENTS);
+  });
 });
 
 describe('GITIGNORE_CONTENTS', () => {
@@ -71,6 +84,27 @@ describe('GITIGNORE_CONTENTS', () => {
 
   it('ignores the run worktrees directory, anchored at the .baiton root', () => {
     assert.strictEqual(lines.filter((line) => line === '/worktrees/').length, 1);
+  });
+
+  it('ignores the personal config overlay, anchored at the .baiton root', () => {
+    assert.strictEqual(lines.filter((line) => line === '/config.local.json').length, 1);
+    assert.ok(!patterns.includes('config.json'));
+    assert.ok(!patterns.includes('/config.json'));
+  });
+
+  it('ignores the atomic config temp files', () => {
+    assert.strictEqual(lines.filter((line) => line === '/.config*json.*.tmp').length, 1);
+  });
+
+  it('lists the config patterns after /.lock and before /chat.jsonl', () => {
+    const lockIndex = lines.indexOf('/.lock');
+    const localIndex = lines.indexOf('/config.local.json');
+    const tempIndex = lines.indexOf('/.config*json.*.tmp');
+    const chatIndex = lines.indexOf('/chat.jsonl');
+    assert.strictEqual(localIndex, lockIndex + 1);
+    assert.strictEqual(tempIndex, localIndex + 1);
+    assert.ok(localIndex < chatIndex);
+    assert.ok(tempIndex < chatIndex);
   });
 
   it('lists /worktrees/ after /runs/', () => {

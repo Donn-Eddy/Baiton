@@ -3,8 +3,9 @@
  *
  * This is the host-free half driven by the {@link ConfigPanelHostToWebview} and
  * {@link ConfigPanelWebviewToHost} message unions defined in
- * `src/config/configPanel.ts`. Every host capability — modal confirm and
- * live-config apply — arrives as an injected seam.
+ * `src/config/configPanel.ts`. Every host capability — modal confirm,
+ * live-config apply, opening settings and managing API keys — arrives as an
+ * injected seam.
  *
  * The controller carries no `vscode` import (matching `chatController.ts`, which
  * imports only `path`, `fs/promises` and host-free cores), which makes the whole
@@ -43,22 +44,23 @@ import type {
 } from '../config/configPanel';
 import {
   readConfigDocument,
+  readBaselineToken,
   readConfigToken,
   writeConfigDocument,
 } from '../config/configDocument';
 import { defaultConfig } from '../config/defaultConfig';
-import { configFilePath, loadConfig } from '../config/loadConfig';
+import { configFilePath, localConfigFilePath, loadConfig } from '../config/loadConfig';
 
 /** Prompt displayed in the modal confirmation before resetting to defaults. */
 export const RESET_CONFIRM_MESSAGE =
-  'Reset .baiton/config.json to the Baiton defaults? The current contents, including any keys the panel does not manage, are discarded.';
+  'Reset .baiton/config.local.json to the Baiton defaults? The current contents, including any keys the panel does not manage, are discarded. A committed .baiton/config.json is not changed.';
 
 /**
  * Note returned when the hot-reload seam is unset (e.g. in unit tests or callers
  * that opt out of live reload; kept as a fallback branch).
  */
 export const ACTIVATION_VALUES_NOTE =
-  'New values were written to .baiton/config.json; components that read the configuration at activation keep their current values until the window is reloaded.';
+  'New values were written to .baiton/config.local.json; components that read the configuration at activation keep their current values until the window is reloaded.';
 
 /**
  * The webview surface the controller drives. Deliberately mirrors the
@@ -99,6 +101,16 @@ export interface ConfigPanelControllerDeps {
   onDidChangeCapabilities?(listener: () => void): { dispose(): void };
   confirmReset(message: string): Promise<boolean>;
   applyConfig?: ApplyConfig;
+  /**
+   * Opens the host's settings UI (wired in extension.ts to `workbench.action.openSettings` filtered to `${SETTINGS_NS}.orchestrator`).
+   * Fire-and-forget: the controller posts nothing back and changes no state. A throw or rejection is logged, never surfaced as `saveFailed`. Absent → the message is a silent no-op.
+   */
+  openSettings?(): Promise<void> | void;
+  /**
+   * Starts the provider API-key flow (wired in extension.ts to `baiton.setProviderApiKey` with no argument).
+   * Same contract as {@link openSettings}: one-way, state-free, errors logged only, absent → silent no-op.
+   */
+  manageApiKeys?(): Promise<void> | void;
   log(message: string): void;
 }
 
@@ -106,11 +118,15 @@ export interface ConfigPanelControllerDeps {
  * Host-free controller for the configuration panel. Handles `ready`, `load`,
  * `save` (host-side re-validation, conflict refusal, atomic write),
  * `reset` (modal confirm, directory creation, default write), and post-save
- * hot-reload notifications.
+ * hot-reload notifications. `openSettings` and `manageApiKeys` are one-way
+ * hand-offs to optional injected seams; nothing is posted back, controller
+ * state is untouched, and a failing seam is only logged. The panel reads the
+ * merged baseline and local overlay but writes only `.baiton/config.local.json`.
  */
 export class ConfigPanelController {
   private doc: Record<string, unknown> | undefined;
   private token: string | undefined;
+  private baselineToken: string | undefined;
   private options: ConfigFormOptions;
   /** The last form parsed from disk; the round-trip input for `refreshOptions()`. */
   private form: ConfigForm | undefined;
@@ -195,18 +211,20 @@ export class ConfigPanelController {
   }
 
   /**
-   * Called when an external event suggests `.baiton/config.json` may have
-   * changed on disk.
+   * Called when `.baiton/config.local.json` or the committed
+   * `.baiton/config.json` may have changed on disk. A baseline-only change is
+   * reported with the unchanged local token.
    *
    * Suppresses the controller's own writes: while a write is in-flight
    * (`this.writing`), or when the token on disk equals `this.token`, nothing is
    * posted. Also swallows byte-identical rewrites and transient read errors.
    *
-   * When the file was genuinely modified externally, posts `externalChange`
-   * carrying the new token. Note that `this.token` is deliberately NOT updated
-   * here: the webview decides whether to auto-reload (if pristine) or show a
-   * conflict banner (if dirty). If the user keeps editing, the controller
-   * retains its previous token so the next save takes the conflict path.
+   * When either file was genuinely modified externally, posts `externalChange`
+   * carrying the current local token (the token checked by the next save).
+   * The stored tokens are deliberately NOT updated here: the webview decides
+   * whether to auto-reload (if pristine) or show a conflict banner (if dirty).
+   * If the user keeps editing, the controller retains its previous tokens so
+   * the next save takes the conflict path.
    */
   public async notifyExternalChange(): Promise<void> {
     if (this.disposed || this.writing) {
@@ -216,11 +234,22 @@ export class ConfigPanelController {
     if (this.disposed || this.writing) {
       return;
     }
+    const baseline = await readBaselineToken(this.deps.baitonDir);
+    if (this.disposed || this.writing) {
+      return;
+    }
     if (isErr(current)) {
       this.deps.log(`ConfigPanelController: error reading config token: ${current.error.message}`);
       return;
     }
-    if (current.value === this.token) {
+    if (isErr(baseline)) {
+      this.deps.log(`ConfigPanelController: error reading config token: ${baseline.error.message}`);
+      return;
+    }
+    if (
+      current.value === this.token &&
+      (this.baselineToken === undefined || baseline.value === this.baselineToken)
+    ) {
       return;
     }
     this.deps.webview.post({ type: 'externalChange', token: current.value });
@@ -241,6 +270,12 @@ export class ConfigPanelController {
       case 'reset':
         await this.reset();
         break;
+      case 'openSettings':
+        await this.invokeSeam('openSettings', this.deps.openSettings);
+        break;
+      case 'manageApiKeys':
+        await this.invokeSeam('manageApiKeys', this.deps.manageApiKeys);
+        break;
       default: {
         const unrecognised = msg as { type?: unknown };
         this.deps.log(
@@ -251,16 +286,38 @@ export class ConfigPanelController {
     }
   }
 
+  /** Calls an optional one-way host seam. Never posts, never touches doc/token/form/writing, never loads; errors are logged only. */
+  private async invokeSeam(
+    name: 'openSettings' | 'manageApiKeys',
+    seam: (() => Promise<void> | void) | undefined,
+  ): Promise<void> {
+    if (seam === undefined) {
+      return;
+    }
+    try {
+      await seam.call(this.deps);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.deps.log(`ConfigPanelController: ${name} failed: ${message}`);
+    }
+  }
+
   private async load(): Promise<void> {
     const read = await readConfigDocument(this.deps.baitonDir);
     if (isErr(read)) {
       this.doc = undefined;
       this.token = undefined;
+      this.baselineToken = undefined;
       const { kind, message } = read.error;
       if (kind === 'absent') {
         this.deps.webview.post({ type: 'loadFailed', kind: 'absent', message, canReset: true });
       } else if (kind === 'unparseable') {
-        this.deps.webview.post({ type: 'loadFailed', kind: 'unparseable', message, canReset: true });
+        this.deps.webview.post({
+          type: 'loadFailed',
+          kind: 'unparseable',
+          message,
+          canReset: read.error.path !== configFilePath(this.deps.baitonDir),
+        });
       } else {
         // loadFailed has no 'io' kind; an unreadable file cannot be fixed by Reset (a reset would overwrite an unreadable file).
         this.deps.webview.post({ type: 'loadFailed', kind: 'invalid', message, canReset: false });
@@ -271,6 +328,7 @@ export class ConfigPanelController {
     const form = formFromDocument(read.value.doc);
     this.doc = read.value.doc;
     this.token = read.value.token;
+    this.baselineToken = read.value.baselineToken;
     this.form = form;
     this.options = configFormOptions(this.deps.agentIds, this.currentCapabilities(), form);
     this.deps.webview.post({
@@ -391,9 +449,9 @@ export class ConfigPanelController {
       }
 
       // writeJsonAtomic writes a sibling temp file and renames; it does not create the directory, so a reset in a workspace with no .baiton/ would fail ENOENT.
-      const configPath = configFilePath(this.deps.baitonDir);
+      const localPath = localConfigFilePath(this.deps.baitonDir);
       try {
-        await mkdir(path.dirname(configPath), { recursive: true });
+        await mkdir(path.dirname(localPath), { recursive: true });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         this.deps.webview.post({

@@ -85,8 +85,8 @@ import {
  *   `registerConfigPanel`, that call passes both live seams
  *   (`getCapabilities` bound to `catalogStore.table()`,
  *   `onDidChangeCapabilities` to `discovery.onDidChange`) while keeping the
- *   static `capabilities` fallback, and `void discovery.refresh()` still
- * follows the registration .
+ *   static `capabilities` fallback, wires the `openSettings` and `manageApiKeys`
+ *   toolbar seams, and `void discovery.refresh()` still follows the registration .
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -902,6 +902,20 @@ describe('config panel live catalog wiring ', () => {
       /capabilities:\s*agentCapabilities\(\)/,
       'the static capabilities fallback must still be passed',
     );
+  });
+
+  it('wires openSettings to workbench.action.openSettings filtered to the orchestrator settings', () => {
+    assert.match(call, /openSettings:/);
+    assert.match(
+      call,
+      /executeCommand\(\s*'workbench\.action\.openSettings',\s*`\$\{SETTINGS_NS\}\.orchestrator`\s*,?\s*\)/,
+    );
+    assert.match(source, /const SETTINGS_NS = 'baiton';/);
+  });
+
+  it('wires manageApiKeys to baiton.setProviderApiKey with no argument', () => {
+    assert.match(call, /manageApiKeys:/);
+    assert.match(call, /executeCommand\(\s*COMMANDS\.setProviderApiKey\s*\)/);
   });
 
   it('still kicks the refresh off without awaiting it, after the panel is registered', () => {

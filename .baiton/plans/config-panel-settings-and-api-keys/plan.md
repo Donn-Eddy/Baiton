@@ -1,12 +1,12 @@
 ---
 version: 1
 name: config-panel-settings-and-api-keys
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 01b75cb67794f2dbff580f7dac78dba06c792d25
+branch: baiton/config-panel-settings-and-api-keys
+approved_rev: 90377d9cfbf5b10abd755fdd52fc52ab0082f20aa4c2c200ca87fc114966aa69
 ---
 
 # Endstate
@@ -73,9 +73,9 @@ Both return `Thenable<unknown>`, so adapt them to `Promise<void> | void`. The pa
 
 # PHASES
 
-- [pending] P01 Add openSettings/manageApiKeys messages and host-free controller seams with unit tests (files: src/config/configPanel.ts, src/activation/configPanelController.ts, test/configPanel.controller.test.ts)
-- [pending] P02 Pass the seams through registerConfigPanel and wire them to openSettings and setProviderApiKey in extension.ts (after P01; files: src/activation/configPanel.ts, src/extension.ts, test/configPanel.view.test.ts, test/activation.gating.test.ts)
-- [pending] P04 Add .baiton/config.local.json as a merged overlay in loadConfig, migrating to it instead of config.json (files: src/config/loadConfig.ts, test/config.test.ts, test/config.overlay.test.ts)
-- [pending] P05 Gitignore the local config and seed it from Initialize instead of config.json (after P04; files: src/config/gitignore.ts, src/config/initialize.ts, src/extension.ts, test/config.gitignore.test.ts, test/config.test.ts)
-- [pending] P06 Point panel saves, tokens, reset and the watcher at config.local.json and relabel the panel's config path (after P05; files: src/config/configDocument.ts, src/activation/configPanelController.ts, src/activation/configPanel.ts, media/config.html, test/configPanel.document.test.ts, test/configPanel.controller.test.ts, test/configPanel.view.test.ts)
-- [pending] P07 Document the local config overlay and the new toolbar buttons in README (after P06; files: README.md)
+- [done] P01 Add openSettings/manageApiKeys messages and host-free controller seams with unit tests (files: src/config/configPanel.ts, src/activation/configPanelController.ts, test/configPanel.controller.test.ts)
+- [done] P02 Pass the seams through registerConfigPanel and wire them to openSettings and setProviderApiKey in extension.ts (after P01; files: src/activation/configPanel.ts, src/extension.ts, test/configPanel.view.test.ts, test/activation.gating.test.ts)
+- [done] P04 Add .baiton/config.local.json as a merged overlay in loadConfig, migrating to it instead of config.json (files: src/config/loadConfig.ts, test/config.test.ts, test/config.overlay.test.ts)
+- [done] P05 Gitignore the local config and seed it from Initialize instead of config.json (after P04; files: src/config/gitignore.ts, src/config/initialize.ts, src/extension.ts, test/config.gitignore.test.ts, test/config.test.ts)
+- [done] P06 Point panel saves, tokens, reset and the watcher at config.local.json and relabel the panel's config path (after P05; files: src/config/configDocument.ts, src/activation/configPanelController.ts, src/activation/configPanel.ts, media/config.html, test/configPanel.document.test.ts, test/configPanel.controller.test.ts, test/configPanel.view.test.ts)
+- [done] P07 Document the local config overlay and the new toolbar buttons in README (after P06; files: README.md)

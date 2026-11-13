@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vm from 'vm';
 import { register } from 'node:module';
@@ -15,6 +16,7 @@ import { join } from 'node:path';
  */
 
 type ConfigPanelModule = typeof import('../src/activation/configPanel');
+type RegisterConfigPanelDepsForTest = import('../src/activation/configPanel').RegisterConfigPanelDeps;
 type OpenConfigPanelViewModule = typeof import('../src/activation/openConfigPanelView');
 
 let configPanelMod: ConfigPanelModule;
@@ -91,6 +93,72 @@ describe('Config Panel view and reveal command ', () => {
     configPanelMod = await import('../src/activation/configPanel');
     openConfigPanelViewMod = await import('../src/activation/openConfigPanelView');
   });
+
+  async function makeRegisteredPanel(
+    baitonDir: string,
+    seams: Pick<RegisterConfigPanelDepsForTest, 'openSettings' | 'manageApiKeys'> = {},
+  ): Promise<{
+    disposable: import('vscode').Disposable;
+    view: FakeWebviewViewInstance;
+    logs: string[];
+    pattern: { pattern?: string } | undefined;
+  }> {
+    let registeredProvider:
+      | { resolveWebviewView(webviewView: import('vscode').WebviewView): void }
+      | undefined;
+    let pattern: { pattern?: string } | undefined;
+    const logs: string[] = [];
+    const fake = {
+      window: {
+        registerWebviewViewProvider: (_id: string, provider: unknown) => {
+          registeredProvider = provider as {
+            resolveWebviewView(webviewView: import('vscode').WebviewView): void;
+          };
+          return { dispose: () => {} };
+        },
+        showInformationMessage: async () => undefined,
+        showWarningMessage: async () => undefined,
+        showErrorMessage: async () => undefined,
+      },
+      commands: { executeCommand: async () => undefined },
+      RelativePattern: class {
+        readonly base: unknown;
+        readonly pattern: string;
+        constructor(base: unknown, value: string) {
+          this.base = base;
+          this.pattern = value;
+        }
+      },
+      workspace: {
+        createFileSystemWatcher: (value: unknown) => {
+          pattern = value as { pattern?: string };
+          return {
+            onDidCreate: () => ({ dispose: () => {} }),
+            onDidChange: () => ({ dispose: () => {} }),
+            onDidDelete: () => ({ dispose: () => {} }),
+            dispose: () => {},
+          };
+        },
+      },
+    };
+    (globalThis as unknown as { __vscodeFake: unknown }).__vscodeFake = fake;
+
+    const extensionUri = { fsPath: process.cwd(), scheme: 'file' } as unknown as import('vscode').Uri;
+    const disposable = configPanelMod.registerConfigPanel({
+      extensionUri,
+      resolveBaitonDir: () => baitonDir,
+      agentIds: ['claude'],
+      ...seams,
+      log: (message) => logs.push(message),
+    });
+    assert.ok(registeredProvider, 'provider should be registered');
+    const view = makeFakeWebviewView();
+    registeredProvider.resolveWebviewView(view.fakeView);
+    view.messageListeners[0]({ type: 'ready' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    return { disposable, view, logs, pattern };
+  }
 
   it('CONFIG_VIEW_ID equals package.json contributed view id and focus command derives from it', () => {
     const pkgPath = path.join(process.cwd(), 'package.json');
@@ -250,6 +318,103 @@ describe('Config Panel view and reveal command ', () => {
     assert.strictEqual(watcherCount, 1, 'second resolve must not recreate watcher');
 
     disposable.dispose();
+  });
+
+  it('passes openSettings and manageApiKeys through to the controller', async () => {
+    const baitonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-cfgpanel-'));
+    let openCalls = 0;
+    let keyCalls = 0;
+    let disposable: import('vscode').Disposable | undefined;
+    try {
+      const panel = await makeRegisteredPanel(baitonDir, {
+        openSettings: () => { openCalls++; },
+        manageApiKeys: async () => { keyCalls++; },
+      });
+      disposable = panel.disposable;
+      const postedAfterLoad = panel.view.posted.length;
+      const send = panel.view.messageListeners[0];
+      assert.ok(send, 'controller should register a message listener');
+
+      send({ type: 'openSettings' });
+      send({ type: 'manageApiKeys' });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+      assert.strictEqual(openCalls, 1);
+      assert.strictEqual(keyCalls, 1);
+      assert.strictEqual(panel.view.posted.length, postedAfterLoad);
+      assert.ok(!panel.logs.some((line) => line.includes('unrecognised message type')));
+    } finally {
+      disposable?.dispose();
+      fs.rmSync(baitonDir, { recursive: true, force: true });
+    }
+  });
+
+  it('omitting the seams is harmless', async () => {
+    const baitonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-cfgpanel-'));
+    let disposable: import('vscode').Disposable | undefined;
+    try {
+      const panel = await makeRegisteredPanel(baitonDir);
+      disposable = panel.disposable;
+      const postedAfterLoad = panel.view.posted.length;
+      const send = panel.view.messageListeners[0];
+      assert.ok(send, 'controller should register a message listener');
+
+      assert.doesNotThrow(() => {
+        send({ type: 'openSettings' });
+        send({ type: 'manageApiKeys' });
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+      assert.strictEqual(panel.view.posted.length, postedAfterLoad);
+      assert.ok(!panel.logs.some((line) => line.includes('unrecognised message type')));
+    } finally {
+      disposable?.dispose();
+      fs.rmSync(baitonDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a rejecting manageApiKeys seam is logged, not posted', async () => {
+    const baitonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-cfgpanel-'));
+    let disposable: import('vscode').Disposable | undefined;
+    try {
+      const panel = await makeRegisteredPanel(baitonDir, {
+        manageApiKeys: async () => { throw new Error('command not found'); },
+      });
+      disposable = panel.disposable;
+      const postedAfterLoad = panel.view.posted.length;
+      const send = panel.view.messageListeners[0];
+      assert.ok(send, 'controller should register a message listener');
+
+      send({ type: 'manageApiKeys' });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+      assert.ok(panel.logs.some((line) =>
+        /ConfigPanelController: manageApiKeys failed: command not found/.test(line),
+      ));
+      assert.strictEqual(panel.view.posted.length, postedAfterLoad);
+    } finally {
+      disposable?.dispose();
+      fs.rmSync(baitonDir, { recursive: true, force: true });
+    }
+  });
+
+  it('the watcher covers config.json and config.local.json', async () => {
+    const baitonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-cfgpanel-'));
+    let disposable: import('vscode').Disposable | undefined;
+    try {
+      const panel = await makeRegisteredPanel(baitonDir);
+      disposable = panel.disposable;
+      assert.strictEqual(panel.pattern?.pattern, '{config.json,config.local.json}');
+    } finally {
+      disposable?.dispose();
+      fs.rmSync(baitonDir, { recursive: true, force: true });
+    }
+  });
+
+  it('labels the local overlay as the configuration path', () => {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'media', 'config.html'), 'utf8');
+    assert.ok(html.includes('<span id="config-path">.baiton/config.local.json</span>'));
+    assert.ok(!html.includes('>.baiton/config.json<'));
   });
 
   it('revealConfigPanel executes the focus command and shows unavailable message on rejection', async () => {

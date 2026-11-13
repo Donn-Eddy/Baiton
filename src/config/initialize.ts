@@ -1,13 +1,14 @@
 /**
  * The Initialize command's file scaffolding (Requirement 1).
  *
- * `initialize` creates the `.baiton/` layout — `config.json`, `.gitignore`, and
- * the `runs/` and `plans/` directories (Req 1.1, 1.2, 1.7) — under a workspace
- * root. It never overwrites an existing `config.json` (Req 1.3): when one is
- * present its contents are left untouched and only `.gitignore` (and the
- * directories) are ensured. On any write failure it rolls back exactly the
- * files and directories it created during this invocation and leaves a
- * pre-existing `config.json` unchanged (Req 1.5).
+ * `initialize` creates the `.baiton/` layout — `config.local.json` when no
+ * configuration exists, `.gitignore`, and the `runs/` and `plans/` directories
+ * (Req 1.1, 1.2, 1.7) — under a workspace root. A pre-existing `config.json` is
+ * a read-only team baseline that Initialize never touches. It seeds the local
+ * overlay only when neither that baseline nor a local config exists; an
+ * existing `config.local.json` is also left untouched. On any write failure it
+ * rolls back exactly the files and directories it created during this
+ * invocation and leaves pre-existing configuration unchanged (Req 1.5).
  *
  * To stay unit-testable without a VS Code host, the core takes the absolute
  * filesystem path of the `.baiton/` directory and uses node `fs`. The design's
@@ -21,16 +22,19 @@ import * as path from 'path';
 import { Result, err, ok } from '../model';
 import { defaultConfigJson } from './defaultConfig';
 import { GITIGNORE_CONTENTS } from './gitignore';
+import { configFilePath, localConfigFilePath } from './loadConfig';
 import { PLANS_SUBDIR } from '../storage/documentLocation';
 
 /**
  * What `initialize` accomplished on success.
  *
- * - `createdConfig`   — `true` when a new `config.json` was written; `false`
- *                       when one already existed and was left untouched (Req 1.3).
+ * - `createdConfig`   — `true` when a new `config.local.json` was seeded from
+ *                       defaults; `false` when a `config.local.json` or
+ *                       committed `config.json` baseline already existed, in
+ *                       which case both are left byte-for-byte untouched.
  * - `ensuredGitignore` — always `true` on success: `.gitignore` is written or
  *                       overwritten with the required exclusions regardless of
- *                       whether `config.json` pre-existed (Req 1.2, 1.3).
+ *                       whether a config pre-existed (Req 1.2, 1.3).
  */
 export interface InitOutcome {
   createdConfig: boolean;
@@ -40,7 +44,7 @@ export interface InitOutcome {
 /**
  * Why initialization failed. Every variant means the `.baiton/` tree was rolled
  * back to the files/directories that existed before this invocation, with any
- * pre-existing `config.json` left unchanged (Req 1.5).
+ * pre-existing `config.local.json` or `config.json` left unchanged (Req 1.5).
  *
  * - `write-failed` — creating a directory or writing a file failed; `path`
  *   names the target that failed and `message` is user-facing.
@@ -64,18 +68,20 @@ interface CreatedTracker {
  * 1. Ensure `baitonDir`, `runs/` and `plans/` exist, recording only the
  *    directories this call actually created.
  * 2. Write `.gitignore` (Req 1.2), recording it if newly created.
- * 3. If `config.json` is absent, write the default (Req 1.1) and record it; if
- *    present, leave it untouched and report `createdConfig: false` (Req 1.3).
+ * 3. If both `config.local.json` and `config.json` are absent, seed the local
+ *    file from defaults (Req 1.1) and record it. If either exists, leave both
+ *    untouched and report `createdConfig: false` (Req 1.3).
  *
  * On the first failure the tracker is unwound: created files are unlinked and
- * created directories removed in reverse creation order. A `config.json` that
- * existed before this call is never in the tracker, so it is never removed
- * (Req 1.5).
+ * created directories removed in reverse creation order. A configuration
+ * file that existed before this call is never in the tracker, so it is never
+ * removed (Req 1.5).
  */
 export async function initialize(baitonDir: string): Promise<Result<InitOutcome, InitError>> {
   const created: CreatedTracker = { files: [], dirs: [] };
 
-  const configPath = path.join(baitonDir, 'config.json');
+  const baselinePath = configFilePath(baitonDir);
+  const localPath = localConfigFilePath(baitonDir);
   const gitignorePath = path.join(baitonDir, '.gitignore');
   const runsDir = path.join(baitonDir, 'runs');
   const plansDir = path.join(baitonDir, PLANS_SUBDIR);
@@ -88,7 +94,7 @@ export async function initialize(baitonDir: string): Promise<Result<InitOutcome,
     await ensureDir(plansDir, created);
 
     // 2. `.gitignore` is always ensured with the required exclusions, whether
-    //    or not `config.json` already exists (Req 1.2, 1.3). Writing it fresh
+    //    or not configuration already exists (Req 1.2, 1.3). Writing it fresh
     //    each time keeps the exclusions correct even if a stale copy existed.
     const gitignorePreexisted = await pathExists(gitignorePath);
     await fs.writeFile(gitignorePath, GITIGNORE_CONTENTS, 'utf8');
@@ -96,18 +102,21 @@ export async function initialize(baitonDir: string): Promise<Result<InitOutcome,
       created.files.push(gitignorePath);
     }
 
-    // 3. `config.json` is written only when absent; an existing one is left
-    //    byte-for-byte unchanged and reported as not created (Req 1.3).
-    const configPreexisted = await pathExists(configPath);
-    if (!configPreexisted) {
-      await fs.writeFile(configPath, defaultConfigJson(), 'utf8');
-      created.files.push(configPath);
+    // 3. Seed the local overlay only when neither layer exists. A full local
+    //    document would shadow the committed baseline, so leave an existing
+    //    config.json alone rather than creating a default overlay beside it.
+    const localPreexisted = await pathExists(localPath);
+    const baselinePreexisted = await pathExists(baselinePath);
+    const seedLocal = !localPreexisted && !baselinePreexisted;
+    if (seedLocal) {
+      await fs.writeFile(localPath, defaultConfigJson(), 'utf8');
+      created.files.push(localPath);
     }
 
-    return ok({ createdConfig: !configPreexisted, ensuredGitignore: true });
+    return ok({ createdConfig: seedLocal, ensuredGitignore: true });
   } catch (cause) {
-    // Any write failure rolls back this invocation's creations and preserves a
-    // pre-existing config.json (Req 1.5). Rollback is best-effort: it must not
+    // Any write failure rolls back this invocation's creations and preserves
+    // pre-existing config files (Req 1.5). Rollback is best-effort: it must not
     // mask the original failure, so cleanup errors are swallowed.
     const failedPath = errorPath(cause) ?? baitonDir;
     await rollback(created);
