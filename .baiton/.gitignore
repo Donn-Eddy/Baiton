@@ -1,5 +1,7 @@
 # Baiton-owned files that must never be committed.
 /.lock
+/config.local.json
+/.config*json.*.tmp
 /chat.jsonl
 /chat/
 /runs/
