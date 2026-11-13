@@ -102,7 +102,7 @@ export interface ConfigPanelControllerDeps {
   confirmReset(message: string): Promise<boolean>;
   applyConfig?: ApplyConfig;
   /**
-   * Opens the host's settings UI (wired in extension.ts to `workbench.action.openSettings` filtered to `${SETTINGS_NS}.orchestrator`).
+   * Opens the host's settings UI (wired in extension.ts to `workbench.action.openSettings` with the `@${SETTINGS_NS}` query, i.e. every Baiton setting).
    * Fire-and-forget: the controller posts nothing back and changes no state. A throw or rejection is logged, never surfaced as `saveFailed`. Absent → the message is a silent no-op.
    */
   openSettings?(): Promise<void> | void;

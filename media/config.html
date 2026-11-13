@@ -66,13 +66,17 @@
         display: flex;
         align-items: center;
         flex-wrap: wrap;
-        gap: var(--baiton-gap);
-        padding: var(--baiton-gap) 0;
+        gap: 4px;
+        padding: 4px 0;
         background-color: var(--vscode-sideBar-background);
         border-bottom: 1px solid var(--vscode-panel-border);
         margin-bottom: var(--baiton-gap);
       }
 
+      .toolbar button {
+        padding: 2px 8px;
+        white-space: nowrap;
+      }
 
       #config-path {
         flex: 1 1 auto;
@@ -292,6 +296,8 @@
       <button id="save" type="button">Save</button>
       <button id="reload" class="secondary" type="button">Reload</button>
       <button id="reset" class="secondary" type="button">Reset&hellip;</button>
+      <button id="more-settings" class="secondary" type="button">More settings&hellip;</button>
+      <button id="manage-api-keys" class="secondary" type="button">Manage API keys&hellip;</button>
     </header>
 
     <div id="banner" role="alert">

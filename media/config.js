@@ -140,6 +140,8 @@
   var saveBtn = /** @type {HTMLButtonElement} */ (document.getElementById('save'));
   var reloadBtn = /** @type {HTMLButtonElement} */ (document.getElementById('reload'));
   var resetBtn = /** @type {HTMLButtonElement} */ (document.getElementById('reset'));
+  var moreSettingsBtn = /** @type {HTMLButtonElement} */ (document.getElementById('more-settings'));
+  var manageApiKeysBtn = /** @type {HTMLButtonElement} */ (document.getElementById('manage-api-keys'));
   var bannerEl = /** @type {HTMLElement} */ (document.getElementById('banner'));
   var bannerMessage = /** @type {HTMLElement} */ (document.getElementById('banner-message'));
   var bannerPrimary = /** @type {HTMLButtonElement} */ (document.getElementById('banner-primary'));
@@ -1028,6 +1030,11 @@
 
   resetBtn.addEventListener('click', requestReset);
   errorResetBtn.addEventListener('click', requestReset);
+
+  // One-way hand-offs to the host. They never touch state, the draft, the
+  // dirty flag or enablement, so they work in every phase and while busy.
+  moreSettingsBtn.addEventListener('click', function () { vscode.postMessage({ type: 'openSettings' }); });
+  manageApiKeysBtn.addEventListener('click', function () { vscode.postMessage({ type: 'manageApiKeys' }); });
 
   bannerPrimary.addEventListener('click', function () {
     if (!state.banner) {
