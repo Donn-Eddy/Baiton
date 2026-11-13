@@ -12,3 +12,4 @@ plans/*/runs.jsonl
 specs/*/chat.jsonl
 specs/*/chat/
 specs/*/runs.jsonl
+/.claude/
