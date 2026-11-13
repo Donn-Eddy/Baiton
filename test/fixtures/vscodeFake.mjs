@@ -4,7 +4,7 @@
  * The extension source imports `vscode` as a bare specifier, but there is no
  * requireable `vscode` runtime outside a running VS Code host. `vscodeLoader.mjs`
  * redirects that bare specifier to this module so glue code such as
- * `setOrchestratorApiKey` and `configPanel` can be exercised without a host.
+ * `setProviderApiKey`, `setProviderEndpoint` and `configPanel` can be exercised without a host.
  *
  * The module is stateless: each member delegates to the mutable fake
  * a test installs on `globalThis.__vscodeFake`. Delegating (rather than closing

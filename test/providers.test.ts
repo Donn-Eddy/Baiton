@@ -4,7 +4,6 @@ import * as path from 'path';
 import {
   BUILTIN_PROVIDER_IDS,
   FEED_PROVIDER_DENY,
-  LEGACY_API_KEY_SECRET,
   MODEL_SELECTION_KEY,
   PROVIDERS,
   PROVIDER_IDS,
@@ -207,7 +206,7 @@ describe('orchestrator/providers', () => {
       }
       assert.strictEqual(new Set(keys).size, keys.length);
       for (const key of keys) {
-        assert.notStrictEqual(key, LEGACY_API_KEY_SECRET);
+        assert.notStrictEqual(key, 'baiton.orchestrator.apiKey');
       }
     });
   });
@@ -249,12 +248,6 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(providerSecretKey('opencode'), 'baiton.orchestrator.key.opencode');
       assert.strictEqual(providerSecretKey('mistral'), 'baiton.orchestrator.key.mistral');
       assert.strictEqual(providerSecretKey('toString'), 'baiton.orchestrator.key.toString');
-    });
-  });
-
-  describe('legacy key', () => {
-    it('pins the legacy secret literal', () => {
-      assert.strictEqual(LEGACY_API_KEY_SECRET, 'baiton.orchestrator.apiKey');
     });
   });
 
@@ -617,7 +610,7 @@ describe('orchestrator/providers', () => {
       assert.strictEqual(providerSecretKey(''), undefined);
       assert.strictEqual(providerSecretKey('   '), undefined);
       for (const entry of buildProviderCatalog(sampleFeed())) {
-        assert.notStrictEqual(providerSecretKey(entry.id), LEGACY_API_KEY_SECRET);
+        assert.notStrictEqual(providerSecretKey(entry.id), 'baiton.orchestrator.apiKey');
       }
     });
   });
