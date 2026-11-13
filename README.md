@@ -667,13 +667,11 @@ dismissing either box changes nothing and says nothing; a storage failure
 leaves the previous value untouched and reports an error. The command is also
 available from the Configuration view's **Manage API keys…** button.
 
-**Baiton: Set Orchestrator API Key** (`baiton.setOrchestratorApiKey`) stays
-registered as an alias so existing key bindings keep working. The
-pre-multi-provider single secret `baiton.orchestrator.apiKey` is migrated once
-into the `openai` slot (`migrateLegacyApiKey` in `src/activation/setApiKey.ts`,
-gated by the `baiton.orchestrator.keyMigrated` flag in `globalState`), so an
-already-configured setup keeps working with nothing to re-enter; the legacy
-secret is never deleted and is no longer read.
+The old **Set Orchestrator API Key** alias command and the one-time migration
+of the pre-multi-provider single secret into the `openai` slot have been
+removed. Baiton no longer reads or writes that secret. If your only key was
+stored there, set it again with **Baiton: Set Provider API Key** (or the
+Configuration view's **Manage API keys…** button).
 
 #### Per-provider endpoints
 
@@ -779,8 +777,13 @@ the whole conversation.
 The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Plan Explorer and the Runs view. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
 
 - **Managed fields** — edits the six role entries (`plan-writer`, `planner`,
-  `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) with an agent dropdown
-  populated from installed adapters; a **per-agent model dropdown populated from
+  `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) in a single flat table
+  with one row per role and **Agent**, **Model** and **Effort** columns. Each
+  cell holds that field's dropdown, its `Other…` input, any documentation link
+  or staleness note, and its inline error, directly under the column header.
+  Limits and Git follow as plain headed sections, with no nested boxes. Each
+  row has an agent dropdown populated from installed adapters; a **per-agent
+  model dropdown populated from
   the refreshed per-agent list** — Codex, Claude, OpenCode and Antigravity alike,
   OpenCode included now that `opencode models --verbose` makes its list
   discoverable — with each agent's curated table as the offline fallback and
@@ -825,9 +828,10 @@ The configuration form is the **Configuration** section of the Baiton view in th
   recovery; it confirms with a modal prompt, writes the default configuration
   to `.baiton/config.local.json`, and never touches `.baiton/config.json`.
 - **Toolbar** — Save, Reload, Reset…, **More settings…** and **Manage API keys…**.
-  **More settings…** opens VS Code Settings filtered to `baiton.orchestrator`
-  (`workbench.action.openSettings`), the same destination as the Chat view's
-  inline-error **open settings** fix. **Manage API keys…** runs **Baiton: Set
+  **More settings…** opens VS Code Settings filtered to every Baiton setting
+  (`workbench.action.openSettings` with the `@baiton` query), not only the
+  `baiton.orchestrator` group. The Chat view's inline-error **open settings**
+  fix still targets `baiton.orchestrator`. **Manage API keys…** runs **Baiton: Set
   Provider API Key** (`baiton.setProviderApiKey`) with no provider argument. It
   shows the provider quick pick with `API key set` / `No API key set` on each
   row, then a masked input; submitting an empty value clears the key. This flow

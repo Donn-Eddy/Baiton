@@ -4,26 +4,23 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 
 /**
- * Unit tests for the `Baiton: Set Orchestrator API Key` command handler
- * (design "Set API Key").
+ * Unit tests for the `Baiton: Set Provider API Key` command handler.
  *
- * `setOrchestratorApiKey` is `vscode` glue: it prompts with a masked input box
- * and persists the trimmed value to an injected `SecretStorage`. There is no
- * requireable `vscode` runtime outside a running host, so a module
+ * `setProviderApiKey` is `vscode` glue: it offers a quick pick over the live
+ * provider catalog, then prompts with a masked input and sets or clears that
+ * provider's `baiton.orchestrator.key.<id>` slot in an injected `SecretStorage`.
+ * Cancel leaves the key unchanged with no message; an empty submit clears an
+ * existing key or warns that nothing was provided; a storage failure leaves
+ * the previous value and shows an error.
+ *
+ * There is no requireable `vscode` runtime outside a running host, so a module
  * customization hook (`fixtures/vscodeLoader.mjs`) redirects the bare `vscode`
  * import to a stateless fake (`fixtures/vscodeFake.mjs`) that delegates to the
  * mutable fake this suite installs on `globalThis.__vscodeFake`. The handler is
  * imported dynamically only after the hook is registered.
  *
- * The `SecretStorage` passed to the handler is a per-test fake so writes are
- * observable and a write failure can be forced.
- *
- * Coverage (Req 17.4, 17.5, 17.6, 17.7):
- * - Cancel (input box dismissed -> `undefined`): key untouched, no message.
- * - Empty / whitespace-only submit: key untouched, "no value provided" message.
- * - Successful write: trimmed value stored under `baiton.orchestrator.apiKey`,
- *   a saved confirmation shown that never contains the value.
- * - Write failure: no stored value changes, an error message shown.
+ * The `SecretStorage` passed to the handler is a per-test fake so reads, writes,
+ * deletes and storage failures are observable.
  */
 
 /** A recorded call to one of the faked `vscode.window` message functions. */
@@ -150,24 +147,16 @@ class FakeSecretStorage {
 // The handler module and its exported constants, loaded once the vscode
 // redirect hook is registered.
 type SetApiKeyModule = typeof import('../src/activation/setApiKey');
-let setOrchestratorApiKey: SetApiKeyModule['setOrchestratorApiKey'];
 let setProviderApiKey: SetApiKeyModule['setProviderApiKey'];
-let migrateLegacyApiKey: SetApiKeyModule['migrateLegacyApiKey'];
-let LEGACY_MIGRATION_FLAG: string;
 let PROVIDER_KEY_NO_VALUE_MESSAGE: string;
 let PROVIDER_KEY_SET_DETAIL: string;
 let PROVIDER_KEY_MISSING_DETAIL: string;
 let providerKeySavedMessage: (label: string) => string;
 let providerKeyClearedMessage: (label: string) => string;
 let providerKeySaveFailedMessage: (label: string) => string;
-let API_KEY_SECRET: string;
-let API_KEY_SAVED_MESSAGE: string;
-let API_KEY_NO_VALUE_MESSAGE: string;
-let API_KEY_SAVE_FAILED_MESSAGE: string;
 
 // The provider catalog is host-free and statically importable.
 import {
-  LEGACY_API_KEY_SECRET,
   providerCatalog,
   providerInfo,
   providerSecretKey,
@@ -210,28 +199,7 @@ function asSecrets(fake: FakeSecretStorage): import('vscode').SecretStorage {
   return fake as unknown as import('vscode').SecretStorage;
 }
 
-/** A fake `vscode.Memento` (globalState) recording its updates. */
-class FakeMemento {
-  readonly values = new Map<string, unknown>();
-  readonly updates: Array<{ key: string; value: unknown }> = [];
-
-  get<T>(key: string): T | undefined {
-    return this.values.get(key) as T | undefined;
-  }
-
-  update(key: string, value: unknown): Promise<void> {
-    this.updates.push({ key, value });
-    this.values.set(key, value);
-    return Promise.resolve();
-  }
-}
-
-/** The two-arg call shape cast for the migration entry point. */
-function asMemento(fake: FakeMemento): import('vscode').Memento {
-  return fake as unknown as import('vscode').Memento;
-}
-
-describe('setOrchestratorApiKey', () => {
+describe('setProviderApiKey', () => {
   before(async () => {
     // Register the hook that redirects `vscode` to the in-repo fake, then load
     // the handler so its `import * as vscode` resolves to the fake. Mocha runs
@@ -246,141 +214,13 @@ describe('setOrchestratorApiKey', () => {
     await import('./fixtures/vscodeLoader.mjs');
 
     const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
-    setOrchestratorApiKey = mod.setOrchestratorApiKey;
-    API_KEY_SECRET = mod.API_KEY_SECRET;
-    API_KEY_SAVED_MESSAGE = mod.API_KEY_SAVED_MESSAGE;
-    API_KEY_NO_VALUE_MESSAGE = mod.API_KEY_NO_VALUE_MESSAGE;
-    API_KEY_SAVE_FAILED_MESSAGE = mod.API_KEY_SAVE_FAILED_MESSAGE;
     setProviderApiKey = mod.setProviderApiKey;
-    migrateLegacyApiKey = mod.migrateLegacyApiKey;
-    LEGACY_MIGRATION_FLAG = mod.LEGACY_MIGRATION_FLAG;
     PROVIDER_KEY_NO_VALUE_MESSAGE = mod.PROVIDER_KEY_NO_VALUE_MESSAGE;
     PROVIDER_KEY_SET_DETAIL = mod.PROVIDER_KEY_SET_DETAIL;
     PROVIDER_KEY_MISSING_DETAIL = mod.PROVIDER_KEY_MISSING_DETAIL;
     providerKeySavedMessage = mod.providerKeySavedMessage;
     providerKeyClearedMessage = mod.providerKeyClearedMessage;
     providerKeySaveFailedMessage = mod.providerKeySaveFailedMessage;
-  });
-
-  beforeEach(() => {
-    vscodeFake = makeVscodeFake();
-    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
-  });
-
-  it('prompts with a masked input box (Req 17.2)', async () => {
-    vscodeFake.inputResult = 'sk-live-secret';
-    const secrets = new FakeSecretStorage();
-
-    await setOrchestratorApiKey(asSecrets(secrets));
-
-    assert.strictEqual(vscodeFake.inputBoxCalls, 1, 'the prompt should be shown once');
-    assert.strictEqual(
-      vscodeFake.lastInputOptions?.password,
-      true,
-      'the input must be masked',
-    );
-  });
-
-  describe('cancel path (Req 17.5)', () => {
-    it('leaves the stored key unchanged and shows no message when the prompt is dismissed', async () => {
-      // A dismissed input box resolves undefined.
-      vscodeFake.inputResult = undefined;
-      const secrets = new FakeSecretStorage();
-      secrets.values.set(API_KEY_SECRET, 'previous-key');
-
-      await setOrchestratorApiKey(asSecrets(secrets));
-
-      assert.strictEqual(secrets.storeCalls.length, 0, 'no store should be attempted');
-      assert.strictEqual(secrets.values.get(API_KEY_SECRET), 'previous-key');
-      assert.strictEqual(vscodeFake.messages.length, 0, 'cancel must surface no message');
-    });
-  });
-
-  describe('empty / whitespace-only submit (Req 17.6)', () => {
-    it('leaves the key unchanged and reports no value for an empty string', async () => {
-      vscodeFake.inputResult = '';
-      const secrets = new FakeSecretStorage();
-      secrets.values.set(API_KEY_SECRET, 'previous-key');
-
-      await setOrchestratorApiKey(asSecrets(secrets));
-
-      assert.strictEqual(secrets.storeCalls.length, 0, 'no store should be attempted');
-      assert.strictEqual(secrets.values.get(API_KEY_SECRET), 'previous-key');
-      assert.deepStrictEqual(
-        vscodeFake.messages,
-        [{ kind: 'warning', message: API_KEY_NO_VALUE_MESSAGE }],
-        'exactly one no-value message should be shown',
-      );
-    });
-
-    it('leaves the key unchanged and reports no value for a whitespace-only submit', async () => {
-      vscodeFake.inputResult = '   \t  \n ';
-      const secrets = new FakeSecretStorage();
-
-      await setOrchestratorApiKey(asSecrets(secrets));
-
-      assert.strictEqual(secrets.storeCalls.length, 0, 'no store should be attempted');
-      assert.strictEqual(secrets.values.has(API_KEY_SECRET), false, 'nothing is stored');
-      assert.deepStrictEqual(vscodeFake.messages, [
-        { kind: 'warning', message: API_KEY_NO_VALUE_MESSAGE },
-      ]);
-    });
-  });
-
-  describe('successful write (Req 17.4)', () => {
-    it('stores the trimmed value under the API-key secret and confirms without revealing it', async () => {
-      vscodeFake.inputResult = '  sk-live-abcdef123456  ';
-      const secrets = new FakeSecretStorage();
-
-      await setOrchestratorApiKey(asSecrets(secrets));
-
-      // The trimmed value is written under the exact key the Model_Client reads.
-      assert.strictEqual(secrets.storeCalls.length, 1, 'exactly one store');
-      assert.strictEqual(secrets.storeCalls[0].key, API_KEY_SECRET);
-      assert.strictEqual(secrets.storeCalls[0].value, 'sk-live-abcdef123456');
-      assert.strictEqual(secrets.values.get(API_KEY_SECRET), 'sk-live-abcdef123456');
-
-      // Exactly one confirmation, and it never contains the stored value.
-      assert.deepStrictEqual(vscodeFake.messages, [
-        { kind: 'info', message: API_KEY_SAVED_MESSAGE },
-      ]);
-      assert.ok(
-        !vscodeFake.messages[0].message.includes('sk-live-abcdef123456'),
-        'the confirmation must not reveal the stored value',
-      );
-    });
-  });
-
-  describe('write failure (Req 17.7)', () => {
-    it('leaves any previously stored key unchanged and surfaces an error', async () => {
-      vscodeFake.inputResult = 'new-key-value';
-      const secrets = new FakeSecretStorage();
-      secrets.values.set(API_KEY_SECRET, 'previous-key');
-      secrets.failStore = true;
-
-      await setOrchestratorApiKey(asSecrets(secrets));
-
-      // A store was attempted and threw, so the previous value is left intact.
-      assert.strictEqual(secrets.storeCalls.length, 1, 'a store should be attempted');
-      assert.strictEqual(
-        secrets.values.get(API_KEY_SECRET),
-        'previous-key',
-        'a failed store leaves the previous key unchanged',
-      );
-      // Exactly one error, and no saved confirmation.
-      assert.deepStrictEqual(vscodeFake.messages, [
-        { kind: 'error', message: API_KEY_SAVE_FAILED_MESSAGE },
-      ]);
-    });
-  });
-});
-
-describe('setProviderApiKey', () => {
-  before(async () => {
-    // The module is already loaded by the earlier suite's hook (same loader,
-    // same redirect); pick it up here too.
-    const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
-    setProviderApiKey = mod.setProviderApiKey;
   });
 
   beforeEach(() => {
@@ -944,105 +784,5 @@ describe('setProviderApiKey catalog-driven quick pick', () => {
     await setProviderApiKey(asSecrets(new FakeSecretStorage()), undefined, undefined, { catalog });
     assert.strictEqual(vscodeFake.lastQuickPickItems!.length, 5);
     assert.strictEqual(vscodeFake.lastQuickPickItems![4].label, 'Baseten');
-  });
-});
-
-describe('migrateLegacyApiKey', () => {
-  before(async () => {
-    const mod = (await import('../src/activation/setApiKey')) as SetApiKeyModule;
-    migrateLegacyApiKey = mod.migrateLegacyApiKey;
-    LEGACY_MIGRATION_FLAG = mod.LEGACY_MIGRATION_FLAG;
-  });
-
-  beforeEach(() => {
-    vscodeFake = makeVscodeFake();
-    (globalThis as unknown as { __vscodeFake: VscodeFake }).__vscodeFake = vscodeFake;
-  });
-
-  it('copies the legacy secret into the openai slot and leaves the legacy secret in place', async () => {
-    const secrets = new FakeSecretStorage();
-    secrets.values.set(LEGACY_API_KEY_SECRET, '  legacy-key  ');
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento));
-
-    assert.strictEqual(migrated, true);
-    assert.strictEqual(secrets.values.get(providerSecretKey('openai')!), 'legacy-key');
-    assert.strictEqual(secrets.values.get(LEGACY_API_KEY_SECRET), '  legacy-key  ', 'legacy secret not deleted');
-    assert.strictEqual(memento.values.get(LEGACY_MIGRATION_FLAG), true);
-  });
-
-  it('runs at most once: the flag prevents a second migration', async () => {
-    const secrets = new FakeSecretStorage();
-    secrets.values.set(LEGACY_API_KEY_SECRET, 'legacy-key');
-    const memento = new FakeMemento();
-
-    assert.strictEqual(await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento)), true);
-
-    // Between calls the user changes the openai key themselves; a second run
-    // must not overwrite it.
-    secrets.values.set(providerSecretKey('openai')!, 'user-key');
-    assert.strictEqual(await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento)), false);
-    assert.strictEqual(secrets.values.get(providerSecretKey('openai')!), 'user-key');
-    assert.strictEqual(secrets.storeCalls.length, 1, 'only the first call stored');
-  });
-
-  it('does not clobber an existing openai key', async () => {
-    const secrets = new FakeSecretStorage();
-    secrets.values.set(LEGACY_API_KEY_SECRET, 'legacy-key');
-    secrets.values.set(providerSecretKey('openai')!, 'user-key');
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento));
-
-    assert.strictEqual(migrated, false);
-    assert.strictEqual(secrets.values.get(providerSecretKey('openai')!), 'user-key');
-    assert.strictEqual(memento.values.get(LEGACY_MIGRATION_FLAG), true);
-  });
-
-  it('no legacy secret: flag set so the read never repeats', async () => {
-    const secrets = new FakeSecretStorage();
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento));
-
-    assert.strictEqual(migrated, false);
-    assert.strictEqual(secrets.storeCalls.length, 0);
-    assert.strictEqual(memento.values.get(LEGACY_MIGRATION_FLAG), true);
-  });
-
-  it('whitespace-only legacy secret is treated as absent', async () => {
-    const secrets = new FakeSecretStorage();
-    secrets.values.set(LEGACY_API_KEY_SECRET, '  \t ');
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento));
-
-    assert.strictEqual(migrated, false);
-    assert.strictEqual(secrets.storeCalls.length, 0);
-  });
-
-  it('a throwing SecretStorage resolves false rather than rejecting', async () => {
-    const secrets = new FakeSecretStorage();
-    secrets.values.set(LEGACY_API_KEY_SECRET, 'legacy-key');
-    secrets.failStore = true;
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(asSecrets(secrets), asMemento(memento));
-
-    assert.strictEqual(migrated, false);
-  });
-
-  it('a rejecting get resolves false rather than rejecting', async () => {
-    const secrets = new FakeSecretStorage();
-    // Force `get` to reject for this case only.
-    const throwing = asSecrets(secrets);
-    (throwing as unknown as { get: () => Promise<string> }).get = () =>
-      Promise.reject(new Error('boom'));
-    const memento = new FakeMemento();
-
-    const migrated = await migrateLegacyApiKey(throwing, asMemento(memento));
-
-    assert.strictEqual(migrated, false);
   });
 });

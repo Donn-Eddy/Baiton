@@ -1,104 +1,22 @@
 /**
- * The `Baiton: Set Orchestrator API Key` command handler (task 13.2; design
- * "Set API Key").
- *
- * This is thin `vscode` glue that prompts for the orchestrator API key with a
- * masked (password) input and persists it to VS Code SecretStorage under the
- * key the Model_Client reads (`baiton.orchestrator.apiKey`). It never reveals
- * the stored value in any message (Req 17.2, 17.3, 17.4).
- *
- * The handler is defensive about the several ways a prompt can end:
- *  - Cancel (the user dismisses the box): the stored key is left unchanged and
- *    no confirmation is shown (Req 17.5).
- *  - Empty / whitespace-only submit: the stored key is left unchanged and a
- *    "no value provided" message is shown (Req 17.6).
- *  - Write failure: any previously stored key is left unchanged and an error
- *    message is shown (Req 17.7).
- *
- * The per-provider half of this module ({@link setProviderApiKey}) applies the
- * same rules to one provider's `baiton.orchestrator.key.<id>` slot, and offers
- * the keyed providers of the *live* catalog — the builtins plus every
- * models.dev-derived provider — so a provider the Chat dropdown hides can still
- * be given a key. Only ids, labels and a set/not-set marker ever reach the
- * quick pick; no stored value does.
+ * The `Baiton: Set Provider API Key` command handler (`baiton.setProviderApiKey`).
+ * Thin `vscode` glue that sets or clears one provider's API key in VS Code
+ * SecretStorage under its `baiton.orchestrator.key.<id>` slot, using a masked
+ * input. It offers the keyed providers of the live catalog (the builtins plus
+ * every models.dev-derived provider), and providers aliased onto one slot
+ * appear as a single item. It never reveals a stored value; only ids, labels
+ * and a set/not-set marker reach the quick pick. Ending behaviours: cancel
+ * leaves the key unchanged with no message; an empty submit clears an existing
+ * key or warns that nothing was provided; a write or delete failure leaves
+ * the previous value and shows an error.
  */
 import * as vscode from 'vscode';
 import {
-  LEGACY_API_KEY_SECRET,
   providerCatalog,
   providerInfo,
   providerSecretKey,
 } from '../orchestrator/providers';
 import type { ProviderId, ProviderInfo } from '../orchestrator/providers';
-
-/**
- * The SecretStorage key under which the orchestrator API key is stored. This is
- * the same key the Model_Client configuration reads via `context.secrets`, so
- * writing here makes the key immediately available to the Tool_Loop.
- */
-export const API_KEY_SECRET = 'baiton.orchestrator.apiKey';
-
-/** The prompt title/label shown in the masked input box (Req 17.2). */
-export const API_KEY_PROMPT = 'Enter your Baiton orchestrator API key';
-
-/** Confirmation shown after a successful write, revealing no value (Req 17.4). */
-export const API_KEY_SAVED_MESSAGE = 'Baiton: the orchestrator API key was saved.';
-
-/** Message shown when the submitted value has no non-whitespace character (Req 17.6). */
-export const API_KEY_NO_VALUE_MESSAGE = 'Baiton: no value provided; the API key was left unchanged.';
-
-/** Error message shown when the SecretStorage write fails (Req 17.7). */
-export const API_KEY_SAVE_FAILED_MESSAGE = 'Baiton: the orchestrator API key could not be saved.';
-
-/**
- * Prompt for the orchestrator API key and store it in SecretStorage.
- *
- * On a submit with at least one non-whitespace character, the trimmed value is
- * written to `baiton.orchestrator.apiKey` and a confirmation is shown that does
- * not reveal the value (Req 17.3, 17.4). Cancelling the prompt (an `undefined`
- * result) leaves the key untouched with no message (Req 17.5). An empty or
- * whitespace-only submit leaves the key untouched and reports that no value was
- * provided (Req 17.6). If the write throws, any previous key is left unchanged
- * and an error is surfaced (Req 17.7).
- *
- * @param secrets The VS Code SecretStorage to write the key into. Passed in so
- *   the handler is testable without a running host.
- */
-export async function setOrchestratorApiKey(
-  secrets: vscode.SecretStorage,
-): Promise<void> {
-  const input = await vscode.window.showInputBox({
-    prompt: API_KEY_PROMPT,
-    password: true,
-    ignoreFocusOut: true,
-  });
-
-  // Cancel: the input box was dismissed. Leave the stored key unchanged and
-  // show nothing (Req 17.5).
-  if (input === undefined) {
-    return;
-  }
-
-  // Empty / whitespace-only submit: nothing meaningful to store. Leave the key
-  // unchanged and report that no value was provided (Req 17.6).
-  const trimmed = input.trim();
-  if (trimmed.length === 0) {
-    void vscode.window.showWarningMessage(API_KEY_NO_VALUE_MESSAGE);
-    return;
-  }
-
-  try {
-    await secrets.store(API_KEY_SECRET, trimmed);
-  } catch {
-    // Write failure: any previously stored key is untouched by a failed store.
-    // Surface an error and do not confirm a save (Req 17.7).
-    void vscode.window.showErrorMessage(API_KEY_SAVE_FAILED_MESSAGE);
-    return;
-  }
-
-  // Success: confirm without revealing the stored value (Req 17.4).
-  void vscode.window.showInformationMessage(API_KEY_SAVED_MESSAGE);
-}
 
 // --- per-provider key management (multi-provider orchestrator) --------------
 
@@ -383,55 +301,4 @@ export async function setProviderApiKey(
 
   // Success: confirm without revealing the stored value.
   void vscode.window.showInformationMessage(providerKeySavedMessage(label));
-}
-
-/** `globalState` flag making the legacy-key migration run at most once. */
-export const LEGACY_MIGRATION_FLAG = 'baiton.orchestrator.keyMigrated';
-
-/** A minimal `vscode.Memento`-like store for the migration gate. */
-interface MementoLike {
-  get<T>(key: string): T | undefined;
-  update(key: string, value: unknown): Thenable<void>;
-}
-
-/**
- * One-time migration of the pre-multi-provider single-key secret
- * (`baiton.orchestrator.apiKey`) into the `openai` provider slot.
- *
- * The migration runs at most once, gated by {@link LEGACY_MIGRATION_FLAG} in
- * the caller's `globalState`. It never deletes the legacy secret; nothing in
- * the live build reads it any more (the ProviderRouter reads the `openai`
- * slot directly). A
- * non-empty value already in the `openai` slot is never clobbered, and a
- * missing/whitespace-only legacy secret sets the flag so the read never
- * repeats. Any failure resolves `false` — activation must not break here.
- *
- * @returns Whether a legacy value was copied into the `openai` slot.
- */
-export async function migrateLegacyApiKey(
-  secrets: vscode.SecretStorage,
-  memento: MementoLike,
-): Promise<boolean> {
-  try {
-    if (memento.get<boolean>(LEGACY_MIGRATION_FLAG) === true) {
-      return false;
-    }
-    const legacy = await secrets.get(LEGACY_API_KEY_SECRET);
-    if (legacy === undefined || legacy.trim().length === 0) {
-      await memento.update(LEGACY_MIGRATION_FLAG, true);
-      return false;
-    }
-    const openaiKey = providerSecretKey('openai')!;
-    const existing = await secrets.get(openaiKey);
-    if (typeof existing === 'string' && existing.length > 0) {
-      await memento.update(LEGACY_MIGRATION_FLAG, true);
-      return false;
-    }
-    await secrets.store(openaiKey, legacy.trim());
-    await memento.update(LEGACY_MIGRATION_FLAG, true);
-    return true;
-  } catch {
-    // A SecretStorage failure at activation must never break activation.
-    return false;
-  }
 }

@@ -222,10 +222,10 @@ export interface RegisterConfigPanelDeps {
     config: Config,
   ): Promise<readonly string[]> | readonly string[];
   /**
-   * Opens VS Code Settings filtered to the Baiton orchestrator settings. Optional: a caller
-   * that omits it (test/configPanel.view.test.ts) gets a silent no-op for the panel's
-   * "More settings…" button. `src/extension.ts` binds it to
-   * `workbench.action.openSettings` with `${SETTINGS_NS}.orchestrator`.
+   * Opens VS Code Settings filtered to every Baiton setting. Optional: a caller that omits
+   * it (test/configPanel.view.test.ts) gets a silent no-op for the panel's "More settings…"
+   * button. `src/extension.ts` binds it to `workbench.action.openSettings` with the
+   * `@${SETTINGS_NS}` query.
    */
   openSettings?(): Promise<void> | void;
   /**

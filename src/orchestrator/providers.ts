@@ -452,14 +452,6 @@ export function providerSecretKey(id: ProviderId): string | undefined {
   return `${PROVIDER_SECRET_KEY_PREFIX}${slot}`;
 }
 
-/**
- * The pre-multi-provider single-key secret, written by
- * `setOrchestratorApiKey` in src/activation/setApiKey.ts. Migrated once into
- * the `openai` slot by the host glue; kept here so the migration and the
- * catalog cannot drift.
- */
-export const LEGACY_API_KEY_SECRET = 'baiton.orchestrator.apiKey';
-
 /** The active provider + model pair, as persisted and as sent to the webview. */
 export interface ModelSelection {
   provider: ProviderId;

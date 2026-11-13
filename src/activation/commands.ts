@@ -30,9 +30,7 @@
  *     SecretStorage (pre-selecting the provider named by its argument, or
  *     picking through a quick-pick); the Chat view's inline "Set API key…"
  *     fix opens the same prompt pre-selected on the provider that failed, and
- *     storing/clearing a key refreshes the Provider & Model dropdown;
- *     `baiton.setOrchestratorApiKey` is kept as an alias of it for existing
- *     key bindings (Req 17).
+ *     storing/clearing a key refreshes the Provider & Model dropdown (Req 17).
  *   - `baiton.setProviderEndpoint` — set or clear one provider's base URL in
  *     the `baiton.orchestrator.endpoints` user setting, for feed providers
  *     models.dev publishes no URL for (or to route one through a proxy); the
@@ -192,7 +190,7 @@ import {
 } from './runsExplorer';
 import { openChat } from './openChat';
 import { phasePlanPath } from './planLister';
-import { migrateLegacyApiKey, setProviderApiKey } from './setApiKey';
+import { setProviderApiKey } from './setApiKey';
 import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEndpoint';
 import { ProviderRouter } from './providerRouter';
 import type { ProviderSettings } from './providerRouter';
@@ -239,7 +237,6 @@ export const COMMANDS = {
   viewPlan: 'baiton.viewPlan',
   chat: 'baiton.chat',
   openChat: 'baiton.openChat',
-  setApiKey: 'baiton.setOrchestratorApiKey',
   setProviderApiKey: 'baiton.setProviderApiKey',
   setProviderEndpoint: 'baiton.setProviderEndpoint',
   openConfigPanel: 'baiton.openConfigPanel',
@@ -400,10 +397,6 @@ export function registerCommands(
   surface: Surface,
 ): CommandSurface {
   const disposables: vscode.Disposable[] = [];
-  // One-time migration of the pre-multi-provider single-key secret into the
-  // `openai` slot; the router's first availability read must see it, so the
-  // init below is chained onto it rather than racing it.
-  const legacyMigration = migrateLegacyApiKey(context.secrets, context.globalState);
   const { workspace } = activation;
   /**
    * Accessor for the live configuration. The config object is replaced wholesale
@@ -864,10 +857,9 @@ export function registerCommands(
   });
   // Releases the router's `secrets.onDidChange` subscription (its key-presence memo).
   disposables.push(new vscode.Disposable(() => router.dispose()));
-  // Restore the persisted selection (or pick the first usable provider) once
-  // the legacy key has landed in the `openai` slot, then fire one change so a
-  // Chat view that resolved first repaints its dropdown.
-  void legacyMigration.then(() => router.init()).then(() => router.refresh());
+  // Restore the persisted selection (or pick the first usable provider), then
+  // fire one change so a Chat view that resolved first repaints its dropdown.
+  void router.init().then(() => router.refresh());
 
   // A landed catalog refresh changes which providers exist and which models
   // they offer, so re-read availability; refresh() never rejects. One
@@ -1190,8 +1182,6 @@ export function registerCommands(
             : undefined,
       ),
     ),
-    // Kept as an alias so existing key bindings and the README keep working.
-    vscode.commands.registerCommand(COMMANDS.setApiKey, () => promptProviderKey()),
     // Same membership gate as the key command; setProviderEndpoint itself
     // falls back to its quick pick for an id it cannot set an endpoint for.
     vscode.commands.registerCommand(COMMANDS.setProviderEndpoint, (arg?: unknown) =>

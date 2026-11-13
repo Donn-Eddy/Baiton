@@ -85,11 +85,6 @@
         "category": "Baiton"
       },
       {
-        "command": "baiton.setOrchestratorApiKey",
-        "title": "Set Orchestrator API Key",
-        "category": "Baiton"
-      },
-      {
         "command": "baiton.setProviderApiKey",
         "title": "Set Provider API Key",
         "category": "Baiton"
@@ -238,10 +233,6 @@
         },
         {
           "command": "baiton.compactContext",
-          "when": "baiton.activated"
-        },
-        {
-          "command": "baiton.setOrchestratorApiKey",
           "when": "baiton.activated"
         },
         {

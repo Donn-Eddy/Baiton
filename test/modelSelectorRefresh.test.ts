@@ -2713,6 +2713,8 @@ describe('model selector refresh ', () => {
       make('save', 'button');
       make('reload', 'button');
       make('reset', 'button');
+      make('more-settings', 'button');
+      make('manage-api-keys', 'button');
       make('banner', 'div');
       make('banner-message', 'span');
       make('banner-primary', 'button');

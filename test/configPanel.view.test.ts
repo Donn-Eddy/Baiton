@@ -415,6 +415,14 @@ describe('Config Panel view and reveal command ', () => {
     const html = fs.readFileSync(path.join(__dirname, '..', 'media', 'config.html'), 'utf8');
     assert.ok(html.includes('<span id="config-path">.baiton/config.local.json</span>'));
     assert.ok(!html.includes('>.baiton/config.json<'));
+    assert.ok(html.includes('<table id="roles-table">'));
+    assert.ok(html.includes('<tbody id="roles-body"></tbody>'));
+    assert.ok(html.includes('>Agent<'));
+    assert.ok(html.includes('>Model<'));
+    assert.ok(html.includes('>Effort<'));
+    assert.ok(!html.includes('<fieldset'));
+    assert.ok(!html.includes('<legend'));
+    assert.ok(!html.includes('role-group'));
   });
 
   it('revealConfigPanel executes the focus command and shows unavailable message on rejection', async () => {
@@ -797,10 +805,12 @@ function loadConfigView(): ConfigView {
 
   // The ids media/config.html defines.
   const formEl = make('config-form', 'form');
-  const rolesBody = make('roles-body', 'div');
+  const rolesBody = make('roles-body', 'tbody');
   make('save', 'button');
   make('reload', 'button');
   make('reset', 'button');
+  make('more-settings', 'button');
+  make('manage-api-keys', 'button');
   make('banner', 'div');
   make('banner-message', 'span');
   make('banner-primary', 'button');
@@ -818,9 +828,21 @@ function loadConfigView(): ConfigView {
 
   // Mirror the markup's containment so formEl.querySelectorAll reaches
   // everything the renderer touches.
-  const rolesFieldset = new ViewEl('fieldset');
-  rolesFieldset.appendChild(rolesBody);
-  formEl.appendChild(rolesFieldset);
+  const rolesTable = make('roles-table', 'table');
+  const thead = new ViewEl('thead');
+  const headRow = new ViewEl('tr');
+  for (const [id, text] of [['roles-col-role', 'Role'], ['roles-col-agent', 'Agent'], ['roles-col-model', 'Model'], ['roles-col-effort', 'Effort']]) {
+    const th = new ViewEl('th');
+    th.id = id;
+    th.textContent = text;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  rolesTable.appendChild(thead);
+  rolesTable.appendChild(rolesBody);
+  const rolesSection = new ViewEl('section');
+  rolesSection.appendChild(rolesTable);
+  formEl.appendChild(rolesSection);
   for (const control of [limitPlan, limitExec, limitStall, gitRemote, gitBase]) {
     const row = new ViewEl('div');
     row.className = 'field-row';
@@ -969,9 +991,13 @@ describe('config panel webview options refresh ', () => {
     view.send({ type: 'optionsChanged', options, stale });
   }
 
-  it('builds six role groups with the model and effort option lists from loaded', () => {
+  it('builds six roles-table rows with the model and effort option lists from loaded', () => {
     const view = loadedView();
-    assert.strictEqual(view.ids['config-form'].querySelectorAll('.role-group').length, 6);
+    const rows = view.ids['roles-body'].querySelectorAll('.role-row');
+    assert.strictEqual(rows.length, 6);
+    assert.deepStrictEqual(rows.map((r) => r.dataset.role), [...VIEW_ROLES]);
+    assert.strictEqual(view.ids['config-form'].querySelectorAll('.role-group').length, 0);
+    assert.strictEqual(view.ids['config-form'].querySelectorAll('fieldset').length, 0);
 
     const modelSelect = view.byId('role-executor-model-select');
     assert.deepStrictEqual(dynamicValues(modelSelect), ['claude-sonnet-5', 'claude-opus-5']);
@@ -983,6 +1009,57 @@ describe('config panel webview options refresh ', () => {
     assert.strictEqual(effortSelect.options[0].value, '');
     assert.strictEqual(effortSelect.options[0].textContent, '(default)');
     assert.deepStrictEqual(dynamicValues(effortSelect), ['high', 'low']);
+  });
+
+  it('puts each role field in its own column cell, with its error in the same cell', () => {
+    const view = loadedView();
+    const rows = view.ids['roles-body'].querySelectorAll('.role-row');
+    const row = rows.find((r) => r.dataset.role === 'executor');
+    assert.ok(row, 'executor row should exist');
+    assert.strictEqual(row.tagName, 'TR');
+    assert.strictEqual(row.children.length, 4);
+    assert.strictEqual(row.children[0].tagName, 'TH');
+    assert.strictEqual(row.children[0].getAttribute('scope'), 'row');
+    assert.strictEqual(row.children[0].textContent, 'executor');
+
+    const [agentCell, modelCell, effortCell] = row.children.slice(1);
+    for (const [cell, field] of [
+      [agentCell, 'agent'],
+      [modelCell, 'model'],
+      [effortCell, 'effort'],
+    ] as const) {
+      assert.strictEqual(cell.tagName, 'TD');
+      assert.ok(cell.querySelector(`[data-error-for="roles.executor.${field}"]`));
+    }
+    const containsId = (cell: ViewEl, id: string): boolean =>
+      Array.from(cell.descendants()).some((el) => el.id === id);
+    assert.ok(containsId(agentCell, 'role-executor-agent'));
+    for (const id of [
+      'role-executor-model-select',
+      'role-executor-model-input',
+      'role-executor-model-link',
+      'role-executor-stale',
+    ]) {
+      assert.ok(containsId(modelCell, id), `model cell should contain #${id}`);
+    }
+    for (const id of ['role-executor-effort-select', 'role-executor-effort-input']) {
+      assert.ok(containsId(effortCell, id), `effort cell should contain #${id}`);
+    }
+  });
+
+  it('a second render does not rebuild the roles table', () => {
+    const view = loadedView();
+    const rows = view.ids['roles-body'].children.slice();
+    const modelInput = view.byId('role-executor-model-input');
+
+    refresh(view, viewOptions(['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1']));
+    view.send({ type: 'loaded', form: viewForm(), token: 'tok-2', options: viewOptions() });
+
+    assert.strictEqual(view.ids['roles-body'].children.length, 6);
+    rows.forEach((row, index) => {
+      assert.strictEqual(view.ids['roles-body'].children[index], row, 'role row node must be reused');
+    });
+    assert.strictEqual(view.byId('role-executor-model-input'), modelInput);
   });
 
   it('optionsChanged replaces the model options in place, keeping node identity and selection', () => {
@@ -1140,6 +1217,100 @@ describe('config panel webview options refresh ', () => {
 
     assert.deepStrictEqual(dynamicValues(select), before);
     assert.strictEqual(select.value, 'claude-sonnet-5');
+  });
+});
+
+describe('config panel webview toolbar hand-offs', () => {
+  function loadedView(): ConfigView {
+    const view = loadConfigView();
+    view.send({ type: 'loaded', form: viewForm(), token: 'tok-1', options: viewOptions() });
+    return view;
+  }
+
+  function makeDirty(view: ConfigView): ViewEl {
+    const remote = view.ids['git-remote'];
+    remote.value = 'upstream';
+    view.ids['config-form'].fire('input', { target: remote });
+    return remote;
+  }
+
+  it('More settings… posts openSettings', () => {
+    const view = loadedView();
+    const before = view.posted.length;
+
+    view.ids['more-settings'].fire('click');
+
+    const messages = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(messages.map(({ type }) => ({ type })), [{ type: 'openSettings' }]);
+  });
+
+  it('Manage API keys… posts manageApiKeys', () => {
+    const view = loadedView();
+    const before = view.posted.length;
+
+    view.ids['manage-api-keys'].fire('click');
+
+    const messages = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(messages.map(({ type }) => ({ type })), [{ type: 'manageApiKeys' }]);
+  });
+
+  it('neither button disables while busy', () => {
+    const view = loadedView();
+    makeDirty(view);
+    view.ids['save'].fire('click');
+
+    assert.strictEqual(view.ids['save'].disabled, true, 'Save should be disabled while its request is in flight');
+    assert.strictEqual(view.ids['reload'].disabled, true, 'Reload should be disabled while its request is in flight');
+    assert.strictEqual(view.ids['more-settings'].disabled, false);
+    assert.strictEqual(view.ids['manage-api-keys'].disabled, false);
+
+    const before = view.posted.length;
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+    assert.deepStrictEqual(newPosts.filter((message) => message.type === 'save' || message.type === 'load'), []);
+  });
+
+  it('neither button disables in loadFailed', () => {
+    const view = loadConfigView();
+    view.send({ type: 'loadFailed', kind: 'invalid', message: 'bad', canReset: true });
+    assert.strictEqual(view.ids['more-settings'].disabled, false);
+    assert.strictEqual(view.ids['manage-api-keys'].disabled, false);
+
+    const before = view.posted.length;
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+  });
+
+  it('clicking does not touch the draft or Save', () => {
+    const view = loadedView();
+    const remote = makeDirty(view);
+    const saveDisabled = view.ids['save'].disabled;
+    const remoteValue = remote.value;
+    const before = view.posted.length;
+
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    assert.strictEqual(view.ids['save'].disabled, saveDisabled);
+    assert.strictEqual(remote.value, remoteValue);
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+    assert.deepStrictEqual(newPosts.filter((message) => message.type === 'save' || message.type === 'load'), []);
   });
 });
 

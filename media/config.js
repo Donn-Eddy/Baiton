@@ -136,10 +136,12 @@
   // ----- Elements ----------------------------------------------------------
 
   var formEl = /** @type {HTMLFormElement} */ (document.getElementById('config-form'));
-  var rolesBody = /** @type {HTMLElement} */ (document.getElementById('roles-body'));
+  var rolesBody = /** @type {HTMLTableSectionElement} */ (document.getElementById('roles-body'));
   var saveBtn = /** @type {HTMLButtonElement} */ (document.getElementById('save'));
   var reloadBtn = /** @type {HTMLButtonElement} */ (document.getElementById('reload'));
   var resetBtn = /** @type {HTMLButtonElement} */ (document.getElementById('reset'));
+  var moreSettingsBtn = /** @type {HTMLButtonElement} */ (document.getElementById('more-settings'));
+  var manageApiKeysBtn = /** @type {HTMLButtonElement} */ (document.getElementById('manage-api-keys'));
   var bannerEl = /** @type {HTMLElement} */ (document.getElementById('banner'));
   var bannerMessage = /** @type {HTMLElement} */ (document.getElementById('banner-message'));
   var bannerPrimary = /** @type {HTMLButtonElement} */ (document.getElementById('banner-primary'));
@@ -234,8 +236,9 @@
   var rolesBuilt = false;
 
   /**
-   * Builds the six role stacked blocks from ROLES — structure only, and
-   * exactly once. The dynamic agent/model/effort options are NOT appended here;
+   * Builds the six roles-table rows (one <tr> per role: a row-header <th>, then
+   * Agent / Model / Effort cells) — structure only, and exactly once. The
+   * dynamic agent/model/effort options are NOT appended here;
    * `renderOptionLists()` syncs them in place on every render so an out-of-band
    * refresh cannot destroy focus, caret position or the shown/hidden state of
    * the `Other…` inputs. Only the static
@@ -256,21 +259,19 @@
 
     for (var i = 0; i < ROLES.length; i++) {
       var role = ROLES[i];
-      var group = document.createElement('fieldset');
-      group.className = 'role-group';
-      group.dataset.role = role;
+      var row = document.createElement('tr');
+      row.className = 'role-row';
+      row.dataset.role = role;
 
-      var legend = document.createElement('legend');
-      legend.textContent = role;
-      group.appendChild(legend);
+      var nameCell = document.createElement('th');
+      nameCell.setAttribute('scope', 'row');
+      nameCell.id = 'role-' + role + '-name';
+      nameCell.textContent = role;
+      row.appendChild(nameCell);
 
-      // Agent row
-      var agentRow = document.createElement('div');
-      agentRow.className = 'field-row';
-      var agentLabel = document.createElement('label');
-      agentLabel.htmlFor = 'role-' + role + '-agent';
-      agentLabel.textContent = 'Agent';
-      agentRow.appendChild(agentLabel);
+      // Agent cell
+      var agentCell = document.createElement('td');
+      agentCell.className = 'role-cell role-cell-agent';
 
       var agentSelect = document.createElement('select');
       agentSelect.id = 'role-' + role + '-agent';
@@ -278,22 +279,18 @@
       agentSelect.className = 'role-agent-select';
       var agentErrorId = 'error-roles-' + role + '-agent';
       agentSelect.setAttribute('aria-describedby', agentErrorId);
-      agentRow.appendChild(agentSelect);
+      agentSelect.setAttribute('aria-labelledby', 'role-' + role + '-name roles-col-agent');
+      agentCell.appendChild(agentSelect);
 
       var agentError = document.createElement('div');
       agentError.className = 'field-error';
       agentError.id = agentErrorId;
       agentError.dataset.errorFor = 'roles.' + role + '.agent';
-      agentRow.appendChild(agentError);
-      group.appendChild(agentRow);
+      agentCell.appendChild(agentError);
 
-      // Model row
-      var modelRow = document.createElement('div');
-      modelRow.className = 'field-row';
-      var modelLabel = document.createElement('label');
-      modelLabel.htmlFor = 'role-' + role + '-model-select';
-      modelLabel.textContent = 'Model';
-      modelRow.appendChild(modelLabel);
+      // Model cell
+      var modelCell = document.createElement('td');
+      modelCell.className = 'role-cell role-cell-model';
 
       var modelGroup = document.createElement('div');
       modelGroup.className = 'select-input-group';
@@ -304,6 +301,7 @@
       modelSelect.dataset.role = role;
       var modelErrorId = 'error-roles-' + role + '-model';
       modelSelect.setAttribute('aria-describedby', modelErrorId);
+      modelSelect.setAttribute('aria-labelledby', 'role-' + role + '-name roles-col-model');
 
       var otherModelOpt = document.createElement('option');
       otherModelOpt.value = OTHER_MODEL_VALUE;
@@ -316,6 +314,7 @@
       modelInput.id = 'role-' + role + '-model-input';
       modelInput.dataset.path = 'roles.' + role + '.model';
       modelInput.setAttribute('aria-describedby', modelErrorId);
+      modelInput.setAttribute('aria-labelledby', 'role-' + role + '-name roles-col-model');
 
       modelGroup.appendChild(modelSelect);
       modelGroup.appendChild(modelInput);
@@ -332,28 +331,23 @@
       modelLink.style.display = 'none';
       modelGroup.appendChild(modelLink);
 
-      modelRow.appendChild(modelGroup);
+      modelCell.appendChild(modelGroup);
 
       var staleNote = document.createElement('div');
       staleNote.className = 'stale-note';
       staleNote.id = 'role-' + role + '-stale';
       staleNote.dataset.staleFor = role;
-      modelRow.appendChild(staleNote);
+      modelCell.appendChild(staleNote);
 
       var modelError = document.createElement('div');
       modelError.className = 'field-error';
       modelError.id = modelErrorId;
       modelError.dataset.errorFor = 'roles.' + role + '.model';
-      modelRow.appendChild(modelError);
-      group.appendChild(modelRow);
+      modelCell.appendChild(modelError);
 
-      // Effort row
-      var effortRow = document.createElement('div');
-      effortRow.className = 'field-row';
-      var effortLabel = document.createElement('label');
-      effortLabel.htmlFor = 'role-' + role + '-effort-select';
-      effortLabel.textContent = 'Effort';
-      effortRow.appendChild(effortLabel);
+      // Effort cell
+      var effortCell = document.createElement('td');
+      effortCell.className = 'role-cell role-cell-effort';
 
       var effortGroup = document.createElement('div');
       effortGroup.className = 'select-input-group';
@@ -364,6 +358,7 @@
       effortSelect.dataset.role = role;
       var effortErrorId = 'error-roles-' + role + '-effort';
       effortSelect.setAttribute('aria-describedby', effortErrorId);
+      effortSelect.setAttribute('aria-labelledby', 'role-' + role + '-name roles-col-effort');
 
       var defaultOpt = document.createElement('option');
       defaultOpt.value = '';
@@ -382,20 +377,23 @@
       effortInput.id = 'role-' + role + '-effort-input';
       effortInput.dataset.path = 'roles.' + role + '.effort';
       effortInput.setAttribute('aria-describedby', effortErrorId);
+      effortInput.setAttribute('aria-labelledby', 'role-' + role + '-name roles-col-effort');
 
       effortGroup.appendChild(effortSelect);
       effortGroup.appendChild(effortInput);
 
-      effortRow.appendChild(effortGroup);
+      effortCell.appendChild(effortGroup);
 
       var effortError = document.createElement('div');
       effortError.className = 'field-error';
       effortError.id = effortErrorId;
       effortError.dataset.errorFor = 'roles.' + role + '.effort';
-      effortRow.appendChild(effortError);
-      group.appendChild(effortRow);
+      effortCell.appendChild(effortError);
 
-      rolesBody.appendChild(group);
+      row.appendChild(agentCell);
+      row.appendChild(modelCell);
+      row.appendChild(effortCell);
+      rolesBody.appendChild(row);
     }
   }
 
@@ -1028,6 +1026,11 @@
 
   resetBtn.addEventListener('click', requestReset);
   errorResetBtn.addEventListener('click', requestReset);
+
+  // One-way hand-offs to the host. They never touch state, the draft, the
+  // dirty flag or enablement, so they work in every phase and while busy.
+  moreSettingsBtn.addEventListener('click', function () { vscode.postMessage({ type: 'openSettings' }); });
+  manageApiKeysBtn.addEventListener('click', function () { vscode.postMessage({ type: 'manageApiKeys' }); });
 
   bannerPrimary.addEventListener('click', function () {
     if (!state.banner) {

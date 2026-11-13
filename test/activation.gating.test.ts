@@ -904,12 +904,13 @@ describe('config panel live catalog wiring ', () => {
     );
   });
 
-  it('wires openSettings to workbench.action.openSettings filtered to the orchestrator settings', () => {
+  it('wires openSettings to workbench.action.openSettings filtered to all Baiton settings (@baiton)', () => {
     assert.match(call, /openSettings:/);
     assert.match(
       call,
-      /executeCommand\(\s*'workbench\.action\.openSettings',\s*`\$\{SETTINGS_NS\}\.orchestrator`\s*,?\s*\)/,
+      /executeCommand\(\s*'workbench\.action\.openSettings',\s*`@\$\{SETTINGS_NS\}`\s*,?\s*\)/,
     );
+    assert.doesNotMatch(call, /`\$\{SETTINGS_NS\}\.orchestrator`/);
     assert.match(source, /const SETTINGS_NS = 'baiton';/);
   });
 
