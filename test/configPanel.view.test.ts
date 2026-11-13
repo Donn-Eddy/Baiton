@@ -801,6 +801,8 @@ function loadConfigView(): ConfigView {
   make('save', 'button');
   make('reload', 'button');
   make('reset', 'button');
+  make('more-settings', 'button');
+  make('manage-api-keys', 'button');
   make('banner', 'div');
   make('banner-message', 'span');
   make('banner-primary', 'button');
@@ -1140,6 +1142,100 @@ describe('config panel webview options refresh ', () => {
 
     assert.deepStrictEqual(dynamicValues(select), before);
     assert.strictEqual(select.value, 'claude-sonnet-5');
+  });
+});
+
+describe('config panel webview toolbar hand-offs', () => {
+  function loadedView(): ConfigView {
+    const view = loadConfigView();
+    view.send({ type: 'loaded', form: viewForm(), token: 'tok-1', options: viewOptions() });
+    return view;
+  }
+
+  function makeDirty(view: ConfigView): ViewEl {
+    const remote = view.ids['git-remote'];
+    remote.value = 'upstream';
+    view.ids['config-form'].fire('input', { target: remote });
+    return remote;
+  }
+
+  it('More settings… posts openSettings', () => {
+    const view = loadedView();
+    const before = view.posted.length;
+
+    view.ids['more-settings'].fire('click');
+
+    const messages = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(messages.map(({ type }) => ({ type })), [{ type: 'openSettings' }]);
+  });
+
+  it('Manage API keys… posts manageApiKeys', () => {
+    const view = loadedView();
+    const before = view.posted.length;
+
+    view.ids['manage-api-keys'].fire('click');
+
+    const messages = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(messages.map(({ type }) => ({ type })), [{ type: 'manageApiKeys' }]);
+  });
+
+  it('neither button disables while busy', () => {
+    const view = loadedView();
+    makeDirty(view);
+    view.ids['save'].fire('click');
+
+    assert.strictEqual(view.ids['save'].disabled, true, 'Save should be disabled while its request is in flight');
+    assert.strictEqual(view.ids['reload'].disabled, true, 'Reload should be disabled while its request is in flight');
+    assert.strictEqual(view.ids['more-settings'].disabled, false);
+    assert.strictEqual(view.ids['manage-api-keys'].disabled, false);
+
+    const before = view.posted.length;
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+    assert.deepStrictEqual(newPosts.filter((message) => message.type === 'save' || message.type === 'load'), []);
+  });
+
+  it('neither button disables in loadFailed', () => {
+    const view = loadConfigView();
+    view.send({ type: 'loadFailed', kind: 'invalid', message: 'bad', canReset: true });
+    assert.strictEqual(view.ids['more-settings'].disabled, false);
+    assert.strictEqual(view.ids['manage-api-keys'].disabled, false);
+
+    const before = view.posted.length;
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+  });
+
+  it('clicking does not touch the draft or Save', () => {
+    const view = loadedView();
+    const remote = makeDirty(view);
+    const saveDisabled = view.ids['save'].disabled;
+    const remoteValue = remote.value;
+    const before = view.posted.length;
+
+    view.ids['more-settings'].fire('click');
+    view.ids['manage-api-keys'].fire('click');
+
+    assert.strictEqual(view.ids['save'].disabled, saveDisabled);
+    assert.strictEqual(remote.value, remoteValue);
+    const newPosts = view.posted.slice(before) as Array<{ type: string }>;
+    assert.deepStrictEqual(
+      newPosts.map(({ type }) => ({ type })),
+      [{ type: 'openSettings' }, { type: 'manageApiKeys' }],
+    );
+    assert.deepStrictEqual(newPosts.filter((message) => message.type === 'save' || message.type === 'load'), []);
   });
 });
 
