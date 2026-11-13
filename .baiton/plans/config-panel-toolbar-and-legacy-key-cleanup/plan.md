@@ -1,12 +1,12 @@
 ---
 version: 1
 name: config-panel-toolbar-and-legacy-key-cleanup
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 9404cd8180097980e6823858e2e6855f91634fb2
+branch: baiton/config-panel-toolbar-and-legacy-key-cleanup
+approved_rev: 4af64dd7464ea7baf1d51a7bd80f1bf8994c85259011087473c7a9293bafb9b1
 ---
 
 # Endstate
