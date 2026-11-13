@@ -517,7 +517,7 @@ export class ProviderRouter implements ModelClient {
    * persisting the fallback.
    *
    * Runs on the activation path, so every failure is swallowed and logged —
-   * activation must not break here (matching `migrateLegacyApiKey`). Does not
+   * activation must not break here. Does not
    * fire the change event: nothing has changed for a listener that has not
    * subscribed yet.
    */
