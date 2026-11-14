@@ -103,7 +103,7 @@ describe('config panel form properties ', () => {
           const raw = JSON.parse(defaultConfigJson()) as Record<string, unknown>;
           Object.assign(raw, unknownTop);
           Object.assign(raw.git as Record<string, unknown>, unknownGit);
-          Object.assign((raw.roles as Record<string, Record<string, unknown>>).planner, unknownRoleEntry);
+          Object.assign((raw.roles as Record<string, Record<string, unknown>>)['step-planner'], unknownRoleEntry);
           const before = JSON.parse(JSON.stringify(raw));
 
           const form = formFromConfig(defaultConfig());
@@ -116,7 +116,7 @@ describe('config panel form properties ', () => {
             assert.deepStrictEqual((out.git as Record<string, unknown>)[k], v);
           }
           for (const [k, v] of Object.entries(unknownRoleEntry)) {
-            assert.deepStrictEqual((out.roles as Record<string, Record<string, unknown>>).planner[k], v);
+            assert.deepStrictEqual((out.roles as Record<string, Record<string, unknown>>)['step-planner'][k], v);
           }
           assert.deepStrictEqual(raw, before);
         },

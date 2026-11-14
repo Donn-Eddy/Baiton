@@ -489,7 +489,7 @@ describe('plan-less run pipeline ', () => {
       await h.waitForWatcher(0);
       assert.deepStrictEqual(
         h.adapter.launches.map((l) => [l.role, l.runId, l.model]),
-        [['planner', `${RUN_ID}.plan.1`, 'stub-model']],
+        [['step-planner', `${RUN_ID}.plan.1`, 'stub-model']],
       );
       assert.strictEqual(h.terminalHost.options[0].cwd, h.worktreeDir());
 
@@ -519,7 +519,7 @@ describe('plan-less run pipeline ', () => {
       assert.deepStrictEqual(
         h.adapter.launches.map((l) => [l.role, l.runId]),
         [
-          ['planner', `${RUN_ID}.plan.1`],
+          ['step-planner', `${RUN_ID}.plan.1`],
           ['executor', `${RUN_ID}.execute.1`],
           ['reviewer', `${RUN_ID}.review.1`],
         ],
@@ -1114,7 +1114,7 @@ describe('plan-less run pipeline ', () => {
 
       const outcome = await started.completed;
       assert.strictEqual(outcome.state, 'failed');
-      assert.match(outcome.message, /roles\.planner\.agent/);
+      assert.match(outcome.message, /roles\.step-planner\.agent/);
       assert.strictEqual(h.terminalHost.created.length, 0);
       const manifest = h.store.read(RUN_ID);
       assert.ok(manifest.ok);

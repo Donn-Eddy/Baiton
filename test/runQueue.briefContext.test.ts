@@ -265,7 +265,7 @@ describe('run queue brief context (Req 18.3, 11.3)', () => {
     );
     const queue = createRunQueue(rig.deps);
 
-    const result = await queue.dispatch(request('plan', 'planner'));
+    const result = await queue.dispatch(request('plan', 'step-planner'));
     assert.ok(result.ok, 'the plan dispatch ran');
 
     const brief = fs.readFileSync(rig.briefPath() as string, 'utf8');

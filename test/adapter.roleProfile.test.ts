@@ -33,6 +33,12 @@ describe('RoleProfile table completeness and naming (Decision 4)', () => {
     }
   });
 
+  it('uses the renamed planner agent names', () => {
+    assert.strictEqual(roleProfile('phased-planner').agentName, 'baiton-phased-planner');
+    assert.strictEqual(roleProfile('step-planner').agentName, 'baiton-step-planner');
+    assert.strictEqual(roleProfile('step-reviewer').agentName, 'baiton-step-reviewer');
+  });
+
   it('gives every profile a non-empty, distinct description', () => {
     const seen = new Set<string>();
     for (const role of ROLES) {
@@ -56,7 +62,7 @@ describe('RoleProfile capability table (Decision 1)', () => {
   });
 
   it('scopes every other role to its run dir with no shell', () => {
-    for (const role of ['plan-writer', 'planner', 'plan-reviewer', 'pr-writer'] as Role[]) {
+    for (const role of ['phased-planner', 'step-planner', 'step-reviewer', 'pr-writer'] as Role[]) {
       const profile = roleProfile(role);
       assert.strictEqual(profile.write, 'run-dir', `${role} must be run-dir scoped`);
       assert.strictEqual(profile.shell, false, `${role} must not have shell`);
@@ -103,10 +109,10 @@ describe('RoleProfile system prompts', () => {
 describe('isReadOnlyRole derived from the profile table', () => {
   it('matches the historical read-only set exactly', () => {
     assert.deepStrictEqual([...READ_ONLY_ROLES].sort(), [
-      'plan-reviewer',
-      'plan-writer',
-      'planner',
+      'phased-planner',
       'pr-writer',
+      'step-planner',
+      'step-reviewer',
     ]);
   });
 

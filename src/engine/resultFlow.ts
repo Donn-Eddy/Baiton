@@ -171,7 +171,7 @@ export function renderPlanArtifact(phaseId: string, plan: PlanResult): string {
 }
 
 /**
- * The plan-review artifact: the verdict and the findings the plan reviewer
+ * The plan-review artifact: the verdict and the findings the step-reviewer
  * raised, each with its severity.
  */
 export function renderPlanReviewArtifact(

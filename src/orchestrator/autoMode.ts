@@ -62,7 +62,7 @@ export interface AutoModeAsk {
 export interface AutoModeRunContext {
   /** Adapter id the run launched with (`adapter.id`), e.g. `'claude'`. */
   agent: string;
-  /** The role the run is executing (`planner` | `executor` | `reviewer` | …). */
+  /** The role the run is executing (`step-planner` | `executor` | `reviewer` | …). */
   role: Role;
   /** The run id whose `.baiton/runs/<run-id>/` directory is the agent's own. */
   runId: string;
@@ -744,7 +744,7 @@ export function allowListDecision(ask: AutoModeAsk, allowList: AgentAllowList): 
  * host and handed in through {@link EvaluateOptions.taskContext}.
  *
  * An escalation carries one plain sentence saying what the user is approving
- * ("Planner wants to run a script that edits rows in the dev database.") and
+ * ("Step planner wants to run a script that edits rows in the dev database.") and
  * an optional secondary line. Every parse or transport failure is an
  * escalation — no path on which this stage runs returns an approval it is not
  * sure of.
@@ -871,7 +871,7 @@ export function askCommandText(ask: AutoModeAsk): string | undefined {
 export const RISK_EVALUATION_PROMPT: string = [
   'You are the auto-mode risk reviewer for a coding-agent orchestrator.',
   'Your job: when the user is away, decide whether a sub-agent\'s tool request is safe enough to approve on the user\'s behalf.',
-  'Judge the EFFECT of the action — what it reads, writes, runs or reaches — not which agent or role asked for it. The role alone is never a reason to escalate: a planner running a local script that only reads project files is approved.',
+  'Judge the EFFECT of the action — what it reads, writes, runs or reaches — not which agent or role asked for it. The role alone is never a reason to escalate: a step-planner running a local script that only reads project files is approved.',
   '',
   'Approve when the action is read-only, or a reversible change inside the workspace: writing files under the workspace root, running the project\'s tests, builds or linters, or running a local script that only reads or writes project files.',
   '',
@@ -892,7 +892,7 @@ export const RISK_EVALUATION_PROMPT: string = [
   '{"decision":"escalate","summary":"<Role> wants to <concrete action and its effect on a concrete target>","detail":"<optional one line>"}',
   '',
   'The summary is one plain sentence the user reads to decide. Start it with the agent\'s role name, capitalised, and say what would happen and to what — not which rule tripped. Examples:',
-  '- "Planner wants to run a script that edits rows in the dev database."',
+  '- "Step planner wants to run a script that edits rows in the dev database."',
   '- "Executor wants to run a command that pulls data from the production database."',
   '- "Reviewer wants to read files outside the project folder (/home/x/other)."',
 ].join('\n');
@@ -943,8 +943,8 @@ export function buildEvaluationMessages(ask: AutoModeAsk, options: EvaluateOptio
 
 /**
  * A role (or, lacking one, the agent id) as the subject of a summary
- * sentence: capitalised, hyphens read as spaces (`plan-reviewer` →
- * `Plan reviewer`).
+ * sentence: capitalised, hyphens read as spaces (`step-reviewer` →
+ * `Step reviewer`).
  */
 function subjectName(ask: AutoModeAsk, role: string | undefined): string {
   const who = role !== undefined && role.length > 0 && role !== 'unknown' ? role : ask.agent;

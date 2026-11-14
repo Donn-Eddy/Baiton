@@ -152,7 +152,7 @@ describe('config service and Initialize command', () => {
       assert.ok(isOk(result), 'a valid default config should load');
       if (isOk(result)) {
         assert.strictEqual(result.value.version, SUPPORTED_VERSION);
-        assert.ok(result.value.roles.planner, 'planner role should be present');
+        assert.ok(result.value.roles['step-planner'], 'step-planner role should be present');
         assert.strictEqual(result.value.limits.exec_attempts, 3);
         assert.strictEqual(result.value.git.remote, 'origin');
       }
@@ -160,85 +160,144 @@ describe('config service and Initialize command', () => {
   });
 
   describe('loadConfig role fallbacks', () => {
-    it('fills a missing "plan-writer" entry from the planner', async () => {
+    async function loadRoles(roles: Record<string, unknown>) {
       const dir = newDir();
-      const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
-      doc.roles = { ...doc.roles };
-      doc.roles.planner = { agent: 'claude', model: 'planner-model', effort: 'high' };
-      delete doc.roles['plan-writer'];
-      writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
+      const doc = configDoc(SUPPORTED_VERSION);
+      doc.roles = roles;
+      writeConfig(dir, configJson(doc));
+      return loadConfig(dir);
+    }
 
-      const result = await loadConfig(dir);
-
-      assert.ok(isOk(result), 'a config without a plan-writer entry should still load');
-      if (isOk(result)) {
-        assert.deepStrictEqual(result.value.roles['plan-writer'], {
-          agent: 'claude',
-          model: 'planner-model',
-          effort: 'high',
-        });
-      }
-    });
-
-    it('prefers an explicit "plan-writer" entry over the planner fallback', async () => {
-      const dir = newDir();
-      const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
-      doc.roles = { ...doc.roles, 'plan-writer': { agent: 'claude', model: 'writer-model' } };
-      writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
-
-      const result = await loadConfig(dir);
-
+    it('fills a missing phased-planner entry from step-planner', async () => {
+      const roles = { ...defaultConfig().roles } as Record<string, unknown>;
+      delete roles['phased-planner'];
+      roles['step-planner'] = { agent: 'claude', model: 'step-model', effort: 'high' };
+      const result = await loadRoles(roles);
       assert.ok(isOk(result));
       if (isOk(result)) {
-        assert.strictEqual(result.value.roles['plan-writer'].model, 'writer-model');
+        assert.deepStrictEqual(result.value.roles['phased-planner'], roles['step-planner']);
       }
     });
 
-    it('loads a legacy "plan-writer" entry as plan-writer', async () => {
-      // Legacy config compatibility: spec-writer migrates to plan-writer.
-      const dir = newDir();
-      const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
-      doc.roles = { ...doc.roles };
-      delete doc.roles['plan-writer'];
-      const legacyEntry = { agent: 'claude', model: 'legacy-model', effort: 'low' };
-      doc.roles['spec-writer'] = legacyEntry;
-      doc.roles.planner = { agent: 'codex', model: 'fallback-model' };
-      writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
-
-      const result = await loadConfig(dir);
-
+    it('fills phased-planner from legacy planner when both drafting and step-planner keys are absent', async () => {
+      const roles = { ...defaultConfig().roles } as Record<string, unknown>;
+      delete roles['phased-planner'];
+      delete roles['step-planner'];
+      roles.planner = { agent: 'claude', model: 'legacy-step-model' };
+      const result = await loadRoles(roles);
       assert.ok(isOk(result));
       if (isOk(result)) {
-        assert.deepStrictEqual(result.value.roles['plan-writer'], legacyEntry);
-        assert.strictEqual('spec-writer' in result.value.roles, false);
+        assert.deepStrictEqual(result.value.roles['phased-planner'], roles.planner);
       }
     });
 
-    it('prefers "plan-writer" over a legacy "plan-writer" when both exist', async () => {
-      // Legacy config compatibility: the canonical key takes precedence.
-      const dir = newDir();
-      const doc = configDoc(SUPPORTED_VERSION) as { roles: Record<string, unknown> };
-      doc.roles = {
-        ...doc.roles,
-        'plan-writer': { agent: 'claude', model: 'canonical-model' },
-        'spec-writer': { agent: 'codex', model: 'legacy-model' },
-      };
-      writeConfig(dir, configJson(doc as unknown as Record<string, unknown>));
-
-      const result = await loadConfig(dir);
-
+    it('prefers an explicit phased-planner entry over the step-planner fallback', async () => {
+      const roles = {
+        ...defaultConfig().roles,
+        'phased-planner': { agent: 'claude', model: 'draft-model' },
+        'step-planner': { agent: 'codex', model: 'step-model' },
+      } as Record<string, unknown>;
+      const result = await loadRoles(roles);
       assert.ok(isOk(result));
       if (isOk(result)) {
-        assert.strictEqual(result.value.roles['plan-writer'].model, 'canonical-model');
+        assert.strictEqual(result.value.roles['phased-planner'].model, 'draft-model');
       }
     });
 
-    it('writes plan-writer and no legacy role in defaults', () => {
-      // Legacy config compatibility: defaults never write spec-writer.
+    it('loads each legacy key under its new role and omits legacy keys from output', async () => {
+      const cases = [
+        ['spec-writer', 'phased-planner'],
+        ['plan-writer', 'phased-planner'],
+        ['planner', 'step-planner'],
+        ['plan-reviewer', 'step-reviewer'],
+      ] as const;
+      for (const [legacy, role] of cases) {
+        const roles = { ...defaultConfig().roles } as Record<string, unknown>;
+        delete roles[role];
+        const entry = { agent: 'codex', model: `legacy-${legacy}` };
+        roles[legacy] = entry;
+        const result = await loadRoles(roles);
+        assert.ok(isOk(result), `legacy key ${legacy} should load`);
+        if (isOk(result)) {
+          assert.deepStrictEqual(result.value.roles[role], entry);
+          for (const [oldKey] of cases) {
+            assert.strictEqual(oldKey in result.value.roles, false);
+          }
+        }
+      }
+    });
+
+    it('new role keys win over every corresponding legacy key', async () => {
+      const pairs = [
+        ['phased-planner', 'plan-writer'],
+        ['phased-planner', 'spec-writer'],
+        ['step-planner', 'planner'],
+        ['step-reviewer', 'plan-reviewer'],
+      ] as const;
+      for (const [role, legacy] of pairs) {
+        const roles = {
+          ...defaultConfig().roles,
+          [role]: { agent: 'claude', model: `current-${legacy}` },
+          [legacy]: { agent: 'codex', model: `old-${legacy}` },
+        } as Record<string, unknown>;
+        const result = await loadRoles(roles);
+        assert.ok(isOk(result));
+        if (isOk(result)) {
+          assert.strictEqual(result.value.roles[role].model, `current-${legacy}`);
+        }
+      }
+    });
+
+    it('prefers plan-writer over spec-writer when both legacy drafting keys exist', async () => {
+      const roles = { ...defaultConfig().roles } as Record<string, unknown>;
+      delete roles['phased-planner'];
+      roles['plan-writer'] = { agent: 'claude', model: 'preferred-legacy' };
+      roles['spec-writer'] = { agent: 'codex', model: 'secondary-legacy' };
+      const result = await loadRoles(roles);
+      assert.ok(isOk(result));
+      if (isOk(result)) {
+        assert.strictEqual(result.value.roles['phased-planner'].model, 'preferred-legacy');
+      }
+    });
+
+    it('loads a copy of this repository config through its legacy role keys', async () => {
+      const source = path.join(process.cwd(), '.baiton', 'config.json');
+      const dir = newDir();
+      const configPath = path.join(dir, 'config.json');
+      fs.copyFileSync(source, configPath);
+      const original = JSON.parse(fs.readFileSync(source, 'utf8')) as { roles: Record<string, unknown> };
+      const result = await loadConfig(dir);
+      assert.ok(isOk(result), 'the repository config should load through legacy keys');
+      if (isOk(result)) {
+        assert.deepStrictEqual(result.value.roles['phased-planner'], original.roles['plan-writer']);
+        assert.deepStrictEqual(result.value.roles['step-planner'], original.roles.planner);
+        assert.deepStrictEqual(result.value.roles['step-reviewer'], original.roles['plan-reviewer']);
+      }
+    });
+
+    it('names the new role in a missing-section error', async () => {
+      const roles = { ...defaultConfig().roles } as Record<string, unknown>;
+      delete roles['step-planner'];
+      delete roles.planner;
+      const result = await loadRoles(roles);
+      assert.ok(isErr(result));
+      if (isErr(result)) {
+        assert.strictEqual(result.error.kind, 'missing-section');
+        if (result.error.kind === 'missing-section') {
+          assert.strictEqual(result.error.section, 'roles.step-planner');
+        }
+      }
+    });
+
+    it('writes all current role names and no legacy keys in defaults', () => {
       const config = defaultConfig();
-      assert.ok(Object.keys(config.roles).includes('plan-writer'));
-      assert.strictEqual('spec-writer' in config.roles, false);
-      assert.strictEqual(defaultConfigJson().includes('spec-writer'), false);
+      assert.deepStrictEqual(Object.keys(config.roles), [
+        'phased-planner', 'step-planner', 'step-reviewer', 'executor', 'reviewer', 'pr-writer',
+      ]);
+      const json = defaultConfigJson();
+      for (const legacy of ['"spec-writer"', '"plan-writer"', '"planner"', '"plan-reviewer"']) {
+        assert.strictEqual(json.includes(legacy), false, `${legacy} must not appear in defaults`);
+      }
     });
   });
 

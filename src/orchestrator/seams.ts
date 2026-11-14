@@ -140,7 +140,7 @@ export interface DraftPlanRequest {
   requirements: string;
   /** Owning repo path relative to the conversation repo; absent means that repo. */
   repo?: string;
-  /** Repositories the plan writer may target, relative to the new plan owner. */
+  /** Repositories the phased-planner may target, relative to the new plan owner. */
   repos?: readonly PlanRepoInfo[];
 }
 

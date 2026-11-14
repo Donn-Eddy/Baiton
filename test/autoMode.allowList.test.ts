@@ -115,19 +115,19 @@ describe('autoMode allow-lists', () => {
   describe('claude specifics', () => {
     it('the accept-edits fallback flips a planner onto the profile-derived list', () => {
       const fallbackMode = { readOnlyFallbackToAcceptEdits: true };
-      const list = claudeAllowList('planner', 'run-1', fallbackMode);
-      assert.deepStrictEqual(list, roleAllowList('claude', 'planner', 'run-1'));
+      const list = claudeAllowList('step-planner', 'run-1', fallbackMode);
+      assert.deepStrictEqual(list, roleAllowList('claude', 'step-planner', 'run-1'));
     });
 
     it("the reviewer's list has a shell rule and the planner's does not", () => {
       const reviewer = claudeAllowList('reviewer', 'run-1');
-      const planner = claudeAllowList('planner', 'run-1');
+      const planner = claudeAllowList('step-planner', 'run-1');
       assert.ok(reviewer.rules.some((r) => r.family === 'shell'));
       assert.ok(!planner.rules.some((r) => r.family === 'shell'));
     });
 
     it('the write rule carries the run-dir glob accepted by the matcher', () => {
-      const list = claudeAllowList('planner', 'run-1');
+      const list = claudeAllowList('step-planner', 'run-1');
       const write = list.rules.find((r) => r.family === 'write');
       assert.ok(write);
       assert.ok(write.paths);
@@ -161,7 +161,7 @@ describe('autoMode allow-lists', () => {
 
   describe('opencode specifics', () => {
     it("the planner's write paths contain the **-widened run-dir glob and no bare '*'", () => {
-      const list = opencodeAllowList('planner', 'run-1');
+      const list = opencodeAllowList('step-planner', 'run-1');
       const write = list.rules.find((r) => r.family === 'write');
       assert.ok(write);
       assert.ok(write.paths);
@@ -396,7 +396,7 @@ describe('autoMode allow-lists', () => {
   });
 
   describe('allowListDecision', () => {
-    const planner = agentAllowList('claude', 'planner', 'run-1');
+    const planner = agentAllowList('claude', 'step-planner', 'run-1');
     const reviewer = agentAllowList('claude', 'reviewer', 'run-1');
     const executor = agentAllowList('claude', 'executor', 'run-1');
 
@@ -404,17 +404,17 @@ describe('autoMode allow-lists', () => {
       return allowListDecision(ask, list);
     }
 
-    it('approves claude/planner Read with no args', () => {
+    it('approves claude/step-step-planner Read with no args', () => {
       const d = decide({ agent: 'claude', tool: 'Read' }, planner);
       assert.strictEqual(d.kind, 'approve');
       if (d.kind === 'approve') {
-        assert.ok(d.rationale.includes('claude/planner'));
+        assert.ok(d.rationale.includes('claude/step-planner'));
         assert.ok(d.rationale.includes('Read'));
         assert.strictEqual(d.rule.family, 'read');
       }
     });
 
-    it('approves claude/planner Write inside the run dir', () => {
+    it('approves claude/step-step-planner Write inside the run dir', () => {
       const d = decide(
         { agent: 'claude', tool: 'Write', args: '{"file_path":".baiton/runs/run-1/result.json"}' },
         planner,
@@ -422,7 +422,7 @@ describe('autoMode allow-lists', () => {
       assert.strictEqual(d.kind, 'approve');
     });
 
-    it('escalates claude/planner Write to src/app.ts', () => {
+    it('escalates claude/step-step-planner Write to src/app.ts', () => {
       const d = decide({ agent: 'claude', tool: 'Write', args: '{"file_path":"src/app.ts"}' }, planner);
       assert.strictEqual(d.kind, 'escalate');
       if (d.kind === 'escalate') {
@@ -438,7 +438,7 @@ describe('autoMode allow-lists', () => {
       assert.strictEqual(d.kind, 'approve');
     });
 
-    it('escalates a claude/planner verification command (planner has no shell rule)', () => {
+    it('escalates a claude/step-step-planner verification command (planner has no shell rule)', () => {
       const d = decide({ agent: 'claude', tool: 'Bash', args: '{"command":"npm test"}' }, planner);
       assert.strictEqual(d.kind, 'escalate');
       if (d.kind === 'escalate') {
@@ -460,7 +460,7 @@ describe('autoMode allow-lists', () => {
     }
 
     for (const command of ['sed -i s/a/b/ x', 'find . -delete', 'python script.py', 'rm -rf build', 'a && b', 'echo x > f']) {
-      it(`escalates a non-read-only command for the planner: ${command}`, () => {
+      it(`escalates a non-read-only command for the 'step-planner': ${command}`, () => {
         const d = decide({ agent: 'claude', tool: 'Bash', args: JSON.stringify({ command }) }, planner);
         assert.strictEqual(d.kind, 'escalate', command);
         if (d.kind === 'escalate') {
@@ -470,7 +470,7 @@ describe('autoMode allow-lists', () => {
     }
 
     it('approves an agy run_command ls via CommandLine for the planner', () => {
-      const list = agentAllowList('antigravity', 'planner', 'run-1');
+      const list = agentAllowList('antigravity', 'step-planner', 'run-1');
       const d = decide(
         { agent: 'antigravity', tool: 'run_command', args: '{"CommandLine":"ls","Cwd":"/w"}' },
         list,

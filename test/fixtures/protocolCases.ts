@@ -410,9 +410,9 @@ cases.push({
         agent: 'claude',
         tool: 'Bash',
         args: '{"command":"python scripts/seed.py"}',
-        detail: 'Planner wants to run a script that edits rows in the dev database.',
+        detail: 'Step planner wants to run a script that edits rows in the dev database.',
         escalation: {
-          summary: 'Planner wants to run a script that edits rows in the dev database.',
+          summary: 'Step planner wants to run a script that edits rows in the dev database.',
           detail: 'The script opens a connection to postgres://dev.',
           command: 'python scripts/seed.py',
           reason: 'the command is not a recognised read-only or verification command',

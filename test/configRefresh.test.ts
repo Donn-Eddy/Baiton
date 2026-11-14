@@ -88,7 +88,7 @@ describe('configRefresh ', () => {
       ...defaultConfig(),
       roles: {
         ...defaultConfig().roles,
-        planner: { agent: 'codex', model: 'gpt-4' },
+        'step-planner': { agent: 'codex', model: 'gpt-4' },
         executor: { agent: 'opencode', model: 'deepseek-coder' },
         reviewer: { agent: 'antigravity', model: 'gemini-pro' },
       },

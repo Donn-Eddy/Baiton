@@ -70,6 +70,7 @@ export const EXECUTOR_NO_GIT_INSTRUCTION =
   'Do not commit, stash, or change branches. The extension manages all git ' +
   'operations; leave your changes in the working tree.';
 
+/** Repository placement guidance for the phased-planner role. */
 export const PLAN_WRITER_REPO_INSTRUCTION = [
   'Repositories:',
   '- When the context lists more than one repository, the plan is owned by the one marked as owning; every other listed repo is nested beneath it.',
@@ -80,17 +81,18 @@ export const PLAN_WRITER_REPO_INSTRUCTION = [
   '- When the context lists no repositories, omit `repo` everywhere.',
 ].join('\n');
 
+/** Repository placement guidance for the step-planner role. */
 export const PLANNER_REPO_INSTRUCTION = 'When the phase line carries a `repo:` hint, the phase runs in that repository: the executor works in its root, and every file path in your plan is relative to it. Without the hint the phase runs in the repository that owns the plan.';
 
 /**
- * The plan writer's instructions: study the repository read-only and produce
+ * The phased planner's instructions: study the repository read-only and produce
  * three preamble sections plus a dependency-ordered phase list. The phase
  * grammar is spelled out here because the writer supplies titles and
  * positional dependencies while the extension assigns the `P##` ids.
  * Exported so tests can assert the wording.
  */
 export const PLAN_WRITER_INSTRUCTION = [
-  'You are the plan writer. Read the request in the context below, study the ' +
+  'You are the phased planner. Read the request in the context below, study the ' +
     'repository read-only to understand how the work fits the existing code, ' +
     'and turn it into a phased plan: three preamble sections and a ' +
     'dependency-ordered list of phases.',
@@ -153,9 +155,9 @@ export const INVESTIGATE_INSTRUCTION = [
 
 /** The role-specific instruction body that opens the Brief. */
 const ROLE_INSTRUCTIONS: Record<Role, string> = {
-  'plan-writer': PLAN_WRITER_INSTRUCTION,
-  planner: [
-    'You are the planner. The Context section gives you the plan OVERVIEW, the ' +
+  'phased-planner': PLAN_WRITER_INSTRUCTION,
+  'step-planner': [
+    'You are the step planner. The Context section gives you the plan OVERVIEW, the ' +
       'one phase you are planning, and the execution summaries of the phases it ' +
       'depends on. Study the code named there read-only and produce a concrete ' +
       'implementation plan for this single phase. Do not modify any source files.',
@@ -170,8 +172,8 @@ const ROLE_INSTRUCTIONS: Record<Role, string> = {
     '',
     CONTEXT_IS_COMPLETE_INSTRUCTION,
   ].join('\n'),
-  'plan-reviewer': [
-    'You are the plan reviewer. The Context section gives you the plan ' +
+  'step-reviewer': [
+    'You are the step reviewer. The Context section gives you the plan ' +
       'OVERVIEW, the phase, and the proposed plan. Read the code the plan names ' +
       'read-only and judge whether the plan is complete and correct for this ' +
       'single phase, and whether an executor could implement it from the plan ' +

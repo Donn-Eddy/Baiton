@@ -1,7 +1,7 @@
 /**
  * The plan-draft runner: the harness writes the plan, and the orchestrator
  * gathers the request. The `draft_plan(slug, request)` tool hands
- * that request to this runner, which launches the `plan-writer` role on
+ * that request to this runner, which launches the `phased-planner` role on
  * the `plan-draft` stage and writes a schema-valid result to
  * `.baiton/plans/<slug>/plan.md`.
  *
@@ -35,7 +35,7 @@ import type { HostTerminal, TerminalHost } from './terminalHost';
 
 /** The stage and role a plan draft always runs as. */
 const PLAN_DRAFT_STAGE = 'plan-draft' as const;
-const PLAN_WRITER_ROLE: Role = 'plan-writer';
+const PLAN_WRITER_ROLE: Role = 'phased-planner';
 
 /** One request to draft a plan from a requirements document. */
 export interface PlanDraftRequest {
@@ -53,7 +53,7 @@ export type PlanDraftOutcome =
       ok: true;
       slug: string;
       runId: string;
-      /** How many phases the plan writer produced. */
+      /** How many phases the phased-planner produced. */
       phaseCount: number;
       /** Repository-relative path of the written plan. */
       planPath: string;
@@ -179,12 +179,12 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
       });
     }
 
-    // Resolve the plan-writer's configured adapter before probing (Req 14.1).
+    // Resolve the phased-planner's configured adapter before probing (Req 14.1).
     const adapter = this.deps.adapterForRole(PLAN_WRITER_ROLE);
     if (adapter === undefined) {
       return refuseHeld({
         kind: 'unknown-agent',
-        message: 'role "plan-writer" is configured with an unsupported agent; update "roles.plan-writer.agent" in .baiton/config.json',
+        message: 'role "phased-planner" is configured with an unsupported agent; update "roles.phased-planner.agent" in .baiton/config.json',
       });
     }
 
@@ -229,7 +229,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
   }
 
   /**
-   * Await the plan writer's result, then render and commit `plan.md`. Journals
+   * Await the phased-planner's result, then render and commit `plan.md`. Journals
    * the start before waiting and the completion once the outcome is known. A
    * failed run keeps its `.baiton/runs/<runId>/` directory for inspection.
    */
@@ -284,7 +284,7 @@ class DefaultPlanDraftRunner implements PlanDraftRunner {
           ok: false,
           slug: req.slug,
           runId,
-          message: `the plan writer did not produce a result (${result.kind})`,
+          message: `the phased-planner did not produce a result (${result.kind})`,
         };
       } else {
         outcome = await this.writePlan(req.slug, runId, result.structured as PlanDraftResult);

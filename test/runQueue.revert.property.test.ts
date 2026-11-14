@@ -56,7 +56,7 @@ const SCENARIOS: Scenario[] = [
   {
     from: 'pending',
     action: 'plan',
-    role: 'planner',
+    role: 'step-planner',
     resultJson: JSON.stringify({
       steps: [{ title: 'step', detail: 'do it', files: [] }],
       risks: [],

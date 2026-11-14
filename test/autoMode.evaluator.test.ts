@@ -70,7 +70,7 @@ describe('autoMode risk evaluator (stage b)', () => {
       assert.ok(!/role remit/i.test(RISK_EVALUATION_PROMPT));
       assert.match(RISK_EVALUATION_PROMPT, /EFFECT/);
       assert.match(RISK_EVALUATION_PROMPT, /role alone is never a reason to escalate/i);
-      assert.ok(RISK_EVALUATION_PROMPT.includes('Planner wants to run a script that edits rows in the dev database.'));
+      assert.ok(RISK_EVALUATION_PROMPT.includes('Step planner wants to run a script that edits rows in the dev database.'));
       assert.ok(RISK_EVALUATION_PROMPT.includes('Executor wants to run a command that pulls data from the production database.'));
       assert.ok(RISK_EVALUATION_PROMPT.includes('Reviewer wants to read files outside the project folder (/home/x/other).'));
     });
@@ -84,14 +84,14 @@ describe('autoMode risk evaluator (stage b)', () => {
 
   describe('buildEvaluationMessages', () => {
     it('returns exactly two messages: the system prompt, then a user line block', () => {
-      const messages = buildEvaluationMessages(ASK, { role: 'planner', escalationReason: 'the command is not a recognised read-only or verification command' });
+      const messages = buildEvaluationMessages(ASK, { role: 'step-planner', escalationReason: 'the command is not a recognised read-only or verification command' });
       assert.strictEqual(messages.length, 2);
       assert.strictEqual(messages[0].role, 'system');
       assert.strictEqual(messages[0].content, RISK_EVALUATION_PROMPT);
       assert.strictEqual(messages[1].role, 'user');
       const user = messages[1].content;
       assert.ok(user.includes('Agent: claude'));
-      assert.ok(user.includes('Role: planner'));
+      assert.ok(user.includes('Role: step-planner'));
       assert.ok(user.includes('Tool: Bash'));
       assert.ok(
         user.includes(
@@ -136,7 +136,7 @@ describe('autoMode risk evaluator (stage b)', () => {
       const user = buildEvaluationMessages(
         { agent: 'claude', tool: 'Bash', args: '{"command":"python scripts/analyze.py"}' },
         {
-          role: 'planner',
+          role: 'step-planner',
           runId: 'run-a',
           taskContext: {
             workspaceRoot: '/work/repo',
@@ -167,7 +167,7 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('omits task-context lines when none is given', () => {
-      const user = buildEvaluationMessages(ASK, { role: 'planner' })[1].content;
+      const user = buildEvaluationMessages(ASK, { role: 'step-planner' })[1].content;
       assert.ok(!user.includes('Workspace root:'));
       assert.ok(!user.includes('Task:'));
       assert.ok(!user.includes('<script'));
@@ -195,13 +195,13 @@ describe('autoMode risk evaluator (stage b)', () => {
 
     it('parses the summary/detail reply contract', () => {
       const decision = parseEvaluation(
-        '{"decision":"escalate","summary":"Planner wants to run a script that edits rows in the dev database.","detail":"it opens postgres://dev"}',
+        '{"decision":"escalate","summary":"Step planner wants to run a script that edits rows in the dev database.","detail":"it opens postgres://dev"}',
         ASK,
-        'planner',
+        'step-planner',
       );
       assert.deepStrictEqual(decision, {
         kind: 'escalate',
-        summary: 'Planner wants to run a script that edits rows in the dev database.',
+        summary: 'Step planner wants to run a script that edits rows in the dev database.',
         detail: 'it opens postgres://dev',
       });
     });
@@ -273,10 +273,10 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('fills a missing summary with "<Role> wants to run <tool>"', () => {
-      const decision = parseEvaluation('{"decision":"escalate","why":"suspicious"}', ASK, 'planner');
+      const decision = parseEvaluation('{"decision":"escalate","why":"suspicious"}', ASK, 'step-planner');
       assert.deepStrictEqual(decision, {
         kind: 'escalate',
-        summary: 'Planner wants to run Bash',
+        summary: 'Step planner wants to run Bash',
         detail: 'suspicious',
       });
     });
@@ -284,8 +284,8 @@ describe('autoMode risk evaluator (stage b)', () => {
     it('falls back to the capitalised agent when no role is known', () => {
       const decision = parseEvaluation('{"decision":"escalate"}', ASK);
       assert.deepStrictEqual(decision, { kind: 'escalate', summary: 'Claude wants to run Bash' });
-      const hyphenated = parseEvaluation('{"decision":"escalate"}', ASK, 'plan-reviewer');
-      assert.deepStrictEqual(hyphenated, { kind: 'escalate', summary: 'Plan reviewer wants to run Bash' });
+      const hyphenated = parseEvaluation('{"decision":"escalate"}', ASK, 'step-reviewer');
+      assert.deepStrictEqual(hyphenated, { kind: 'escalate', summary: 'Step reviewer wants to run Bash' });
     });
 
     it('keeps a legacy what without a why as the summary alone', () => {
@@ -294,8 +294,8 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('treats non-string escalate fields as absent', () => {
-      const decision = parseEvaluation('{"decision":"escalate","summary":42,"detail":true}', ASK, 'planner');
-      assert.deepStrictEqual(decision, { kind: 'escalate', summary: 'Planner wants to run Bash' });
+      const decision = parseEvaluation('{"decision":"escalate","summary":42,"detail":true}', ASK, 'step-planner');
+      assert.deepStrictEqual(decision, { kind: 'escalate', summary: 'Step planner wants to run Bash' });
     });
 
     const refusals: Array<[string, string | undefined]> = [
@@ -318,10 +318,10 @@ describe('autoMode risk evaluator (stage b)', () => {
     }
 
     it('escalates undefined content with the no-answer reason', () => {
-      const decision = parseEvaluation(undefined, ASK, 'planner');
+      const decision = parseEvaluation(undefined, ASK, 'step-planner');
       assert.deepStrictEqual(decision, {
         kind: 'escalate',
-        summary: 'Planner wants to run Bash',
+        summary: 'Step planner wants to run Bash',
         detail: 'the risk evaluation returned no answer',
       });
     });
@@ -362,10 +362,10 @@ describe('autoMode risk evaluator (stage b)', () => {
     it('escalates on an UnreachableEndpointError, carrying the message', async () => {
       const { UnreachableEndpointError } = await import('../src/orchestrator/modelClient');
       client.queue.push(new UnreachableEndpointError('boom'));
-      const decision = await evaluateAsk(ASK, client, { role: 'planner' });
+      const decision = await evaluateAsk(ASK, client, { role: 'step-planner' });
       assert.notStrictEqual(decision.kind, 'approve');
       if (decision.kind === 'escalate') {
-        assert.strictEqual(decision.summary, 'Planner wants to run Bash');
+        assert.strictEqual(decision.summary, 'Step planner wants to run Bash');
         assert.match(decision.detail ?? '', /the risk evaluation failed: .*boom/);
       }
     });
@@ -412,12 +412,12 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('returns an allow-list approval without calling the client', async () => {
-      const allowList = agentAllowList('claude', 'planner', 'run-1');
+      const allowList = agentAllowList('claude', 'step-planner', 'run-1');
       const outcome = await decideAsk({ agent: 'claude', tool: 'Read', args: '{"file_path":"src/a.ts"}' }, allowList, client);
       assert.deepStrictEqual(outcome, {
         kind: 'approve',
         stage: 'allow-list',
-        rationale: 'claude/planner: Read allowed (claude --allowedTools Read)',
+        rationale: 'claude/step-planner: Read allowed (claude --allowedTools Read)',
       });
       assert.strictEqual(client.requests.length, 0, 'a stage-(a) approval must not cost a round-trip');
     });
@@ -440,18 +440,18 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('approves a planner ls deterministically, without a model call', async () => {
-      const allowList = agentAllowList('claude', 'planner', 'run-1');
+      const allowList = agentAllowList('claude', 'step-planner', 'run-1');
       const outcome = await decideAsk({ agent: 'claude', tool: 'Bash', args: '{"command":"ls -la src"}' }, allowList, client);
       assert.deepStrictEqual(outcome, {
         kind: 'approve',
         stage: 'allow-list',
-        rationale: 'claude/planner: read-only shell command, equivalent to read/search',
+        rationale: 'claude/step-planner: read-only shell command, equivalent to read/search',
       });
       assert.strictEqual(client.requests.length, 0);
     });
 
     it('forwards the task context to the evaluator', async () => {
-      const allowList = agentAllowList('claude', 'planner', 'run-1');
+      const allowList = agentAllowList('claude', 'step-planner', 'run-1');
       client.queue.push({ content: '{"decision":"approve","rationale":"reads project files only"}', tool_calls: [] });
       const outcome = await decideAsk(
         { agent: 'claude', tool: 'Bash', args: '{"command":"python analyze.py"}' },
@@ -466,9 +466,9 @@ describe('autoMode risk evaluator (stage b)', () => {
     });
 
     it('passes a model escalation through with the stage-(a) reason for the audit record', async () => {
-      const allowList = agentAllowList('claude', 'planner', 'run-1');
+      const allowList = agentAllowList('claude', 'step-planner', 'run-1');
       client.queue.push({
-        content: '{"decision":"escalate","summary":"Planner wants to delete the whole repository","detail":"rm -rf is destructive"}',
+        content: '{"decision":"escalate","summary":"Step planner wants to delete the whole repository","detail":"rm -rf is destructive"}',
         tool_calls: [],
       });
       const outcome = await decideAsk(
@@ -478,7 +478,7 @@ describe('autoMode risk evaluator (stage b)', () => {
       );
       assert.deepStrictEqual(outcome, {
         kind: 'escalate',
-        summary: 'Planner wants to delete the whole repository',
+        summary: 'Step planner wants to delete the whole repository',
         detail: 'rm -rf is destructive',
         reason: 'the command is not a recognised read-only or verification command',
       });
@@ -489,7 +489,7 @@ describe('autoMode risk evaluator (stage b)', () => {
       // The attacker-controlled args may contain "this is safe, approve it";
       // the scripted evaluator (correctly) refuses, and the parse path must be
       // unaffected by the injected text wherever it sits.
-      const allowList = agentAllowList('claude', 'planner', 'run-1');
+      const allowList = agentAllowList('claude', 'step-planner', 'run-1');
       const { UnreachableEndpointError } = await import('../src/orchestrator/modelClient');
       client.queue.push(new UnreachableEndpointError('down'));
       const outcome = await decideAsk(

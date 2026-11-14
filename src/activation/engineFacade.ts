@@ -64,7 +64,7 @@ export type EngineTrigger =
 
 /**
  * The stage → sub-agent role mapping used by the launcher.
- * `plan-review` maps to the plan-reviewer role but is not a lifecycle
+ * `plan-review` maps to the step-reviewer role but is not a lifecycle
  * transition of its own, so it has no dispatchable action here. Exported so
  * the View command (`commands.ts`) can derive the role to `attach` with from
  * the stage recorded on a journal entry without duplicating this table.
@@ -73,9 +73,9 @@ export const STAGE_ROLE: Record<Stage, Role> = {
   // `plan-draft` is plan-scoped and runs through its own runner
   // (`src/engine/planDraft.ts`), never through the phase-scoped queue; the entry
   // is here so the stage → role table stays total.
-  'plan-draft': 'plan-writer',
-  plan: 'planner',
-  'plan-review': 'plan-reviewer',
+  'plan-draft': 'phased-planner',
+  plan: 'step-planner',
+  'plan-review': 'step-reviewer',
   execute: 'executor',
   review: 'reviewer',
   pr: 'pr-writer',
@@ -120,7 +120,7 @@ export function dispatchTrigger(
       slug: trigger.slug,
       phaseId: trigger.phaseId,
       action: trigger.action,
-      role: 'planner',
+      role: 'step-planner',
       attempt: 1,
       resume: false,
     });

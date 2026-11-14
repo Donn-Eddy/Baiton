@@ -545,7 +545,7 @@ const resolveUsageCli = (cli: UsageCliName): string | undefined => {
  * `.baiton/plans/` or the legacy `.baiton/specs/` root. Each plan owns a
  * plan-level journal plus per-phase journals, merged by readPlanJournal. The
  * recovery uses the git seam, a `process`-backed {@link ProcessControl}, and a
- * serializer-backed plan writer. A failure for one plan is contained so the
+ * serializer-backed phased planner. A failure for one plan is contained so the
  * rest still reconcile.
  */
 async function runCrashRecovery(

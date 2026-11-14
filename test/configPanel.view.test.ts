@@ -772,9 +772,9 @@ type ViewHostMessage = import('../src/config/configPanel').ConfigPanelHostToWebv
 
 /** ROLES, duplicated so this suite needs no `vscode`-tainted import. */
 const VIEW_ROLES = [
-  'plan-writer',
-  'planner',
-  'plan-reviewer',
+  'phased-planner',
+  'step-planner',
+  'step-reviewer',
   'executor',
   'reviewer',
   'pr-writer',
@@ -1103,10 +1103,10 @@ describe('config panel webview options refresh ', () => {
 
   it('optionsChanged never overwrites the focused control', () => {
     const view = loadedView();
-    const select = view.byId('role-planner-model-select');
+    const select = view.byId('role-step-planner-model-select');
     select.value = OTHER_SENTINEL;
     view.ids['config-form'].fire('change', { target: select });
-    const input = view.byId('role-planner-model-input');
+    const input = view.byId('role-step-planner-model-input');
     input.value = 'half-typed-mod';
     view.setActive(input);
 
