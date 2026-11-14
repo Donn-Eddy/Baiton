@@ -823,14 +823,14 @@ describe('interventions', () => {
 
     it('escalatedInterventionView leads the detail with the summary and never shows the tripped rule', () => {
       const card = escalatedInterventionView(permission, {
-        summary: 'Planner wants to run a script that edits rows in the dev database.',
+        summary: 'Step planner wants to run a script that edits rows in the dev database.',
         detail: 'It connects to postgres://dev.',
         command: 'python seed.py',
         reason: 'the command is not a recognised read-only or verification command',
       });
-      assert.strictEqual(card.detail, 'Planner wants to run a script that edits rows in the dev database.\nIt connects to postgres://dev.');
+      assert.strictEqual(card.detail, 'Step planner wants to run a script that edits rows in the dev database.\nIt connects to postgres://dev.');
       assert.deepStrictEqual(card.escalation, {
-        summary: 'Planner wants to run a script that edits rows in the dev database.',
+        summary: 'Step planner wants to run a script that edits rows in the dev database.',
         detail: 'It connects to postgres://dev.',
         command: 'python seed.py',
         reason: 'the command is not a recognised read-only or verification command',
@@ -839,9 +839,9 @@ describe('interventions', () => {
     });
 
     it('escalatedInterventionView keeps the harness description as a last paragraph', () => {
-      const card = escalatedInterventionView({ ...permission, detail: 'Seeds the db.' }, { summary: 'Planner wants to seed the dev database.' });
-      assert.strictEqual(card.detail, 'Planner wants to seed the dev database.\nSeeds the db.');
-      assert.deepStrictEqual(card.escalation, { summary: 'Planner wants to seed the dev database.' });
+      const card = escalatedInterventionView({ ...permission, detail: 'Seeds the db.' }, { summary: 'Step planner wants to seed the dev database.' });
+      assert.strictEqual(card.detail, 'Step planner wants to seed the dev database.\nSeeds the db.');
+      assert.deepStrictEqual(card.escalation, { summary: 'Step planner wants to seed the dev database.' });
     });
 
     it('normalizeEscalation reads the current and the legacy shape', () => {

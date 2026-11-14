@@ -247,14 +247,14 @@ describe('run queue ask watcher wiring', () => {
       adapterForRole: () => adapter, newRunId: () => 'run-1', newSessionId: () => '11111111-1111-1111-1111-111111111111',
       ...(wire ? { askWatcherFactory: { create: (input) => { creates.push(input); return { dispose: () => { disposeCount += 1; } }; } } } : {}),
     };
-    const outcome = await createRunQueue(deps).dispatch({ slug, phaseId: phaseId, action: 'plan', role: 'planner', attempt: 1, resume: false });
+    const outcome = await createRunQueue(deps).dispatch({ slug, phaseId: phaseId, action: 'plan', role: 'step-planner', attempt: 1, resume: false });
     assert.ok(outcome.ok);
     return { relay, creates, disposes: () => disposeCount };
   }
 
   it('creates and disposes a watcher over the launched relay directory', async () => {
     const result = await dispatch(true);
-    assert.deepStrictEqual(result.creates, [{ slug, phaseId: phaseId, runId: 'run-1', agent: 'claude', role: 'planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
+    assert.deepStrictEqual(result.creates, [{ slug, phaseId: phaseId, runId: 'run-1', agent: 'claude', role: 'step-planner', asksDir: join(workspaceRoot, '.baiton', 'runs', 'run-1', 'asks') }]);
     assert.strictEqual(result.disposes(), 1);
     assert.ok(result.relay !== undefined);
   });

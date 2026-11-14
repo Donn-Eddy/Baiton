@@ -899,7 +899,7 @@ describe('orchestrator registry and control tools', () => {
   describe('phase scoping (Req 11.1)', () => {
     /**
      * The tool surface of each orchestrator phase. `gather` asks clarifying
-     * questions and hands the agreed requirements to the plan writer; `drive`
+     * questions and hands the agreed requirements to the phased planner; `drive`
      * dispatches stages for an approved plan. The repository read tools and
      * `draft_plan` belong to the first, `run` and `submit_pr` to the second,
      * and the plan-write tools plus the cheap orientation reads to both. The
@@ -1043,7 +1043,7 @@ describe('orchestrator registry and control tools', () => {
         assert.match(result.error, /draft_plan/);
         assert.match(result.error, /drive/);
       }
-      assert.strictEqual(draft.calls.length, 0, 'the plan writer was never dispatched');
+      assert.strictEqual(draft.calls.length, 0, 'the phased planner was never dispatched');
       assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
     });
 
@@ -1154,7 +1154,7 @@ describe('orchestrator registry and control tools', () => {
 
       assert.strictEqual(confirm.calls.length, 0, 'no confirmation was shown');
       assert.strictEqual(queue.calls.length, 0, 'the run queue was never reached');
-      assert.strictEqual(draft.calls.length, 0, 'the plan writer was never dispatched');
+      assert.strictEqual(draft.calls.length, 0, 'the phased planner was never dispatched');
       assert.strictEqual(
         fs.readFileSync(specFile, 'utf8'),
         before,

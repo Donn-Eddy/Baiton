@@ -150,7 +150,7 @@ describe('buildSystemPrompt', () => {
 
     it('tells the user where the draft is written and where to watch it', () => {
       const prompt = buildSystemPrompt(WORKSPACE);
-      assert.match(prompt, /harness|plan-writer agent/i);
+      assert.match(prompt, /harness|phased-planner agent/i);
       assert.match(prompt, /watch/i);
       assert.match(prompt, /Plan Explorer/);
     });

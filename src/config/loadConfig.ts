@@ -27,6 +27,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Result, ok, err, ROLES, Role } from '../model';
+import { resolveRoleEntry } from './roleKeys';
 import {
   Config,
   ConfigError,
@@ -314,40 +315,11 @@ export async function migrateAndPersist(
 }
 
 /**
- * Roles added after a `config.json` shape shipped, mapped to the role whose
- * entry stands in for a missing one. `plan-writer` is a read-only plan-draft
- * role like `planner`, so a config with neither entry still loads with the plan
- * writer inheriting the planner's agent, model and effort.
- */
-const ROLE_FALLBACKS: Partial<Record<Role, Role>> = {
-  'plan-writer': 'planner',
-};
-
-/**
- * Legacy: configs written before the phased-plan rename name the drafting role
- * `spec-writer`; map that key into the canonical role while loading.
- */
-const LEGACY_ROLE_KEYS: Partial<Record<Role, string>> = {
-  'plan-writer': 'spec-writer',
-};
-
-/** The entry a missing role inherits, or `undefined` when it has no fallback. */
-function fallbackRoleEntry(role: Role, roles: Record<string, unknown>): unknown {
-  const source = ROLE_FALLBACKS[role];
-  return source === undefined ? undefined : roles[source];
-}
-
-/** The pre-rename config entry for a role, when that role has one. */
-function legacyRoleEntry(role: Role, roles: Record<string, unknown>): unknown {
-  const legacyKey = LEGACY_ROLE_KEYS[role];
-  return legacyKey === undefined ? undefined : roles[legacyKey];
-}
-
-/**
  * Validates the `roles` mapping: an object assigning every {@link Role} an
  * `agent` and a `model` string, with an optional `effort` string (Req 2.2).
- * A role absent from the file is filled in from {@link ROLE_FALLBACKS} so a
- * config written before that role existed still loads.
+ * Entries resolve from the new key first, then that role's legacy keys in
+ * order, then its fallback role. A merged overlay using a legacy key cannot
+ * override a baseline's new key because new-key-wins precedence applies.
  */
 function readRoles(
   doc: Record<string, unknown>,
@@ -359,8 +331,7 @@ function readRoles(
 
   const out = {} as Record<Role, RoleConfig>;
   for (const role of ROLES) {
-    const entry =
-      roles[role] ?? legacyRoleEntry(role, roles) ?? fallbackRoleEntry(role, roles);
+    const entry = resolveRoleEntry(role, roles);
     if (!isObject(entry)) {
       return err(
         missingSection(`roles.${role}`, `the "${role}" role is missing or not an object`),

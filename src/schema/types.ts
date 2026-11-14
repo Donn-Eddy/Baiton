@@ -7,7 +7,7 @@
  * the compile-time view the rest of the codebase programs against.
  */
 
-/** One phase the plan writer proposes, in dependency order. */
+/** One phase the phased-planner proposes, in dependency order. */
 export interface PlanDraftPhase {
   /** The phase title — a title only; never a lifecycle state. */
   title: string;
@@ -23,7 +23,7 @@ export interface PlanDraftPhase {
   repo?: string;
 }
 
-/** The plan writer's structured output (Plan_Draft stage). */
+/** The phased-planner's structured output (Plan_Draft stage). */
 export interface PlanDraftResult {
   /** Prose for the plan's Endstate section. */
   endstate: string;
@@ -45,7 +45,7 @@ export interface PlanStep {
   files: string[];
 }
 
-/** The planner's structured output (Plan stage). */
+/** The step-planner's structured output (Plan stage). */
 export interface PlanResult {
   /** Ordered plan steps. */
   steps: PlanStep[];
@@ -58,7 +58,7 @@ export interface PlanResult {
 /** Severity of a review finding. */
 export type FindingSeverity = 'must' | 'should';
 
-/** A finding raised by the plan-reviewer. */
+/** A finding raised by the step-reviewer. */
 export interface PlanReviewFinding {
   /** Whether the finding must be addressed or is a suggestion. */
   severity: FindingSeverity;
@@ -67,7 +67,7 @@ export interface PlanReviewFinding {
 }
 
 /**
- * The plan-reviewer's structured output (Plan_Review stage).
+ * The step-reviewer's structured output (Plan_Review stage).
  *
  * A `findings` verdict requires a non-empty {@link findings} list; a `pass`
  * verdict carries an empty list (Req 12.9).

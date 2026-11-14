@@ -17,7 +17,7 @@
  *   carries an `approved_rev`) recomputes the Approval_Hash into `approved_rev`
  *   and leaves every phase's state unchanged (Req 5.5).
  * - `draft_plan(slug, request)` (dispatch) — hand an agreed request to the
- *   plan-writer agent, which studies the repository and drafts the phased plan.
+ *   phased-planner agent, which studies the repository and drafts the phased plan.
  *   Confirms the request through the confirm seam first; a decline drafts nothing.
  *   Returns as soon as the sub-agent is running, carrying its run id.
  * - `start_run(mode, statement, files, reproduction?)` (dispatch) — start one
@@ -191,7 +191,7 @@ function askUserTool(services: ToolServices): Tool {
 }
 
 /**
- * `draft_plan(slug, request)` — hand an agreed request to the plan-writer agent
+ * `draft_plan(slug, request)` — hand an agreed request to the phased-planner agent
  * to study the repository and draft the phased plan.
  *
  * The user confirms a summary of the endstate, what needs changing, and
@@ -202,7 +202,7 @@ function draftPlanTool(services: ToolServices): Tool {
   return {
     name: 'draft_plan',
     description:
-      'Hand an agreed request to the plan-writer agent for a new slug. Optional `repo` is the repo that will own the plan, as a path relative to this repo; omit it for this repo.',
+      'Hand an agreed request to the phased-planner agent for a new slug. Optional `repo` is the repo that will own the plan, as a path relative to this repo; omit it for this repo.',
     mutating: false,
     steps: ['gather'],
     dispatch: true,
@@ -305,7 +305,7 @@ function draftPlanTool(services: ToolServices): Tool {
 
 /**
  * The confirmation message shown before a draft launches: the slug plus a
- * bounded summary of the request so the user sees what the plan writer is
+ * bounded summary of the request so the user sees what the phased-planner is
  * being handed.
  */
 function draftConfirmation(slug: string, requirements: string, repo?: string): string {
@@ -314,7 +314,7 @@ function draftConfirmation(slug: string, requirements: string, repo?: string): s
     trimmed.length > 1200 ? `${trimmed.slice(0, 1200)}\n…` : trimmed;
   return (
     `Draft plan "${slug}"${repo !== undefined && repo !== '.' ? ` in repo "${repo}"` : ''} from this request? ` +
-    'The configured plan-writer agent will study the repository and write the ' +
+    'The configured phased-planner agent will study the repository and write the ' +
     'endstate, what needs changing, limitations & constraints, and phases.' +
     `\n\n${summary}`
   );

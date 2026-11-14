@@ -440,7 +440,7 @@ describe('run queue per-phase worktrees (real repo)', () => {
     git(t01.value.worktreeDir, 'add', '-A');
     git(t01.value.worktreeDir, 'commit', '-q', '-m', 'T01 work');
 
-    const refused = await rig.dispatch('T03', 'plan', 'planner');
+    const refused = await rig.dispatch('T03', 'plan', 'step-planner');
     assert.ok(!refused.ok && refused.error.kind === 'deps-unlanded', JSON.stringify(refused));
     assert.ok(!fs.existsSync(phaseWorktreeDirFor(repo, SLUG, 'T03')), 'no worktree for a refused Plan');
     assert.strictEqual(rig.stages.length, 0);
@@ -448,7 +448,7 @@ describe('run queue per-phase worktrees (real repo)', () => {
     const landed = await landPhaseWorktree(deps, { slug: SLUG, phaseId: 'T01' });
     assert.ok(landed.ok, JSON.stringify(landed));
 
-    const plan = rig.dispatch('T03', 'plan', 'planner');
+    const plan = rig.dispatch('T03', 'plan', 'step-planner');
     await until(() => rig.stages.length === 1, 'plan to launch');
     const wt3 = phaseWorktreeDirFor(repo, SLUG, 'T03');
     assert.strictEqual(rig.stages[0].cwd, wt3);

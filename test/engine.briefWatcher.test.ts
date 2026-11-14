@@ -104,7 +104,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     it('orders sections role → result path → schema → write-and-stop, with schema and stop last', () => {
       const brief = buildBrief({
         stage: 'plan',
-        role: 'planner',
+        role: 'step-planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
       });
 
@@ -129,7 +129,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       for (const stage of ['plan', 'plan-review', 'execute', 'review'] as const) {
         const brief = buildBrief({
           stage,
-          role: 'planner',
+          role: 'step-planner',
           resultPath: '/repo/.baiton/runs/run-1/result.json',
         });
         const schemaIdx = brief.indexOf('# Result schema');
@@ -150,7 +150,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
 
     it('embeds the absolute result path in the result-file section', () => {
       const resultPath = '/repo/.baiton/runs/run-42/result.json';
-      const brief = buildBrief({ stage: 'plan', role: 'planner', resultPath });
+      const brief = buildBrief({ stage: 'plan', role: 'step-planner', resultPath });
       assert.ok(brief.includes(resultPath), 'the brief names the exact result path');
     });
 
@@ -158,7 +158,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
       const relay = askRelayDescriptor('/repo', 'run-1');
       const brief = buildBrief({
         stage: 'plan',
-        role: 'planner',
+        role: 'step-planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
         context: '## Phase\n\nP01 do the thing.',
         askRelay: { agent: 'antigravity', relay },
@@ -182,7 +182,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     it('leaves the brief text unchanged when askRelay is omitted', () => {
       const base = {
         stage: 'plan' as const,
-        role: 'planner' as const,
+        role: 'step-planner' as const,
         resultPath: '/repo/.baiton/runs/run-1/result.json',
         context: '## Phase\n\nP01 do the thing.',
       };
@@ -193,11 +193,11 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     });
   });
 
-  describe('plan-writer brief', () => {
+  describe('phased-planner brief', () => {
     const brief = (): string =>
       buildBrief({
         stage: 'plan-draft',
-        role: 'plan-writer',
+        role: 'phased-planner',
         resultPath: '/repo/.baiton/runs/draft-1/result.json',
         context: '## Requirements\n\nBuild a greeting module.',
       });
@@ -259,7 +259,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     it('does not carry the no-git instruction in a non-executor (planner) brief', () => {
       const brief = buildBrief({
         stage: 'plan',
-        role: 'planner',
+        role: 'step-planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
       });
       assert.ok(
@@ -307,7 +307,7 @@ describe('brief writer, launcher prompt, and watcher outcomes (unit)', () => {
     it('does not carry the executor-only requirement in a planner brief', () => {
       const brief = buildBrief({
         stage: 'plan',
-        role: 'planner',
+        role: 'step-planner',
         resultPath: '/repo/.baiton/runs/run-1/result.json',
       });
       assert.ok(!brief.includes(EXECUTOR_RESULT_FILE_INSTRUCTION));

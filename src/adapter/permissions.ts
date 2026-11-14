@@ -30,7 +30,7 @@ import {
  * Whether a role only reads and searches (Requirement 15.1): it may write
  * nothing outside its run directory AND may not run shell commands. Derived
  * from the profile table, and by construction the historical set
- * `plan-writer, planner, plan-reviewer, pr-writer` — the reviewer is excluded
+ * `phased-planner, step-planner, step-reviewer, pr-writer` — the reviewer is excluded
  * because it has shell.
  */
 export function isReadOnlyRole(role: Role): boolean {
@@ -96,7 +96,7 @@ export function permissionFlags(role: Role, mode: PermissionMode = DEFAULT_PERMI
   if (profile.shell) {
     return ['--allowedTools', REVIEWER_ALLOWED_TOOLS];
   }
-  // Read-only roles: plan-writer, planner, plan-reviewer, pr-writer.
+  // Read-only roles: phased-planner, step-planner, step-reviewer, pr-writer.
   if (mode.readOnlyFallbackToAcceptEdits) {
     return ['--permission-mode', ACCEPT_EDITS_MODE];
   }
@@ -271,7 +271,7 @@ export const CLAUDE_RELAY_HOOK_SCRIPT: string =
   `const a=process.argv.slice(1);` +
   `const dir=a[0],askSuffix=a[1],respSuffix=a[2],runId=a[3],deadline=Date.now()+Number(a[4]);` +
   `function done(decision,reason){` +
-  `process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"PreToolUse",` +
+  `fs.writeSync(1,JSON.stringify({hookSpecificOutput:{hookEventName:"PreToolUse",` +
   `permissionDecision:decision,permissionDecisionReason:reason}}));process.exit(0)}` +
   `let ev={};` +
   `try{ev=JSON.parse(fs.readFileSync(0,"utf8")||"{}")}` +

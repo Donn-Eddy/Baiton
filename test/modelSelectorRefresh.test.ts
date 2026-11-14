@@ -2489,7 +2489,7 @@ describe('model selector refresh ', () => {
       const harness = buildDiscovery();
       const dir = newDir();
       writeRoles(dir, {
-        planner: { agent: 'claude', model: 'claude-opus-4-legacy', effort: 'high' },
+        'step-planner': { agent: 'claude', model: 'claude-opus-4-legacy', effort: 'high' },
         executor: { agent: 'codex', model: 'gpt-5-codex', effort: 'xhigh' },
       });
       const { webview } = buildPanel(harness, dir);
@@ -2517,7 +2517,7 @@ describe('model selector refresh ', () => {
 
       const reloaded = await loadConfig(dir);
       assert.ok(isOk(reloaded));
-      assert.strictEqual(reloaded.value.roles.planner.model, 'claude-opus-4-legacy');
+      assert.strictEqual(reloaded.value.roles['step-planner'].model, 'claude-opus-4-legacy');
       assert.strictEqual(reloaded.value.roles.executor.effort, 'xhigh');
     });
 
@@ -2604,7 +2604,7 @@ describe('model selector refresh ', () => {
         // `claude-opus-5` is a real legacy id both the corrected curated table
         // and the local catalog drop; `ultra` is outside the opencode variant
         // union the verbose listing discloses.
-        planner: { agent: 'claude', model: 'claude-opus-5', effort: 'medium' },
+        'step-planner': { agent: 'claude', model: 'claude-opus-5', effort: 'medium' },
         executor: { agent: 'opencode', model: 'openrouter/legacy-model', effort: 'ultra' },
       });
       const { webview } = buildPanel(harness, dir);
@@ -2662,7 +2662,7 @@ describe('model selector refresh ', () => {
 
       const reloaded = await loadConfig(dir);
       assert.ok(isOk(reloaded));
-      assert.strictEqual(reloaded.value.roles.planner.model, 'claude-opus-5');
+      assert.strictEqual(reloaded.value.roles['step-planner'].model, 'claude-opus-5');
       assert.strictEqual(reloaded.value.roles.executor.model, 'openrouter/legacy-model');
       assert.strictEqual(reloaded.value.roles.executor.effort, 'ultra');
     });
@@ -2861,12 +2861,12 @@ describe('model selector refresh ', () => {
 
     it('a custom value renders as an editable Other… entry after the refresh', async () => {
       const { webview } = await refreshedPanel({
-        planner: { agent: 'claude', model: 'claude-opus-5', effort: 'medium' },
+        'step-planner': { agent: 'claude', model: 'claude-opus-5', effort: 'medium' },
       });
       const view = viewOf(webview);
 
-      const select = view.byId('role-planner-model-select');
-      const input = view.byId('role-planner-model-input');
+      const select = view.byId('role-step-planner-model-select');
+      const input = view.byId('role-step-planner-model-input');
       assert.strictEqual(select.value, OTHER_SENTINEL, 'the select shows Other…');
       assert.notStrictEqual(input.style.display, 'none', 'the text input is visible');
       assert.strictEqual(input.value, 'claude-opus-5', 'and keeps the configured value');
@@ -2930,13 +2930,13 @@ describe('model selector refresh ', () => {
 
     it('per-model effort lists and the default label follow the selected model', async () => {
       const { webview } = await refreshedPanel({
-        planner: { agent: 'claude', model: 'claude-opus-5-5', effort: '' },
+        'step-planner': { agent: 'claude', model: 'claude-opus-5-5', effort: '' },
         reviewer: { agent: 'antigravity', model: 'gemini-3.1-pro', effort: '' },
       });
       const view = viewOf(webview);
       const form = view.ids['config-form'];
 
-      const plannerEffort = view.byId('role-planner-effort-select');
+      const plannerEffort = view.byId('role-step-planner-effort-select');
       assert.deepStrictEqual(
         dynamicOptions(plannerEffort).map((o) => o.value),
         ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -2945,12 +2945,12 @@ describe('model selector refresh ', () => {
 
       // A `thinking: none` model discloses an EMPTY list, which leaves only the
       // static options.
-      const plannerModel = view.byId('role-planner-model-select');
+      const plannerModel = view.byId('role-step-planner-model-select');
       plannerModel.value = 'claude-haiku-4-5-20251001';
       form.fire('change', { target: plannerModel });
-      assert.deepStrictEqual(dynamicOptions(view.byId('role-planner-effort-select')), []);
+      assert.deepStrictEqual(dynamicOptions(view.byId('role-step-planner-effort-select')), []);
       assert.strictEqual(
-        staticOption(view.byId('role-planner-effort-select'), 'default').textContent,
+        staticOption(view.byId('role-step-planner-effort-select'), 'default').textContent,
         '(default)',
       );
 
@@ -2968,9 +2968,9 @@ describe('model selector refresh ', () => {
 
     it('a stale refresh keeps the options on screen and shows the note', async () => {
       const { harness, webview } = await refreshedPanel({
-        planner: { agent: 'claude', model: 'claude-opus-5-5', effort: '' },
+        'step-planner': { agent: 'claude', model: 'claude-opus-5-5', effort: '' },
       });
-      const good = dynamicOptions(viewOf(webview).byId('role-planner-model-select'));
+      const good = dynamicOptions(viewOf(webview).byId('role-step-planner-model-select'));
       assert.ok(good.length > 0, 'the refresh put a list on screen');
 
       // Now break every source, exactly as the malformed-refresh case does.
@@ -2985,11 +2985,11 @@ describe('model selector refresh ', () => {
 
       const view = viewOf(webview);
       assert.deepStrictEqual(
-        dynamicOptions(view.byId('role-planner-model-select')),
+        dynamicOptions(view.byId('role-step-planner-model-select')),
         good,
         'the last known-good options are still on screen',
       );
-      const note = view.byId('role-planner-stale');
+      const note = view.byId('role-step-planner-stale');
       assert.strictEqual(note.classList.contains('visible'), true);
       assert.ok(
         note.textContent.startsWith('stale — showing last known models'),

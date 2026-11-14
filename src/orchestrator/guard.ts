@@ -98,7 +98,7 @@ export interface ToolContext {
  *
  * - `gather` — a Workspace conversation, or a plan still in `draft`: ask
  *              clarifying questions until the requirements are agreed, then
- *              hand them to the plan writer through `draft_plan`.
+ *              hand them to the phased-planner through `draft_plan`.
  * - `drive`  — an approved plan being driven to completion: dispatch the next
  *              legal stage through `run` until every phase is done, then
  *              `submit_pr`.

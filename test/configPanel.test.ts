@@ -65,9 +65,9 @@ describe('config panel core ', () => {
 
     it('leaves effort "" when unset and copies it verbatim when set', () => {
       const config = defaultConfig();
-      delete config.roles.planner.effort;
+      delete config.roles['step-planner'].effort;
       const form = formFromConfig(config);
-      assert.strictEqual(form.roles.planner.effort, '');
+      assert.strictEqual(form.roles['step-planner'].effort, '');
       assert.strictEqual(form.roles.executor.effort, config.roles.executor.effort);
     });
 
@@ -105,7 +105,7 @@ describe('config panel core ', () => {
 
     it('coerces wrong-typed leaves to ""', () => {
       const doc = JSON.parse(defaultConfigJson());
-      doc.roles.planner.agent = 42;
+      doc.roles['step-planner'].agent = 42;
       doc.limits.exec_attempts = '3';
       doc.limits.plan_review_rounds = NaN;
       doc.limits.stall_notice_minutes = Infinity;
@@ -113,7 +113,7 @@ describe('config panel core ', () => {
 
       const form = formFromDocument(doc);
 
-      assert.strictEqual(form.roles.planner.agent, '');
+      assert.strictEqual(form.roles['step-planner'].agent, '');
       assert.strictEqual(form.limits.exec_attempts, '');
       assert.strictEqual(form.limits.plan_review_rounds, '');
       assert.strictEqual(form.limits.stall_notice_minutes, '');
@@ -148,7 +148,7 @@ describe('config panel core ', () => {
     it('accepts every installed agent id, since the dropdown and the validator share the registry', () => {
       for (const id of AGENTS) {
         const form = validForm();
-        form.roles.planner.agent = id;
+        form.roles['step-planner'].agent = id;
         assert.deepStrictEqual(validateConfigForm(form, OPTIONS), []);
       }
     });
@@ -156,17 +156,17 @@ describe('config panel core ', () => {
     it('flags an empty or whitespace-only agent at roles.<role>.agent', () => {
       for (const value of ['', '   ']) {
         const form = validForm();
-        form.roles.planner.agent = value;
+        form.roles['step-planner'].agent = value;
         const errors = validateConfigForm(form, OPTIONS);
-        assert.deepStrictEqual(paths(errors), ['roles.planner.agent']);
+        assert.deepStrictEqual(paths(errors), ['roles.step-planner.agent']);
       }
     });
 
     it('flags an agent not in the registry, naming it and the installed list', () => {
       const form = validForm();
-      form.roles.planner.agent = 'nope';
+      form.roles['step-planner'].agent = 'nope';
       const errors = validateConfigForm(form, OPTIONS);
-      assert.deepStrictEqual(paths(errors), ['roles.planner.agent']);
+      assert.deepStrictEqual(paths(errors), ['roles.step-planner.agent']);
       assert.ok(errors[0].message.includes('nope'));
       assert.ok(errors[0].message.includes(AGENTS.join(', ')));
     });
@@ -192,14 +192,14 @@ describe('config panel core ', () => {
 
     it('effort: flags error if agent has a closed effort set and value is not in set', () => {
       const form = validForm();
-      form.roles.planner.agent = 'claude';
-      form.roles.planner.effort = 'unsupported';
+      form.roles['step-planner'].agent = 'claude';
+      form.roles['step-planner'].effort = 'unsupported';
       const errors = validateConfigForm(form, OPTIONS);
       assert.deepStrictEqual(errors, [
         {
-          path: 'roles.planner.effort',
+          path: 'roles.step-planner.effort',
           message:
-            '"planner" effort "unsupported" is not supported by claude (supported: low, medium, high, xhigh, max).',
+            '"step-planner" effort "unsupported" is not supported by claude (supported: low, medium, high, xhigh, max).',
         },
       ]);
     });
@@ -207,23 +207,23 @@ describe('config panel core ', () => {
     it('effort: accepts any non-blank value when agent has an open effort set or unknown agent', () => {
       // opencode has efforts: [] (open set)
       const opencodeForm = validForm();
-      opencodeForm.roles.planner.agent = 'opencode';
-      opencodeForm.roles.planner.effort = 'custom';
+      opencodeForm.roles['step-planner'].agent = 'opencode';
+      opencodeForm.roles['step-planner'].effort = 'custom';
       assert.deepStrictEqual(validateConfigForm(opencodeForm, OPTIONS), []);
 
       // unknown agent has no capability entry
       const unknownForm = validForm();
-      unknownForm.roles.planner.agent = 'unknown';
-      unknownForm.roles.planner.effort = 'custom';
+      unknownForm.roles['step-planner'].agent = 'unknown';
+      unknownForm.roles['step-planner'].effort = 'custom';
       // Will flag agent unknown, but should NOT flag effort
       const errors = validateConfigForm(unknownForm, OPTIONS);
-      assert.deepStrictEqual(paths(errors), ['roles.planner.agent']);
+      assert.deepStrictEqual(paths(errors), ['roles.step-planner.agent']);
     });
 
     it('model: accepts any non-blank string without membership check', () => {
       const form = validForm();
-      form.roles.planner.agent = 'claude';
-      form.roles.planner.model = 'custom-model-not-in-catalogue';
+      form.roles['step-planner'].agent = 'claude';
+      form.roles['step-planner'].model = 'custom-model-not-in-catalogue';
       assert.deepStrictEqual(validateConfigForm(form, OPTIONS), []);
     });
 
@@ -284,7 +284,7 @@ describe('config panel core ', () => {
 
     it('aggregates every error, ordered roles -> limits -> git', () => {
       const form = validForm();
-      form.roles.planner.agent = '';
+      form.roles['step-planner'].agent = '';
       form.roles.executor.model = '';
       form.limits.exec_attempts = 'abc';
       form.git.remote = '';
@@ -293,7 +293,7 @@ describe('config panel core ', () => {
       const errors = validateConfigForm(form, OPTIONS);
 
       assert.deepStrictEqual(paths(errors), [
-        'roles.planner.agent',
+        'roles.step-planner.agent',
         'roles.executor.model',
         'limits.exec_attempts',
         'git.remote',
@@ -353,7 +353,7 @@ describe('config panel core ', () => {
 
     it('appends an unknown agent to agents and creates empty byAgent entry for it', () => {
       const form = validForm();
-      form.roles.planner.agent = 'unknown-agent';
+      form.roles['step-planner'].agent = 'unknown-agent';
       // Duplicate in later role
       form.roles.reviewer.agent = 'unknown-agent';
 
@@ -364,9 +364,9 @@ describe('config panel core ', () => {
 
     it('appends out-of-table values for closed-set agent capabilities', () => {
       const form = validForm();
-      form.roles.planner.agent = 'claude';
-      form.roles.planner.model = 'custom-claude-model';
-      form.roles.planner.effort = 'custom-claude-effort';
+      form.roles['step-planner'].agent = 'claude';
+      form.roles['step-planner'].model = 'custom-claude-model';
+      form.roles['step-planner'].effort = 'custom-claude-effort';
       // Duplicate in another claude role
       form.roles.executor.agent = 'claude';
       form.roles.executor.model = 'custom-claude-model';
@@ -380,8 +380,8 @@ describe('config panel core ', () => {
 
     it('does NOT append out-of-table values for open-set agent capabilities (efforts: [])', () => {
       const form = validForm();
-      form.roles.planner.agent = 'opencode';
-      form.roles.planner.effort = 'custom-effort';
+      form.roles['step-planner'].agent = 'opencode';
+      form.roles['step-planner'].effort = 'custom-effort';
 
       const options = configFormOptions(AGENTS, CAPABILITIES, form);
       assert.ok(options.byAgent?.opencode);
@@ -391,9 +391,9 @@ describe('config panel core ', () => {
 
     it('never duplicates installed ids / in-set values and ignores ""', () => {
       const form = validForm();
-      form.roles.planner.agent = 'claude';
-      form.roles.planner.model = CAPABILITIES.claude.models[0];
-      form.roles.planner.effort = '';
+      form.roles['step-planner'].agent = 'claude';
+      form.roles['step-planner'].model = CAPABILITIES.claude.models[0];
+      form.roles['step-planner'].effort = '';
       const options = configFormOptions(AGENTS, CAPABILITIES, form);
       assert.deepStrictEqual(options.agents, [...AGENTS]);
       assert.deepStrictEqual(options.byAgent?.claude.models, [...CAPABILITIES.claude.models]);
@@ -413,15 +413,50 @@ describe('config panel core ', () => {
       return raw;
     }
 
+    it('reads legacy role entries and saves their values under the new names', () => {
+      const raw = JSON.parse(defaultConfigJson());
+      raw.roles = {
+        'spec-writer': { agent: 'codex', model: 'spec-model', effort: 'low' },
+        'plan-writer': { agent: 'claude', model: 'draft-model', effort: 'high', metadata: 'kept' },
+        planner: { agent: 'opencode', model: 'step-model', effort: 'custom' },
+        'plan-reviewer': { agent: 'antigravity', model: 'review-model', effort: 'medium' },
+        executor: { agent: 'claude', model: 'execute-model', effort: 'high' },
+        reviewer: { agent: 'codex', model: 'reviewer-model', effort: 'medium' },
+        'pr-writer': { agent: 'claude', model: 'pr-model', effort: 'low' },
+        'custom-role': { agent: 'custom', model: 'keep-this' },
+      };
+
+      const form = formFromDocument(raw);
+      assert.deepStrictEqual(form.roles['phased-planner'], {
+        agent: 'claude', model: 'draft-model', effort: 'high',
+      });
+      assert.deepStrictEqual(form.roles['step-planner'], {
+        agent: 'opencode', model: 'step-model', effort: 'custom',
+      });
+
+      const out = applyFormToDocument(raw, form);
+      const roles = out.roles as Record<string, Record<string, unknown>>;
+      for (const role of ROLES) {
+        assert.ok(roles[role], `missing new role key ${role}`);
+      }
+      for (const legacy of ['spec-writer', 'plan-writer', 'planner', 'plan-reviewer']) {
+        assert.strictEqual(legacy in roles, false, `legacy key ${legacy} should be removed`);
+      }
+      assert.deepStrictEqual(roles['phased-planner'], {
+        agent: 'claude', model: 'draft-model', effort: 'high', metadata: 'kept',
+      });
+      assert.deepStrictEqual(roles['custom-role'], { agent: 'custom', model: 'keep-this' });
+    });
+
     it('preserves every unmanaged key, trims and applies edits, and does not mutate the input', () => {
       const raw = docWithUnmanagedKeys();
       const before = clone(raw);
 
       const form = validForm();
       const newAgent = AGENTS[AGENTS.length - 1];
-      form.roles.planner.agent = `  ${newAgent}  `;
-      form.roles.planner.model = '  new-model  ';
-      form.roles.planner.effort = '  ';
+      form.roles['step-planner'].agent = `  ${newAgent}  `;
+      form.roles['step-planner'].model = '  new-model  ';
+      form.roles['step-planner'].effort = '  ';
       form.roles.executor.effort = '  high  ';
       form.limits.plan_review_rounds = ' 2 ';
       form.limits.exec_attempts = ' 4 ';
@@ -444,7 +479,7 @@ describe('config panel core ', () => {
       assert.strictEqual(outExecutor.notes, 'keep me');
 
       // Edited fields present and trimmed.
-      const outPlanner = (out.roles as Record<string, Record<string, unknown>>).planner;
+      const outPlanner = (out.roles as Record<string, Record<string, unknown>>)['step-planner'];
       assert.strictEqual(outPlanner.agent, newAgent);
       assert.strictEqual(outPlanner.model, 'new-model');
       assert.ok(!('effort' in outPlanner), 'cleared effort should be absent, not undefined');
@@ -507,7 +542,7 @@ describe('config panel core ', () => {
     it('formFromDocument(applyFormToDocument(raw, form)) equals the trimmed form', () => {
       const raw = JSON.parse(defaultConfigJson());
       const form = validForm();
-      form.roles.planner.agent = '  claude  ';
+      form.roles['step-planner'].agent = '  claude  ';
       form.git.remote = '  origin  ';
 
       const applied = applyFormToDocument(raw, form);
@@ -616,9 +651,9 @@ describe('config panel core ', () => {
 
     it('a refreshed list that dropped the configured model and effort still round-trips', () => {
       const form = validForm();
-      form.roles.planner.agent = 'claude';
-      form.roles.planner.model = 'claude-opus-5';
-      form.roles.planner.effort = 'ultra';
+      form.roles['step-planner'].agent = 'claude';
+      form.roles['step-planner'].model = 'claude-opus-5';
+      form.roles['step-planner'].effort = 'ultra';
 
       const refreshed = {
         ...CAPABILITIES,
@@ -660,7 +695,7 @@ describe('config panel core ', () => {
       for (const role of ROLES) {
         form.roles[role] = { agent: 'x', model: 'a', effort: 'low' };
       }
-      form.roles.planner = { agent: 'x', model, effort };
+      form.roles['step-planner'] = { agent: 'x', model, effort };
       return form;
     }
 
@@ -733,7 +768,7 @@ describe('config panel core ', () => {
 
     it('an agent with no models carries no modelEntries own key', () => {
       const form = validForm();
-      form.roles.planner = { agent: 'unknown-agent', model: 'whatever', effort: '' };
+      form.roles['step-planner'] = { agent: 'unknown-agent', model: 'whatever', effort: '' };
 
       const result = configFormOptions(AGENTS, CAPABILITIES, form);
       assert.strictEqual(
@@ -758,7 +793,7 @@ describe('config panel core ', () => {
 
     it('validation and models are unchanged by the entry carry-through', () => {
       const form = validForm();
-      form.roles.planner = { agent: 'claude', model: 'claude-opus-5', effort: 'low' };
+      form.roles['step-planner'] = { agent: 'claude', model: 'claude-opus-5', effort: 'low' };
 
       const refreshed = {
         ...CAPABILITIES,

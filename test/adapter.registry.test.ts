@@ -14,7 +14,7 @@ import { ACCEPT_EDITS_MODE, READ_ONLY_ALLOWED_TOOLS, READ_ONLY_ROLES } from '../
 /** Build a launch request with sensible defaults, overridable per test. */
 function req(overrides: Partial<LaunchRequest> = {}): LaunchRequest {
   return {
-    role: 'plan-writer',
+    role: 'phased-planner',
     model: 'sonnet',
     prompt: 'Read brief.md and do what it says.',
     runId: 'run-123',

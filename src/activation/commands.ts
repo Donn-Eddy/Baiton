@@ -250,12 +250,12 @@ export const COMMANDS = {
 /**
  * The role the Auto-mode gate evaluates a harness ask against when it arrives
  * with no run context — an orchestrator-raised permission ask, which never
- * passes through the relay. `planner` is the most restrictive profile
+ * passes through the relay. `step-planner` is the most restrictive profile
  * (read-only, no shell, writes confined to its run dir), so the deterministic
  * stage can only ever clear reads, searches and recognised read-only shell
  * commands on its own and everything else goes to the model stage.
  */
-const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
+const AUTO_MODE_FALLBACK_ROLE: Role = 'step-planner';
 
 /** Run id used for the same reason: it matches no real run directory, so no write rule can fire. */
 const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';

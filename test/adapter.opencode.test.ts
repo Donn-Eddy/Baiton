@@ -209,8 +209,8 @@ describe('OpencodeAdapter attach() (Req 3.3, 3.4)', () => {
   });
 
   it('uses the role-specific Baiton agent for a read-only role', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'ses_1' });
-    assert.ok(findPair(launchSpec.shellArgs, '--agent', 'baiton-planner') >= 0);
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-1', sessionId: 'ses_1' });
+    assert.ok(findPair(launchSpec.shellArgs, '--agent', 'baiton-step-planner') >= 0);
   });
 
   it('degrades an unresolved Baiton Session_Id to -c rather than emitting -s', () => {
@@ -356,12 +356,12 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
   }
 
   it('attach() emits exactly the same config as launch() for the same role and run', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 's-1' });
-    assert.deepStrictEqual(launchSpec.env, adapter.launch(req({ role: 'planner', runId: 'run-777' })).env);
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-777', sessionId: 's-1' });
+    assert.deepStrictEqual(launchSpec.env, adapter.launch(req({ role: 'step-planner', runId: 'run-777' })).env);
   });
 
   it('uses a workspace-relative run-dir pattern containing the run id verbatim', () => {
-    const agent = agentDefinition(opencodeConfigEnv('planner', 'run-abc'), 'baiton-planner');
+    const agent = agentDefinition(opencodeConfigEnv('step-planner', 'run-abc'), 'baiton-step-planner');
     const pattern = Object.keys(agent.permission.edit).filter((k) => k !== '*')[0];
     assert.ok(!pattern.startsWith('/'), `expected a relative pattern, got ${pattern}`);
     assert.ok(pattern.includes('run-abc'));
@@ -370,12 +370,12 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
 
   it('pins the env var name and the full config shape for the planner', () => {
     assert.strictEqual(OPENCODE_CONFIG_ENV, 'OPENCODE_CONFIG_CONTENT');
-    assert.deepStrictEqual(JSON.parse(opencodeConfigEnv('planner', 'r1')[OPENCODE_CONFIG_ENV]), {
+    assert.deepStrictEqual(JSON.parse(opencodeConfigEnv('step-planner', 'r1')[OPENCODE_CONFIG_ENV]), {
       agent: {
-        'baiton-planner': {
-          description: roleProfile('planner').description,
+        'baiton-step-planner': {
+          description: roleProfile('step-planner').description,
           mode: 'primary',
-          prompt: roleProfile('planner').systemPrompt,
+          prompt: roleProfile('step-planner').systemPrompt,
           permission: {
             edit: { '*': 'deny', '.baiton/runs/r1/*': 'allow' },
             bash: { '*': 'deny' },
@@ -386,9 +386,9 @@ describe('OpencodeAdapter custom-agent config via OPENCODE_CONFIG_CONTENT (Req 1
   });
 
   it('is pure: same inputs deep-equal, different run ids differ', () => {
-    assert.deepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-1'));
-    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('planner', 'run-2'));
-    assert.notDeepStrictEqual(opencodeConfigEnv('planner', 'run-1'), opencodeConfigEnv('executor', 'run-1'));
+    assert.deepStrictEqual(opencodeConfigEnv('step-planner', 'run-1'), opencodeConfigEnv('step-planner', 'run-1'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('step-planner', 'run-1'), opencodeConfigEnv('step-planner', 'run-2'));
+    assert.notDeepStrictEqual(opencodeConfigEnv('step-planner', 'run-1'), opencodeConfigEnv('executor', 'run-1'));
   });
 });
 
@@ -474,8 +474,8 @@ describe('OpencodeAdapter ask-relay wiring (probe findings)', () => {
   });
 
   it('attach() installs no relay (it takes no descriptor at all)', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'ses_1' });
-    assert.deepStrictEqual(launchSpec.env, opencodeConfigEnv('planner', 'run-777'));
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-777', sessionId: 'ses_1' });
+    assert.deepStrictEqual(launchSpec.env, opencodeConfigEnv('step-planner', 'run-777'));
   });
 
   for (const role of ROLES) {
@@ -1243,8 +1243,8 @@ describe('OpencodeAdapter.discoverModels ', () => {
 
     assert.deepStrictEqual(withDiscovery.launch(req()), plain.launch(req()));
     assert.deepStrictEqual(
-      withDiscovery.attach({ role: 'planner', runId: 'run-9', sessionId: 'ses_1' }),
-      plain.attach({ role: 'planner', runId: 'run-9', sessionId: 'ses_1' }),
+      withDiscovery.attach({ role: 'step-planner', runId: 'run-9', sessionId: 'ses_1' }),
+      plain.attach({ role: 'step-planner', runId: 'run-9', sessionId: 'ses_1' }),
     );
   });
 

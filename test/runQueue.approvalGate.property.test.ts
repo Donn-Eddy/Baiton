@@ -414,7 +414,7 @@ describe('run queue worktree mode guards', () => {
           slug: 's',
           phaseId: 'T06',
           action: 'plan',
-          role: 'planner',
+          role: 'step-planner',
           attempt: 1,
           resume: false,
         };
@@ -450,7 +450,7 @@ describe('run queue worktree mode guards', () => {
       slug: 's',
       phaseId: 'T06',
       action: 'plan',
-      role: 'planner',
+      role: 'step-planner',
       attempt: 1,
       resume: false,
     });

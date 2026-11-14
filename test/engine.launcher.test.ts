@@ -49,7 +49,7 @@ describe('launchStage adapter refusal (launch-args)', () => {
     workspaceRoot,
     runId: 'run-1',
     stage: 'plan' as const,
-    role: 'planner' as const,
+    role: 'step-planner' as const,
     model: 'gemini-3.1-pro',
     effort: 'medium',
     resume: false,
@@ -119,7 +119,7 @@ describe('launchStage config-driven ask-relay fallback', () => {
     workspaceRoot,
     runId: 'run-1',
     stage: 'plan' as const,
-    role: 'planner' as const,
+    role: 'step-planner' as const,
     model: 'gemini-3.1-pro',
     effort: 'medium',
     resume: false,
@@ -230,7 +230,7 @@ describe('launchStage config-driven ask-relay fallback', () => {
     // writer composes for the same input, with no relay section anywhere.
     const expected = buildBrief({
       stage: 'plan',
-      role: 'planner',
+      role: 'step-planner',
       resultPath: path.join(root, '.baiton', 'runs', 'run-1', 'result.json'),
       context: undefined,
     });

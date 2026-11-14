@@ -535,7 +535,7 @@ describe('Integration: Plan → Execute → Review over a legacy document', () =
       slug: SLUG,
       phaseId: PHASE_ID,
       action: 'plan',
-      role: 'planner',
+      role: 'step-planner',
       attempt: 1,
       resume: false,
     });
@@ -732,7 +732,7 @@ describe('Integration: Plan → Execute → Review over a legacy document', () =
       slug: SLUG,
       phaseId: PHASE_ID,
       action: 'plan',
-      role: 'planner',
+      role: 'step-planner',
       attempt: 1,
       resume: false,
     });
@@ -757,7 +757,7 @@ describe('Integration: Plan → Execute → Review over a legacy document', () =
       slug: SLUG,
       phaseId: PHASE_ID,
       action: 'plan',
-      role: 'planner',
+      role: 'step-planner',
       attempt: 1,
       resume: false,
     });

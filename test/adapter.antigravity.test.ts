@@ -219,7 +219,7 @@ describe('AntigravityAdapter attach() (Req 3.3, 3.4)', () => {
   });
 
   it('uses the plan mode and run-dir grant for a read-only role', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-1', sessionId: 'session-1' });
     assert.ok(findPair(launchSpec.shellArgs, '--mode', ANTIGRAVITY_PLAN_MODE) >= 0);
     assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
   });
@@ -250,7 +250,7 @@ describe('AntigravityAdapter role -> --mode permission mapping (Req 15.1-15.3)',
   }
 
   it('antigravityModeFlags returns the plan mode for a read-only role', () => {
-    assert.deepStrictEqual(antigravityModeFlags('planner'), ['--mode', ANTIGRAVITY_PLAN_MODE]);
+    assert.deepStrictEqual(antigravityModeFlags('step-planner'), ['--mode', ANTIGRAVITY_PLAN_MODE]);
   });
 
   it('antigravityModeFlags returns the accept-edits mode for the executor', () => {
@@ -480,7 +480,7 @@ describe('AntigravityAdapter native ask relay (probe findings, agy 1.2.8)', () =
   });
 
   it('attach() installs no relay and never emits skip-permissions', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-777', sessionId: 'sess-1' });
     assert.ok(!launchSpec.shellArgs.includes(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG));
     assert.ok(!launchSpec.shellArgs.join(' ').includes('hooks.json'));
   });

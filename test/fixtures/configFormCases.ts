@@ -56,10 +56,10 @@ cases.push({
 cases.push({
   name: 'empty agent on planner role',
   form: withEdits(validForm(), (f) => {
-    f.roles.planner.agent = '';
+    f.roles['step-planner'].agent = '';
   }),
   options: DEFAULT_OPTIONS,
-  expectedPaths: ['roles.planner.agent'],
+  expectedPaths: ['roles.step-planner.agent'],
 });
 cases.push({
   name: 'whitespace-only agent on executor role',
@@ -74,17 +74,17 @@ cases.push({
 cases.push({
   name: 'agent not in options.agents',
   form: withEdits(validForm(), (f) => {
-    f.roles.planner.agent = 'uninstalled-agent';
+    f.roles['step-planner'].agent = 'uninstalled-agent';
   }),
   options: DEFAULT_OPTIONS,
-  expectedPaths: ['roles.planner.agent'],
+  expectedPaths: ['roles.step-planner.agent'],
 });
 
 // (4) Out-of-set agent that IS passed in options.agents (round-trip case) — valid
 cases.push({
   name: 'out-of-set agent passed in options.agents is valid',
   form: withEdits(validForm(), (f) => {
-    f.roles.planner.agent = 'custom-agent';
+    f.roles['step-planner'].agent = 'custom-agent';
   }),
   options: {
     agents: [...AGENT_IDS, 'custom-agent'],
@@ -106,12 +106,12 @@ cases.push({
   expectedPaths: ['roles.reviewer.model'],
 });
 cases.push({
-  name: 'whitespace-only model on plan-writer role',
+  name: 'whitespace-only model on phased-planner role',
   form: withEdits(validForm(), (f) => {
-    f.roles['plan-writer'].model = '   ';
+    f.roles['phased-planner'].model = '   ';
   }),
   options: DEFAULT_OPTIONS,
-  expectedPaths: ['roles.plan-writer.model'],
+  expectedPaths: ['roles.phased-planner.model'],
 });
 
 // (6) Effort: whitespace vs unset '' vs closed/open catalogue rules
@@ -286,9 +286,9 @@ cases.push({
 cases.push({
   name: 'multi-error form pinning roles -> limits -> git ordering and ROLES ordering',
   form: withEdits(validForm(), (f) => {
-    f.roles['plan-writer'].agent = '';
-    f.roles.planner.agent = 'uninstalled';
-    f.roles['plan-reviewer'].model = '   ';
+    f.roles['phased-planner'].agent = '';
+    f.roles['step-planner'].agent = 'uninstalled';
+    f.roles['step-reviewer'].model = '   ';
     f.roles.executor.effort = '   ';
     f.limits.plan_review_rounds = '11';
     f.limits.exec_attempts = 'abc';
@@ -298,9 +298,9 @@ cases.push({
   }),
   options: DEFAULT_OPTIONS,
   expectedPaths: [
-    'roles.plan-writer.agent',
-    'roles.planner.agent',
-    'roles.plan-reviewer.model',
+    'roles.phased-planner.agent',
+    'roles.step-planner.agent',
+    'roles.step-reviewer.model',
     'roles.executor.effort',
     'limits.plan_review_rounds',
     'limits.exec_attempts',

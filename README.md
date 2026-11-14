@@ -83,7 +83,7 @@ The views:
 In a **Phased Plan** conversation the orchestrator has exactly two jobs:
 
 1. **Create a plan** — ask you clarifying questions until you agree on what the
-   work is, then hand the agreed requirements to the plan writer with
+   work is, then hand the agreed requirements to the phased planner with
    `draft_plan`.
 2. **Drive an approved plan** — dispatch each stage with `run` until every phase
    is done, then `submit_pr`.
@@ -162,7 +162,7 @@ ids are `default | plan | bug | quick | refactor | investigate` (`RunMode` in
 an absent or unknown stored value falls back to it. A plan conversation does
 not follow it — it is always Phased Plan, exactly as before. **Bug**, **Quick Fix** and **Refactor** share ONE plan-less
 plan → execute → review pipeline that differs only in the framing handed to the
-planner and the executor; **Investigate** is a read-only dispatch ending in a
+step planner and the executor; **Investigate** is a read-only dispatch ending in a
 written finding. No non-Plan mode reads or writes anything under
 `.baiton/plans/` (`isPlanless(mode)` in `src/model/mode.ts`).
 
@@ -292,14 +292,23 @@ refusal; a declined permission ask is written back to the run as a denial.
 ### Creating a plan
 
 The orchestrator gathers and agrees the requirements; the configured
-`plan-writer` role produces the phase list.
+`phased-planner` role produces the phase list.
+
+The six roles are:
+
+- `phased-planner` drafts the complete phased plan.
+- `step-planner` writes the plan for one phase.
+- `step-reviewer` reviews that phase plan.
+- `executor` implements one phase.
+- `reviewer` reviews the implementation or investigates a question.
+- `pr-writer` drafts the pull request description.
 
 1. Describe the work in the Workspace conversation. The orchestrator reads the
    repository, asks clarifying questions and restates the agreement as
    **Endstate**, **What needs changing**, and **Limitations & constraints**.
    It revises those sections until you agree and never proposes the phase list.
 2. `draft_plan(slug, request)` asks for confirmation, then launches the
-   `plan-writer` role. It returns endstate, changes, constraints and a
+   `phased-planner` role. It returns endstate, changes, constraints and a
    dependency-ordered phase list. The extension numbers phases `P01`, `P02`,
    ... and commits `.baiton/plans/<slug>/plan.md` with a
    `plan(<slug>): ...` commit message.
@@ -308,8 +317,8 @@ The orchestrator gathers and agrees the requirements; the configured
    plan appears in Plan Explorer and the conversation selector.
 
 Only one stage runs per repository, so a plan draft, a phase stage and a
-plan-less run's stage never run at the same time. A `plan-writer` entry missing
-from the configuration is filled in from the `planner` entry. After the draft
+plan-less run's stage never run at the same time. A `phased-planner` entry missing
+from the configuration is filled in from the `step-planner` entry. After the draft
 lands you can refine it in chat with `update_overview`, `add_phase`, `edit_phase`
 and `remove_phase`.
 
@@ -574,7 +583,7 @@ an audit trace you can read. Its default is off.
   data. The stage-(a) reason is passed as information only ("not by itself a
   reason to escalate"). It approves read-only work and reversible changes
   inside the workspace — writing workspace files, running tests, builds and
-  linters, local scripts that only read or write project files — so a planner
+  linters, local scripts that only read or write project files — so a step planner
   running a script that only reads files is approved. It escalates anything
   that mutates outside the workspace, touches a database or external service,
   reaches the network, installs software, changes git history, remotes or CI,
@@ -596,7 +605,7 @@ an audit trace you can read. Its default is off.
   agent, role, tool and matched rule (or the model's rationale), and is
   appended to the transcript. An escalation is appended when it happens, as a
   pending card that leads with one plain sentence saying what you are
-  approving — e.g. "Planner wants to run a script that edits rows in the dev
+  approving — e.g. "Step planner wants to run a script that edits rows in the dev
   database." — with the raw command (or the tool's args) under it as a code
   block and an optional muted secondary line. The rule that tripped stage (a)
   is not the headline: it is kept in the card's persisted `escalation.reason`
@@ -612,7 +621,7 @@ documented in **Harness ask relay (per-adapter probe findings)** below.
 
 Existing `.baiton/specs/<slug>/spec.md` documents with `# OVERVIEW`, `# TODOS`, `T##` ids and `todos/<id>/` artifacts remain supported for listing, validation and runs. Their phase branches keep the `baiton-todo/<slug>/<id>` namespace.
 
-For compatibility, a `roles.spec-writer` key in the configuration is read as `plan-writer`; an explicit `plan-writer` entry takes precedence when both are present. A persisted mode `spec` loads as `plan`. When a slug exists under both document roots, `.baiton/plans/` takes precedence. New documents are written under `.baiton/plans/`; nothing new is written under `.baiton/specs/`.
+For compatibility, `roles.plan-writer` and `roles.spec-writer` are read as `phased-planner` (in that order), `roles.planner` as `step-planner`, and `roles.plan-reviewer` as `step-reviewer`. An explicit new-name key always wins. A config with no drafting entry inherits the `step-planner` entry. A Config Panel save writes the new names and drops the superseded legacy keys. A persisted mode `spec` loads as `plan`. When a slug exists under both document roots, `.baiton/plans/` takes precedence. New documents are written under `.baiton/plans/`; nothing new is written under `.baiton/specs/`.
 
 ### Providers and models
 
@@ -776,8 +785,8 @@ the whole conversation.
 
 The configuration form is the **Configuration** section of the Baiton view in the activity bar, collapsed by default, sitting under the Plan Explorer and the Runs view. **Baiton: Open Config Panel** (`baiton.openConfigPanel`) reveals and focuses that section rather than opening an editor tab:
 
-- **Managed fields** — edits the six role entries (`plan-writer`, `planner`,
-  `plan-reviewer`, `executor`, `reviewer`, `pr-writer`) in a single flat table
+- **Managed fields** — edits the six role entries (`phased-planner`, `step-planner`,
+  `step-reviewer`, `executor`, `reviewer`, `pr-writer`) in a single flat table
   with one row per role and **Agent**, **Model** and **Effort** columns. Each
   cell holds that field's dropdown, its `Other…` input, any documentation link
   or staleness note, and its inline error, directly under the column header.

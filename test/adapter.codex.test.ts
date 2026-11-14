@@ -242,7 +242,7 @@ describe('CodexAdapter attach() (Req 3.3, 3.4)', () => {
   });
 
   it('uses the workspace-write sandbox and run-dir grant for a read-only role too (Decision 2)', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-1', sessionId: 'session-1' });
     assert.ok(findPair(launchSpec.shellArgs, '--sandbox', CODEX_WORKSPACE_WRITE_SANDBOX) >= 0);
     assert.ok(!launchSpec.shellArgs.includes(CODEX_READ_ONLY_SANDBOX));
     assert.ok(findPair(launchSpec.shellArgs, '--add-dir', '.baiton/runs/run-1/') >= 0);
@@ -290,7 +290,7 @@ describe('CodexAdapter role -> sandbox/approval permission mapping (Req 15.1-15.
   }
 
   it('codexPermissionFlags returns the workspace-write sandbox flags for planner too', () => {
-    assert.deepStrictEqual(codexPermissionFlags('planner'), [
+    assert.deepStrictEqual(codexPermissionFlags('step-planner'), [
       '--sandbox',
       'workspace-write',
       '--ask-for-approval',
@@ -716,7 +716,7 @@ describe('CodexAdapter native ask relay (probe findings, codex 0.155.1)', () => 
   });
 
   it('attach() installs no relay (no attach caller passes one)', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-777', sessionId: 'sess-1' });
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-777', sessionId: 'sess-1' });
     assert.ok(!launchSpec.shellArgs.includes(CODEX_BYPASS_HOOK_TRUST_FLAG));
     assert.ok(!launchSpec.shellArgs.join(' ').includes('hooks.'));
   });
