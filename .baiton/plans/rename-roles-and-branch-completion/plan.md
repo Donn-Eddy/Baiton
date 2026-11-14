@@ -1,12 +1,12 @@
 ---
 version: 1
 name: rename-roles-and-branch-completion
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 3575b59b64632aa8a23baa2f0047c7060be89086
+branch: baiton/rename-roles-and-branch-completion
+approved_rev: 75f995748664d7a8844c6105db9c5c9050591572e8fecd15398d5b0557bc97f8
 ---
 
 # Endstate
