@@ -285,6 +285,12 @@ describe('submitPr multi-repo flow', () => {
       ['.', 'https://example.test/owner/pull/1'],
       ['packages/api', 'https://example.test/api/pull/2'],
     ]);
+    const ownerRemotePlan = parsePlan(git(h.world.owner.remote, 'show', `${BRANCH}:.baiton/plans/${SLUG}/plan.md`));
+    assert.strictEqual(ownerRemotePlan.frontmatter.get('status'), 'pr');
+    assert.deepStrictEqual(Object.entries(JSON.parse(ownerRemotePlan.frontmatter.get('prs') ?? '{}')), [
+      ['.', 'https://example.test/owner/pull/1'],
+      ['packages/api', 'https://example.test/api/pull/2'],
+    ]);
     assert.match(git(h.world.owner.remote, 'branch', '--list', BRANCH), /baiton\/multi/);
     assert.match(git(h.world.child.remote, 'branch', '--list', BRANCH), /baiton\/multi/);
   });
@@ -342,6 +348,8 @@ describe('submitPr multi-repo flow', () => {
     assert.strictEqual(readPlan(h.world).frontmatter.get('status'), 'pr-partial');
     assert.strictEqual(readPlan(h.world).frontmatter.get('prs'), formatPrsValue([{ repo: '.', url: 'https://example.test/owner/pull/1' }]));
     assert.strictEqual(git(h.world.owner.root, 'log', '-1', '--format=%s').trim(), 'plan(multi): pr (partial)');
+    const ownerRemotePartial = parsePlan(git(h.world.owner.remote, 'show', `${BRANCH}:.baiton/plans/${SLUG}/plan.md`));
+    assert.strictEqual(ownerRemotePartial.frontmatter.get('status'), 'pr-partial');
 
     const ownerCreated = h.ownerPr.created.length;
     const ownerPushes = h.world.ownerPushes();
@@ -352,7 +360,8 @@ describe('submitPr multi-repo flow', () => {
     if (!second.ok) return;
     assert.strictEqual(h.ownerPr.created.length, ownerCreated);
     assert.strictEqual(h.ownerPr.lookedUp.length, 1);
-    assert.strictEqual(h.world.ownerPushes(), ownerPushes);
+    // The one extra owner push carries the pr record; it does not resubmit its PR.
+    assert.strictEqual(h.world.ownerPushes(), ownerPushes + 1);
     assert.strictEqual(h.childPr.created.length, 2);
     assert.deepStrictEqual(h.childPr.lookedUp, [BRANCH, BRANCH]);
     assert.strictEqual(readPlan(h.world).frontmatter.get('status'), 'pr');

@@ -12,10 +12,11 @@
  *   3. Groups done phases by target repo and launches one pr-writer with a
  *      diff for each repo that still needs a PR.
  *   4. On a valid `{title, body}` result, pushes each repo branch and creates
- *      or reuses one PR per repo. The owner plan records `pr` when all touched
- *      repos succeeded and `pr-partial` when at least one succeeded. Verify
- *      and the clean-tree check run only in the owner; child repos need not
- *      have their plan branch checked out or a clean main checkout.
+ *      or reuses one PR per repo. The owner then records `pr`/`pr-partial` in
+ *      a `plan(<slug>): pr` commit and pushes its branch again, so the record
+ *      lands on the PR head. Verify and the clean-tree check run only in the
+ *      owner; child repos need not have their plan branch checked out or a
+ *      clean main checkout.
  *
  * Host-independent like the queue: the per-role adapter lookup, terminal host,
  * watcher factory, git service and PR tool are injected.
@@ -334,15 +335,17 @@ async function submitOwnerPr(
     return fail({ kind: 'create-failed', message: `could not create the pull request: ${describePrToolError(e)}` });
   }
   try {
-    let content = await fsp.readFile(documentPath, 'utf8');
-    content = setFrontmatterKey(content, 'pr', pr.url);
-    content = setFrontmatterKey(content, 'status', 'pr');
-    await fsp.writeFile(documentPath, content, 'utf8');
-    await deps.git.commit(`plan(${slug}): pr`);
+    await writeAndPushRecord(
+      deps,
+      documentPath,
+      (content) => setFrontmatterKey(setFrontmatterKey(content, 'pr', pr.url), 'status', 'pr'),
+      `plan(${slug}): pr`,
+      { remote: deps.remote, branch },
+    );
     steps.record = true;
   } catch (e) {
     complete();
-    return fail({ kind: 'record-failed', message: `pull request ${pr.url} exists but recording it failed: ${errorMessage(e)}` });
+    return fail({ kind: 'record-failed', message: `pull request ${pr.url} exists but recording it on ${branch} failed: ${errorMessage(e)}` });
   }
   complete();
   const repo = { repo: repoName, isOwner: true, branch, base, pr, reused };
@@ -567,24 +570,31 @@ async function recordGroupedPr(
     return failures.length > 0 ? fail(failures[0].error) : fail({ kind: 'create-failed', message: 'no pull requests were opened' });
   }
   const primary = prs.find((pr) => pr.isOwner) ?? prs[0];
+  const owner = prs.find((pr) => pr.isOwner);
   if (primary === undefined) {
     complete?.();
     return fail({ kind: 'record-failed', message: `plan "${slug}" has no PR URL to record` });
   }
   try {
-    let content = await fsp.readFile(documentPath, 'utf8');
-    content = setFrontmatterKey(content, 'pr', primary.pr.url);
-    if (touchedNames.length > 1) {
-      const urls = orderedPrs ?? prs.map((pr) => ({ repo: pr.repo, url: pr.pr.url }));
-      content = setFrontmatterKey(content, 'prs', formatPrsValue(urls));
-    }
-    content = setFrontmatterKey(content, 'status', status);
-    await fsp.writeFile(documentPath, content, 'utf8');
-    await deps.git.commit(status === PR_PARTIAL_STATUS ? `plan(${slug}): pr (partial)` : `plan(${slug}): pr`);
+    await writeAndPushRecord(
+      deps,
+      documentPath,
+      (content) => {
+        let updated = setFrontmatterKey(content, 'pr', primary.pr.url);
+        if (touchedNames.length > 1) {
+          const urls = orderedPrs ?? prs.map((pr) => ({ repo: pr.repo, url: pr.pr.url }));
+          updated = setFrontmatterKey(updated, 'prs', formatPrsValue(urls));
+        }
+        return setFrontmatterKey(updated, 'status', status);
+      },
+      status === PR_PARTIAL_STATUS ? `plan(${slug}): pr (partial)` : `plan(${slug}): pr`,
+      owner === undefined ? undefined : { remote: deps.remote, branch: owner.branch },
+    );
     if (steps !== undefined) steps.record = true;
   } catch (e) {
     complete?.();
-    return fail({ kind: 'record-failed', message: `pull request ${primary.pr.url} exists but recording it failed: ${errorMessage(e)}` });
+    const ownerBranch = owner === undefined ? '' : ` on ${owner.branch}`;
+    return fail({ kind: 'record-failed', message: `pull request ${primary.pr.url} exists but recording it${ownerBranch} failed: ${errorMessage(e)}` });
   }
   complete?.();
   if (status === 'pr-partial') {
@@ -597,6 +607,29 @@ async function recordGroupedPr(
     });
   }
   return { ok: true, pr: primary.pr, reused: primary.reused, title, prs };
+}
+
+/**
+ * Write the PR record into the plan document, commit it when the document
+ * changed, then push the owner branch so the record reaches the PR head.
+ * Rejects on any read, write, commit or push failure; callers map that to
+ * `record-failed`. An unchanged document (a retry after a failed record push)
+ * skips the commit but still pushes.
+ */
+async function writeAndPushRecord(
+  deps: SubmitPrDeps,
+  documentPath: string,
+  update: (content: string) => string,
+  message: string,
+  push: { remote: string; branch: string } | undefined,
+): Promise<void> {
+  const before = await fsp.readFile(documentPath, 'utf8');
+  const after = update(before);
+  if (after !== before) {
+    await fsp.writeFile(documentPath, after, 'utf8');
+    await deps.git.commit(message);
+  }
+  if (push !== undefined) await deps.git.push(push.remote, push.branch);
 }
 
 async function checkReady(

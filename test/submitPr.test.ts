@@ -490,6 +490,10 @@ describe('submitPr (design section 8 "PR")', () => {
     const remoteHeads = git(h.repo.remote, 'branch', '--list', BRANCH);
     assert.match(remoteHeads, /baiton\/greeting/);
     assert.strictEqual(git(h.repo.root, 'rev-parse', '--abbrev-ref', `${BRANCH}@{upstream}`).trim(), `origin/${BRANCH}`);
+    assert.strictEqual(git(h.repo.remote, 'log', '-1', '--format=%s', BRANCH).trim(), `plan(${SLUG}): pr`);
+    const remotePlan = parsePlan(git(h.repo.remote, 'show', `${BRANCH}:.baiton/specs/${SLUG}/spec.md`));
+    assert.strictEqual(remotePlan.frontmatter.get('status'), 'pr');
+    assert.strictEqual(remotePlan.frontmatter.get('pr'), 'https://example.test/pull/42');
 
     // The metadata was recorded and committed; the draft persisted as pr.md.
     const parsedPlan = readPlan(h.repo);
