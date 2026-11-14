@@ -5,8 +5,9 @@
  * the legacy `.baiton/specs/<slug>/spec.md`. `listPlans` and `resolveDocument`
  * prefer the plans root when a slug exists in both locations. Refreshes derive
  * the tree from disk, approval state, plan journals, and phase plans. Completed
- * also includes `pr`/`pr-partial` plans whose recorded requests all read merged,
- * derived through an injected checker and never persisted.
+ * also includes `pr`/`pr-partial` plans whose recorded requests all read merged
+ * and plans whose recorded branch is merged into base, derived through injected
+ * checkers and never persisted.
  *
  * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
  * `specs` root is the legacy document root. The three top-level roots are
@@ -69,6 +70,12 @@ export interface PlanExplorerOptions {
    * trimmed status is `pr`/`pr-partial` and whose recorded URL set is non-empty.
    */
   prsMerged?: PrsMergedChecker;
+  /**
+   * Consulted at most once per owning repo + slug + branch + base + base_commit
+   * per explorer instance; refresh never awaits it. It is only called when the
+   * trimmed branch and base are non-empty and status is not `done`.
+   */
+  branchMerged?: BranchMergedChecker;
 }
 
 /** What the explorer asks the PR-state checker about one plan. */
@@ -84,6 +91,56 @@ export interface PrsMergedQuery {
 
 /** Resolves true only when every recorded request reads merged; may reject (treated as not merged). */
 export type PrsMergedChecker = (query: PrsMergedQuery) => Promise<boolean>;
+
+/** What the explorer asks the branch-state checker about one plan. */
+export interface BranchMergedQuery {
+  slug: string;
+  /** Owning repository; undefined for the primary (single-source) repo. */
+  repo?: string;
+  /** Trimmed recorded `branch:`, non-empty. */
+  branch: string;
+  /** Trimmed recorded `base:`, non-empty. */
+  base: string;
+  /** Trimmed recorded `base_commit:`, when non-empty. */
+  baseCommit?: string;
+}
+
+/** Resolves true only when the branch is strictly ahead of its starting point and is an ancestor of `<remote>/<base>`; may reject (treated as not merged, logged once). */
+export type BranchMergedChecker = (query: BranchMergedQuery) => Promise<boolean>;
+
+/** The git reads the branch-merged decision needs (a subset of GitWorktreeService). */
+export interface BranchAncestryGit {
+  fetchBranch(remote: string, branch: string): Promise<void>;
+  branchHead(ref: string): Promise<string | undefined>;
+  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+}
+
+/** Decide whether `query.branch` is merged into `<remote>/<base>`. Fetches `base` first when `fetch` is true. Rejects when the base tracking ref or the branch tip cannot be resolved. Never writes. */
+export async function branchMergedIntoBase(
+  git: BranchAncestryGit,
+  remote: string,
+  query: BranchMergedQuery,
+  fetch: boolean,
+): Promise<boolean> {
+  if (fetch) await git.fetchBranch(remote, query.base);
+  const baseRef = `refs/remotes/${remote}/${query.base}`;
+  const baseTip = await git.branchHead(baseRef);
+  if (baseTip === undefined) throw new Error(`${remote}/${query.base} could not be resolved`);
+
+  const tip = (await git.branchHead(`refs/heads/${query.branch}`)) ??
+    (await git.branchHead(`refs/remotes/${remote}/${query.branch}`));
+  if (tip === undefined) {
+    throw new Error(`branch ${query.branch} could not be resolved locally or on ${remote}`);
+  }
+
+  if (query.baseCommit !== undefined) {
+    if (tip === query.baseCommit) return false;
+    if (!(await git.isAncestor(query.baseCommit, tip))) return false;
+  } else if (tip === baseTip) {
+    return false;
+  }
+  return git.isAncestor(tip, baseTip);
+}
 
 interface ResolvedPlanRepoSource {
   repo?: string;
@@ -166,6 +223,10 @@ export class PlanExplorer
   private readonly prsMergedMemo = new Map<string, { merged?: boolean }>();
   /** Plans (repo + slug) whose PR check failure has already been logged this session. */
   private readonly prsMergedLogged = new Set<string>();
+  /** Per-session branch merge memo, keyed by owning repo + slug + branch + base + base_commit; holds in-flight checks too. */
+  private readonly branchMergedMemo = new Map<string, { merged?: boolean }>();
+  /** Plans (repo + slug) whose branch check failure has already been logged this session. */
+  private readonly branchMergedLogged = new Set<string>();
   private disposed = false;
 
   /**
@@ -322,6 +383,11 @@ export class PlanExplorer
             source.repo,
             entry.readError === undefined ? entry.raw : undefined,
           ),
+          branchMerged: this.branchMergedFor(
+            entry.slug,
+            source.repo,
+            entry.readError === undefined ? entry.raw : undefined,
+          ),
           // Journals and phase plans are always read from the owning repository.
           sessions: sessionSet(readPlanJournal(ownerBaitonDir, entry.slug)),
           plans: await listPhasePlans(ownerBaitonDir, entry.slug),
@@ -397,6 +463,70 @@ export class PlanExplorer
     try {
       this.surface.log(
         `Baiton: could not read PR state for plan "${slug}"${repo === undefined ? '' : ` in ${repo}`}: ${describe(e)}.`,
+      );
+    } catch {
+      // Logging must never escape.
+    }
+  }
+
+  /** Derive branch ancestry without waiting for git or network work. */
+  private branchMergedFor(slug: string, repo: string | undefined, raw: string | undefined): boolean {
+    const checker = this.options.branchMerged;
+    if (checker === undefined || raw === undefined) return false;
+
+    let frontmatter: Map<string, string>;
+    try {
+      frontmatter = parsePlan(raw).frontmatter;
+    } catch {
+      return false;
+    }
+    const status = frontmatter.get('status')?.trim();
+    if (status === 'done') return false;
+
+    const branch = (frontmatter.get('branch') ?? '').trim();
+    const base = (frontmatter.get('base') ?? '').trim();
+    const baseCommit = (frontmatter.get('base_commit') ?? '').trim();
+    if (branch === '' || base === '') return false;
+
+    const key = [repo ?? '', slug, branch, base, baseCommit].join('\u0000');
+    const existing = this.branchMergedMemo.get(key);
+    if (existing !== undefined) return existing.merged === true;
+
+    const entry: { merged?: boolean } = {};
+    this.branchMergedMemo.set(key, entry);
+    let check: Promise<boolean>;
+    try {
+      check = Promise.resolve(checker({
+        slug,
+        ...(repo !== undefined ? { repo } : {}),
+        branch,
+        base,
+        ...(baseCommit !== '' ? { baseCommit } : {}),
+      }));
+    } catch (e) {
+      check = Promise.reject(e);
+    }
+    void check.then(
+      (merged) => {
+        entry.merged = merged === true;
+        if (entry.merged && !this.disposed) void this.refresh();
+      },
+      (e: unknown) => {
+        entry.merged = false;
+        this.logBranchMergedFailure(slug, repo, e);
+      },
+    );
+    return false;
+  }
+
+  /** Log a failed branch lookup once per plan without raising a notification. */
+  private logBranchMergedFailure(slug: string, repo: string | undefined, e: unknown): void {
+    const id = `${repo ?? ''}\u0000${slug}`;
+    if (this.branchMergedLogged.has(id) || this.disposed) return;
+    this.branchMergedLogged.add(id);
+    try {
+      this.surface.log(
+        `Baiton: could not read branch state for plan "${slug}"${repo === undefined ? '' : ` in ${repo}`}: ${describe(e)}.`,
       );
     } catch {
       // Logging must never escape.

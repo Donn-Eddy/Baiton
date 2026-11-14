@@ -412,6 +412,7 @@ describe('tree model (property)', function () {
           approved: fc.boolean(),
           phaseStates: fc.array(fc.constantFrom(...PHASE_STATES), { maxLength: 6 }),
           prsMerged: fc.option(fc.boolean(), { nil: undefined }),
+          branchMerged: fc.option(fc.boolean(), { nil: undefined }),
         }),
         (facts) => {
           const expected = facts.status.kind === 'set' && facts.status.value === 'done'
@@ -419,14 +420,33 @@ describe('tree model (property)', function () {
             : facts.prsMerged === true && facts.status.kind === 'set' &&
               (facts.status.value === 'pr' || facts.status.value === 'pr-partial')
               ? 'completed'
+              : facts.branchMerged === true
+                ? 'completed'
               : facts.approved || facts.phaseStates.some((state) => state !== 'pending')
                 ? 'active'
                 : 'pending';
           assert.strictEqual(planGroupKind(facts), expected);
           assert.strictEqual(
-            planGroupKind({ ...facts, prsMerged: undefined }),
+            planGroupKind({ ...facts, prsMerged: undefined, branchMerged: undefined }),
             planGroupKind({ status: facts.status, approved: facts.approved, phaseStates: facts.phaseStates }),
           );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('branchMerged completes every status independently of phase state', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant({ kind: 'unset' as const }),
+          fc.string().map((value) => ({ kind: 'set' as const, value })),
+        ),
+        fc.boolean(),
+        fc.array(fc.constantFrom(...PHASE_STATES), { maxLength: 6 }),
+        (status, approved, phaseStates) => {
+          assert.strictEqual(planGroupKind({ status, approved, phaseStates, branchMerged: true }), 'completed');
         },
       ),
       { numRuns: 200 },
@@ -487,6 +507,49 @@ describe('tree model (property)', function () {
     assert.strictEqual(invalidMerged.invalid, true);
     assert.strictEqual(invalidMerged.group, 'completed');
     assert.deepStrictEqual(invalidMerged.actions, []);
+  });
+
+  it('buildPlanNode carries branch-merged facts through every plan shape', () => {
+    const prUrl = 'https://example.com/o/r/pull/9';
+    const approvedRaw = ['---', 'status: approved', '---', validPlanDocument()].join('\n');
+    const merged = buildPlanTree([{
+      slug: 'branch-merged', raw: approvedRaw, approved: true,
+      sessions: new Set<string>(), plans: new Set<string>(), branchMerged: true,
+    }])[0];
+    assert.strictEqual(merged.group, 'completed');
+    assert.strictEqual(merged.branchMerged, true);
+
+    const ordinary = buildPlanNodeForTest(approvedRaw);
+    assert.strictEqual('branchMerged' in ordinary, false);
+
+    const readError = buildPlanTree([{
+      slug: 'read-error', readError: 'unreadable', approved: false,
+      sessions: new Set<string>(), plans: new Set<string>(), branchMerged: true,
+    }])[0];
+    assert.strictEqual(readError.group, 'completed');
+    assert.strictEqual(readError.branchMerged, true);
+    assert.deepStrictEqual(readError.actions, []);
+
+    const invalidRaw = [
+      '---', 'status: approved', '---',
+      '# OVERVIEW', 'Invalid because the phase ids repeat.',
+      '# TODOS', '- [pending] T01 First', '- [pending] T01 Duplicate',
+    ].join('\n');
+    const invalid = buildPlanTree([{
+      slug: 'invalid', raw: invalidRaw, approved: true,
+      sessions: new Set<string>(), plans: new Set<string>(), branchMerged: true,
+    }])[0];
+    assert.strictEqual(invalid.group, 'completed');
+    assert.strictEqual(invalid.branchMerged, true);
+    assert.deepStrictEqual(invalid.actions, []);
+
+    const withPr = ['---', 'status: approved', `pr: ${prUrl}`, '---', validPlanDocument()].join('\n');
+    const withPrNode = buildPlanTree([{
+      slug: 'branch-merged-pr', raw: withPr, approved: true,
+      sessions: new Set<string>(), plans: new Set<string>(), branchMerged: true,
+    }])[0];
+    assert.deepStrictEqual(withPrNode.actions, ['showPr']);
+    assert.deepStrictEqual(merged.actions, []);
   });
 
   it('groups valid, invalid, and unreadable plans using the facts available', () => {
