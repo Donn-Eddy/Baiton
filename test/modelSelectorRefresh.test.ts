@@ -1824,11 +1824,8 @@ describe('model selector refresh ', () => {
         'thinking',
         'minimal',
       ]);
-      assert.strictEqual(
-        opencode.modelLink,
-        builtinAgentCapabilities().opencode.modelLink,
-        'the documentation link is re-attached from the builtin',
-      );
+      assert.strictEqual(opencode.modelLink, undefined, 'opencode carries no documentation link after a refresh');
+      assert.strictEqual(hasOwnKey(opencode, 'modelLink'), false);
       assert.strictEqual(harness.opencodeApiCalls(), 0, 'no server, no /api/model request');
     });
 
@@ -2924,8 +2921,8 @@ describe('model selector refresh ', () => {
         "the SELECTED model's own variants, not the agent-level union",
       );
       const link = view.byId('role-executor-model-link');
-      assert.ok(link.getAttribute('href'), 'the documentation link survives the refresh');
-      assert.notStrictEqual(link.style.display, 'none');
+      assert.strictEqual(link.getAttribute('href'), null, 'builtin opencode carries no documentation link');
+      assert.strictEqual(link.style.display, 'none', 'the Documentation link stays hidden after refresh');
     });
 
     it('per-model effort lists and the default label follow the selected model', async () => {

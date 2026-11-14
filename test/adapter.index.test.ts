@@ -9,7 +9,6 @@ import {
 import { ANTIGRAVITY_MODELS } from '../src/adapter/antigravity';
 import { CODEX_EFFORTS } from '../src/adapter/codex';
 import { CLAUDE_EFFORTS } from '../src/adapter/claude';
-import { OPENCODE_MODEL_DOC_URL } from '../src/adapter/opencode';
 import {
   AGENT_BINARY,
   AGENT_CATALOG_SOURCE,
@@ -47,7 +46,7 @@ function snap(
  * Verifies that the adapter capability catalogue:
  * - shares its key set with createAdapterRegistry().ids and AGENT_BINARY (drift guard);
  * - exposes non-empty, non-blank, duplicate-free models and efforts for claude, antigravity, and codex;
- * - exposes the free-text shape (empty models, empty efforts, non-empty modelLink) for opencode;
+ * - exposes the free-text shape (empty models, empty efforts) for opencode; no agent carries a modelLink;
  * - contains defaultConfig()'s model and effort under claude;
  * - returns fresh, non-aliased copies on every call.
  */
@@ -86,17 +85,30 @@ describe('agentCapabilities', () => {
     }
   });
 
-  it('opencode exposes empty models and efforts and a non-empty modelLink', () => {
+  it('opencode exposes empty models and efforts and no modelLink', () => {
     const caps = agentCapabilities();
     const entry = caps.opencode;
 
     assert.ok(entry, 'missing opencode capability entry');
     assert.deepStrictEqual(entry.models, [], 'opencode models must be empty (free-text shape)');
     assert.deepStrictEqual(entry.efforts, [], 'opencode efforts must be empty (free-text shape)');
-    assert.ok(
-      typeof entry.modelLink === 'string' && entry.modelLink.startsWith('https://'),
-      'opencode modelLink must be a non-empty documentation URL',
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(entry, 'modelLink'),
+      false,
+      'opencode must not carry a documentation link',
     );
+  });
+
+  it('no builtin agent carries a modelLink', () => {
+    for (const capabilities of [builtinAgentCapabilities(), agentCapabilities()]) {
+      for (const [agent, entry] of Object.entries(capabilities)) {
+        assert.strictEqual(
+          Object.prototype.hasOwnProperty.call(entry, 'modelLink'),
+          false,
+          `${agent} must not carry a modelLink`,
+        );
+      }
+    }
   });
 
   it("defaultConfig()'s model and effort are members of the claude lists", () => {
@@ -279,17 +291,17 @@ describe('agentCapabilities snapshot overlay', () => {
     assert.deepStrictEqual(codex.efforts, [...CODEX_EFFORTS]);
   });
 
-  it('opencode keeps its doc link; an empty refreshed list keeps the free-text shape', () => {
+  it('opencode carries no doc link; an empty refreshed list keeps the free-text shape', () => {
     const listed = agentCapabilities({
       opencode: snap('opencode', ['anthropic/claude-sonnet-5', 'openai/gpt-6-astra']),
     }).opencode;
     assert.deepStrictEqual(listed.models, ['anthropic/claude-sonnet-5', 'openai/gpt-6-astra']);
-    assert.strictEqual(listed.modelLink, OPENCODE_MODEL_DOC_URL);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(listed, 'modelLink'), false);
 
     const empty = agentCapabilities({ opencode: snap('opencode', []) }).opencode;
     assert.deepStrictEqual(empty.models, []);
     assert.deepStrictEqual(empty.efforts, []);
-    assert.strictEqual(empty.modelLink, OPENCODE_MODEL_DOC_URL);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(empty, 'modelLink'), false);
     assert.strictEqual(empty.source, 'builtin');
     assert.strictEqual(empty.stale, false);
     assert.strictEqual(empty.fetchedAt, '2026-01-02T03:04:05.000Z');
@@ -453,12 +465,14 @@ describe('capability helpers', () => {
       stale: true,
       staleReason: 'x',
       fetchedAt: 't',
+      modelLink: 'https://example.invalid/models',
     });
     assert.deepStrictEqual(caps.models, ['gpt-6-astra']);
     assert.strictEqual(caps.source, 'live');
     assert.strictEqual(caps.stale, true);
     assert.strictEqual(caps.staleReason, 'x');
     assert.strictEqual(caps.fetchedAt, 't');
+    assert.strictEqual(caps.modelLink, 'https://example.invalid/models');
     assert.ok(caps.modelEntries, 'non-empty entries must carry modelEntries');
     assert.notStrictEqual(caps.modelEntries, entries);
     assert.deepStrictEqual([...caps.modelEntries], entries);
