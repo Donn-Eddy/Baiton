@@ -22,21 +22,57 @@ import {
 } from './types';
 import { resolveDocument } from '../storage/documentLocation';
 
-/** Outcome of a single git invocation. */
-interface GitRun {
+/** Outcome of a single git invocation, including abnormal process termination. */
+export interface GitRun {
   readonly exitCode: number | undefined;
   readonly stdout: string;
   readonly stderr: string;
 }
 
 /**
- * Constructs a {@link GitWorktreeService} bound to `repoRoot`. The working
- * directory is injected so callers (and tests) can point the service at any
- * repository — including a linked worktree, which is a repository working
- * directory like any other.
+ * Runs git with argv in a working directory. A runner never rejects; a process
+ * that does not exit normally is reported with `exitCode` undefined.
  */
-export function createGitService(repoRoot: string): GitWorktreeService {
-  return new ShellGitService(repoRoot);
+export type GitRunner = (args: readonly string[], cwd: string) => Promise<GitRun>;
+
+/** The default execFile-backed runner used by {@link createGitService}. */
+export const execFileGitRunner: GitRunner = (args, cwd) =>
+  new Promise<GitRun>((resolve) => {
+    try {
+      execFile(
+        'git',
+        [...args],
+        { cwd, maxBuffer: 64 * 1024 * 1024 },
+        (error, stdout, stderr) => {
+          const exitCode =
+            error && typeof (error as { code?: unknown }).code === 'number'
+              ? (error as { code: number }).code
+              : error
+                ? undefined
+                : 0;
+          resolve({ exitCode, stdout, stderr });
+        },
+      );
+    } catch (error) {
+      resolve({
+        exitCode: undefined,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+/**
+ * Constructs a {@link GitWorktreeService} bound to `repoRoot`. The working
+ * directory and runner are injected so callers and tests can point the service
+ * at any repository — including a linked worktree — and replace process
+ * execution with a scripted runner.
+ */
+export function createGitService(
+  repoRoot: string,
+  runner: GitRunner = execFileGitRunner,
+): GitWorktreeService {
+  return new ShellGitService(repoRoot, runner);
 }
 
 /** A memoized per-repository collection of git services. */
@@ -65,7 +101,7 @@ export function createGitServiceRegistry(
 }
 
 class ShellGitService implements GitWorktreeService {
-  constructor(private readonly repoRoot: string) {}
+  constructor(private readonly repoRoot: string, private readonly runner: GitRunner) {}
 
   async status(): Promise<GitStatus> {
     // `--untracked-files=all` lists each untracked file individually. Without
@@ -85,6 +121,42 @@ class ShellGitService implements GitWorktreeService {
 
   async fetch(remote: string): Promise<void> {
     await this.runOrThrow(['fetch', remote]);
+  }
+
+  async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    if (isInvalidRef(ancestor)) {
+      throw invalidGitArgument('git merge-base --is-ancestor', ancestor);
+    }
+    if (isInvalidRef(descendant)) {
+      throw invalidGitArgument('git merge-base --is-ancestor', descendant);
+    }
+    const args = ['merge-base', '--is-ancestor', ancestor, descendant];
+    const result = await this.run(args);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    // Exit 1 is git's “not an ancestor” answer, not a command fault.
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw toGitError(args, result);
+  }
+
+  async fetchBranch(remote: string, branch: string): Promise<void> {
+    if (isInvalidRef(remote)) {
+      throw invalidGitArgument('git fetch', remote);
+    }
+    if (isInvalidRef(branch)) {
+      throw invalidGitArgument('git fetch', branch);
+    }
+    // This explicit refspec updates <remote>/<branch> regardless of the
+    // remote's configured fetch refspec.
+    await this.runOrThrow([
+      'fetch',
+      '--no-tags',
+      remote,
+      `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`,
+    ]);
   }
 
   async resolveBaseCommit(base: string): Promise<string> {
@@ -258,7 +330,7 @@ class ShellGitService implements GitWorktreeService {
       .sort();
   }
 
-  private async runOrThrow(args: string[]): Promise<string> {
+  private async runOrThrow(args: readonly string[]): Promise<string> {
     const result = await this.run(args);
     if (result.exitCode !== 0) {
       throw toGitError(args, result);
@@ -266,25 +338,20 @@ class ShellGitService implements GitWorktreeService {
     return result.stdout;
   }
 
-  /** Run git in the repo root, capturing exit code and streams (never rejects). */
-  private run(args: string[]): Promise<GitRun> {
-    return new Promise<GitRun>((resolve) => {
-      execFile(
-        'git',
-        args,
-        { cwd: this.repoRoot, maxBuffer: 64 * 1024 * 1024 },
-        (error, stdout, stderr) => {
-          const exitCode =
-            error && typeof (error as { code?: unknown }).code === 'number'
-              ? (error as { code: number }).code
-              : error
-                ? undefined
-                : 0;
-          resolve({ exitCode, stdout, stderr });
-        },
-      );
-    });
+  /** Run git through the configured runner in the repository root. */
+  private run(args: readonly string[]): Promise<GitRun> {
+    return this.runner(args, this.repoRoot);
   }
+}
+
+/** Empty values and leading dashes are rejected before invoking git. */
+function isInvalidRef(value: string): boolean {
+  return value.length === 0 || value.startsWith('-');
+}
+
+/** Build a structured validation error without invoking git. */
+function invalidGitArgument(command: string, value: string): GitError {
+  return { command, exitCode: undefined, stderr: `invalid ref: ${value}` };
 }
 
 /** Parse `git status --porcelain` output into structured changes. */
@@ -396,7 +463,7 @@ function escapeBasicRegex(input: string): string {
 }
 
 /** Build a {@link GitError} from a failed invocation. */
-function toGitError(args: string[], run: GitRun): GitError {
+function toGitError(args: readonly string[], run: GitRun): GitError {
   return {
     command: ['git', ...args].join(' '),
     exitCode: run.exitCode,
