@@ -11,7 +11,7 @@ import { phaseContextValue } from '../src/model/phaseActions';
 import { planContextValue } from '../src/model/planActions';
 import type { RepoTopology } from '../src/model/validator';
 import type { Surface } from '../src/activation/surface';
-import type { PrsMergedQuery } from '../src/activation/planExplorer';
+import type { BranchAncestryGit, BranchMergedQuery, PrsMergedQuery } from '../src/activation/planExplorer';
 
 type PlanExplorerModule = typeof import('../src/activation/planExplorer');
 let mod: PlanExplorerModule;
@@ -554,5 +554,250 @@ describe('PlanExplorer', function () {
     const plan = explorer.getChildren(completed).find((node) =>
       node.kind === 'plan' && node.node.slug === 'multi')!;
     assert.strictEqual(explorer.getTreeItem(plan).contextValue, planContextValue(['showPr']));
+  });
+
+  it('groups a plan Completed when its recorded branch is merged into base, without writing the document', async () => {
+    const branchPath = writePlan('branchdone', [
+      'status: approved', 'base: main', 'base_commit: abc', 'branch: baiton/branchdone',
+    ]);
+    writePlan('nobranch', ['status: approved', 'base: main']);
+    writePlan('nobase', ['status: approved', 'branch: baiton/x']);
+    writePlan('isdone', ['status: done', 'base: main', 'branch: baiton/d']);
+    const before = fs.readFileSync(branchPath);
+    const calls: BranchMergedQuery[] = [];
+    const logs: string[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: (m: string) => logs.push(m) } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: async (query) => { calls.push(query); return true; } },
+    ).start();
+
+    await waitFor(() => groupSlugs().completed?.includes('branchdone') === true, 'the merged branch plan');
+    assert.deepStrictEqual(calls, [{
+      slug: 'branchdone', branch: 'baiton/branchdone', base: 'main', baseCommit: 'abc',
+    }]);
+    assert.ok(!groupSlugs().completed?.includes('nobranch'));
+    assert.ok(!groupSlugs().completed?.includes('nobase'));
+    assert.ok(groupSlugs().completed?.includes('isdone'));
+    const completed = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'completed')!;
+    const plan = explorer.getChildren(completed).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'branchdone')!;
+    assert.strictEqual(explorer.getTreeItem(plan).contextValue, planContextValue([]));
+    assert.deepStrictEqual(fs.readFileSync(branchPath), before);
+    assert.deepStrictEqual(logs, []);
+  });
+
+  it('offers Show PR for a branch-completed plan only when a PR is recorded', async () => {
+    writePlan('branch-pr', [
+      'status: approved', 'base: main', 'branch: b', 'pr: https://github.com/o/r/pull/9',
+    ]);
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: async () => true },
+    ).start();
+    await waitFor(() => groupSlugs().completed?.includes('branch-pr') === true, 'the branch-completed PR plan');
+    const completed = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'completed')!;
+    const plan = explorer.getChildren(completed).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'branch-pr')!;
+    assert.strictEqual(explorer.getTreeItem(plan).contextValue, planContextValue(['showPr']));
+  });
+
+  it('memoises branch checks by branch and re-arms when the branch changes', async () => {
+    writePlan('memo-branch', ['status: approved', 'base: main', 'branch: first']);
+    const calls: BranchMergedQuery[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: async (query) => { calls.push(query); return true; } },
+    ).start();
+    await waitFor(() => groupSlugs().completed?.includes('memo-branch') === true, 'the first branch check');
+
+    await refreshAfterChange();
+    await refreshAfterChange();
+    assert.strictEqual(calls.length, 1);
+
+    writePlan('memo-branch', ['status: approved', 'base: main', 'branch: second']);
+    await refreshAfterChange();
+    await waitFor(() => calls.length === 2, 'the changed branch check');
+    assert.deepStrictEqual(calls.map((query) => query.branch), ['first', 'second']);
+  });
+
+  it('does not block refresh on a hung branch check', async () => {
+    writePlan('waiting-branch', ['status: approved', 'base: main', 'branch: waiting']);
+    const calls: BranchMergedQuery[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: (query) => { calls.push(query); return new Promise<boolean>(() => {}); } },
+    ).start();
+    await waitFor(() => groupSlugs().pending?.includes('alpha') === true &&
+      groupSlugs().pending?.includes('beta') === true, 'the initial rows while branch check is pending');
+    assert.strictEqual(calls.length, 1);
+    assert.ok(!groupSlugs().completed?.includes('waiting-branch'));
+    await refreshAfterChange();
+    assert.strictEqual(calls.length, 1);
+  });
+
+  it('treats rejected and synchronously thrown branch checks as unmerged and logs once', async () => {
+    writePlan('branchfailed', ['status: approved', 'base: main', 'branch: failed']);
+    writePlan('branchsyncfailed', ['status: approved', 'base: main', 'branch: syncfailed']);
+    const calls: BranchMergedQuery[] = [];
+    const logs: string[] = [];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: (m: string) => logs.push(m) } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: (query) => {
+        calls.push(query);
+        if (query.slug === 'branchsyncfailed') throw new Error('sync offline');
+        return Promise.reject(new Error('offline'));
+      } },
+    ).start();
+    await waitFor(() => logs.length === 2, 'the branch check failure logs');
+    assert.deepStrictEqual(logs.map((message) => message.includes('branchsyncfailed') ? 'branchsyncfailed' : 'branchfailed').sort(), [
+      'branchfailed', 'branchsyncfailed',
+    ]);
+    assert.ok(logs.every((message) => message.includes('branch state')));
+    assert.strictEqual(calls.length, 2);
+    assert.ok(!groupSlugs().completed?.includes('branchfailed'));
+    assert.ok(!groupSlugs().completed?.includes('branchsyncfailed'));
+    await refreshAfterChange();
+    await refreshAfterChange();
+    assert.strictEqual(logs.length, 2);
+    assert.strictEqual(calls.length, 2);
+  });
+
+  it('leaves a false branch check in Active or Pending', async () => {
+    writePlan('not-merged', ['status: approved', 'base: main', 'branch: not-merged']);
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined, warn: () => undefined, log: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { branchMerged: async () => false },
+    ).start();
+    await waitFor(() => groupSlugs().pending?.includes('not-merged') === true, 'the plan after a false branch check');
+    assert.ok(!groupSlugs().completed?.includes('not-merged'));
+  });
+});
+
+describe('branchMergedIntoBase', () => {
+  const query: BranchMergedQuery = {
+    slug: 'plan', branch: 'baiton/plan', base: 'main', baseCommit: 'B0',
+  };
+
+  function fakeGit(
+    heads: Record<string, string | undefined>,
+    ancestors: Set<string> = new Set<string>(),
+    fetchFailure?: Error,
+  ): { git: BranchAncestryGit; calls: string[] } {
+    const calls: string[] = [];
+    const git: BranchAncestryGit = {
+      fetchBranch: async (remote, branch) => {
+        calls.push(`fetch:${remote}/${branch}`);
+        if (fetchFailure !== undefined) throw fetchFailure;
+      },
+      branchHead: async (ref) => {
+        calls.push(`head:${ref}`);
+        return heads[ref];
+      },
+      isAncestor: async (ancestor, descendant) => {
+        calls.push(`ancestor:${ancestor}..${descendant}`);
+        return ancestors.has(`${ancestor}..${descendant}`);
+      },
+    };
+    return { git, calls };
+  }
+
+  it('fetches the base first and detects a strictly ahead branch ancestor', async () => {
+    const baseRef = 'refs/remotes/origin/main';
+    const { git, calls } = fakeGit(
+      { [baseRef]: 'BASE', 'refs/heads/baiton/plan': 'T' },
+      new Set(['B0..T', 'T..BASE']),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(git, 'origin', query, true), true);
+    assert.deepStrictEqual(calls, [
+      'fetch:origin/main',
+      `head:${baseRef}`,
+      'head:refs/heads/baiton/plan',
+      'ancestor:B0..T',
+      'ancestor:T..BASE',
+    ]);
+  });
+
+  it('uses the remote branch ref when the local branch is absent and skips fetch when not requested', async () => {
+    const baseRef = 'refs/remotes/origin/main';
+    const branchRef = 'refs/remotes/origin/baiton/plan';
+    const { git, calls } = fakeGit(
+      { [baseRef]: 'BASE', [branchRef]: 'T' },
+      new Set(['B0..T', 'T..BASE']),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(git, 'origin', query, false), true);
+    assert.deepStrictEqual(calls, [
+      `head:${baseRef}`,
+      'head:refs/heads/baiton/plan',
+      `head:${branchRef}`,
+      'ancestor:B0..T',
+      'ancestor:T..BASE',
+    ]);
+  });
+
+  it('rejects false positives where the branch is not strictly ahead or is not merged', async () => {
+    const baseRef = 'refs/remotes/origin/main';
+    const localRef = 'refs/heads/baiton/plan';
+    const equalTip = fakeGit(
+      { [baseRef]: 'BASE', [localRef]: 'B0' },
+      new Set(['B0..BASE']),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(equalTip.git, 'origin', query, false), false);
+    assert.ok(!equalTip.calls.some((call) => call === 'ancestor:B0..BASE'));
+
+    const notAhead = fakeGit(
+      { [baseRef]: 'BASE', [localRef]: 'T' },
+      new Set(['T..BASE']),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(notAhead.git, 'origin', query, false), false);
+
+    const sameAsBase = fakeGit(
+      { [baseRef]: 'BASE', [localRef]: 'BASE' },
+      new Set(),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(sameAsBase.git, 'origin', { ...query, baseCommit: undefined }, false), false);
+
+    const unmerged = fakeGit(
+      { [baseRef]: 'BASE', [localRef]: 'T' },
+      new Set(['B0..T']),
+    );
+    assert.strictEqual(await mod.branchMergedIntoBase(unmerged.git, 'origin', query, false), false);
+  });
+
+  it('rejects when refs cannot be resolved or fetching fails', async () => {
+    const missingBase = fakeGit({ 'refs/heads/baiton/plan': 'T' });
+    await assert.rejects(mod.branchMergedIntoBase(missingBase.git, 'origin', query, false), /origin\/main could not be resolved/);
+
+    const missingBranch = fakeGit({ 'refs/remotes/origin/main': 'BASE' });
+    await assert.rejects(mod.branchMergedIntoBase(missingBranch.git, 'origin', query, false), /branch baiton\/plan could not be resolved/);
+
+    const fetchFailure = fakeGit({}, new Set(), new Error('offline'));
+    await assert.rejects(mod.branchMergedIntoBase(fetchFailure.git, 'origin', query, true), /offline/);
+    assert.deepStrictEqual(fetchFailure.calls, ['fetch:origin/main']);
   });
 });

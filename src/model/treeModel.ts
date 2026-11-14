@@ -2,7 +2,8 @@
  * Host-free tree model for the Plan Explorer.
  *
  * It parses and validates plan.md and legacy spec.md documents with the shared
- * model cores, then groups plans as Active, Pending, or Completed and creates
+ * model cores, then groups plans as Active, Pending, or Completed (including a
+ * plan whose recorded branch is merged into base) and creates
  * phase or validation-error children in file order.
  * Optional repo identity labels the owning plan and a phase's distinct target; non-actionable inputs expose no actions.
  */
@@ -31,16 +32,19 @@ export interface PlanGroupFacts {
   phaseStates: readonly PhaseState[];
   /** True when every recorded PR/MR URL reads merged; only consulted for status `pr`/`pr-partial`. */
   prsMerged?: boolean;
+  /** True when the recorded plan branch is merged into its recorded base on the configured remote (derived, never persisted). Independent of status. */
+  branchMerged?: boolean;
 }
 
 function isPrStatus(status: PlanStatus): boolean {
   return status.kind === 'set' && (status.value === PR_STATUS || status.value === PR_PARTIAL_STATUS);
 }
 
-/** Completed when status is `done`, or when status is `pr`/`pr-partial` and every recorded PR reads merged; otherwise active when approved or any phase is past `pending`. */
+/** Completed when status is `done`, when status is `pr`/`pr-partial` and every recorded PR reads merged, or when the recorded branch is merged into base; otherwise active when approved or any phase is past `pending`. */
 export function planGroupKind(facts: PlanGroupFacts): PlanGroupKind {
   if (facts.status.kind === 'set' && facts.status.value === 'done') return 'completed';
   if (facts.prsMerged === true && isPrStatus(facts.status)) return 'completed';
+  if (facts.branchMerged === true) return 'completed';
   if (facts.approved || facts.phaseStates.some((state) => state !== 'pending')) return 'active';
   return 'pending';
 }
@@ -75,6 +79,8 @@ export interface PlanNode {
   group: PlanGroupKind;
   /** Present (true) only when the caller supplied the merged fact; part of the facts `group` is derived from. */
   prsMerged?: boolean;
+  /** Present (true) only when the caller supplied the branch-merged fact; part of the facts `group` is derived from. */
+  branchMerged?: boolean;
   /** The states of every parsed phase line in file order; present even when invalid, empty when unreadable. */
   phaseStates: PhaseState[];
   invalid: boolean;
@@ -96,6 +102,8 @@ export interface PlanInput {
   actionable?: boolean;
   /** Derived fact: every recorded PR/MR URL reads merged. Absent means not known to be merged. */
   prsMerged?: boolean;
+  /** Derived fact: the recorded `branch:` is merged into `<remote>/<base>`. Absent means not known to be merged. */
+  branchMerged?: boolean;
   raw?: string;
   readError?: string;
   approved: boolean;
@@ -129,16 +137,18 @@ export function buildPlanGroups(nodes: readonly PlanNode[]): PlanGroupNode[] {
 
 function buildPlanNode(input: PlanInput): PlanNode {
   const prsMergedFact = input.prsMerged === true ? { prsMerged: true as const } : {};
+  const branchMergedFact = input.branchMerged === true ? { branchMerged: true as const } : {};
   if (input.readError !== undefined || input.raw === undefined) {
     const kind = input.kind ?? 'plan';
     return {
       slug: input.slug,
       ...(input.repo !== undefined ? { repo: input.repo } : {}),
       ...prsMergedFact,
+      ...branchMergedFact,
       kind,
       status: { kind: 'unset' },
       approved: input.approved,
-      group: planGroupKind({ status: { kind: 'unset' }, approved: input.approved, phaseStates: [], prsMerged: input.prsMerged }),
+      group: planGroupKind({ status: { kind: 'unset' }, approved: input.approved, phaseStates: [], prsMerged: input.prsMerged, branchMerged: input.branchMerged }),
       phaseStates: [],
       invalid: true,
       actions: [],
@@ -163,10 +173,11 @@ function buildPlanNode(input: PlanInput): PlanNode {
       slug: input.slug,
       ...(input.repo !== undefined ? { repo: input.repo } : {}),
       ...prsMergedFact,
+      ...branchMergedFact,
       kind: parsed.kind,
       status,
       approved: input.approved,
-      group: planGroupKind({ status, approved: input.approved, phaseStates, prsMerged: input.prsMerged }),
+      group: planGroupKind({ status, approved: input.approved, phaseStates, prsMerged: input.prsMerged, branchMerged: input.branchMerged }),
       phaseStates,
       invalid: true,
       prUrl,
@@ -197,10 +208,11 @@ function buildPlanNode(input: PlanInput): PlanNode {
     slug: input.slug,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
     ...prsMergedFact,
+    ...branchMergedFact,
     kind: parsed.kind,
     status,
     approved: input.approved,
-    group: planGroupKind({ status, approved: input.approved, phaseStates, prsMerged: input.prsMerged }),
+    group: planGroupKind({ status, approved: input.approved, phaseStates, prsMerged: input.prsMerged, branchMerged: input.branchMerged }),
     phaseStates,
     invalid: false,
     prUrl,
@@ -213,6 +225,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
         phaseStates,
         status: status.kind === 'set' ? status.value : undefined,
         prsMerged: input.prsMerged === true && isPrStatus(status),
+        branchMerged: input.branchMerged === true,
       }),
     children: { kind: 'phases', phases },
   };
