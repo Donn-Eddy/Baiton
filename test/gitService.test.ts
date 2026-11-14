@@ -641,4 +641,49 @@ describe('git service against a temp repo', () => {
       assert.deepStrictEqual(await git$.listBranches('nope/'), []);
     });
   });
+
+  describe('isAncestor and fetchBranch', () => {
+    it('checks ancestry before and after a merge, including a commit as its own ancestor', async () => {
+      const repo = newRepo();
+      const git$ = createGitService(repo);
+      git(repo, 'checkout', '-q', '-b', 'feature', 'main');
+      writeFile(repo, 'feature.txt', 'feature\n');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-q', '-m', 'feature commit');
+
+      assert.strictEqual(await git$.isAncestor('main', 'feature'), true);
+      assert.strictEqual(await git$.isAncestor('feature', 'main'), false);
+      assert.strictEqual(await git$.isAncestor('main', 'main'), true);
+
+      git(repo, 'checkout', '-q', 'main');
+      git(repo, 'merge', '--no-ff', '-q', 'feature');
+      assert.strictEqual(await git$.isAncestor('feature', 'main'), true);
+      await assert.rejects(() => git$.isAncestor('no-such-ref', 'main'));
+    });
+
+    it('fetches a new remote tip into its remote-tracking ref', async () => {
+      const repo = newRepo();
+      const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-git-remote-'));
+      repos.push(remote);
+      const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-git-clone-'));
+      repos.push(clone);
+
+      git(remote, 'init', '--bare', '-q', '--initial-branch=main');
+      git(repo, 'remote', 'add', 'origin', remote);
+      git(repo, 'push', '-q', '-u', 'origin', 'main');
+      git(clone, 'clone', '-q', remote, '.');
+      git(clone, 'config', 'user.name', 'Baiton Test');
+      git(clone, 'config', 'user.email', 'baiton-test@example.com');
+      writeFile(clone, 'README.md', 'remote update\n');
+      git(clone, 'add', '-A');
+      git(clone, 'commit', '-q', '-m', 'remote update');
+      git(clone, 'push', '-q', 'origin', 'main');
+      const remoteTip = git(clone, 'rev-parse', 'HEAD').trim();
+
+      const git$ = createGitService(repo);
+      await git$.fetchBranch('origin', 'main');
+      assert.strictEqual(await git$.branchHead('origin/main'), remoteTip);
+      await assert.rejects(() => git$.fetchBranch('origin', 'no-such-branch'));
+    });
+  });
 });
