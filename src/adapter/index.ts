@@ -21,7 +21,7 @@ import { opencodeAllowList } from './opencode';
 import { roleAllowList } from './roleProfile';
 import type { AgentAllowList } from './roleProfile';
 import { ClaudeAdapter, CLAUDE_MODELS, CLAUDE_EFFORTS } from './claude';
-import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS, OPENCODE_MODEL_DOC_URL } from './opencode';
+import { OpencodeAdapter, OPENCODE_MODELS, OPENCODE_EFFORTS } from './opencode';
 import { AntigravityAdapter, ANTIGRAVITY_MODELS, ANTIGRAVITY_EFFORTS } from './antigravity';
 import { CodexAdapter, CODEX_MODELS, CODEX_EFFORTS } from './codex';
 import { mergePreservingExisting, modelIds } from '../orchestrator/modelCatalog';
@@ -213,7 +213,6 @@ export function builtinAgentCapabilities(): Record<AgentId, AgentCapabilities> {
     opencode: {
       models: [...OPENCODE_MODELS],
       efforts: [...OPENCODE_EFFORTS],
-      modelLink: OPENCODE_MODEL_DOC_URL,
     },
     antigravity: {
       models: Object.keys(ANTIGRAVITY_MODELS),
@@ -276,7 +275,7 @@ export function agentCapabilities(snapshots?: ModelCatalogTable): Record<AgentId
  * none) — while the snapshot's
  * `source`/`stale`/`staleReason`/`fetchedAt` are still carried — this is the
  * normal, correct path for an opencode snapshot with no models, whose
- * free-text shape (`models: []`, `efforts: []`, `modelLink`) survives.
+ * free-text shape (`models: []`, `efforts: []`) survives.
  * Otherwise the overlay is built via `capabilitiesFromEntries` with:
  * `efforts` the snapshot-level list when non-empty, else the union of the
  * entries' own efforts when any entry has them, else the builtin's;

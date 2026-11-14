@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as opencodeModule from '../src/adapter/opencode';
 import {
   OpencodeAdapter,
   OPENCODE_CONFIG_ENV,
@@ -33,6 +34,7 @@ import type { ApiFailureEntry, ApiLog } from '../src/orchestrator/apiLog';
 import { roleProfile } from '../src/adapter/roleProfile';
 import { ROLES } from '../src/model/role';
 import { askRelayDescriptor } from '../src/engine/askRelay';
+import { builtinAgentCapabilities } from '../src/adapter';
 
 /**
  * This file mirrors test/adapter.claude.test.ts for the opencode CLI and pins:
@@ -116,6 +118,16 @@ describe('OpencodeAdapter probe shape (Req 14.2, 14.3, 14.4)', () => {
       assert.strictEqual(typeof result.reason, 'string');
       assert.ok((result.reason as string).length > 0);
     }
+  });
+});
+
+describe('opencode capability', () => {
+  it('does not export a documentation URL or attach a builtin modelLink', () => {
+    assert.strictEqual(['OPENCODE', 'MODEL', 'DOC', 'URL'].join('_') in opencodeModule, false);
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(builtinAgentCapabilities().opencode, 'modelLink'),
+      false,
+    );
   });
 });
 

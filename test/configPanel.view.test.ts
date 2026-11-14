@@ -991,6 +991,32 @@ describe('config panel webview options refresh ', () => {
     view.send({ type: 'optionsChanged', options, stale });
   }
 
+  it('no builtin agent renders a Documentation link', async () => {
+    const { agentCapabilities } = await import('../src/adapter');
+    const { configFormOptions } = await import('../src/config/configPanel');
+    const caps = agentCapabilities();
+    const options = configFormOptions(Object.keys(caps), caps);
+
+    for (const [agent, capability] of Object.entries(caps)) {
+      const model = agent === 'opencode' ? 'anthropic/claude-sonnet-5' : capability.models[0];
+      const overrides: Record<string, { agent: string; model: string; effort: string }> = {};
+      for (const role of VIEW_ROLES) {
+        overrides[role] = { agent, model, effort: '' };
+      }
+      const view = loadedView(options, viewForm(overrides));
+
+      for (const role of VIEW_ROLES) {
+        const link = view.byId(`role-${role}-model-link`);
+        assert.strictEqual(link.style.display, 'none', `${agent}/${role} Documentation link should be hidden`);
+        assert.strictEqual(
+          link.getAttribute('href'),
+          null,
+          `${agent}/${role} Documentation link should have no href`,
+        );
+      }
+    }
+  });
+
   it('builds six roles-table rows with the model and effort option lists from loaded', () => {
     const view = loadedView();
     const rows = view.ids['roles-body'].querySelectorAll('.role-row');
@@ -1439,7 +1465,12 @@ describe('config panel webview per-model options ', () => {
     assert.strictEqual(select.style.display, 'none', 'no list yet: the dropdown is hidden');
     assert.notStrictEqual(input.style.display, 'none');
     assert.strictEqual(input.value, 'anthropic/claude-sonnet-5');
-    assert.notStrictEqual(link.style.display, 'none', 'the documentation link is visible without a list');
+    assert.notStrictEqual(
+      link.style.display,
+      'none',
+      'the explicit modelLink seam fixture is visible without a list',
+    );
+    assert.strictEqual(link.href, 'https://opencode.invalid/models');
 
     refresh(
       view,
@@ -1462,7 +1493,19 @@ describe('config panel webview per-model options ', () => {
     assert.strictEqual(staticOption(select, 'other').textContent, 'Other…');
     assert.strictEqual(select.value, 'anthropic/claude-sonnet-5');
     assert.strictEqual(input.style.display, 'none', 'the configured model is listed, so no Other… input');
-    assert.notStrictEqual(link.style.display, 'none', 'the documentation link stays visible as a dropdown');
+    assert.notStrictEqual(
+      link.style.display,
+      'none',
+      'the explicit modelLink seam fixture stays visible as a dropdown',
+    );
+    assert.strictEqual(link.href, 'https://opencode.invalid/models');
+
+    refresh(
+      view,
+      capsOptions({ opencode: { models: ['anthropic/claude-sonnet-5'], efforts: [] } }, ['opencode']),
+    );
+    assert.strictEqual(link.style.display, 'none', 'removing modelLink hides the Documentation link');
+    assert.strictEqual(link.getAttribute('href'), null, 'removing modelLink clears the href');
   });
 
   it('OpenCode: an unlisted configured model lands in the Other… state once the list arrives', () => {

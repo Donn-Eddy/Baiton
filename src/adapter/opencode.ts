@@ -200,9 +200,6 @@ export const OPENCODE_MODELS: readonly string[] = [];
  */
 export const OPENCODE_EFFORTS: readonly string[] = [];
 
-/** Documentation URL for opencode model selection rendered inline in the config panel. */
-export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
-
 // --- opencode model discovery ---
 
 /** The only subcommand discovery ever spawns: `opencode serve`. */
