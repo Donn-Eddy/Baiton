@@ -379,6 +379,21 @@ describe('config service and Initialize command', () => {
   });
 
   describe('initialize local config seeding (Req 1.3)', () => {
+    it('preserves custom .gitignore lines while adding the canonical exclusions', async () => {
+      const dir = newDir();
+      const baitonDir = path.join(dir, '.baiton');
+      fs.mkdirSync(baitonDir, { recursive: true });
+      fs.writeFileSync(path.join(baitonDir, '.gitignore'), '/.lock\n.claude/\n.env\n', 'utf8');
+
+      const result = await initialize(baitonDir);
+
+      assert.ok(isOk(result));
+      assert.strictEqual(
+        fs.readFileSync(path.join(baitonDir, '.gitignore'), 'utf8'),
+        `${GITIGNORE_CONTENTS}\n.claude/\n.env\n`,
+      );
+    });
+
     it('leaves an existing config.json untouched but still ensures .gitignore', async () => {
       const dir = newDir();
       const baitonDir = path.join(dir, '.baiton');
