@@ -43,7 +43,8 @@
  *     clicked run id to `baiton.runs.cancel` / `baiton.runs.viewDiff` /
  *     `baiton.runs.merge` (design "dispatch modes").
  *   - A {@link vscode.CodeLensProvider} over a plan's `# PHASES (legacy '# TODOS')` lines exposing
- *     the stage triggers inline per phase.
+ *     the stage triggers inline per phase. It derives the owning repo from the
+ *     document path and passes `[slug, phaseId, repoPath]` when multiple repos exist.
  *
  * It also constructs the run store and the plan-less run pipeline (design
  * "dispatch modes"), supplies the resulting `RunPipelineSeam` to the tool
@@ -1416,8 +1417,8 @@ export function registerCommands(
   disposables.push(
     vscode.languages.registerCodeLensProvider(
       // Legacy: keep watching existing spec.md documents alongside plan.md.
-      { pattern: '**/.baiton/{plans/*/plan.md,specs/*/spec.md}' },
-      new PlanCodeLensProvider(baitonDir),
+      { pattern: '**/.baiton/{plans,specs}/*/*.md' },
+      new PlanCodeLensProvider(planTargets),
     ),
   );
 
@@ -2108,31 +2109,33 @@ const ACTION_LENS: Record<PhaseAction, { title: string; command: string }> = {
 };
 
 /**
- * A CodeLens provider that puts the state-gated actions inline above each phase
- * line of a plan's `plan.md`. Each phase emits exactly `legalActions(phase.state,
+ * A CodeLens provider that derives the owning repo from the document path and
+ * puts state-gated actions inline above each phase line of a plan's `plan.md`.
+ * Each phase emits exactly `legalActions(phase.state,
  * hasSession)`, so the tree and the CodeLens cannot disagree (Req 4.2, 4.3);
  * `hasSession` comes from one merged read of the plan's journals per provide call.
- * Each lens invokes a stage/action/view command with the plan's slug and the
- * phase id, wiring the editor surface to the run queue and tools (Req 10.3).
+ * Each lens invokes a stage/action/view command with `[slug, phaseId]` in a
+ * single-repo workspace or `[slug, phaseId, repoPath]` when multiple repos
+ * exist, wiring the editor surface to the right run queue and tools (Req 10.3).
  */
 class PlanCodeLensProvider implements vscode.CodeLensProvider {
-  constructor(private readonly baitonDir: string) {}
+  constructor(private readonly targets: PlanTargetDeps) {}
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const slug = slugFromDocumentUri(document.uri);
-    if (slug === undefined) {
+    const target = resolveLensTarget(this.targets, document.uri.fsPath);
+    if (target === undefined) {
       return [];
     }
     const parsedPlan = parsePlan(document.getText());
-    const sessions = sessionSet(readPlanJournal(this.baitonDir, slug));
+    const sessions = sessionSet(readPlanJournal(target.baitonDir, target.slug));
     const lenses: vscode.CodeLens[] = [];
     for (const phase of parsedPlan.phases) {
       const line = document.lineAt(phase.lineIndex);
       const range = new vscode.Range(line.range.start, line.range.start);
-      const hasPlan = fs.existsSync(phasePlanPath(this.baitonDir, slug, phase.id));
+      const hasPlan = fs.existsSync(phasePlanPath(target.baitonDir, target.slug, phase.id));
       for (const action of legalActions(phase.state, sessions.has(phase.id), hasPlan)) {
         const { title, command } = ACTION_LENS[action];
-        lenses.push(lens(range, title, command, slug, phase.id));
+        lenses.push(lens(range, title, command, target.slug, phase.id, target.repoPath));
       }
     }
     return lenses;
@@ -2151,22 +2154,43 @@ function sessionSet(entries: JournalEntry[]): Set<string> {
   return sessions;
 }
 
-/** Build one CodeLens invoking a command with `[slug, phaseId]`. */
+/** Build one CodeLens with optional repo routing for a multi-repo workspace. */
 function lens(
   range: vscode.Range,
   title: string,
   command: string,
   slug: string,
   phaseId: string,
+  repoPath?: string,
 ): vscode.CodeLens {
-  return new vscode.CodeLens(range, { title, command, arguments: [slug, phaseId] });
+  return new vscode.CodeLens(range, {
+    title,
+    command,
+    arguments: repoPath === undefined ? [slug, phaseId] : [slug, phaseId, repoPath],
+  });
 }
 
 /** The plan slug from a document URI, including the legacy `.baiton/specs/<slug>/spec.md` root. */
 function slugFromDocumentUri(uri: vscode.Uri): string | undefined {
-  // Legacy: accept document URIs from the former specs/ root.
-  const match = /[/\\]\.baiton[/\\](?:plans[/\\]([^/\\]+)[/\\]plan\.md|specs[/\\]([^/\\]+)[/\\]spec\.md)$/.exec(uri.fsPath);
-  return match ? (match[1] ?? match[2]) : undefined;
+  return planDocumentFromPath(uri.fsPath)?.slug;
+}
+
+export interface PlanDocumentLocation {
+  slug: string;
+  root: string;
+  baitonDir: string;
+}
+
+/** Parse a persisted plan document path, preferring its last `.baiton` segment. */
+export function planDocumentFromPath(fsPath: string): PlanDocumentLocation | undefined {
+  const match = /^(.*)[/\\]\.baiton[/\\](?:plans[/\\]([^/\\]+)[/\\]plan\.md|specs[/\\]([^/\\]+)[/\\]spec\.md)$/.exec(fsPath);
+  if (!match) return undefined;
+  const root = match[1] === '' ? path.sep : match[1];
+  return {
+    slug: (match[2] ?? match[3])!,
+    root,
+    baitonDir: path.join(root, '.baiton'),
+  };
 }
 
 // --- shared helpers --------------------------------------------------------
@@ -2201,6 +2225,39 @@ export interface PlanTargetDeps {
   ownerGit: GitService;
   /** Chooser used on ambiguity; returns the chosen qualified ref or undefined. */
   choose: (items: string[], placeHolder: string) => Promise<string | undefined>;
+}
+
+export interface LensPlanTarget {
+  slug: string;
+  baitonDir: string;
+  repoPath?: string;
+}
+
+/** Resolve a plan document to a discovered repo, with an owner-root worktree fallback. */
+export function resolveLensTarget(deps: PlanTargetDeps, fsPath: string): LensPlanTarget | undefined {
+  const doc = planDocumentFromPath(fsPath);
+  if (doc === undefined) return undefined;
+
+  const multiRepo = deps.planRepos.owners().length > 1;
+  const target = deps.planRepos.targetAt(doc.root);
+  if (target !== undefined && repoLockKey(target.baitonDir) === repoLockKey(doc.baitonDir)) {
+    const isOwner = repoLockKey(target.root) === repoLockKey(deps.ownerRoot);
+    return {
+      slug: doc.slug,
+      baitonDir: isOwner ? deps.ownerBaitonDir : target.baitonDir,
+      ...(multiRepo ? { repoPath: target.info.path } : {}),
+    };
+  }
+
+  const relative = path.relative(deps.ownerRoot, doc.root);
+  if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+    return {
+      slug: doc.slug,
+      baitonDir: deps.ownerBaitonDir,
+      ...(multiRepo ? { repoPath: '.' } : {}),
+    };
+  }
+  return undefined;
 }
 
 export type PickPlanTargetDeps = PlanTargetDeps & {
