@@ -3,12 +3,14 @@
  * binds plan-less dispatch tools (`start_run` / `investigate`) to the run
  * pipeline through {@link createRunPipelineSeam}.
  *
- * The facade derives the role, attempt/round index, and executor resume flag
- * from the stage and the merged plan journal, then dispatches one RunRequest.
- * Phase queues are keyed by (owning repo, slug, phase), each using its own
- * worktree, so phases can run concurrently. The plan draft and plan-less
- * pipeline share a per-repo lock; unrelated repos do not block each other, and
- * phase queues do not take that lock.
+ * Each discovered `.baiton/` repo gets its own lazily-created plan store,
+ * writer and owner entry keyed by repo root. The facade derives the role,
+ * attempt/round index, and executor resume flag from the stage and the merged
+ * plan journal, then dispatches one RunRequest. Phase queues are keyed by
+ * (owning repo, slug, phase), each using its own worktree, so phases can run
+ * concurrently. The plan draft and plan-less pipeline share a per-repo lock;
+ * unrelated repos do not block each other, and phase queues do not take that
+ * lock.
  *
  * The facade has no VS Code dependency. Commands and the run tool call it with
  * plain values, and the queue relays harness asks through its shared watcher.
@@ -31,6 +33,8 @@ import type {
 import { createQueueWorktreeSeam, createRunQueue, repoLockKey } from '../engine';
 import type { GitWorktreeService } from '../git';
 import type { PhaseTargetResolver } from '../engine/phaseWorktree';
+import { createOwnerPlanState, createPhaseTargetResolver } from './planStore';
+import type { RepoTopology } from '../model/validator';
 import type {
   RunDispatchOutcome,
   RunDispatchRequest,
@@ -193,6 +197,57 @@ export interface PhaseQueueOwner {
   targets?: PhaseTargetResolver;
 }
 
+/** What the facade needs to know about one discovered `.baiton/` repo to build its owner entry. Mirrors PlanRepoTarget's root/baitonDir/git/topology. */
+export interface PhaseQueueOwnerSource {
+  root: string;
+  baitonDir: string;
+  git: GitWorktreeService;
+  topology?: RepoTopology;
+}
+
+export interface PhaseQueueOwnersDeps {
+  /** Resolve a discovered `.baiton/` repo by canonical root (activation passes planRepos.targetAt); undefined = not a plan repo. */
+  sourceAt(repoRoot: string): PhaseQueueOwnerSource | undefined;
+  /** One git service per repo root, used for phase targets (the activation GitServiceRegistry). */
+  gitFor(repoRoot: string): GitWorktreeService;
+}
+
+export interface PhaseQueueOwners {
+  /** The owner entry for a repo root, created once and cached by repoLockKey(root); undefined when the root is not a discovered `.baiton/` repo. */
+  ownerFor(repoRoot: string): PhaseQueueOwner | undefined;
+}
+
+/** Lazily create one plan writer, store and target resolver for each discovered repo. */
+export function createPhaseQueueOwners(deps: PhaseQueueOwnersDeps): PhaseQueueOwners {
+  const owners = new Map<string, PhaseQueueOwner>();
+  return {
+    ownerFor(repoRoot) {
+      const key = repoLockKey(repoRoot);
+      const cached = owners.get(key);
+      if (cached !== undefined) return cached;
+      const source = deps.sourceAt(key);
+      if (source === undefined) return undefined;
+      const state = createOwnerPlanState(source.baitonDir, source.git);
+      const targets = createPhaseTargetResolver({
+        baitonDir: source.baitonDir,
+        ownerRoot: source.root,
+        topology: () => source.topology,
+        gitFor: deps.gitFor,
+      });
+      const owner: PhaseQueueOwner = {
+        workspaceRoot: source.root,
+        baitonDir: source.baitonDir,
+        git: source.git,
+        planWriter: state.planWriter,
+        planStore: state.planStore,
+        targets,
+      };
+      owners.set(key, owner);
+      return owner;
+    },
+  };
+}
+
 /** Dependencies shared by every per-phase queue; slug/phase/journal wiring is derived per queue. */
 export type PhaseQueuesDeps = Omit<
   RunQueueDeps,
@@ -214,7 +269,7 @@ export type PhaseQueuesDeps = Omit<
   worktrees?: QueueWorktreeSeam;
   /** Resolves each phase's target repo while leaving plan state owner-bound. */
   targets?: PhaseTargetResolver;
-  /** Resolve a non-default owning repo by its root. */
+  /** Resolve a non-default owning repo by its root; may be `createPhaseQueueOwners(...).ownerFor`. */
   owners?: (repoRoot: string) => PhaseQueueOwner | undefined;
 };
 
@@ -226,6 +281,8 @@ export interface PhaseQueues {
   find(slug: string, phaseId: string, repo?: string): RunQueue | undefined;
   /** Every live run across all queues; repo is the canonical owning-repo root. */
   running(): Array<LiveRun & { repo: string }>;
+  /** The owner entry (baitonDir, git, planStore, planWriter) for a repo; omitted repo = default owner; undefined for an unknown repo. Never creates a queue. */
+  owner(repo?: string): PhaseQueueOwner | undefined;
   /**
    * True when any queue of `slug` (any slug when omitted) and `repo` (any repo
    * when omitted) has a stage in flight. This is the overview's `isRunning(repo,
@@ -256,12 +313,20 @@ export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
   const seams = new Map<string, QueueWorktreeSeam>();
   const queues = new Map<string, { repo: string; slug: string; queue: RunQueue }>();
 
-  const ownerFor = (repo?: string): { repo: string; owner: PhaseQueueOwner } => {
+  const resolveOwner = (repo?: string): { repo: string; owner: PhaseQueueOwner } | undefined => {
     const key = repo === undefined ? defaultRepo : repoLockKey(repo);
     if (key === defaultRepo) return { repo: defaultRepo, owner: defaultOwner };
     const owner = owners?.(key);
-    if (owner === undefined) throw new Error(`unknown owning repo "${key}"`);
-    return { repo: key, owner };
+    return owner === undefined ? undefined : { repo: key, owner };
+  };
+
+  const ownerFor = (repo?: string): { repo: string; owner: PhaseQueueOwner } => {
+    const resolved = resolveOwner(repo);
+    if (resolved === undefined) {
+      const key = repo === undefined ? defaultRepo : repoLockKey(repo);
+      throw new Error(`unknown owning repo "${key}"`);
+    }
+    return resolved;
   };
 
   const seamFor = (repo: string, owner: PhaseQueueOwner): QueueWorktreeSeam => {
@@ -304,6 +369,9 @@ export function createPhaseQueues(deps: PhaseQueuesDeps): PhaseQueues {
     find(slug, phaseId, repoArg) {
       const repo = repoArg === undefined ? defaultRepo : repoLockKey(repoArg);
       return queues.get(phaseQueueKey(repo, slug, phaseId))?.queue;
+    },
+    owner(repoArg) {
+      return resolveOwner(repoArg)?.owner;
     },
     running() {
       const live: Array<LiveRun & { repo: string }> = [];
