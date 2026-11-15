@@ -422,13 +422,15 @@ export function createStageLock(holders: {
  * surfaced by the queue's reporter and reported to the tool as `illegal` with
  * the queue's message (for example `deps-unlanded`).
  *
- * `busy` means a stage is already running or being dispatched for THIS phase.
- * The queue is FIFO and would otherwise enqueue behind the running stage, so
- * the seam tracks in-flight dispatches itself. Different phases never see busy
- * from each other.
+ * Requests carrying `repoRoot` and `baitonDir` dispatch into that owner's
+ * queue and journal directory. `busy` means a stage is already running or
+ * being dispatched for this (owning repo, slug, phase). The queue is FIFO and
+ * would otherwise enqueue behind the running stage, so the seam tracks
+ * in-flight dispatches itself. Different phases or repos never see busy from
+ * each other.
  */
 export function createRunQueueSeam(
-  queueFor: (slug: string, phaseId: string) => RunQueue,
+  queueFor: (slug: string, phaseId: string, repo?: string) => RunQueue,
   baitonDir: string,
   adapterForRole: AdapterForRole,
   repo?: string,
@@ -436,8 +438,17 @@ export function createRunQueueSeam(
   const inFlight = new Set<string>();
   return {
     async dispatch(req: RunDispatchRequest): Promise<RunDispatchOutcome> {
-      const key = phaseQueueKey(repo ?? path.dirname(baitonDir), req.slug, req.phaseId);
-      const queue = queueFor(req.slug, req.phaseId);
+      const owningRepo = req.repoRoot ?? repo ?? path.dirname(baitonDir);
+      const owningBaitonDir = req.baitonDir ?? (req.repoRoot !== undefined ? path.join(req.repoRoot, '.baiton') : baitonDir);
+      const key = phaseQueueKey(owningRepo, req.slug, req.phaseId);
+      let queue: RunQueue;
+      try {
+        queue = req.repoRoot === undefined
+          ? queueFor(req.slug, req.phaseId)
+          : queueFor(req.slug, req.phaseId, req.repoRoot);
+      } catch (e) {
+        return { kind: 'illegal', reason: e instanceof Error ? e.message : String(e) };
+      }
       if (inFlight.has(key) || queue.isRunning()) {
         return { kind: 'busy' };
       }
@@ -446,7 +457,7 @@ export function createRunQueueSeam(
       try {
         result = await dispatchTrigger(
           queue,
-          baitonDir,
+          owningBaitonDir,
           {
             kind: 'stage',
             slug: req.slug,

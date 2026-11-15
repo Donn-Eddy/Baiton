@@ -14,10 +14,10 @@
  *   `./interventions` (built with `confirmSeamFrom`); hosts should prefer the
  *   intervention seam for new asks.
  * - {@link RunQueueSeam} — the run queues the `run` tool dispatches into
- *   (Req 10.3–10.5), backed by per-phase queues, one per (slug, phase). Each
- *   phase's stages run in its own worktree, and different phases run
- *   concurrently. The stage engine owns the real queues; the tool only asks
- *   for one stage and reports what it answers.
+ *   (Req 10.3–10.5), backed by per-phase queues, one per (owning repo, slug,
+ *   phase). Each phase's stages run in its own worktree, and different phases
+ *   run concurrently. The stage engine owns the real queues; the tool only
+ *   asks for one stage and reports what it answers.
  * - {@link LandPhaseSeam} — the seam `land_phase` merges a done phase's branch
  *   into its plan branch through; the engine serializes it with state commits.
  * - {@link SubAgentSeam} — the seam `spawn_subagent` and `send_to_subagent` go
@@ -64,6 +64,10 @@ export interface RunDispatchRequest {
   slug: string;
   phaseId: string;
   stage: Stage;
+  /** Absolute owning-repo root; omitted for the conversation's own repo. */
+  repoRoot?: string;
+  /** That repo's absolute `.baiton/`; set together with repoRoot. */
+  baitonDir?: string;
 }
 
 /**
