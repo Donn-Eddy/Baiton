@@ -17,10 +17,13 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  parseScopeId,
   SessionStore,
+  scopeId,
   TITLE_MAX_CHARS,
   type SessionScope,
 } from '../src/orchestrator/sessionStore';
+import { normalizeRepoPath } from '../src/orchestrator/planRepos';
 
 /** One generated transcript record. */
 interface GenRecord {
@@ -50,6 +53,25 @@ const sessionArb = fc.record({
   id: fc.hexaString({ minLength: 4, maxLength: 10 }).filter((s) => s.length > 0),
   records: fc.array(recordArb, { maxLength: 6 }),
 });
+
+const slugArb = fc
+  .stringMatching(/^[A-Za-z0-9._-]{1,20}$/)
+  .filter((slug) => slug !== '.' && slug !== '..' && slug !== 'workspace');
+const repoSegmentArb = fc
+  .stringMatching(/^[A-Za-z0-9._-]{1,8}$/)
+  .filter((segment) => segment !== '.' && segment !== '..');
+const repoArb = fc
+  .tuple(fc.array(repoSegmentArb, { minLength: 1, maxLength: 3 }), fc.boolean())
+  .map(([segments, absolute]) => `${absolute ? '/' : ''}${segments.join('/')}`);
+
+function scopeRepoIdentity(repo: string | undefined): string {
+  if (repo === undefined) return '.';
+  return normalizeRepoPath(repo) ?? repo;
+}
+
+function planScopeId(repo: string | undefined, slug: string): string {
+  return scopeId({ kind: 'plan', slug, ...(repo === undefined ? {} : { repo }) });
+}
 
 describe('SessionStore properties', () => {
   const scope: SessionScope = { kind: 'workspace' };
@@ -197,6 +219,85 @@ describe('SessionStore properties', () => {
         },
       ),
       { numRuns: 30 },
+    );
+  });
+});
+
+describe('SessionScope identity properties', () => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'baiton-session-scope-prop-'));
+  const ownerDir = path.join(tempRoot, 'owner', '.baiton');
+  const childBaitonDir = path.join(tempRoot, 'child', '.baiton');
+  const store = new SessionStore({ baitonDir: ownerDir });
+
+  before(() => {
+    // No specs folder: generated owner slugs resolve to the plans layout.
+    mkdirSync(path.join(ownerDir, 'plans'), { recursive: true });
+    mkdirSync(path.join(childBaitonDir, 'plans'), { recursive: true });
+  });
+
+  after(() => {
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('preserves owner ids and paths for every owner scope spelling', () => {
+    fc.assert(
+      fc.property(slugArb, (slug) => {
+        const scopes: SessionScope[] = [
+          { kind: 'plan', slug },
+          { kind: 'plan', slug, repo: '.' },
+          { kind: 'plan', slug, repo: '.', baitonDir: ownerDir },
+        ];
+        const expectedDir = path.join(ownerDir, 'plans', slug, 'chat');
+        const expectedLegacy = path.join(ownerDir, 'plans', slug, 'chat.jsonl');
+        for (const scope of scopes) {
+          assert.strictEqual(scopeId(scope), slug);
+          assert.strictEqual(store.dirFor(scope), expectedDir);
+          assert.strictEqual(store.legacyPathFor(scope), expectedLegacy);
+        }
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('qualifies and parses non-owner repo identities without path separators', () => {
+    fc.assert(
+      fc.property(slugArb, repoArb, (slug, repo) => {
+        const scope: SessionScope = { kind: 'plan', slug, repo, baitonDir: childBaitonDir };
+        const id = scopeId(scope);
+        const normalizedRepo = normalizeRepoPath(repo) ?? repo;
+        assert.ok(id.includes(':'));
+        assert.ok(!id.includes('/'));
+        assert.notStrictEqual(id, slug);
+        assert.deepStrictEqual(parseScopeId(id), { kind: 'plan', slug, repo: normalizedRepo });
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('is injective across repo and slug pairs, treating owner spellings as one repo', () => {
+    const ownerRepoArb = fc.constantFrom<string | undefined>(undefined, '.', './');
+    const repoIdentityArb = fc.oneof(ownerRepoArb, repoArb);
+    const pairArb = fc.record({ repo: repoIdentityArb, slug: slugArb });
+    fc.assert(
+      fc.property(pairArb, pairArb, (left, right) => {
+        const leftEqual = scopeRepoIdentity(left.repo) === scopeRepoIdentity(right.repo) && left.slug === right.slug;
+        assert.strictEqual(planScopeId(left.repo, left.slug) === planScopeId(right.repo, right.slug), leftEqual);
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('keeps generated session transcript paths under their owning baiton dirs', () => {
+    fc.assert(
+      fc.property(sessionArb, (session) => {
+        const ownerScope: SessionScope = { kind: 'plan', slug: 'owner-plan', repo: '.', baitonDir: ownerDir };
+        const childScope: SessionScope = {
+          kind: 'plan', slug: 'child-plan', repo: 'packages/child', baitonDir: childBaitonDir,
+        };
+        assert.ok(store.pathFor(childScope, session.id).startsWith(`${childBaitonDir}${path.sep}`));
+        assert.ok(store.pathFor(ownerScope, session.id).startsWith(`${ownerDir}${path.sep}`));
+      }),
+      { numRuns: 100 },
     );
   });
 });
