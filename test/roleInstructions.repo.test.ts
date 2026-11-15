@@ -8,7 +8,7 @@ import {
 } from '../src/engine/roleInstructions';
 
 describe('role instructions for repository targeting', () => {
-  it('tells the plan writer to select the lowest repo and use child-relative hints', () => {
+  it('tells the phased planner to select the lowest repo and use child-relative hints', () => {
     assert.ok(PLAN_WRITER_INSTRUCTION.includes(PLAN_WRITER_REPO_INSTRUCTION));
     assert.match(PLAN_WRITER_INSTRUCTION, /Choose the lowest repository/);
     assert.match(PLAN_WRITER_INSTRUCTION, /never name a sibling or an ancestor/);
@@ -16,7 +16,7 @@ describe('role instructions for repository targeting', () => {
   });
 
   it('explains repo hints to planners before the complete-context rule', () => {
-    const planner = roleInstructions('planner');
+    const planner = roleInstructions('step-planner');
     assert.ok(planner.includes(PLANNER_REPO_INSTRUCTION));
     assert.ok(planner.includes(CONTEXT_IS_COMPLETE_INSTRUCTION));
     assert.ok(planner.indexOf(PLANNER_REPO_INSTRUCTION) < planner.indexOf(CONTEXT_IS_COMPLETE_INSTRUCTION));

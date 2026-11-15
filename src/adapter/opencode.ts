@@ -86,7 +86,7 @@ export interface OpencodeAgentDefinition {
  * profile is the point of this function: opencode's `SessionReminders` injects
  * a hard read-only reminder keyed on the *name* `plan` (verified in v1.18.30
  * `session/reminders.ts`, condition `agent.name === "plan"`), which overrode
- * the granted run-dir write and left the planner unable to produce
+ * the granted run-dir write and left the step-planner unable to produce
  * `result.json`. A `baiton-`-prefixed name never matches that condition.
  */
 export function opencodeAgentDefinition(role: Role, runId: string): OpencodeAgentDefinition {
@@ -199,9 +199,6 @@ export const OPENCODE_MODELS: readonly string[] = [];
  * disclosed any level" — never "opencode has no variants".
  */
 export const OPENCODE_EFFORTS: readonly string[] = [];
-
-/** Documentation URL for opencode model selection rendered inline in the config panel. */
-export const OPENCODE_MODEL_DOC_URL = 'https://opencode.ai/docs/go/';
 
 // --- opencode model discovery ---
 

@@ -217,11 +217,11 @@ describe('run modes and the investigate stage', () => {
     });
 
     it('keeps every pre-existing stage → role mapping', () => {
-      assert.strictEqual(STAGE_ROLE.plan, 'planner');
+      assert.strictEqual(STAGE_ROLE.plan, 'step-planner');
       assert.strictEqual(STAGE_ROLE.execute, 'executor');
       assert.strictEqual(STAGE_ROLE.review, 'reviewer');
-      assert.strictEqual(STAGE_ROLE['plan-draft'], 'plan-writer');
-      assert.strictEqual(STAGE_ROLE['plan-review'], 'plan-reviewer');
+      assert.strictEqual(STAGE_ROLE['plan-draft'], 'phased-planner');
+      assert.strictEqual(STAGE_ROLE['plan-review'], 'step-reviewer');
       assert.strictEqual(STAGE_ROLE.pr, 'pr-writer');
     });
   });

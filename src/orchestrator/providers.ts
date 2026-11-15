@@ -143,8 +143,7 @@ export const PROVIDERS: Readonly<Record<BuiltinProviderId, ProviderInfo>> = {
   },
   // OpenCode runs TWO hosted gateways that models.dev lists as separate
   // providers with disjoint model sets: Go (the subscription tier, documented
-  // at https://opencode.ai/docs/go — the same page OPENCODE_MODEL_DOC_URL in
-  // src/adapter/opencode.ts points the CLI adapter at) and Zen (pay-as-you-go,
+  // at https://opencode.ai/docs/go) and Zen (pay-as-you-go,
   // https://opencode.ai/docs/zen). They used to be conflated under one
   // `opencode` entry labelled "Go" but pointing at Zen, so the dropdown showed
   // Zen's models under the Go label. The id `opencode` stays Zen because its

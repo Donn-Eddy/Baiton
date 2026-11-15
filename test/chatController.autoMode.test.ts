@@ -365,7 +365,7 @@ describe('ChatController auto mode', () => {
   });
 
   it('settles a gate-approved ask with no card ever pending (allow-list stage)', async () => {
-    gateResult = { kind: 'approve', stage: 'allow-list', rationale: 'claude/planner may read any file' };
+    gateResult = { kind: 'approve', stage: 'allow-list', rationale: 'claude/step-planner may read any file' };
     await startSendWithAutoOn();
     await awaitRunEnd();
 
@@ -375,7 +375,7 @@ describe('ChatController auto mode', () => {
     assert.strictEqual(card.status, 'resolved');
     assert.strictEqual(card.auto, true);
     assert.ok(card.rationale!.includes('Auto mode (allow-list)'));
-    assert.ok(card.rationale!.includes('claude/planner may read any file'));
+    assert.ok(card.rationale!.includes('claude/step-planner may read any file'));
     assert.strictEqual(webview.all('resolveIntervention').length, 0);
     assert.deepStrictEqual(observed, [{ kind: 'approved' }]);
     assert.strictEqual(askRegistry.size, 0);
@@ -409,7 +409,7 @@ describe('ChatController auto mode', () => {
 
   it('renders and audits an escalated ask', async () => {
     const escalation = {
-      summary: 'Planner wants to read a file outside the project folder (/etc/shadow).',
+      summary: 'Step planner wants to read a file outside the project folder (/etc/shadow).',
       detail: 'The path is absolute and outside the workspace.',
       reason: '"/etc/shadow" cannot be proven to stay inside the workspace',
     };
@@ -675,7 +675,7 @@ describe('ChatController auto mode', () => {
     });
 
     it('switching the model while a gated run is in flight leaves the card and records untouched', async () => {
-      gateResult = { kind: 'escalate', summary: 'Planner wants to read a file.' };
+      gateResult = { kind: 'escalate', summary: 'Step planner wants to read a file.' };
       await startSendWithAutoOn();
       await waitFor(() => webview.all('showIntervention').length === 1, 'the pending escalated card');
       const card = webview.last('showIntervention')!.intervention;

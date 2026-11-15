@@ -16,6 +16,7 @@
  */
 import { Role, ROLES } from '../model';
 import { Config, LIMIT_BOUNDS, Limits, SUPPORTED_VERSION } from './types';
+import { legacyKeysFor, resolveRoleEntry } from './roleKeys';
 
 /**
  * One model behind `AgentFormCapability.models`, as the webview receives it
@@ -132,7 +133,7 @@ export interface ConfigFormOptions {
 
 /** One field-level validation error, keyed by a dotted path into {@link ConfigForm}. */
 export interface ConfigFieldError {
-  /** e.g. `roles.planner.agent`, `limits.exec_attempts`, `git.base`. */
+  /** e.g. `roles.step-planner.agent`, `limits.exec_attempts`, `git.base`. */
   path: string;
   message: string;
 }
@@ -322,7 +323,8 @@ export function formFromDocument(doc: unknown): ConfigForm {
 
   const roles = {} as Record<Role, RoleFormEntry>;
   for (const role of ROLES) {
-    const entry = isObject(rawRoles[role]) ? (rawRoles[role] as Record<string, unknown>) : {};
+    const rawEntry = resolveRoleEntry(role, rawRoles);
+    const entry = isObject(rawEntry) ? rawEntry : {};
     roles[role] = {
       agent: asString(entry.agent),
       model: asString(entry.model),
@@ -436,9 +438,11 @@ export function validateConfigForm(
  * a new object; `rawDoc` is never mutated (the caller keeps the original for
  * conflict reporting). Unknown top-level keys (`pr`, `git.verify`, unknown
  * role keys, …) survive untouched, because the merge clones the existing
- * document rather than rebuilding it from the form. Precondition: `form` has
- * already passed {@link validateConfigForm} (limits are parsed with `Number`
- * without re-checking range/integer-ness here).
+ * document rather than rebuilding it from the form. Existing entries under
+ * legacy role keys are carried into the new role keys, then those superseded
+ * keys are removed; unrelated unknown role keys survive. Precondition: `form`
+ * has already passed {@link validateConfigForm} (limits are parsed with
+ * `Number` without re-checking range/integer-ness here).
  */
 export function applyFormToDocument(rawDoc: unknown, form: ConfigForm): Record<string, unknown> {
   const base = isObject(rawDoc) ? { ...rawDoc } : {};
@@ -451,7 +455,8 @@ export function applyFormToDocument(rawDoc: unknown, form: ConfigForm): Record<s
   const existingRoles = isObject(base.roles) ? base.roles : {};
   const roles: Record<string, unknown> = { ...existingRoles };
   for (const role of ROLES) {
-    const existingEntry = isObject(existingRoles[role]) ? (existingRoles[role] as Record<string, unknown>) : {};
+    const resolvedEntry = resolveRoleEntry(role, existingRoles);
+    const existingEntry = isObject(resolvedEntry) ? resolvedEntry : {};
     const formEntry = form.roles[role];
     const entry: Record<string, unknown> = {
       ...existingEntry,
@@ -465,6 +470,9 @@ export function applyFormToDocument(rawDoc: unknown, form: ConfigForm): Record<s
       entry.effort = effort;
     }
     roles[role] = entry;
+    for (const legacy of legacyKeysFor(role)) {
+      delete roles[legacy];
+    }
   }
   out.roles = roles;
 

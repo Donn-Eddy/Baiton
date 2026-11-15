@@ -19,14 +19,16 @@ export interface PlanActionInput {
   status?: string;
   /** True when every recorded PR/MR URL reads merged (derived, never persisted). Absent or false keeps today's actions. */
   prsMerged?: boolean;
+  /** True when the recorded plan branch reads merged into base (derived, never persisted). Absent or false keeps today's actions. */
+  branchMerged?: boolean;
 }
 
-/** Return legal actions in deterministic order: approve, submitPr, showPr. A partial plan offers Submit PR as a retry beside Show PR. A plan whose recorded PRs all read merged offers Show PR only. */
+/** Return legal actions in deterministic order: approve, submitPr, showPr. A partial plan offers Submit PR as a retry beside Show PR. A plan whose recorded PRs all read merged or whose recorded branch is merged into base offers Show PR only. */
 export function legalPlanActions(input: PlanActionInput): PlanAction[] {
   if (input.invalid) {
     return [];
   }
-  if (input.prsMerged === true) {
+  if (input.prsMerged === true || input.branchMerged === true) {
     return input.prUrl !== undefined ? ['showPr'] : [];
   }
   if (input.status === PR_PARTIAL_STATUS) {

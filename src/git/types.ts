@@ -149,13 +149,32 @@ export interface GitWorktree {
  * service", the run worktree design).
  *
  * The same convention as {@link GitService} holds: reads reject on an unexpected
- * non-zero exit, the mutators `addWorktree`, `removeWorktree` and
+ * non-zero exit; {@link isAncestor} treats exit 1 as its normal false answer.
+ * The mutators `addWorktree`, `removeWorktree` and
  * `deleteBranch` reject with a {@link GitError} like `createPlanBranch`,
  * `checkout` and `commit`, and only `merge` returns a {@link Result}, because a
  * conflict is an ordinary outcome the caller reports as a named reason rather
  * than a fault (same rationale as `resetWorkingTree`, Req 15.6).
  */
 export interface GitWorktreeService extends GitService {
+  /**
+   * Whether `ancestor` is an ancestor of `descendant`, backed by
+   * `git merge-base --is-ancestor <ancestor> <descendant>`. Resolves true on
+   * exit 0 and false on exit 1; any other exit or abnormal process termination
+   * rejects with a {@link GitError}. A commit is its own ancestor, so callers
+   * that need a strict ancestor must compare shas themselves. Rejects refs that
+   * are empty or begin with `-`.
+   */
+  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+  /**
+   * Fetch one branch from `remote`, force-updating its remote-tracking ref with
+   * `+refs/heads/<branch>:refs/remotes/<remote>/<branch>`. This makes a commit
+   * present only on the remote visible as `<remote>/<branch>` without fetching
+   * every ref. Rejects with a {@link GitError} on a non-zero exit, such as a
+   * missing remote or branch or a network failure. Rejects empty values and
+   * values beginning with `-`.
+   */
+  fetchBranch(remote: string, branch: string): Promise<void>;
   /**
    * Create a new worktree at `dir`, checked out on a NEW branch `branch`
    * starting at `fromCommit`.

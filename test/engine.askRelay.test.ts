@@ -432,7 +432,7 @@ describe('launchStage relay plumbing', () => {
     workspaceRoot,
     runId: 'run-1',
     stage: 'plan' as const,
-    role: 'planner' as const,
+    role: 'step-planner' as const,
     model: 'gemini-3.1-pro',
     effort: 'medium',
     resume: false,

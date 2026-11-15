@@ -39,7 +39,7 @@
   // output against the compiled TypeScript core.
 
   /** Mirrors src/model/role.ts ROLES — same order. */
-  var ROLES = ['plan-writer', 'planner', 'plan-reviewer', 'executor', 'reviewer', 'pr-writer'];
+  var ROLES = ['phased-planner', 'step-planner', 'step-reviewer', 'executor', 'reviewer', 'pr-writer'];
 
   /**
    * Mirrors src/config/types.ts LIMIT_BOUNDS — same key order, because the

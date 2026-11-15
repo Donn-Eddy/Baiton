@@ -208,22 +208,22 @@ describe('ClaudeAdapter attach() (Req 3.3, 3.4)', () => {
   });
 
   it('uses the role-specific permission row, e.g. the read-only allow-list for planner', () => {
-    const launchSpec = adapter.attach({ role: 'planner', runId: 'run-1', sessionId: 'session-1' });
+    const launchSpec = adapter.attach({ role: 'step-planner', runId: 'run-1', sessionId: 'session-1' });
     assert.ok(findPair(launchSpec.shellArgs, '--allowedTools', READ_ONLY_ALLOWED_TOOLS) >= 0);
   });
 });
 
 describe('ClaudeAdapter role permission table', () => {
-  it('treats the plan writer as a read-only role', () => {
+  it('treats the phased planner as a read-only role', () => {
     assert.ok(
-      (READ_ONLY_ROLES as readonly string[]).includes('plan-writer'),
-      'plan-writer must be read-only: it writes only its result file',
+      (READ_ONLY_ROLES as readonly string[]).includes('phased-planner'),
+      'phased-planner must be read-only: it writes only its result file',
     );
   });
 
-  it('launches the plan writer with the read-only allow-list', () => {
+  it('launches the phased planner with the read-only allow-list', () => {
     const launchSpec = new ClaudeAdapter().launch({
-      role: 'plan-writer',
+      role: 'phased-planner',
       model: 'claude-sonnet-5',
       prompt: 'Read /repo/.baiton/runs/draft-1/brief.md and do what it says.',
       runId: 'draft-1',
@@ -328,9 +328,9 @@ describe('ClaudeAdapter --append-system-prompt carries the role profile', () => 
   });
 
   it('is unaffected by the readOnlyFallbackToAcceptEdits flip', () => {
-    const on = new ClaudeAdapter({ readOnlyFallbackToAcceptEdits: true }).launch(req({ role: 'planner' }));
-    const off = new ClaudeAdapter(DEFAULT_PERMISSION_MODE).launch(req({ role: 'planner' }));
-    const expected = roleProfile('planner').systemPrompt;
+    const on = new ClaudeAdapter({ readOnlyFallbackToAcceptEdits: true }).launch(req({ role: 'step-planner' }));
+    const off = new ClaudeAdapter(DEFAULT_PERMISSION_MODE).launch(req({ role: 'step-planner' }));
+    const expected = roleProfile('step-planner').systemPrompt;
     assert.ok(findPair(on.shellArgs, '--append-system-prompt', expected) >= 0);
     assert.ok(findPair(off.shellArgs, '--append-system-prompt', expected) >= 0);
   });

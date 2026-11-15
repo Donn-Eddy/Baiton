@@ -76,18 +76,18 @@ describe('config local overlay', () => {
     const dir = newDir();
     const baseline = JSON.parse(defaultConfigJson()) as Record<string, unknown>;
     const roles = baseline.roles as Record<string, unknown>;
-    const planner = roles.planner as Record<string, unknown>;
+    const planner = roles['step-planner'] as Record<string, unknown>;
     planner.model = 'baseline-model';
     const baselineText = `${JSON.stringify(baseline, null, 2)}\n`;
     writeBaseline(dir, baselineText);
-    writeLocal(dir, '{"roles":{"planner":{"model":"local-model"}}}');
+    writeLocal(dir, '{"roles":{"step-planner":{"model":"local-model"}}}');
 
     const result = await loadConfig(dir);
 
     assert.ok(isOk(result));
     if (isOk(result)) {
-      assert.strictEqual(result.value.roles.planner.model, 'local-model');
-      assert.strictEqual(result.value.roles.planner.agent, defaultConfig().roles.planner.agent);
+      assert.strictEqual(result.value.roles['step-planner'].model, 'local-model');
+      assert.strictEqual(result.value.roles['step-planner'].agent, defaultConfig().roles['step-planner'].agent);
       assert.deepStrictEqual(result.value.roles.executor, defaultConfig().roles.executor);
     }
   });

@@ -22,7 +22,7 @@ import { ROLES, Role } from '../src/model/role';
  * match the permission table
  *
  * For any role and request, the launch arguments the adapter builds SHALL match
- * the design's permission table: read-only roles (planner, plan-reviewer,
+ * the design's permission table: read-only roles (phased-planner, step-planner,
  * pr-writer) get `--allowedTools "Read,Glob,Grep,Write(.baiton/runs/**)"`
  * (Requirement 15.1); reviewer additionally gets `Bash` (Requirement 15.2);
  * executor gets `--permission-mode acceptEdits` (Requirement 15.3); every role
@@ -44,7 +44,7 @@ function expectedPermissionArgs(role: Role, mode: PermissionMode): string[] {
   if (role === 'reviewer') {
     return ['--allowedTools', REVIEWER_ALLOWED_TOOLS];
   }
-  // Read-only roles: planner, plan-reviewer, pr-writer.
+  // Read-only roles: phased-planner, step-planner, step-reviewer, pr-writer.
   if (mode.readOnlyFallbackToAcceptEdits) {
     return ['--permission-mode', ACCEPT_EDITS_MODE];
   }

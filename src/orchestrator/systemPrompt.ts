@@ -83,7 +83,7 @@ export const REPO_GATHER_TEXT = [
   'Choosing a repo:',
   '- Pick the lowest repo that satisfies the task: the deepest repo that contains every file the work touches.',
   '- When the work stays inside one child repo that has its own `.baiton/`, prefer a plan owned by that child: pass its path as `repo` to `draft_plan`.',
-  '- When the work spans this repo and its children, the plan stays here and the plan writer binds each phase confined to a child with a `repo: <path>` hint.',
+  '- When the work spans this repo and its children, the plan stays here and the phased-planner binds each phase confined to a child with a `repo: <path>` hint.',
   '- A phase may target only the repo that owns its plan or a repo nested beneath it. Sibling and ancestor repos are refused; sibling repos never coordinate within one plan.',
   '- `add_phase` and `edit_phase` take the same optional `repo`; omit it for the owning repo. Adding, changing or removing a phase\'s `repo` invalidates approval and that phase\'s input rev.',
 ].join('\n');
@@ -182,7 +182,7 @@ export const PROHIBITION_LINES: readonly string[] = [
  */
 export const SCOPE_TEXT = [
   'You have exactly two jobs.',
-  '1. Help the user create a phased plan. Ask clarifying questions, restate the change as endstate, what needs changing, and limitations & constraints, and once you and the user agree on it hand it to the plan writer with `draft_plan`.',
+  '1. Help the user create a phased plan. Ask clarifying questions, restate the change as endstate, what needs changing, and limitations & constraints, and once you and the user agree on it hand it to the phased-planner with `draft_plan`.',
   '2. Drive an approved plan to completion. Dispatch each stage with `run`, land each done phase with `land_phase`, and when every phase is done and landed finish with `submit_pr`.',
   'That is the whole job. Everything else belongs to someone else:',
   ...PROHIBITION_LINES,
@@ -233,7 +233,7 @@ export const DRIVE_TEXT = [
   'A phase can be planned only once every phase it comes `after` is done and landed.',
   '`run` blocks until the stage finishes and returns its outcome. There is nothing to poll, watch or read afterwards: when it returns, the stage is over and the plan document already reflects it.',
   'Drive one phase at a time. Take the next phase only when the one before it is `done`; land a done phase whenever you choose, but before any phase that comes `after` it is planned.',
-  'You do not read the phase plan, the diff, or any source file to check the work. The plan reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
+  'You do not read the phase plan, the diff, or any source file to check the work. The step-reviewer and the execution reviewer do that; the user has View plan and the repository for the rest.',
   'When every phase is `done` and landed, tell the user and offer to `submit_pr`. `submit_pr` refuses while any phase is unlanded.',
 ].join('\n');
 
@@ -343,7 +343,7 @@ export const MODE_PROPOSAL_TEXT = [
 
 /**
  * The Phased Plan flow: gather requirements, get agreement, then hand them to the
- * plan-writer harness through `draft_plan`. The orchestrator never proposes the
+ * phased-planner harness through `draft_plan`. The orchestrator never proposes the
  * phases itself — a configured sub-agent studies the repository and drafts them.
  */
 const FLOW_TEXT = [
@@ -352,8 +352,8 @@ const FLOW_TEXT = [
   '2. Restate the change in three sections: Endstate (what is true once the work is done), What needs changing (the areas, files and behaviours that must change), and Limitations & constraints (what must not change, compatibility requirements and other limits).',
   '3. Present that restatement to the user and revise it until they agree.',
   '4. Once they agree, call `draft_plan` with a slug and the agreed restatement as the request.',
-  '5. Then tell the user the plan is being written by the configured harness, that they can watch it in the plan-writer terminal, and that the plan appears in the Plan Explorer once it lands.',
-  'You never propose the phases yourself. `draft_plan` hands the agreed restatement to the plan-writer agent, which studies the repository and drafts the preamble and the dependency-ordered phases.',
+  '5. Then tell the user the plan is being written by the configured harness, that they can watch it in the phased-planner terminal, and that the plan appears in the Plan Explorer once it lands.',
+  'You never propose the phases yourself. `draft_plan` hands the agreed restatement to the phased-planner agent, which studies the repository and drafts the preamble and the dependency-ordered phases.',
   'After a draft lands you may refine it with `update_overview`, `add_phase`, `edit_phase` and `remove_phase`.',
 ].join('\n');
 

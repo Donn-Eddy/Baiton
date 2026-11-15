@@ -247,8 +247,8 @@ describe('ConfigPanelController ', () => {
     const editedForm = { ...loadedMsg.form };
     editedForm.roles = {
       ...editedForm.roles,
-      planner: {
-        ...editedForm.roles.planner,
+      'step-planner': {
+        ...editedForm.roles['step-planner'],
         model: 'new-planner-model',
       },
     };
@@ -266,7 +266,7 @@ describe('ConfigPanelController ', () => {
     const fileTextOnDisk = fs.readFileSync(localConfigFilePath(dir), 'utf8');
     assert.ok(fileTextOnDisk.endsWith('\n'), 'file must end with trailing newline');
     const parsed = JSON.parse(fileTextOnDisk);
-    assert.strictEqual(parsed.roles.planner.model, 'new-planner-model');
+    assert.strictEqual(parsed.roles['step-planner'].model, 'new-planner-model');
     assert.strictEqual(parsed.custom_unknown_key, 'preserved_value');
     assert.deepStrictEqual(parsed.pr, { tool: 'custom-pr-tool' });
     assert.strictEqual(fileTextOnDisk, `${JSON.stringify(parsed, null, 2)}\n`);
@@ -297,8 +297,8 @@ describe('ConfigPanelController ', () => {
     const badForm = { ...loadedMsg.form };
     badForm.roles = {
       ...badForm.roles,
-      planner: {
-        ...badForm.roles.planner,
+      'step-planner': {
+        ...badForm.roles['step-planner'],
         model: '   ',
       },
     };
@@ -316,9 +316,9 @@ describe('ConfigPanelController ', () => {
       assert.strictEqual(saveFailedMsg.reason, 'invalid');
       assert.ok(saveFailedMsg.errors);
       const hasPlannerModelError = saveFailedMsg.errors.some(
-        (e) => e.path === 'roles.planner.model',
+        (e) => e.path === 'roles.step-planner.model',
       );
-      assert.ok(hasPlannerModelError, 'must report roles.planner.model error path');
+      assert.ok(hasPlannerModelError, 'must report roles.step-planner.model error path');
     }
 
     const fileAfter = fs.readFileSync(localConfigFilePath(dir), 'utf8');
@@ -917,7 +917,7 @@ describe('ConfigPanelController ', () => {
       assert.deepStrictEqual(loads[0].options.byAgent.claude.models, [
         'first-model',
         // the configured model is appended by the round-trip rule
-        defaultConfig().roles.planner.model,
+        defaultConfig().roles['step-planner'].model,
       ]);
       assert.ok(loads[1].options.byAgent.claude.models.includes('second-model'));
       assert.strictEqual(loads[1].options.byAgent.claude.models.includes('first-model'), false);
@@ -1037,7 +1037,7 @@ describe('ConfigPanelController ', () => {
         ...base,
         roles: {
           ...base.roles,
-          planner: { agent: 'claude', model: 'claude-opus-4-9', effort: 'high' },
+          'step-planner': { agent: 'claude', model: 'claude-opus-4-9', effort: 'high' },
         },
       };
       writeConfigFile(dir, `${JSON.stringify(doc, null, 2)}\n`);
@@ -1074,7 +1074,7 @@ describe('ConfigPanelController ', () => {
       const reloaded = await loadConfig(dir);
       assert.ok(isOk(reloaded));
       if (isOk(reloaded)) {
-        assert.strictEqual(reloaded.value.roles.planner.model, 'claude-opus-4-9');
+        assert.strictEqual(reloaded.value.roles['step-planner'].model, 'claude-opus-4-9');
       }
     });
 
@@ -1333,14 +1333,14 @@ describe('ConfigPanelController ', () => {
           const editedForm = { ...loaded.form };
           editedForm.roles = {
             ...editedForm.roles,
-            planner: { ...editedForm.roles.planner, model: 'model-after-one-way-message' },
+            'step-planner': { ...editedForm.roles['step-planner'], model: 'model-after-one-way-message' },
           };
           await webview.send({ type: 'save', form: editedForm, token: loaded.token });
 
           assert.strictEqual(webview.messages.length, 2);
           assert.strictEqual(webview.messages[1].type, 'saved');
           const parsed = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
-          assert.strictEqual(parsed.roles.planner.model, 'model-after-one-way-message');
+          assert.strictEqual(parsed.roles['step-planner'].model, 'model-after-one-way-message');
         });
 
         it('logs a synchronous throw and posts nothing; a following save still works', async () => {
@@ -1486,7 +1486,7 @@ describe('ConfigPanelController ', () => {
         const form = { ...loaded.form };
         form.roles = {
           ...form.roles,
-          planner: { ...form.roles.planner, model: 'baseline-save-model' },
+          'step-planner': { ...form.roles['step-planner'], model: 'baseline-save-model' },
         };
         await webview.send({ type: 'save', form, token: loaded.token });
 
@@ -1494,7 +1494,7 @@ describe('ConfigPanelController ', () => {
         assert.strictEqual(fs.readFileSync(configFilePath(dir), 'utf8'), baselineText);
         const local = JSON.parse(fs.readFileSync(localConfigFilePath(dir), 'utf8'));
         assert.deepStrictEqual(local.baselineUnknown, { keep: true });
-        assert.strictEqual(local.roles.planner.model, 'baseline-save-model');
+        assert.strictEqual(local.roles['step-planner'].model, 'baseline-save-model');
       });
 
       it('local values win on load and saves leave the committed baseline unchanged', async () => {

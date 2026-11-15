@@ -227,4 +227,50 @@ describe('planActions (property)', () => {
       { numRuns: 200 },
     );
   });
+
+  it('a branch-merged plan offers Show PR only, including pr-partial retries', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        prUrlArb,
+        phaseStatesArb,
+        statusArb,
+        (approved, prUrl, phaseStates, status) => {
+          assert.deepStrictEqual(
+            legalPlanActions({ approved, invalid: false, prUrl, phaseStates, status, branchMerged: true }),
+            prUrl !== undefined ? ['showPr'] : [],
+          );
+          assert.deepStrictEqual(
+            legalPlanActions({ approved, invalid: true, prUrl, phaseStates, status, branchMerged: true }),
+            [],
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it('an absent or false branch-merged fact preserves today\'s actions', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.boolean(),
+        prUrlArb,
+        phaseStatesArb,
+        statusArb,
+        (approved, invalid, prUrl, phaseStates, status) => {
+          const input = { approved, invalid, prUrl, phaseStates, status };
+          assert.deepStrictEqual(
+            legalPlanActions({ ...input, branchMerged: false }),
+            legalPlanActions(input),
+          );
+          assert.deepStrictEqual(
+            legalPlanActions({ ...input, branchMerged: undefined }),
+            legalPlanActions(input),
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
 });

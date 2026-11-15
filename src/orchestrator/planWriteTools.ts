@@ -8,7 +8,7 @@
  * {@link GuardContext.resolveMutatingPath} so the write can only land under
  * `.baiton/plans/` or legacy `.baiton/specs/` (Req 8.1, 8.2).
  *
- * The `draft_plan` control tool hands the request to the plan-writer harness,
+ * The `draft_plan` control tool hands the request to the phased-planner harness,
  * and the plan-draft runner in `src/engine/planDraft.ts` renders and commits
  * new plans. These tools refine plans and legacy spec documents after they exist.
  *

@@ -174,7 +174,9 @@ import type { AutoModeGate, OrchestratorConfig } from './chatController';
 import { CHAT_VIEW_ID, ChatWebviewProvider } from './chatWebview';
 import {
   PlanExplorer,
+  branchMergedIntoBase,
   treeNodeTarget,
+  type BranchMergedChecker,
   type PrsMergedChecker,
   type TreeNode,
 } from './planExplorer';
@@ -250,12 +252,12 @@ export const COMMANDS = {
 /**
  * The role the Auto-mode gate evaluates a harness ask against when it arrives
  * with no run context — an orchestrator-raised permission ask, which never
- * passes through the relay. `planner` is the most restrictive profile
+ * passes through the relay. `step-planner` is the most restrictive profile
  * (read-only, no shell, writes confined to its run dir), so the deterministic
  * stage can only ever clear reads, searches and recognised read-only shell
  * commands on its own and everything else goes to the model stage.
  */
-const AUTO_MODE_FALLBACK_ROLE: Role = 'planner';
+const AUTO_MODE_FALLBACK_ROLE: Role = 'step-planner';
 
 /** Run id used for the same reason: it matches no real run directory, so no write rule can fire. */
 const AUTO_MODE_UNKNOWN_RUN = 'unknown-run';
@@ -589,6 +591,25 @@ export function registerCommands(
       return [url, state ?? 'unknown'];
     })));
     return planPrsMerged(urls, observed);
+  };
+
+  /** Plans (root + slug) whose base has already been fetched this session. */
+  const branchFetched = new Set<string>();
+  /** Whether a plan's recorded branch is merged into `<remote>/<base>`; read-only, never writes, commits, pushes or checks out. Unresolvable repo/remote/refs reject (the explorer logs once and treats it as not merged). */
+  const branchMergedForPlan: BranchMergedChecker = async (query) => {
+    const name = query.repo;
+    const root = name === undefined || name === ownerRepoName()
+      ? repoRoot
+      : activation.repos?.repos.find((r) => r.name === name)?.root;
+    if (root === undefined) throw new Error(`repo ${name} is not in the workspace`);
+    const rootGit = path.resolve(root) === path.resolve(repoRoot)
+      ? git
+      : activation.git?.forRepo(root) ?? createGitService(root);
+    const remote = (name !== undefined ? activation.repoConfigs?.get(name)?.git?.remote : undefined) ?? readGitSettings().remote;
+    const fetchKey = `${path.resolve(root)}\u0000${query.slug}`;
+    const fetch = !branchFetched.has(fetchKey);
+    branchFetched.add(fetchKey);
+    return branchMergedIntoBase(rootGit, remote, query, fetch);
   };
 
   // Submit PR (design section 8): the per-plan flow over the same seams as the
@@ -1203,7 +1224,7 @@ export function registerCommands(
     surface,
     workspace.restricted,
     (slug) => chatController.setActivePlan(slug),
-    { prsMerged: prsMergedForPlan },
+    { prsMerged: prsMergedForPlan, branchMerged: branchMergedForPlan },
   ).start();
   disposables.push(
     vscode.window.registerTreeDataProvider(PLAN_EXPLORER_VIEW_ID, explorer),

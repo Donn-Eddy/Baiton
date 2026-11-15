@@ -9,7 +9,7 @@ import type { Role } from '../model/role';
  * `permissions.ts`, and every other adapter re-derived it from
  * {@link isReadOnlyRole} by mapping onto whatever "plan mode" its CLI shipped.
  * That is not equivalent: opencode's built-in `plan` agent injects a system
- * reminder keyed on the agent *name* that forbids all writes, so a planner
+ * reminder keyed on the agent *name* that forbids all writes, so a step-planner
  * launched as `--agent plan` never wrote its `result.json` even once the
  * permission had been granted. Owning the policy here and translating it per
  * adapter removes that class of defect.
@@ -150,29 +150,29 @@ function readOnlyFragment(who: string): string {
 
 /** The six default profiles, keyed by role. Constants: there is no user override. */
 export const ROLE_PROFILES: Record<Role, RoleProfile> = {
-  'plan-writer': {
-    role: 'plan-writer',
-    agentName: 'baiton-plan-writer',
-    description: 'Baiton plan-writer (read-only, writes only its run result)',
+  'phased-planner': {
+    role: 'phased-planner',
+    agentName: 'baiton-phased-planner',
+    description: 'Baiton phased-planner (read-only, writes only its run result)',
     shell: false,
     write: 'run-dir',
-    systemPrompt: prompt(readOnlyFragment('plan writer')),
+    systemPrompt: prompt(readOnlyFragment('phased planner')),
   },
-  planner: {
-    role: 'planner',
-    agentName: 'baiton-planner',
-    description: 'Baiton planner (read-only, writes only its run result)',
+  'step-planner': {
+    role: 'step-planner',
+    agentName: 'baiton-step-planner',
+    description: 'Baiton step-planner (read-only, writes only its run result)',
     shell: false,
     write: 'run-dir',
-    systemPrompt: prompt(readOnlyFragment('planner')),
+    systemPrompt: prompt(readOnlyFragment('step planner')),
   },
-  'plan-reviewer': {
-    role: 'plan-reviewer',
-    agentName: 'baiton-plan-reviewer',
-    description: 'Baiton plan-reviewer (read-only, writes only its run result)',
+  'step-reviewer': {
+    role: 'step-reviewer',
+    agentName: 'baiton-step-reviewer',
+    description: 'Baiton step-reviewer (read-only, writes only its run result)',
     shell: false,
     write: 'run-dir',
-    systemPrompt: prompt(readOnlyFragment('plan reviewer')),
+    systemPrompt: prompt(readOnlyFragment('step reviewer')),
   },
   executor: {
     role: 'executor',

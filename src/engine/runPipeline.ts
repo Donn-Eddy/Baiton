@@ -69,7 +69,7 @@ import type { Unsubscribe } from './resultWatcher';
  * — so a read-only investigation needs no new role and no config migration.
  */
 export const ROLE_FOR_RUN_STAGE: Record<RunStage, Role> = {
-  plan: 'planner',
+  plan: 'step-planner',
   execute: 'executor',
   review: 'reviewer',
   investigate: 'reviewer',

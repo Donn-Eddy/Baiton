@@ -255,7 +255,7 @@ describe('plan-draft runner (unit)', () => {
     assert.ok(contextual.includes('- `packages/api`'));
   });
 
-  it('launches the plan writer, writes the brief, and returns the run id immediately', async () => {
+  it('launches the phased planner, writes the brief, and returns the run id immediately', async () => {
     const h = track(makeHarness());
 
     const started = await h.runner.start({
@@ -276,15 +276,15 @@ describe('plan-draft runner (unit)', () => {
       path.join(h.root, '.baiton', 'runs', 'draft-run-1', 'brief.md'),
       'utf8',
     );
-    assert.match(brief, /plan writer/i);
+    assert.match(brief, /phased planner/i);
     assert.ok(brief.includes('Goal: add a greeting module.'));
     assert.ok(brief.includes('"phases"'));
     assert.ok(brief.includes('"endstate"'));
 
-    // The launch used the plan-writer role and the configured model.
+    // The launch used the phased-planner role and the configured model.
     assert.deepStrictEqual(
       h.adapter.launches.map((l) => [l.role, l.model, l.effort]),
-      [['plan-writer', 'writer-model', 'high']],
+      [['phased-planner', 'writer-model', 'high']],
     );
 
     // The start is journaled before the result lands.
@@ -560,8 +560,8 @@ describe('plan-draft runner (unit)', () => {
     assert.strictEqual(started.ok, false, 'an unknown agent id must refuse the draft');
     if (!started.ok) {
       assert.strictEqual(started.error.kind, 'unknown-agent');
-      assert.match(started.error.message, /plan-writer/);
-      assert.match(started.error.message, /roles\.plan-writer\.agent/);
+      assert.match(started.error.message, /phased-planner/);
+      assert.match(started.error.message, /roles\.phased-planner\.agent/);
       assert.match(started.error.message, /\.baiton\/config\.json/);
     }
     assert.strictEqual(h.adapter.probeCount, 0, 'no probe runs for an unknown agent');
