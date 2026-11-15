@@ -21,7 +21,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Result, err, ok } from '../model';
 import { defaultConfigJson } from './defaultConfig';
-import { GITIGNORE_CONTENTS } from './gitignore';
+import { refreshGitignore } from './gitignore';
 import { configFilePath, localConfigFilePath } from './loadConfig';
 import { PLANS_SUBDIR } from '../storage/documentLocation';
 
@@ -32,9 +32,9 @@ import { PLANS_SUBDIR } from '../storage/documentLocation';
  *                       defaults; `false` when a `config.local.json` or
  *                       committed `config.json` baseline already existed, in
  *                       which case both are left byte-for-byte untouched.
- * - `ensuredGitignore` — always `true` on success: `.gitignore` is written or
- *                       overwritten with the required exclusions regardless of
- *                       whether a config pre-existed (Req 1.2, 1.3).
+ * - `ensuredGitignore` — always `true` on success: `.gitignore` includes the
+ *                       required exclusions regardless of whether a config
+ *                       pre-existed (Req 1.2, 1.3).
  */
 export interface InitOutcome {
   createdConfig: boolean;
@@ -67,7 +67,8 @@ interface CreatedTracker {
  * Order of operations, chosen so rollback is precise:
  * 1. Ensure `baitonDir`, `runs/` and `plans/` exist, recording only the
  *    directories this call actually created.
- * 2. Write `.gitignore` (Req 1.2), recording it if newly created.
+ * 2. Merge the required exclusions into `.gitignore` (Req 1.2), recording it
+ *    if newly created. Existing user lines are preserved.
  * 3. If both `config.local.json` and `config.json` are absent, seed the local
  *    file from defaults (Req 1.1) and record it. If either exists, leave both
  *    untouched and report `createdConfig: false` (Req 1.3).
@@ -94,10 +95,10 @@ export async function initialize(baitonDir: string): Promise<Result<InitOutcome,
     await ensureDir(plansDir, created);
 
     // 2. `.gitignore` is always ensured with the required exclusions, whether
-    //    or not configuration already exists (Req 1.2, 1.3). Writing it fresh
-    //    each time keeps the exclusions correct even if a stale copy existed.
+    //    or not configuration already exists (Req 1.2, 1.3). Merge the file so
+    //    missing exclusions are added and user lines survive.
     const gitignorePreexisted = await pathExists(gitignorePath);
-    await fs.writeFile(gitignorePath, GITIGNORE_CONTENTS, 'utf8');
+    await refreshGitignore(baitonDir);
     if (!gitignorePreexisted) {
       created.files.push(gitignorePath);
     }

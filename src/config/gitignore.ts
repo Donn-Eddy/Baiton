@@ -53,31 +53,69 @@ export const GITIGNORE_CONTENTS = [
   '',
 ].join('\n');
 
+/**
+ * Ignore lines written by older Baiton builds that should be removed during
+ * refresh instead of being retained as user additions. Every entry was
+ * written by an older Baiton build.
+ */
+export const RETIRED_GITIGNORE_LINES: readonly string[] = [
+  // This obsolete pattern was written by an older build.
+  '/chat/*',
+];
+
 /** Outcome of {@link refreshGitignore}. */
 export type GitignoreRefresh = 'unchanged' | 'rewritten';
 
 /**
- * Bring `.baiton/.gitignore` up to date with {@link GITIGNORE_CONTENTS}.
+ * Merge the canonical exclusions into `.baiton/.gitignore`, preserving lines
+ * outside the canonical set.
  *
  * The Initialize command writes the file once, but the exclusion list grows
  * as new Baiton-owned artifacts appear (for example the per-session `chat/`
  * folders). A workspace initialized by an older build would otherwise keep a
- * stale ignore list until Initialize is rerun by hand, so activation calls
- * this to rewrite the file whenever its contents differ from the canonical
- * text. A missing `.baiton/` directory is not created here: an uninitialized
- * folder is left alone.
+ * stale ignore list until Initialize is rerun by hand, so activation merges
+ * the required lines while preserving user additions. A missing `.baiton/`
+ * directory is not created here: an uninitialized folder is left alone.
  */
+export function mergeGitignore(current: string | undefined): string {
+  if (current === undefined) {
+    return GITIGNORE_CONTENTS;
+  }
+
+  const managed = new Set(GITIGNORE_CONTENTS.split('\n').filter((line) => line.length > 0));
+  const retired = new Set(RETIRED_GITIGNORE_LINES);
+  const kept = current.split(/\r?\n/).filter((line) => {
+    const comparison = line.replace(/\s+$/, '');
+    return !managed.has(comparison) && !retired.has(comparison);
+  });
+
+  while (kept.length > 0 && kept[0].trim().length === 0) {
+    kept.shift();
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim().length === 0) {
+    kept.pop();
+  }
+
+  if (kept.length === 0) {
+    return GITIGNORE_CONTENTS;
+  }
+  return `${GITIGNORE_CONTENTS}\n${kept.join('\n')}\n`;
+}
+
 export async function refreshGitignore(baitonDir: string): Promise<GitignoreRefresh> {
   const gitignorePath = path.join(baitonDir, '.gitignore');
   let current: string | undefined;
   try {
     current = await fs.readFile(gitignorePath, 'utf8');
-  } catch {
-    current = undefined;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw cause;
+    }
   }
-  if (current === GITIGNORE_CONTENTS) {
+  const next = mergeGitignore(current);
+  if (next === current) {
     return 'unchanged';
   }
-  await fs.writeFile(gitignorePath, GITIGNORE_CONTENTS, 'utf8');
+  await fs.writeFile(gitignorePath, next, 'utf8');
   return 'rewritten';
 }
