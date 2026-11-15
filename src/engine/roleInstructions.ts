@@ -79,10 +79,11 @@ export const PLAN_WRITER_REPO_INSTRUCTION = [
   '- A phase\'s `files` are relative to its target repository.',
   '- If every phase would target the same child repository, say in `constraints` that the plan belongs in that child repository.',
   '- When the context lists no repositories, omit `repo` everywhere.',
+  '- A plan is identified by its owning repository and its slug, written `<repoPath>:<slug>` when the repository must be named. The plan you write belongs to the repository marked as owning, even when the conversation that asked for it lives in another repository; every `repo` and `files` path is relative to that owning repository.',
 ].join('\n');
 
 /** Repository placement guidance for the step-planner role. */
-export const PLANNER_REPO_INSTRUCTION = 'When the phase line carries a `repo:` hint, the phase runs in that repository: the executor works in its root, and every file path in your plan is relative to it. Without the hint the phase runs in the repository that owns the plan.';
+export const PLANNER_REPO_INSTRUCTION = 'When the phase line carries a `repo:` hint, the phase runs in that repository: the executor works in its root, and every file path in your plan is relative to it. Without the hint the phase runs in the repository that owns the plan. The plan\'s owning repository is the one whose `.baiton/` holds it, which may differ from the repository a conversation was started in.';
 
 /**
  * The phased planner's instructions: study the repository read-only and produce
