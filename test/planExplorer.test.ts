@@ -236,6 +236,156 @@ describe('PlanExplorer', function () {
     );
   });
 
+  it('keeps a single named source owner-aware without changing its visible tree identity', async () => {
+    const topologies = repoTopologies(root);
+    const sources = () => [{
+      repo: '.', baitonDir, topology: topologies.owner,
+      isApproved: async () => false, actionable: true,
+    }];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { sources },
+    ).start();
+    await waitFor(() => groupSlugs().pending?.includes('alpha') === true, 'the named single-source refresh');
+
+    const pending = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'pending')!;
+    const alpha = explorer.getChildren(pending).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'alpha')!;
+    assert.strictEqual(alpha.kind, 'plan');
+    assert.strictEqual(alpha.node.ownerRepo, '.');
+    const item = explorer.getTreeItem(alpha);
+    assert.strictEqual(item.description, 'no status');
+    assert.deepStrictEqual(item.command?.arguments, ['alpha']);
+    assert.strictEqual(item.id, undefined);
+    const phase = explorer.getChildren(alpha)[0];
+    assert.strictEqual(phase.kind, 'phase');
+    assert.strictEqual(phase.node.ownerRepo, '.');
+    assert.strictEqual(phase.node.repo, undefined);
+    assert.strictEqual(
+      (globalThis as unknown as { __vscodeFake: { watchers: unknown[] } }).__vscodeFake.watchers.length,
+      1,
+    );
+  });
+
+  it('keeps same-slug rows distinct and carries their owners onto plans and phases', async () => {
+    const childBaitonDir = path.join(root, 'packages', 'api', '.baiton');
+    const childPlan = path.join(childBaitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(childPlan), { recursive: true });
+    fs.writeFileSync(childPlan, [
+      '---', 'status: pr', 'pr: https://github.com/o/r/pull/1', '---', validPlan(),
+    ].join('\n'));
+    const topologies = repoTopologies(root);
+    const approvals: string[] = [];
+    const sources = () => [
+      {
+        repo: '.', baitonDir, topology: topologies.owner,
+        isApproved: async (slug: string) => { approvals.push(`owner:${slug}`); return false; },
+        actionable: true,
+      },
+      {
+        repo: 'packages/api', baitonDir: childBaitonDir, topology: topologies.api,
+        isApproved: async (slug: string) => { approvals.push(`api:${slug}`); return slug === 'alpha'; },
+        actionable: true,
+      },
+    ];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: () => undefined } as unknown as Surface,
+      false,
+      undefined,
+      { sources },
+    ).start();
+    await waitFor(() => groupSlugs().active?.includes('alpha') === true &&
+      groupSlugs().pending?.includes('alpha') === true, 'both same-slug repository rows');
+
+    const active = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'active')!;
+    const pending = explorer.getChildren().find((group) =>
+      group.kind === 'group' && group.node.kind === 'pending')!;
+    const apiPlan = explorer.getChildren(active).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'alpha')!;
+    const ownerPlan = explorer.getChildren(pending).find((node) =>
+      node.kind === 'plan' && node.node.slug === 'alpha')!;
+    assert.strictEqual(apiPlan.kind, 'plan');
+    assert.strictEqual(ownerPlan.kind, 'plan');
+    assert.ok(approvals.includes('api:alpha'));
+    assert.strictEqual(apiPlan.node.approved, true);
+    assert.strictEqual(apiPlan.node.ownerRepo, 'packages/api');
+    assert.strictEqual(ownerPlan.node.ownerRepo, '.');
+
+    const apiItem = explorer.getTreeItem(apiPlan);
+    const ownerItem = explorer.getTreeItem(ownerPlan);
+    assert.strictEqual(apiItem.id, 'packages/api:alpha');
+    assert.strictEqual(ownerItem.id, '.:alpha');
+    assert.deepStrictEqual(apiItem.command?.arguments, ['alpha', 'packages/api']);
+    assert.strictEqual(apiItem.contextValue, planContextValue(['showPr']));
+    const apiPhase = explorer.getChildren(apiPlan)[0];
+    const ownerPhase = explorer.getChildren(ownerPlan)[0];
+    assert.strictEqual(apiPhase.kind, 'phase');
+    assert.strictEqual(ownerPhase.kind, 'phase');
+    assert.strictEqual(apiPhase.node.ownerRepo, 'packages/api');
+    assert.strictEqual(apiPhase.node.repo, undefined);
+    assert.strictEqual(explorer.getTreeItem(apiPhase).contextValue, phaseContextValue(['plan', 'replan']));
+    assert.deepStrictEqual(mod.treeNodeTarget(apiPhase), ['alpha', 'P01']);
+    assert.strictEqual(explorer.getTreeItem(apiPhase).id, 'packages/api:alpha/P01');
+    assert.strictEqual(explorer.getTreeItem(ownerPhase).id, '.:alpha/P01');
+    assert.notStrictEqual(explorer.getTreeItem(apiPhase).id, explorer.getTreeItem(ownerPhase).id);
+  });
+
+  it('opens a named source strictly and reports an unknown repository', async () => {
+    const childBaitonDir = path.join(root, 'packages', 'api', '.baiton');
+    const childPlan = path.join(childBaitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(childPlan), { recursive: true });
+    fs.writeFileSync(childPlan, validPlan());
+    const topologies = repoTopologies(root);
+    const activePlans: Array<[string | undefined, string | undefined]> = [];
+    const errors: string[] = [];
+    const sources = () => [
+      {
+        repo: '.', baitonDir, topology: topologies.owner,
+        isApproved: async () => false, actionable: true,
+      },
+      {
+        repo: 'packages/api', baitonDir: childBaitonDir, topology: topologies.api,
+        isApproved: async () => false, actionable: true,
+      },
+    ];
+    explorer = new mod.PlanExplorer(
+      baitonDir,
+      { isApproved: async () => false } as unknown as PlanStore,
+      { error: (message: string) => errors.push(message) } as unknown as Surface,
+      false,
+      (slug, repo) => activePlans.push([slug, repo]),
+      { sources },
+    ).start();
+    await waitFor(() => groupSlugs().pending?.includes('alpha') === true, 'the open-plan source refresh');
+    const fake = (globalThis as unknown as {
+      __vscodeFake: {
+        handlers: Record<string, (slug: string, repo?: string) => unknown>;
+        openedDocuments: string[];
+      };
+    }).__vscodeFake;
+    const openPlan = fake.handlers['baiton.planExplorer.openPlan'];
+
+    await openPlan('alpha', 'packages/api');
+    await openPlan('alpha', '.');
+    assert.deepStrictEqual(fake.openedDocuments, [childPlan, path.join(baitonDir, 'plans', 'alpha', 'plan.md')]);
+    assert.deepStrictEqual(activePlans, [['alpha', 'packages/api'], ['alpha', '.']]);
+
+    await openPlan('alpha', 'nope');
+    assert.strictEqual(fake.openedDocuments.length, 2);
+    assert.deepStrictEqual(activePlans, [['alpha', 'packages/api'], ['alpha', '.']]);
+    assert.deepStrictEqual(errors, [
+      'Baiton: could not open plan "alpha" in nope: that repo is not a discovered .baiton/ repo.',
+    ]);
+  });
+
   it('places plans into Active, Pending, and Completed groups from their facts', async () => {
     const write = (relative: string, contents: string) => {
       const target = path.join(baitonDir, relative);

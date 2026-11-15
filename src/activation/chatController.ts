@@ -111,8 +111,11 @@ import {
   toHistory,
   toRenderRecords,
   toolUpdate,
+  parseScopeId,
+  isOwnerScope,
 } from '../orchestrator';
 import { DEFAULT_MODE, isRunMode, toRunMode, type RunMode } from '../model/mode';
+import { formatPlanRef, normalizeRepoPath } from '../orchestrator/planRepos';
 import type {
   RunFinding,
   RunManifest,
@@ -157,7 +160,7 @@ import { autoApprovedInterventionLines, resolveContextTrimAt, trimHistory } from
 import { CONTEXT_SUMMARY_PREFIX } from '../orchestrator/transcriptReader';
 import type { CompactionMarker } from '../orchestrator/chatTranscript';
 import type { ContextBudget } from '../orchestrator/toolLoop';
-import { listPlans } from './planLister';
+import { listPlansAcrossRepos } from './planLister';
 import { resolveDocument } from '../storage/documentLocation';
 
 /** The conversation-selector id of the Workspace_Conversation. */
@@ -322,6 +325,8 @@ export interface ChatControllerDeps {
   askRegistry?: PendingAskRegistry;
   /** Absolute `.baiton/` directory: `<baitonDir>/chat/` holds workspace sessions. */
   baitonDir: string;
+  /** Every discovered repo with a `.baiton/` that can own plans, owner (`.`) first; absent = only the owner repo at `baitonDir`. */
+  planOwners?(): readonly ChatPlanOwner[];
   /** Reads the configured Round_Bound; resolved through {@link resolveRoundBound}. */
   roundBound(): unknown;
   /**
@@ -394,6 +399,19 @@ export interface ChatControllerDeps {
   runPipeline?: RunPipelineSeam;
 }
 
+/** A plan's identity relative to the chat conversation owner. */
+export interface ChatPlanIdentity {
+  /** PlanRepoInfo.path (`.` for the owner repo), or an absolute repo root. */
+  repo: string;
+  slug: string;
+}
+
+/** A discovered repo whose `.baiton/` may own plans and chat sessions. */
+export interface ChatPlanOwner {
+  repo: string;
+  baitonDir: string;
+}
+
 /** Remembers the composer's Mode select across windows (backed by `workspaceState`). */
 export interface ModeMemory {
   /** The remembered mode value, or `undefined` when nothing was stored. */
@@ -455,8 +473,8 @@ export interface SessionMemory {
 export class ChatController {
   private readonly deps: ChatControllerDeps;
 
-  /** The active plan slug, or `undefined` for the Workspace_Conversation (Req 7.2). */
-  private activePlan: string | undefined;
+  /** The active (repo, slug) plan identity, or `undefined` for Workspace_Conversation (Req 7.2). */
+  private activePlan: ChatPlanIdentity | undefined;
 
   /** The conversation-selector entries, refreshed from disk (Req 7.1). */
   private conversations: ConversationItem[] = [];
@@ -537,7 +555,9 @@ export class ChatController {
       tools: () => deps.registry as unknown as SubAgentToolSurface,
       guardContext: () => deps.guardContext(),
       roundBound: () => deps.roundBound(),
-      readPlan: (slug) => this.readPlanDocument(slug),
+      readPlan: (slug, scope) => scope?.kind === 'plan'
+        ? this.readPlanDocument(this.planOfScope(scope) ?? { repo: '.', slug }, scope.baitonDir)
+        : this.readPlanDocument({ repo: '.', slug }),
       asks: this.asks,
       onEvent: (e) => void this.onSubAgentEvent(e),
       log: (m) => deps.log(`Baiton chat: ${m}`),
@@ -557,10 +577,8 @@ export class ChatController {
     }
     const scopeKey = key.slice(0, i);
     const sessionId = key.slice(i + 1);
-    return {
-      scope: scopeKey === 'workspace' ? { kind: 'workspace' } : { kind: 'plan', slug: scopeKey },
-      sessionId,
-    };
+    const scope = this.scopeFromId(scopeKey);
+    return scope === undefined ? undefined : { scope, sessionId };
   }
 
   /** React to a sub-agent's progress: post live output only when its chat is in view. */
@@ -676,15 +694,22 @@ export class ChatController {
 
   /**
    * Set the active plan from the explorer selection or the active editor
-   * (Req 7.4, 7.5). `undefined` selects the Workspace_Conversation (Req 7.2). A
-   * no-op when the plan is already active, so an editor-activation storm does
-   * not reload the transcript repeatedly.
+   * (Req 7.4, 7.5). A `{ repo, slug }` identity selects a plan in that repo; a
+   * bare slug selects an owner-repo plan. `undefined` selects the
+   * Workspace_Conversation (Req 7.2). A no-op when that scope is already
+   * active, so an editor-activation storm does not reload the transcript repeatedly.
    */
-  public setActivePlan(slug: string | undefined): void {
-    if (slug === this.activePlan) {
+  public setActivePlan(plan: ChatPlanIdentity | string | undefined): void {
+    const next = plan === undefined ? undefined : this.normalizePlan(plan);
+    if (next !== undefined && !this.isOwnerPlan(next) && this.scopeOf(next) === undefined) {
+      this.deps.log(`Baiton chat: unknown plan repo "${next.repo}" for ${formatPlanRef(next.repo, next.slug)}`);
       return;
     }
-    this.activePlan = slug;
+    const nextScope = next === undefined ? { kind: 'workspace' as const } : this.scopeOf(next)!;
+    if (scopeId(nextScope) === scopeId(this.activeScope())) {
+      return;
+    }
+    this.activePlan = next;
     void this.refresh();
   }
 
@@ -997,11 +1022,16 @@ export class ChatController {
 
   /** Return the conversation an ask belongs on, switching to a scoped run when needed. */
   private async scopeForAsk(ask: Intervention): Promise<SessionScope> {
-    const slug = ask.scopeId;
-    if (slug === undefined || slug === this.activePlan) {
+    const active = this.activeScope();
+    if (ask.scopeId === undefined || ask.scopeId === scopeId(active)) {
       return this.activeScope();
     }
-    this.activePlan = slug;
+    const scope = this.scopeFromId(ask.scopeId);
+    if (scope === undefined || scope.kind === 'workspace') {
+      this.deps.log(`Baiton chat: unknown conversation scope "${ask.scopeId}" for ask`);
+      return active;
+    }
+    this.activePlan = this.planOfScope(scope);
     await this.refresh();
     return this.activeScope();
   }
@@ -1110,9 +1140,16 @@ export class ChatController {
    * conversation.
    */
   private onSelectConversation(conversationId: string): void {
-    const slug =
-      conversationId === WORKSPACE_CONVERSATION_ID ? undefined : conversationId;
-    this.setActivePlan(slug);
+    if (conversationId === WORKSPACE_CONVERSATION_ID) {
+      this.setActivePlan(undefined);
+      return;
+    }
+    const scope = this.scopeFromId(conversationId);
+    if (scope === undefined || scope.kind === 'workspace') {
+      this.deps.log(`Baiton chat: unknown conversation id "${conversationId}"`);
+      return;
+    }
+    this.setActivePlan(this.planOfScope(scope));
   }
 
   /**
@@ -1271,7 +1308,7 @@ export class ChatController {
       return;
     }
 
-    const slug = this.activePlan;
+    const plan = this.activePlan;
     const scope = this.activeScope();
     // The mode and conversation step are both fixed for this send: the step decides
     // the tools advertised to the model and the tools the registry will
@@ -1280,7 +1317,7 @@ export class ChatController {
     // invariant. The prompt re-reads the plan document every round (Req 11.6), so a
     // status that changes mid-run is picked up by the next send, not mid-loop.
     const mode = this.effectiveMode();
-    const step = await this.stepForConversation(slug);
+    const step = await this.stepForConversation(plan);
     // A fresh chat has no id until its first message: allocate one now so the
     // transcript file is created by this very append (Req 9.9).
     const sessionId =
@@ -1308,11 +1345,11 @@ export class ChatController {
     const tools = this.deps.toolsFor(step);
     this.abort = new AbortController();
     try {
-      if (this.shouldSummarize(history, tools, await this.buildPrompt(slug, mode), autoApprovedLines)) {
+      if (this.shouldSummarize(history, tools, await this.buildPrompt(plan, mode), autoApprovedLines)) {
         const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
         if (compacted !== undefined) {
           history = compacted;
-          await this.seedContextEstimate(key, slug, history);
+          await this.seedContextEstimate(key, plan, history);
           this.postContextUsage(key);
         }
       }
@@ -1322,7 +1359,7 @@ export class ChatController {
         call: (name, args, callId, signal) =>
           this.callTool(name, args, callId, signal, step, scope, key),
         isConcurrent: (name) => (this.deps.registry.definitions?.() ?? []).some((t) => t.name === name && t.concurrent === true),
-        systemPrompt: () => this.buildPrompt(slug, mode),
+        systemPrompt: () => this.buildPrompt(plan, mode),
         append: async (m) => {
           await this.append(transcript, m);
           if (key === this.viewKey()) {
@@ -1394,13 +1431,12 @@ export class ChatController {
    * document each call so a plan conversation never reuses cached content
    * (Req 11.6). A missing or unreadable plan document builds without it (Req 11.7).
    */
-  private async buildPrompt(slug: string | undefined, mode: RunMode): Promise<string> {
-    const kind: ConversationKind =
-      slug === undefined ? { kind: 'workspace' } : { kind: 'plan', slug };
-    if (slug === undefined) {
+  private async buildPrompt(plan: ChatPlanIdentity | undefined, mode: RunMode): Promise<string> {
+    const kind: ConversationKind = plan === undefined ? { kind: 'workspace' } : this.conversationKindFor(plan);
+    if (plan === undefined) {
       return buildSystemPrompt(kind, undefined, mode, this.deps.repoContext?.());
     }
-    const documentContent = await this.readPlanDocument(slug);
+    const documentContent = await this.readPlanDocument(plan);
     return buildSystemPrompt(kind, documentContent, mode, this.deps.repoContext?.());
   }
 
@@ -1409,11 +1445,11 @@ export class ChatController {
    * from the same plan document the prompt is built from. A plan-less workspace
    * conversation is `run`; the plan branch deliberately passes no mode.
    */
-  private async stepForConversation(slug: string | undefined): Promise<ConversationStep> {
-    if (slug === undefined) {
+  private async stepForConversation(plan: ChatPlanIdentity | undefined): Promise<ConversationStep> {
+    if (plan === undefined) {
       return conversationStepFor({ kind: 'workspace' }, undefined, this.effectiveMode());
     }
-    return conversationStepFor({ kind: 'plan', slug }, await this.readPlanDocument(slug));
+    return conversationStepFor(this.conversationKindFor(plan), await this.readPlanDocument(plan));
   }
 
   // --- transcript / rendering ----------------------------------------------
@@ -1634,11 +1670,11 @@ export class ChatController {
   /** Record a local estimate of what the next request would carry on the tracker. */
   private async seedContextEstimate(
     key: string,
-    slug: string | undefined,
+    plan: ChatPlanIdentity | undefined,
     history: readonly ChatMessage[],
   ): Promise<void> {
-    const tools = this.deps.toolsFor(await this.stepForConversation(slug));
-    const prompt = await this.buildPrompt(slug, this.effectiveMode());
+    const tools = this.deps.toolsFor(await this.stepForConversation(plan));
+    const prompt = await this.buildPrompt(plan, this.effectiveMode());
     this.trackerFor(key).record({ messages: [{ role: 'system', content: prompt }, ...history], tools }, {});
   }
 
@@ -1656,7 +1692,7 @@ export class ChatController {
       this.deps.webview.post({ type: 'showError', message: 'Wait for the current run to finish before compacting.' });
       return;
     }
-    const slug = this.activePlan;
+    const plan = this.activePlan;
     const scope = this.activeScope();
     const sessionId = this.activeSessions.get(scopeId(scope));
     if (sessionId !== undefined && parentIdOf(sessionId) !== undefined) {
@@ -1684,7 +1720,7 @@ export class ChatController {
     try {
       const compacted = await this.compact(transcript, key, this.abort.signal, sessionId);
       const history = compacted ?? toHistory(await readTranscript(transcript.path));
-      await this.seedContextEstimate(key, slug, history);
+      await this.seedContextEstimate(key, plan, history);
       this.postContextUsage(key);
     } catch (err) {
       this.surfaceError(err);
@@ -1866,12 +1902,12 @@ export class ChatController {
   private activeScope(): SessionScope {
     return this.activePlan === undefined
       ? { kind: 'workspace' }
-      : { kind: 'plan', slug: this.activePlan };
+      : this.scopeOf(this.activePlan)!;
   }
 
   /** The selector id for the active conversation (Req 7.7). */
   private activeConversationId(): string {
-    return this.activePlan ?? WORKSPACE_CONVERSATION_ID;
+    return scopeId(this.activeScope());
   }
 
   /**
@@ -1879,24 +1915,84 @@ export class ChatController {
    * plan document (`.baiton/plans/<slug>/plan.md`, or a legacy `.baiton/specs/<slug>/spec.md`) in ascending slug order (Req 7.1).
    */
   private async buildConversationItems(): Promise<ConversationItem[]> {
-    const listed = await listPlans(this.deps.baitonDir);
+    const listed = await listPlansAcrossRepos(this.owners().map(({ repo, baitonDir }) => ({ repo, baitonDir })));
     const items: ConversationItem[] = [
       { id: WORKSPACE_CONVERSATION_ID, label: 'Workspace' },
     ];
     for (const entry of listed) {
-      items.push({ id: entry.slug, label: entry.slug });
+      const plan = this.normalizePlan({ repo: entry.repo, slug: entry.slug });
+      const scope = this.scopeOf(plan);
+      if (scope === undefined) continue;
+      items.push({
+        id: scopeId(scope),
+        label: this.isOwnerPlan(plan) ? entry.slug : formatPlanRef(plan.repo, entry.slug),
+      });
     }
     return items;
   }
 
   /** Re-read a plan document, or `undefined` when it is missing/unreadable (Req 11.7). */
-  private async readPlanDocument(slug: string): Promise<string | undefined> {
-    const documentPath = resolveDocument(this.deps.baitonDir, slug).documentPath;
+  private async readPlanDocument(plan: ChatPlanIdentity, baitonDir?: string): Promise<string | undefined> {
+    const dir = baitonDir ?? this.baitonDirFor(plan.repo);
+    if (dir === undefined) return undefined;
+    const documentPath = resolveDocument(dir, plan.slug).documentPath;
     try {
       return await readFile(documentPath, 'utf8');
     } catch {
       return undefined;
     }
+  }
+
+  /** The owner repo always remains first and keeps its original `.baiton/` path. */
+  private owners(): ChatPlanOwner[] {
+    return [
+      { repo: '.', baitonDir: this.deps.baitonDir },
+      ...(this.deps.planOwners?.() ?? []).filter((owner) => normalizeRepoPath(owner.repo) !== '.'),
+    ];
+  }
+
+  /** Interpret a bare slug as an owner plan and normalize qualified repo paths. */
+  private normalizePlan(plan: ChatPlanIdentity | string): ChatPlanIdentity {
+    return typeof plan === 'string'
+      ? { repo: '.', slug: plan }
+      : { repo: normalizeRepoPath(plan.repo) ?? plan.repo, slug: plan.slug };
+  }
+
+  private isOwnerPlan(plan: ChatPlanIdentity): boolean {
+    return plan.repo === '.';
+  }
+
+  private baitonDirFor(repo: string): string | undefined {
+    if (repo === '.') return this.deps.baitonDir;
+    return this.owners().find((owner) => normalizeRepoPath(owner.repo) === repo)?.baitonDir;
+  }
+
+  /** Owner scopes deliberately omit repo and baitonDir to preserve their paths and ids. */
+  private scopeOf(plan: ChatPlanIdentity): SessionScope | undefined {
+    if (this.isOwnerPlan(plan)) return { kind: 'plan', slug: plan.slug };
+    const baitonDir = this.baitonDirFor(plan.repo);
+    return baitonDir === undefined
+      ? undefined
+      : { kind: 'plan', slug: plan.slug, repo: plan.repo, baitonDir };
+  }
+
+  private planOfScope(scope: SessionScope): ChatPlanIdentity | undefined {
+    if (scope.kind === 'workspace') return undefined;
+    return { repo: isOwnerScope(scope) ? '.' : normalizeRepoPath(scope.repo!)!, slug: scope.slug };
+  }
+
+  private scopeFromId(id: string): SessionScope | undefined {
+    const parsed = parseScopeId(id);
+    if (parsed === undefined) return undefined;
+    if (parsed.kind === 'workspace') return { kind: 'workspace' };
+    if (parsed.repo === undefined) return { kind: 'plan', slug: parsed.slug };
+    return this.scopeOf({ repo: normalizeRepoPath(parsed.repo) ?? parsed.repo, slug: parsed.slug });
+  }
+
+  private conversationKindFor(plan: ChatPlanIdentity): ConversationKind {
+    return this.isOwnerPlan(plan)
+      ? { kind: 'plan', slug: plan.slug }
+      : { kind: 'plan', slug: plan.slug, repo: plan.repo };
   }
 
   // --- busy / error surfacing ----------------------------------------------

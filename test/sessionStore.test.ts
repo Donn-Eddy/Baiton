@@ -8,16 +8,18 @@
  * `os.tmpdir()`, so the filesystem behaviour is exercised, not mocked.
  */
 import * as assert from 'assert';
-import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
   DEFAULT_TITLE,
   SessionStore,
   TITLE_MAX_CHARS,
+  parseScopeId,
   scopeId,
   type SessionScope,
 } from '../src/orchestrator/sessionStore';
+import { normalizeRepoPath } from '../src/orchestrator/planRepos';
 
 describe('SessionStore', () => {
   const workspace: SessionScope = { kind: 'workspace' };
@@ -33,6 +35,16 @@ describe('SessionStore', () => {
     writeFileSync(path.join(baitonDir, 'plans', 'my-plan', 'plan.md'), '# PHASES\n', 'utf8');
     writeFileSync(path.join(legacySpecsDir, 'my-legacy-plan', 'spec.md'), '# OVERVIEW\n\n# TODOS\n', 'utf8');
     return { store: new SessionStore({ baitonDir }), baitonDir, legacySpecsDir };
+  }
+
+  /** A second repository's `.baiton` with both current and legacy documents. */
+  function newChildBaiton(): string {
+    const baitonDir = path.join(mkdtempSync(path.join(os.tmpdir(), 'baiton-child-sessions-')), '.baiton');
+    mkdirSync(path.join(baitonDir, 'plans', 'my-plan'), { recursive: true });
+    mkdirSync(path.join(baitonDir, 'specs', 'legacy-child'), { recursive: true });
+    writeFileSync(path.join(baitonDir, 'plans', 'my-plan', 'plan.md'), '# PHASES\n', 'utf8');
+    writeFileSync(path.join(baitonDir, 'specs', 'legacy-child', 'spec.md'), '# OVERVIEW\n', 'utf8');
+    return baitonDir;
   }
 
   /** Write a session transcript file directly, with one record per entry. */
@@ -379,6 +391,168 @@ describe('SessionStore', () => {
       const { store } = newStore();
       writeSession(store, workspace, 'X/c', rec('2026-09-01T10:00:00.000Z'));
       assert.deepStrictEqual(await store.listTree(workspace), []);
+    });
+  });
+
+  describe('owner-aware session scopes', () => {
+    it('keeps owner plan and legacy spec ids and paths compatible', () => {
+      const { store, baitonDir } = newStore();
+      const planScopes: SessionScope[] = [
+        { kind: 'plan', slug: 'my-plan' },
+        { kind: 'plan', slug: 'my-plan', repo: '.' },
+        { kind: 'plan', slug: 'my-plan', repo: './' },
+        { kind: 'plan', slug: 'my-plan', repo: '.', baitonDir },
+      ];
+      const legacyScopes: SessionScope[] = [
+        { kind: 'plan', slug: 'my-legacy-plan' },
+        { kind: 'plan', slug: 'my-legacy-plan', repo: '.' },
+        { kind: 'plan', slug: 'my-legacy-plan', repo: './' },
+        { kind: 'plan', slug: 'my-legacy-plan', repo: '.', baitonDir },
+      ];
+
+      for (const scope of planScopes) {
+        assert.strictEqual(scopeId(scope), 'my-plan');
+        assert.strictEqual(store.dirFor(scope), path.join(baitonDir, 'plans', 'my-plan', 'chat'));
+        assert.strictEqual(store.pathFor(scope, 'a'), path.join(baitonDir, 'plans', 'my-plan', 'chat', 'a.jsonl'));
+        assert.strictEqual(
+          store.childrenDirFor(scope, 'a'),
+          path.join(baitonDir, 'plans', 'my-plan', 'chat', 'a.children'),
+        );
+        assert.strictEqual(store.legacyPathFor(scope), path.join(baitonDir, 'plans', 'my-plan', 'chat.jsonl'));
+      }
+      for (const scope of legacyScopes) {
+        assert.strictEqual(scopeId(scope), 'my-legacy-plan');
+        assert.strictEqual(store.dirFor(scope), path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat'));
+        assert.strictEqual(store.pathFor(scope, 'a'), path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat', 'a.jsonl'));
+        assert.strictEqual(
+          store.childrenDirFor(scope, 'a'),
+          path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat', 'a.children'),
+        );
+        assert.strictEqual(store.legacyPathFor(scope), path.join(baitonDir, 'specs', 'my-legacy-plan', 'chat.jsonl'));
+      }
+    });
+
+    it('qualifies child repo ids and resolves plan and legacy paths in that repo', () => {
+      const { store } = newStore();
+      const childBaiton = newChildBaiton();
+      const childScope: SessionScope = {
+        kind: 'plan', slug: 'my-plan', repo: 'packages/child', baitonDir: childBaiton,
+      };
+      const childLegacyScope: SessionScope = {
+        kind: 'plan', slug: 'legacy-child', repo: 'packages/child', baitonDir: childBaiton,
+      };
+      const id = scopeId(childScope);
+
+      assert.strictEqual(id, 'packages%2Fchild:my-plan');
+      assert.ok(!id.includes('/'));
+      assert.notStrictEqual(id, 'my-plan');
+      assert.strictEqual(store.dirFor(childScope), path.join(childBaiton, 'plans', 'my-plan', 'chat'));
+      assert.strictEqual(
+        store.pathFor(childScope, 'p/c'),
+        path.join(childBaiton, 'plans', 'my-plan', 'chat', 'p.children', 'c.jsonl'),
+      );
+      assert.strictEqual(store.legacyPathFor(childScope), path.join(childBaiton, 'plans', 'my-plan', 'chat.jsonl'));
+      assert.strictEqual(store.dirFor(childLegacyScope), path.join(childBaiton, 'specs', 'legacy-child', 'chat'));
+    });
+
+    it('lists and deletes same-slug sessions independently across repos', async () => {
+      const { store } = newStore();
+      const childBaiton = newChildBaiton();
+      const ownerScope: SessionScope = { kind: 'plan', slug: 'my-plan' };
+      const childScope: SessionScope = { kind: 'plan', slug: 'my-plan', repo: 'packages/child', baitonDir: childBaiton };
+      writeSession(store, ownerScope, 'owner-session', [
+        { ts: '2026-09-01T10:00:00.000Z', role: 'user', content: 'owner' },
+      ]);
+      writeSession(store, childScope, 'child-session', [
+        { ts: '2026-09-02T10:00:00.000Z', role: 'user', content: 'child' },
+      ]);
+
+      assert.deepStrictEqual((await store.list(ownerScope)).map((m) => m.id), ['owner-session']);
+      assert.deepStrictEqual((await store.list(childScope)).map((m) => m.id), ['child-session']);
+      await store.delete(ownerScope, 'owner-session');
+      assert.deepStrictEqual((await store.list(ownerScope)).map((m) => m.id), []);
+      assert.deepStrictEqual((await store.list(childScope)).map((m) => m.id), ['child-session']);
+    });
+
+    it("migrates a child's legacy transcript without touching the owner's", async () => {
+      const { store, baitonDir } = newStore();
+      const childBaiton = newChildBaiton();
+      const ownerScope: SessionScope = { kind: 'plan', slug: 'my-plan' };
+      const childScope: SessionScope = { kind: 'plan', slug: 'my-plan', repo: 'packages/child', baitonDir: childBaiton };
+      const ownerLegacy = store.legacyPathFor(ownerScope);
+      const childLegacy = store.legacyPathFor(childScope);
+      const ownerText = `${JSON.stringify({ ts: '2026-09-01T10:00:00.000Z', role: 'user', content: 'owner legacy' })}\n`;
+      const childText = `${JSON.stringify({ ts: '2026-09-02T10:00:00.000Z', role: 'user', content: 'child legacy' })}\n`;
+      writeFileSync(ownerLegacy, ownerText, 'utf8');
+      writeFileSync(childLegacy, childText, 'utf8');
+
+      const id = await store.migrateLegacy(childScope);
+
+      assert.strictEqual(id, '20260902-100000-legacy');
+      assert.strictEqual(existsSync(childLegacy), false);
+      assert.strictEqual(existsSync(store.pathFor(childScope, id)), true);
+      assert.strictEqual(existsSync(ownerLegacy), true);
+      assert.strictEqual(path.dirname(ownerLegacy), path.join(baitonDir, 'plans', 'my-plan'));
+      assert.strictEqual(readFileSync(ownerLegacy, 'utf8'), ownerText);
+    });
+
+    it('creates and lists child sessions only inside the child repo', async () => {
+      const { store, baitonDir } = newStore();
+      const childBaiton = newChildBaiton();
+      const ownerScope: SessionScope = { kind: 'plan', slug: 'my-plan' };
+      const childScope: SessionScope = { kind: 'plan', slug: 'my-plan', repo: 'packages/child', baitonDir: childBaiton };
+      writeSession(store, ownerScope, 'p', [{ ts: '2026-09-01T10:00:00.000Z', role: 'user', content: 'owner parent' }]);
+      writeSession(store, childScope, 'p', [{ ts: '2026-09-02T10:00:00.000Z', role: 'user', content: 'child parent' }]);
+      const childId = await store.createChild(childScope, 'p');
+      writeSession(store, childScope, childId, [{ ts: '2026-09-03T10:00:00.000Z', role: 'user', content: 'child task' }]);
+
+      assert.strictEqual(
+        existsSync(path.join(childBaiton, 'plans', 'my-plan', 'chat', 'p.children')),
+        true,
+      );
+      assert.strictEqual(
+        existsSync(path.join(baitonDir, 'plans', 'my-plan', 'chat', 'p.children')),
+        false,
+      );
+      assert.deepStrictEqual((await store.listTree(childScope)).map((m) => m.id), ['p', childId]);
+      assert.deepStrictEqual((await store.listTree(ownerScope)).map((m) => m.id), ['p']);
+    });
+
+    it('requires baitonDir for non-owner repos', () => {
+      const { store } = newStore();
+      assert.throws(
+        () => store.dirFor({ kind: 'plan', slug: 'my-plan', repo: 'packages/child' }),
+        /has no baitonDir/,
+      );
+    });
+
+    it('parses scope ids and rejects malformed qualified ids', () => {
+      const scopes: SessionScope[] = [
+        { kind: 'workspace' },
+        { kind: 'plan', slug: 'my-plan' },
+        { kind: 'plan', slug: 'nested', repo: 'packages/child' },
+        { kind: 'plan', slug: 'absolute', repo: '/abs/repo' },
+      ];
+      for (const scope of scopes) {
+        assert.deepStrictEqual(parseScopeId(scopeId(scope)), scope.kind === 'plan'
+          ? { kind: 'plan', slug: scope.slug, ...(scope.repo === undefined ? {} : { repo: scope.repo }) }
+          : { kind: 'workspace' });
+      }
+      for (const malformed of ['', ':slug', 'repo:', '%E0%A4%A:x']) {
+        assert.strictEqual(parseScopeId(malformed), undefined);
+      }
+    });
+
+    it('normalizes repo paths like planRepos', () => {
+      for (const repo of [' packages\\child/../child/ ', '/abs/repo/', 'C:\\repo\\', './', 'foo//bar']) {
+        const normalized = normalizeRepoPath(repo) ?? repo;
+        const parsed = parseScopeId(scopeId({ kind: 'plan', slug: 'x', repo }));
+        if (normalized === '.') {
+          assert.deepStrictEqual(parsed, { kind: 'plan', slug: 'x' });
+        } else {
+          assert.deepStrictEqual(parsed, { kind: 'plan', slug: 'x', repo: normalized });
+        }
+      }
     });
   });
 

@@ -18,6 +18,8 @@
  *      owner; child repos need not have their plan branch checked out or a
  *      clean main checkout.
  *
+ * `workspaceRoot`, `baitonDir`, `git`, `remote` and `pr` in the dependencies
+ * all describe the plan's repo, which can differ from the conversation repo.
  * Host-independent like the queue: the per-role adapter lookup, terminal host,
  * watcher factory, git service and PR tool are injected.
  */
@@ -70,6 +72,7 @@ export interface PrRepoTarget {
 export interface PrRepoSettings {
   remote: string;
   base: string;
+  /** PR tool configured for this target repo. */
   pr: PrTool;
 }
 
@@ -99,14 +102,19 @@ export type CommandRunner = (
 ) => Promise<{ ok: boolean; output: string }>;
 
 export interface SubmitPrDeps {
+  /** The plan's owning repo root; this need not be the conversation repo. */
   workspaceRoot: string;
-  /** The `.baiton` directory. */
+  /** The plan repo's `.baiton` directory. */
   baitonDir: string;
   terminalHost: TerminalHost;
   watcherFactory: ResultWatcherFactory;
+  /** Git service for the plan's repo. */
   git: GitService;
+  /** The plan's owning repo name (RepoSet name); the owner target of grouping. Absent = '.' (today). */
+  planRepoName?: string;
+  /** PR tool configured for the plan's repo. */
   pr: PrTool;
-  /** The remote the branch is pushed to (`git.remote`). */
+  /** The plan repo's remote; the branch is pushed there (`git.remote`). */
   remote: string;
   /** The `git.verify` command, when configured. */
   verify?: string;
@@ -218,7 +226,7 @@ export async function submitPr(slug: string, deps: SubmitPrDeps): Promise<Submit
   const targets = new Map<string, PrRepoTarget>();
   for (const phaseId of value.phaseIds) {
     if (deps.phaseTarget === undefined) {
-      targets.set(phaseId, { name: '.', root: deps.workspaceRoot, isOwner: true, git: deps.git });
+      targets.set(phaseId, { name: deps.planRepoName ?? '.', root: deps.workspaceRoot, isOwner: true, git: deps.git });
     } else {
       let target: Result<PrRepoTarget, string>;
       try {

@@ -6,7 +6,8 @@
  * `<id>.jsonl` transcript:
  *
  * - workspace sessions at `.baiton/chat/<id>.jsonl`
- * - plan sessions at `.baiton/plans/<slug>/chat/<id>.jsonl` (a legacy spec keeps `.baiton/specs/<slug>/chat/`)
+ * - plan sessions at `<owning repo>/.baiton/plans/<slug>/chat/<id>.jsonl` (or the legacy
+ *   `<owning repo>/.baiton/specs/<slug>/chat/` layout); the owner repo is the default
  *
  * There is no index file: every piece of session metadata is derived from the
  * transcript itself, so the folder is the whole model and an externally deleted
@@ -41,15 +42,41 @@
  */
 import { mkdir, readdir, readFile, rename, rm, stat, unlink } from 'fs/promises';
 import * as path from 'path';
-import type { ConversationKind } from './systemPrompt';
 import { Clock, systemClock } from './seams';
 import { resolveDocument } from '../storage/documentLocation';
 
 /**
  * Which conversation a session belongs to: the workspace conversation, or one
- * plan's conversation. Reuses the system prompt's conversation discriminator.
+ * plan's conversation, optionally carrying its owning repo location.
  */
-export type SessionScope = ConversationKind;
+export type SessionScope =
+  | { kind: 'workspace' }
+  | {
+      kind: 'plan';
+      slug: string;
+      /** Owning repo of the plan, as a path relative to the conversation owner (PlanRepoInfo.path) or an absolute root. Absent or '.' = the owner repo. */
+      repo?: string;
+      /** Absolute `.baiton/` of the owning repo. Absent = the store's own baitonDir. Required when `repo` names a non-owner repo. */
+      baitonDir?: string;
+    };
+
+/** Normalize scope repos like normalizeRepoPath in planRepos.ts so both layers spell repo paths identically. */
+function normalizeScopeRepo(repo: string): string {
+  const trimmed = repo.trim().replace(/\\/g, '/');
+  const normalized = path.posix.normalize(trimmed);
+  if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) return normalized;
+  const withoutTrailingSlash = normalized.replace(/\/+$/, '');
+  return withoutTrailingSlash === '' || withoutTrailingSlash === '.' || withoutTrailingSlash === './'
+    ? '.'
+    : withoutTrailingSlash;
+}
+
+/** Whether a plan scope belongs to the conversation-owner repo. */
+export function isOwnerScope(scope: SessionScope): boolean {
+  if (scope.kind === 'workspace') return true;
+  const repo = scope.repo === undefined ? '.' : normalizeScopeRepo(scope.repo);
+  return repo === '.';
+}
 
 /** Separates the segments of a nested (child) session id. */
 export const CHILD_ID_SEPARATOR = '/';
@@ -114,9 +141,37 @@ export interface SessionMeta {
   updatedAt: string;
 }
 
-/** The stable identifier of a scope, used as a settings/memory key. */
+/** Separates the encoded repo from the slug in a non-owner plan's scope id. */
+export const SCOPE_REPO_SEPARATOR = ':';
+
+/**
+ * The stable identifier of a scope, used as a settings/memory key. Owner-repo
+ * plans keep the bare slug, exactly today's value; other repos get
+ * `<encoded repo>:<slug>`. Since slugs contain neither ':' nor '%', a qualified
+ * id can never equal a bare slug or 'workspace'.
+ */
 export function scopeId(scope: SessionScope): string {
-  return scope.kind === 'workspace' ? 'workspace' : scope.slug;
+  if (scope.kind === 'workspace') return 'workspace';
+  if (isOwnerScope(scope)) return scope.slug;
+  return `${encodeURIComponent(normalizeScopeRepo(scope.repo!))}${SCOPE_REPO_SEPARATOR}${scope.slug}`;
+}
+
+/** Decode a scope id back to its workspace/plan identity (no baitonDir: callers resolve that from the repo). Returns undefined for an empty or malformed id. */
+export function parseScopeId(id: string): { kind: 'workspace' } | { kind: 'plan'; slug: string; repo?: string } | undefined {
+  if (id === '') return undefined;
+  if (id === 'workspace') return { kind: 'workspace' };
+  const separator = id.lastIndexOf(SCOPE_REPO_SEPARATOR);
+  if (separator < 0) return { kind: 'plan', slug: id };
+  const encodedRepo = id.slice(0, separator);
+  const slug = id.slice(separator + 1);
+  if (encodedRepo === '' || slug === '') return undefined;
+  try {
+    const repo = decodeURIComponent(encodedRepo);
+    if (repo === '') return undefined;
+    return { kind: 'plan', slug, repo };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Options the store needs to locate a scope's session folder. */
@@ -144,11 +199,20 @@ export class SessionStore {
     this.random = options.random ?? Math.random;
   }
 
+  private baitonDirFor(scope: SessionScope): string {
+    if (scope.kind === 'workspace') return this.baitonDir;
+    if (scope.baitonDir !== undefined) return scope.baitonDir;
+    if (!isOwnerScope(scope)) {
+      throw new Error(`session scope for plan "${scope.slug}" in repo "${scope.repo}" has no baitonDir`);
+    }
+    return this.baitonDir;
+  }
+
   /** The folder holding a scope's session transcripts. */
   public dirFor(scope: SessionScope): string {
     return scope.kind === 'workspace'
       ? path.join(this.baitonDir, 'chat')
-      : path.join(resolveDocument(this.baitonDir, scope.slug).dir, 'chat');
+      : path.join(resolveDocument(this.baitonDirFor(scope), scope.slug).dir, 'chat');
   }
 
   /** The transcript file path of one session in a scope. */
@@ -171,7 +235,7 @@ export class SessionStore {
   public legacyPathFor(scope: SessionScope): string {
     return scope.kind === 'workspace'
       ? path.join(this.baitonDir, 'chat.jsonl')
-      : path.join(resolveDocument(this.baitonDir, scope.slug).dir, 'chat.jsonl');
+      : path.join(resolveDocument(this.baitonDirFor(scope), scope.slug).dir, 'chat.jsonl');
   }
 
   /**

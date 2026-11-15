@@ -255,6 +255,50 @@ function readPlan(world: World): ReturnType<typeof parsePlan> {
 }
 
 describe('submitPr multi-repo flow', () => {
+  it('submits a plan owned by the child repo as that repo owner when no phase target resolver is supplied', async () => {
+    const world = makeWorld([], false);
+    const slug = 'child-owned';
+    const branch = `baiton/${slug}`;
+    const ownerLogBefore = git(world.owner.root, 'log', '-1', '--format=%H').trim();
+    const ownerRemoteBefore = git(world.owner.remote, 'branch', '--list').trim();
+
+    write(world.child.root, '.baiton/.gitignore', 'runs/\n');
+    git(world.child.root, 'checkout', '-q', '-b', branch);
+    const baseCommit = git(world.child.root, 'rev-parse', 'HEAD').trim();
+    const draft = [
+      '---', `name: ${slug}`, 'status: approved', 'mode: manual', 'base: main',
+      `base_commit: ${baseCommit}`, `branch: ${branch}`, 'approved_rev:', 'pr:', '---', '',
+      '# Endstate', 'Complete the child repo plan.', '',
+      '# What needs changing', 'Ship the child repo change.', '',
+      '# Limitations & constraints', 'Keep the plan repo isolated.', '',
+      '# PHASES', '- [done] P01 Child change', '',
+    ].join('\n');
+    const approved = setFrontmatterKey(draft, 'approved_rev', approvalHash(parsePlan(draft)));
+    write(world.child.root, `.baiton/plans/${slug}/plan.md`, approved);
+    git(world.child.root, 'add', '-A');
+    git(world.child.root, 'commit', '-q', '-m', 'child plan baseline');
+
+    const h = harness(world);
+    h.deps.workspaceRoot = world.child.root;
+    h.deps.baitonDir = path.join(world.child.root, '.baiton');
+    h.deps.git = world.childGit;
+    h.deps.pr = h.childPr;
+    h.deps.planRepoName = 'api';
+    h.deps.phaseTarget = undefined;
+    h.deps.repoSettings = undefined;
+    const pending = submitPr(slug, h.deps);
+    const result = await draftAndFinish(h, pending);
+    assert.strictEqual(result.ok, true, JSON.stringify(result));
+    if (!result.ok) return;
+    assert.deepStrictEqual(result.prs.map(({ repo, isOwner }) => ({ repo, isOwner })), [{ repo: 'api', isOwner: true }]);
+    assert.match(git(world.child.remote, 'branch', '--list', branch), new RegExp(branch));
+    const remotePlan = parsePlan(git(world.child.remote, 'show', `${branch}:.baiton/plans/${slug}/plan.md`));
+    assert.strictEqual(remotePlan.frontmatter.get('pr'), 'https://example.test/api/pull/2');
+    assert.strictEqual(git(world.owner.root, 'log', '-1', '--format=%H').trim(), ownerLogBefore);
+    assert.strictEqual(git(world.owner.remote, 'branch', '--list').trim(), ownerRemoteBefore);
+    assert.strictEqual(world.ownerPushes(), 0);
+  });
+
   it('uses one writer draft and records a PR for owner and child repos', async () => {
     const h = harness(makeWorld());
     const pending = submitPr(SLUG, h.deps);

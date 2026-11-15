@@ -20,9 +20,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { listDocumentSlugs, resolveDocument } from '../storage/documentLocation';
+import { formatPlanRef } from './planRepos';
 import { Tool, ToolContext, ToolResult } from './guard';
 import { matchesGlob, walkFiles } from './glob';
-import { ToolServices } from './toolServices';
+import { resolvePlanAddress, ToolServices } from './toolServices';
 
 /** Build every read tool for the registry. */
 export function createReadTools(services: ToolServices): Tool[] {
@@ -44,38 +45,73 @@ export function createReadTools(services: ToolServices): Tool[] {
 function listPlansTool(services: ToolServices): Tool {
   return {
     name: 'list_plans',
-    description: 'List the slugs of every plan under .baiton/plans/ (and legacy specs under .baiton/specs/) that has a plan document.',
+    description: 'List plans from every discovered .baiton/ repo. Colliding slugs appear as `<repoPath>:<slug>`.',
     mutating: false,
     concurrent: true,
     steps: ['gather', 'drive', 'run'],
-    schema: { type: 'object', properties: {}, additionalProperties: false },
-    async run(): Promise<ToolResult> {
-      const slugs: string[] = [];
-      for (const slug of listDocumentSlugs(services.baitonDir)) {
-        const location = resolveDocument(services.baitonDir, slug);
-        try {
-          await fs.access(location.documentPath);
-          slugs.push(slug);
-        } catch {
-          // A directory without a document file is not a plan.
-        }
+    schema: { type: 'object', properties: { plan_repo: { type: 'string' } }, additionalProperties: false },
+    async run(args: unknown): Promise<ToolResult> {
+      const planRepo = readString(args, 'plan_repo');
+      if (planRepo !== undefined) {
+        const resolved = services.planRepos.target(planRepo);
+        if (!resolved.ok) return { ok: false, error: resolved.error };
+        const plans = await existingSlugs(resolved.target.baitonDir);
+        return { ok: true, data: { plans, repo: resolved.target.info.path } };
       }
-      return { ok: true, data: { plans: slugs } };
+
+      const owners = services.planRepos.owners();
+      if (owners.length === 1 && owners[0].path === '.') {
+        return { ok: true, data: { plans: await existingSlugs(services.baitonDir) } };
+      }
+      const entries: { repo: string; slug: string }[] = [];
+      for (const info of owners) {
+        let baitonDir: string;
+        if (info.path === '.') {
+          baitonDir = services.baitonDir;
+        } else {
+          const resolved = services.planRepos.target(info.path);
+          if (!resolved.ok) continue;
+          baitonDir = resolved.target.baitonDir;
+        }
+        for (const slug of await existingSlugs(baitonDir)) entries.push({ repo: info.path, slug });
+      }
+      const counts = new Map<string, number>();
+      for (const entry of entries) counts.set(entry.slug, (counts.get(entry.slug) ?? 0) + 1);
+      return {
+        ok: true,
+        data: {
+          plans: entries.map((entry) => (counts.get(entry.slug) ?? 0) > 1 ? formatPlanRef(entry.repo, entry.slug) : entry.slug),
+          entries: entries.map((entry) => ({ ...entry, ref: formatPlanRef(entry.repo, entry.slug) })),
+        },
+      };
     },
   };
+}
+
+async function existingSlugs(baitonDir: string): Promise<string[]> {
+  const slugs: string[] = [];
+  for (const slug of listDocumentSlugs(baitonDir)) {
+    try {
+      await fs.access(resolveDocument(baitonDir, slug).documentPath);
+      slugs.push(slug);
+    } catch {
+      // A directory without a document file is not a plan.
+    }
+  }
+  return slugs;
 }
 
 /** `read_plan` — the raw plan document for a slug, bounded to the read cap. */
 function readPlanTool(services: ToolServices): Tool {
   return {
     name: 'read_plan',
-    description: 'Read the raw plan document (plan.md, or a legacy spec.md) for a slug, bounded to the read cap.',
+    description: 'Read the raw plan document (plan.md, or a legacy spec.md) for a slug, bounded to the read cap. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: false,
     concurrent: true,
     steps: ['gather', 'drive', 'run'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' } },
+      properties: { slug: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug'],
       additionalProperties: false,
     },
@@ -84,8 +120,11 @@ function readPlanTool(services: ToolServices): Tool {
       if (slug === undefined) {
         return { ok: false, error: 'read_plan requires a string "slug"' };
       }
-      const location = resolveDocument(services.baitonDir, slug);
-      const resolved = await tc.ctx.resolveReadPath(location.documentPath);
+      const address = await resolvePlanAddress(services, slug, readString(args, 'plan_repo'), tc, { mutating: false });
+      if (!address.ok) return { ok: false, error: address.error };
+      const plan = address.plan;
+      const location = resolveDocument(plan.baitonDir, plan.slug);
+      const resolved = await plan.guard.resolveReadPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -93,12 +132,12 @@ function readPlanTool(services: ToolServices): Tool {
       try {
         text = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `plan "${slug}" was not found` };
+        return { ok: false, error: `plan "${plan.label}" was not found` };
       }
       const bounded = tc.ctx.boundRead(text);
       return {
         ok: true,
-        data: { slug, kind: location.kind, text: bounded.text, truncated: bounded.truncated },
+        data: { slug: plan.slug, kind: location.kind, text: bounded.text, truncated: bounded.truncated, ...(plan.isOwner ? {} : { repo: plan.repoPath }) },
       };
     },
   };

@@ -73,6 +73,17 @@ export function guardWorkspaceForRepo(
   };
 }
 
+/** A guard for reading/writing one plan repo's documents. Containment is that repo's root for reads and only its own .baiton/plans and .baiton/specs for mutations; Restricted Mode is inherited from the calling conversation's guard (either flag disables writes). */
+export function planRepoGuard(
+  conversation: GuardContext,
+  target: { root: string; baitonDir: string; guard?: GuardContext },
+): GuardContext {
+  return new GuardContext(guardWorkspaceForRepo(
+    { root: target.root, baitonDir: target.baitonDir },
+    conversation.restricted || (target.guard?.restricted ?? false),
+  ));
+}
+
 /**
  * The context passed to every tool's `run` (design "Orchestrator: tool registry
  * and guard").

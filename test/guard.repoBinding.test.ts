@@ -4,8 +4,9 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createReadTools } from '../src/orchestrator/readTools';
-import { GuardContext, guardWorkspaceForRepo } from '../src/orchestrator/guard';
-import type { ToolServices } from '../src/orchestrator/toolServices';
+import { GuardContext, guardWorkspaceForRepo, planRepoGuard } from '../src/orchestrator/guard';
+import { singleRepoPlanRepos, type ToolServices } from '../src/orchestrator/toolServices';
+import type { GitService } from '../src/git';
 
 describe('repo-bound stage guard', () => {
   let parent: string;
@@ -34,7 +35,7 @@ describe('repo-bound stage guard', () => {
     assert.ok(!(await ctx.resolveMutatingPath(path.join(parent, '.baiton/plans/x/plan.md'))).ok);
     assert.ok((await ctx.resolveMutatingPath(path.join(child, '.baiton/plans/x/plan.md'))).ok);
 
-    const tools = createReadTools({ repoRoot: parent, baitonDir: path.join(parent, '.baiton') } as ToolServices);
+    const tools = createReadTools({ repoRoot: parent, baitonDir: path.join(parent, '.baiton'), git: {} as GitService, planRepos: singleRepoPlanRepos(parent, {} as GitService) } as ToolServices);
     const context = { callId: undefined, ctx };
     const list = await tools.find((tool) => tool.name === 'list_files')!.run({ glob: '**/*' }, context);
     assert.ok(list.ok);
@@ -45,5 +46,18 @@ describe('repo-bound stage guard', () => {
       const matches = (search.data as { matches: { file: string }[] }).matches;
       assert.deepStrictEqual(matches.map((match) => match.file), ['src/b.ts']);
     }
+  });
+
+  it('binds plan writes to the target repo documents and inherits Restricted Mode', async () => {
+    const childBaiton = path.join(child, '.baiton');
+    const childGuard = planRepoGuard(new GuardContext({ repoRoot: parent, baitonDir: path.join(parent, '.baiton'), restricted: false }), { root: child, baitonDir: childBaiton });
+    assert.ok((await childGuard.resolveMutatingPath(path.join(childBaiton, 'plans/x/plan.md'))).ok);
+    assert.ok((await childGuard.resolveMutatingPath(path.join(childBaiton, 'specs/x/spec.md'))).ok);
+    assert.ok(!(await childGuard.resolveMutatingPath(path.join(parent, '.baiton/plans/x/plan.md'))).ok);
+    assert.ok(!(await childGuard.resolveMutatingPath(path.join(child, 'src/b.ts'))).ok);
+    assert.ok(!(await childGuard.resolveMutatingPath(path.join(parent, 'packages/web/.baiton/plans/x/plan.md'))).ok);
+
+    const restricted = planRepoGuard(new GuardContext({ repoRoot: parent, baitonDir: path.join(parent, '.baiton'), restricted: true }), { root: child, baitonDir: childBaiton });
+    assert.strictEqual(restricted.restricted, true);
   });
 });

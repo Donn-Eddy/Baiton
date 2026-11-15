@@ -138,15 +138,20 @@ export interface DraftPlanRequest {
   slug: string;
   /** The agreed request the orchestrator assembled with the user. */
   requirements: string;
-  /** Owning repo path relative to the conversation repo; absent means that repo. */
+  /** Owning repo path relative to the conversation repo (see PlanRepoInfo.path). */
   repo?: string;
   /** Repositories the phased-planner may target, relative to the new plan owner. */
   repos?: readonly PlanRepoInfo[];
 }
 
-/** One repo the conversation's owning repo may plan into: itself or a descendant. */
+/** One discovered repo, addressed relative to the conversation's owning repo. */
 export interface PlanRepoInfo {
-  /** Path relative to the conversation's owning repo root; '.' for the owner. */
+  /**
+   * Path relative to the conversation's owning repo root: '.' for the owner,
+   * a descendant path such as 'packages/api', or '../sibling' for a repo
+   * outside the owner's subtree. If relative paths are absolute (different
+   * Windows drives), this is the repo root with forward slashes.
+   */
   readonly path: string;
   /** Stable discovery name (RepoSet name). */
   readonly name: string;
@@ -169,16 +174,27 @@ export interface PlanRepoTarget {
 export type PlanRepoLookup =
   | { kind: 'found'; target: PlanRepoTarget }
   | { kind: 'missing' }
-  | { kind: 'ambiguous'; repos: readonly string[] };
+  /**
+   * `repos` are PlanRepoInfo.path values, owner first then discovery pre-order.
+   * Callers can format qualified `<repoPath>:<slug>` candidates with
+   * `formatPlanRef`.
+   */
+  | { kind: 'ambiguous'; repos: readonly string[] }
+  /** An explicit repo argument did not resolve to a discovered .baiton/ repo. */
+  | { kind: 'invalid'; error: string };
 
-/** The plan-writing view of the owning repo and its descendants. */
+/** The plan-writing view over repos discovered in the workspace. */
 export interface PlanRepoSeam {
-  /** Owner first, then descendants in pre-order. Never siblings or ancestors. */
+  /** Phase-target / repo-context view: owner first, then descendants in pre-order (with or without .baiton/). */
   list(): readonly PlanRepoInfo[];
-  /** Resolve a repo path relative to the owner ('.' = owner) to a writable target. */
+  /** Plan-addressing view: every discovered repo with a .baiton/, owner first when available, then discovery pre-order. */
+  owners(): readonly PlanRepoInfo[];
+  /** Resolve a repo path relative to the owner ('.' = owner, '../x' allowed) to a writable target. */
   target(repoPath: string): { ok: true; target: PlanRepoTarget } | { ok: false; error: string };
-  /** Find the repo whose `.baiton/` holds the plan or legacy document for `slug`. */
-  locate(slug: string): Promise<PlanRepoLookup>;
+  /** Find the repo holding the plan or legacy spec for a bare slug; explicit repo lookup has no precedence. */
+  locate(slug: string, repo?: string): Promise<PlanRepoLookup>;
+  /** Find a writable plan target by its absolute repo root. */
+  targetAt(root: string): PlanRepoTarget | undefined;
 }
 
 /**

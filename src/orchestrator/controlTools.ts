@@ -75,7 +75,7 @@ import { Tool, ToolContext, ToolResult } from './guard';
 import type { InterventionOption } from './interventions';
 import { MAX_SUBAGENT_DEPTH } from './seams';
 import type { PlanRepoInfo, PlanRepoTarget } from './seams';
-import { ToolServices } from './toolServices';
+import { isSingleRepo, resolvePlanAddress, ToolServices, type ResolvedPlan } from './toolServices';
 
 /** Build every control tool for the registry. */
 export function createControlTools(services: ToolServices): Tool[] {
@@ -242,7 +242,7 @@ function draftPlanTool(services: ToolServices): Tool {
         return { ok: false, error: 'draft_plan: repo path must not be empty; omit "repo" for this repo' };
       }
       if (repoHint !== undefined && repoHint !== '.') {
-        if (services.planRepos === undefined) {
+        if (isSingleRepo(services)) {
           return { ok: false, error: 'draft_plan: this workspace has no nested repos; omit "repo"' };
         }
         const resolvedTarget = services.planRepos.target(repoHint);
@@ -272,12 +272,9 @@ function draftPlanTool(services: ToolServices): Tool {
         };
       }
 
-      let repoContextTarget = target;
-      if (repoContextTarget === undefined && services.planRepos !== undefined) {
-        const ownerTarget = services.planRepos.target('.');
-        if (ownerTarget.ok) repoContextTarget = ownerTarget.target;
-      }
-      const repos = services.planRepos === undefined || repoContextTarget === undefined
+      const ownerTarget = services.planRepos.target('.');
+      const repoContextTarget = target ?? (ownerTarget.ok ? ownerTarget.target : undefined);
+      const repos = repoContextTarget === undefined
         ? undefined
         : reposForDraftOwner(services.planRepos.list(), repoContextTarget);
       const outcome = await services.draftPlan.draft({
@@ -565,12 +562,12 @@ function investigateTool(services: ToolServices): Tool {
 function approvePlanTool(services: ToolServices): Tool {
   return {
     name: 'approve_plan',
-    description: 'Approve or re-approve a plan: create its branch and record the approval hash.',
+    description: 'Approve or re-approve a plan: create its branch and record the approval hash. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' } },
+      properties: { slug: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug'],
       additionalProperties: false,
     },
@@ -579,12 +576,11 @@ function approvePlanTool(services: ToolServices): Tool {
       if (slug === undefined) {
         return { ok: false, error: 'approve_plan requires a string "slug"' };
       }
-      if (!isSlug(slug)) {
-        return { ok: false, error: `invalid slug: ${slug}` };
-      }
-
-      const location = documentFor(services, slug);
-      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
+      const address = await resolvePlanAddress(services, slug, readString(args, 'plan_repo'), tc, { mutating: true });
+      if (!address.ok) return { ok: false, error: address.error };
+      const planRepo = address.plan;
+      const location = resolveDocument(planRepo.baitonDir, planRepo.slug);
+      const resolved = await planRepo.guard.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -592,18 +588,18 @@ function approvePlanTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `plan "${slug}" was not found` };
+        return { ok: false, error: `plan "${planRepo.label}" was not found` };
       }
 
       // Req 10.1: confirm in the UI before performing any change. A decline or
       // cancel leaves the plan unchanged (Req 10.2).
       const confirmed = await services.confirm.confirm(
-        `Approve plan "${slug}"? This creates its branch from the resolved base commit and records the approval.`,
+        `Approve plan "${planRepo.label}"? This creates its branch from the resolved base commit and records the approval.`,
       );
       if (!confirmed) {
         return {
           ok: false,
-          error: `approval of plan "${slug}" was declined; the plan is unchanged`,
+          error: `approval of plan "${planRepo.label}" was declined; the plan is unchanged`,
         };
       }
 
@@ -613,10 +609,10 @@ function approvePlanTool(services: ToolServices): Tool {
       // A re-approval only recomputes the Approval_Hash into `approved_rev` and
       // leaves every phase state (and the branch) unchanged (Req 5.5).
       if (alreadyApproved) {
-        return reapprove(services, resolved.resolved, content, plan, slug);
+        return reapprove(planRepo, resolved.resolved, content, plan);
       }
 
-      return freshApprove(services, resolved.resolved, content, plan, slug, location);
+      return freshApprove(services, planRepo, resolved.resolved, content, plan, location);
     },
   };
 }
@@ -628,16 +624,16 @@ function approvePlanTool(services: ToolServices): Tool {
  */
 async function freshApprove(
   services: ToolServices,
+  planRepo: ResolvedPlan,
   absolute: string,
   content: string,
   plan: ReturnType<typeof parsePlan>,
-  slug: string,
   location: DocumentLocation,
 ): Promise<ToolResult> {
   // Req 16.1/16.2: clean only if every change is confined to this document folder.
   let clean: boolean;
   try {
-    clean = await services.git.isCleanExceptPlanFolder(slug);
+    clean = await planRepo.git.isCleanExceptPlanFolder(planRepo.slug);
   } catch (e) {
     return { ok: false, error: gitErrorMessage(e) };
   }
@@ -651,11 +647,12 @@ async function freshApprove(
 
   // Req 16.3/16.4: fetch the remote and resolve the base branch to a commit.
   // The base branch comes from the plan frontmatter when set, else config.
-  const baseBranch = (plan.frontmatter.get('base') ?? '').trim() || services.gitSettings.base;
+  const settings = planRepo.isOwner ? services.gitSettings : services.gitSettingsFor?.(planRepo.root) ?? services.gitSettings;
+  const baseBranch = (plan.frontmatter.get('base') ?? '').trim() || settings.base;
   let baseCommit: string;
   try {
-    await services.git.fetch(services.gitSettings.remote);
-    baseCommit = await services.git.resolveBaseCommit(baseBranch);
+    await planRepo.git.fetch(settings.remote);
+    baseCommit = await planRepo.git.resolveBaseCommit(baseBranch);
   } catch (e) {
     return {
       ok: false,
@@ -665,10 +662,10 @@ async function freshApprove(
 
   // Req 16.5: create the plan branch from the resolved base commit and check it
   // out. The branch name is derived from the slug.
-  const branch = `baiton/${slug}`;
+  const branch = `baiton/${planRepo.slug}`;
   try {
-    await services.git.createPlanBranch(branch, baseCommit);
-    await services.git.checkout(branch);
+    await planRepo.git.createPlanBranch(branch, baseCommit);
+    await planRepo.git.checkout(branch);
   } catch (e) {
     return {
       ok: false,
@@ -694,10 +691,10 @@ async function freshApprove(
   try {
     await fs.mkdir(path.dirname(absolute), { recursive: true });
     await fs.writeFile(absolute, updated, 'utf8');
-    const commit = await services.git.commit(`plan(${slug}): approve`);
+    const commit = await planRepo.git.commit(`plan(${planRepo.slug}): approve`);
     return {
       ok: true,
-      data: { slug, branch, base_commit: baseCommit, approved_rev: hash, commit },
+      data: { slug: planRepo.slug, ...(planRepo.isOwner ? {} : { repo: planRepo.repoPath }), branch, base_commit: baseCommit, approved_rev: hash, commit },
     };
   } catch (e) {
     return { ok: false, error: `approval halted while committing: ${gitErrorMessage(e)}` };
@@ -709,22 +706,21 @@ async function freshApprove(
  * metadata change, leaving every phase state and the branch unchanged (Req 5.5).
  */
 async function reapprove(
-  services: ToolServices,
+  planRepo: ResolvedPlan,
   absolute: string,
   content: string,
   plan: ReturnType<typeof parsePlan>,
-  slug: string,
 ): Promise<ToolResult> {
   const hash = approvalHash(plan);
   const updated = setFrontmatterKey(content, 'approved_rev', hash);
   if (updated === content) {
     // The hash was already current; nothing to write or commit.
-    return { ok: true, data: { slug, approved_rev: hash, commit: undefined, unchanged: true } };
+    return { ok: true, data: { slug: planRepo.slug, ...(planRepo.isOwner ? {} : { repo: planRepo.repoPath }), approved_rev: hash, commit: undefined, unchanged: true } };
   }
   try {
     await fs.writeFile(absolute, updated, 'utf8');
-    const commit = await services.git.commit(`plan(${slug}): ${slug} re-approve`);
-    return { ok: true, data: { slug, approved_rev: hash, commit } };
+    const commit = await planRepo.git.commit(`plan(${planRepo.slug}): ${planRepo.slug} re-approve`);
+    return { ok: true, data: { slug: planRepo.slug, ...(planRepo.isOwner ? {} : { repo: planRepo.repoPath }), approved_rev: hash, commit } };
   } catch (e) {
     return { ok: false, error: `re-approval halted while committing: ${gitErrorMessage(e)}` };
   }
@@ -846,12 +842,12 @@ function landPhaseTool(services: ToolServices): Tool {
   return {
     name: 'land_phase',
     description:
-      'Land a done phase: merge its branch into the plan branch and remove its worktree. Returns the merge commit, or reports that the phase is already landed.',
+      'Land a done phase: merge its branch into the plan branch and remove its worktree. Returns the merge commit, or reports that the phase is already landed. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: true,
     steps: ['drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' }, phase: { type: 'string' } },
+      properties: { slug: { type: 'string' }, phase: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug', 'phase'],
       additionalProperties: false,
     },
@@ -861,11 +857,11 @@ function landPhaseTool(services: ToolServices): Tool {
       if (slug === undefined || phase === undefined) {
         return { ok: false, error: 'land_phase requires a string "slug" and "phase"' };
       }
-      if (!isSlug(slug)) {
-        return { ok: false, error: `invalid slug: ${slug}` };
-      }
-      const location = documentFor(services, slug);
-      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
+      const address = await resolvePlanAddress(services, slug, readString(args, 'plan_repo'), tc, { mutating: true });
+      if (!address.ok) return { ok: false, error: address.error };
+      const planRepo = address.plan;
+      const location = resolveDocument(planRepo.baitonDir, planRepo.slug);
+      const resolved = await planRepo.guard.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -873,14 +869,14 @@ function landPhaseTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `plan "${slug}" was not found` };
+        return { ok: false, error: `plan "${planRepo.label}" was not found` };
       }
       if (!phaseIdPattern(location.kind).test(phase)) {
         return { ok: false, error: `invalid phase id: ${phase}` };
       }
       const entry = parsePlan(content, location.kind).phases.find((item) => item.id === phase);
       if (entry === undefined) {
-        return { ok: false, error: `phase "${phase}" was not found in plan "${slug}"` };
+        return { ok: false, error: `phase "${phase}" was not found in plan "${planRepo.label}"` };
       }
       if (entry.state !== 'done') {
         return {
@@ -891,13 +887,15 @@ function landPhaseTool(services: ToolServices): Tool {
       if (services.landPhase === undefined) {
         return { ok: false, error: 'land_phase is not available in this host' };
       }
-      const outcome = await services.landPhase.land({ slug, phaseId: phase });
+      const outcome = await services.landPhase.land(planRepo.isOwner
+        ? { slug: planRepo.slug, phaseId: phase }
+        : { slug: planRepo.slug, phaseId: phase, repoRoot: planRepo.root });
       switch (outcome.kind) {
         case 'landed':
           return {
             ok: true,
             data: {
-              slug,
+              slug: planRepo.slug,
               phase,
               landed: true,
               commit: outcome.commit,
@@ -906,9 +904,9 @@ function landPhaseTool(services: ToolServices): Tool {
             },
           };
         case 'already-landed':
-          return { ok: true, data: { slug, phase, landed: false, message: 'already landed' } };
+          return { ok: true, data: { slug: planRepo.slug, phase, landed: false, message: 'already landed' } };
         case 'refused':
-          return { ok: false, error: `landing phase "${phase}" of plan "${slug}" was refused: ${outcome.reason}` };
+          return { ok: false, error: `landing phase "${phase}" of plan "${planRepo.label}" was refused: ${outcome.reason}` };
         default:
           return { ok: false, error: 'land_phase returned an unknown outcome' };
       }
@@ -925,12 +923,12 @@ function submitPrTool(services: ToolServices): Tool {
   return {
     name: 'submit_pr',
     description:
-      'Submit the pull request for a plan whose phases are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR.',
+      'Submit the pull request for a plan whose phases are all done and landed: run verify, draft the PR with the pr-writer, push the branch and open (or reuse) the PR. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: true,
     steps: ['drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' } },
+      properties: { slug: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug'],
       additionalProperties: false,
     },
@@ -939,11 +937,11 @@ function submitPrTool(services: ToolServices): Tool {
       if (slug === undefined) {
         return { ok: false, error: 'submit_pr requires a string "slug"' };
       }
-      if (!isSlug(slug)) {
-        return { ok: false, error: `invalid slug: ${slug}` };
-      }
-      const location = documentFor(services, slug);
-      const resolved = await tc.ctx.resolveMutatingPath(location.documentPath);
+      const address = await resolvePlanAddress(services, slug, readString(args, 'plan_repo'), tc, { mutating: true });
+      if (!address.ok) return { ok: false, error: address.error };
+      const planRepo = address.plan;
+      const location = resolveDocument(planRepo.baitonDir, planRepo.slug);
+      const resolved = await planRepo.guard.resolveMutatingPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -951,19 +949,22 @@ function submitPrTool(services: ToolServices): Tool {
         return { ok: false, error: 'submit_pr is not available in this host' };
       }
       const confirmed = await services.confirm.confirm(
-        `Submit a pull request for plan "${slug}"? This pushes its branch and opens the PR.`,
+        `Submit a pull request for plan "${planRepo.label}"? This pushes its branch and opens the PR.`,
       );
       if (!confirmed) {
-        return { ok: false, error: `submitting the PR for plan "${slug}" was declined; nothing was pushed` };
+        return { ok: false, error: `submitting the PR for plan "${planRepo.label}" was declined; nothing was pushed` };
       }
-      const outcome = await services.submitPr(slug);
+      const outcome = planRepo.isOwner
+        ? await services.submitPr(planRepo.slug)
+        : await services.submitPr(planRepo.slug, planRepo.root);
       if (!outcome.ok) {
         return { ok: false, error: outcome.error };
       }
       return {
         ok: true,
         data: {
-          slug,
+          slug: planRepo.slug,
+          ...(planRepo.isOwner ? {} : { repo: planRepo.repoPath }),
           url: outcome.url,
           reused: outcome.reused,
           title: outcome.title,
