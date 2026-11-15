@@ -739,13 +739,14 @@ async function reapprove(
  * runs inside the Plan action's own review rounds and `pr` is plan-scoped
  * (`submit_pr` runs it), so neither is a value this tool accepts: both are
  * rejected here with a message naming the three legal stages, before the queue
- * seam is reached.
+ * seam is reached. The plan may be addressed with a qualified slug or
+ * `plan_repo` when another repo owns it.
  */
 function runTool(services: ToolServices): Tool {
   return {
     name: 'run',
     description:
-      'Dispatch one stage for one phase (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome.',
+      'Dispatch one stage for one phase (plan, execute or review) and wait for it: the call blocks until the stage finishes and returns its outcome. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: false,
     steps: ['drive'],
     subagent: true,
@@ -756,6 +757,7 @@ function runTool(services: ToolServices): Tool {
       properties: {
         slug: { type: 'string' },
         phase: { type: 'string' },
+        plan_repo: { type: 'string' },
         stage: {
           type: 'string',
           enum: ['plan', 'execute', 'review'],
@@ -783,17 +785,17 @@ function runTool(services: ToolServices): Tool {
             'plan-review runs inside the plan stage, and the PR stage is run by submit_pr.',
         };
       }
-      if (!isSlug(slug)) {
-        return { ok: false, error: `invalid slug: ${slug}` };
-      }
+      const address = await resolvePlanAddress(services, slug, readString(args, 'plan_repo'), tc, { mutating: false });
+      if (!address.ok) return { ok: false, error: address.error };
+      const planRepo = address.plan;
 
       // Req 4.9: while the plan is invalid, refuse to start any stage and
       // surface the current validation errors. The plan is re-read and
       // re-validated on every dispatch so the refusal lifts only once the plan
       // parses without error. A plan that cannot be read is treated as a
       // not-found refusal rather than a dispatch.
-      const location = documentFor(services, slug);
-      const resolved = await tc.ctx.resolveReadPath(location.documentPath);
+      const location = resolveDocument(planRepo.baitonDir, planRepo.slug);
+      const resolved = await planRepo.guard.resolveReadPath(location.documentPath);
       if (!resolved.ok) {
         return { ok: false, error: resolved.error.message };
       }
@@ -801,7 +803,7 @@ function runTool(services: ToolServices): Tool {
       try {
         content = await fs.readFile(resolved.resolved, 'utf8');
       } catch {
-        return { ok: false, error: `plan "${slug}" was not found` };
+        return { ok: false, error: `plan "${planRepo.label}" was not found` };
       }
       const errors = validatePlan(parsePlan(content, location.kind), content);
       if (errors.length > 0) {
@@ -811,22 +813,34 @@ function runTool(services: ToolServices): Tool {
         return {
           ok: false,
           error:
-            `plan "${slug}" is invalid; no stage can run until it is fixed. ` +
+            `plan "${planRepo.label}" is invalid; no stage can run until it is fixed. ` +
             `Validation errors: ${detail}`,
         };
       }
 
-      const outcome = await services.runQueue.dispatch({ slug, phaseId: phase, stage });
+      const request = planRepo.isOwner
+        ? { slug: planRepo.slug, phaseId: phase, stage }
+        : { slug: planRepo.slug, phaseId: phase, stage, repoRoot: planRepo.root, baitonDir: planRepo.baitonDir };
+      const outcome = await services.runQueue.dispatch(request);
       switch (outcome.kind) {
         case 'dispatched':
-          return { ok: true, data: { slug, phase, stage, runId: outcome.runId } };
+          return {
+            ok: true,
+            data: {
+              slug: planRepo.slug,
+              ...(planRepo.isOwner ? {} : { repo: planRepo.repoPath }),
+              phase,
+              stage,
+              runId: outcome.runId,
+            },
+          };
         case 'busy':
           return {
             ok: false,
-            error: `a stage is already running for phase "${phase}" of plan "${slug}"; wait for it to finish before dispatching another stage for this phase (other phases can run meanwhile)`,
+            error: `a stage is already running for phase "${phase}" of plan "${planRepo.label}"; wait for it to finish before dispatching another stage for this phase (other phases can run meanwhile)`,
           };
         case 'illegal':
-          return { ok: false, error: `stage "${stage}" is not allowed for phase "${phase}": ${outcome.reason}` };
+          return { ok: false, error: `stage "${stage}" is not allowed for phase "${phase}" of plan "${planRepo.label}": ${outcome.reason}` };
         default:
           return { ok: false, error: 'run dispatch returned an unknown outcome' };
       }
@@ -976,10 +990,6 @@ function submitPrTool(services: ToolServices): Tool {
       };
     },
   };
-}
-
-function documentFor(services: ToolServices, slug: string): DocumentLocation {
-  return resolveDocument(services.baitonDir, slug);
 }
 
 /**

@@ -90,7 +90,7 @@ export function planOwnerText(slug: string, repo: string): string {
 export const PLAN_ADDRESSING_TEXT = [
   'Addressing plans across repos:',
   '- A plan is identified by its owning repo and its slug. Write a qualified plan as `<repoPath>:<slug>`, where `<repoPath>` is the repo\'s path relative to this repo (`.` for this repo), for example `packages/api:my-plan`.',
-  '- `list_plans`, `read_plan`, `update_overview`, `add_phase`, `edit_phase`, `remove_phase`, `approve_plan`, `land_phase` and `submit_pr` accept a qualified `slug`, or a bare `slug` plus an optional `plan_repo`. Each acts on the plan\'s own repo: its `.baiton/`, its branch and its pull requests.',
+  '- `list_plans`, `read_plan`, `update_overview`, `add_phase`, `edit_phase`, `remove_phase`, `approve_plan`, `run`, `land_phase` and `submit_pr` accept a qualified `slug`, or a bare `slug` plus an optional `plan_repo`. Each acts on the plan\'s own repo: its `.baiton/`, its branch and its pull requests.',
   '- A bare slug works only when exactly one repo has a plan with that slug. Nothing picks a repo for you.',
   '- When a tool refuses because the slug exists in more than one repo, it lists the candidates as `<repoPath>:<slug>`. This is the one refusal you do not just quote: ask the user which plan they mean with `ask_user`, offering each candidate as an option, then retry with the qualified slug they chose. Never choose a candidate yourself.',
   '- `list_plans` shows qualified names wherever a slug appears in more than one repo; use those names as given.',

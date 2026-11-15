@@ -595,6 +595,66 @@ describe('orchestrator registry and control tools', () => {
       ]);
       assert.deepStrictEqual(submitCalls, [['child-land', childRoot], ['owner-land']]);
     });
+
+    it('dispatches run for a qualified child plan to the child repo', async () => {
+      const ownerRoot = newRepo();
+      const { childRoot, services: base } = twoRepoServices(ownerRoot, benignGit(), benignGit());
+      writePlan(childRoot, 'client-events-ingest', draftPlanDoc());
+      writePlan(ownerRoot, 'owner-run', draftPlanDoc());
+      writePlan(childRoot, 'invalid-child', draftPlanDoc().replace('- [pending] P01', '- [pending] BAD'));
+      const queue = {
+        calls: [] as RunDispatchRequest[],
+        dispatch: async (req: RunDispatchRequest): Promise<RunDispatchOutcome> => {
+          queue.calls.push(req);
+          return { kind: 'dispatched', runId: 'r' };
+        },
+      };
+      const registry = createToolRegistry({ ...base, runQueue: queue });
+
+      const qualified = await registry.call(
+        'run', { slug: 'packages/api:client-events-ingest', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+      const planRepo = await registry.call(
+        'run', { slug: 'client-events-ingest', plan_repo: 'packages/api', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+      const owner = await registry.call(
+        'run', { slug: 'owner-run', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+      const invalid = await registry.call(
+        'run', { slug: 'invalid-child', plan_repo: 'packages/api', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+      const conflict = await registry.call(
+        'run', { slug: 'packages/api:client-events-ingest', plan_repo: 'other', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+
+      assert.strictEqual(qualified.ok, true, qualified.ok ? undefined : `qualified child slug is accepted: ${qualified.error}`);
+      assert.strictEqual(planRepo.ok, true, planRepo.ok ? undefined : `plan_repo is accepted by the schema: ${planRepo.error}`);
+      assert.strictEqual(owner.ok, true, 'owner plan still dispatches');
+      if (qualified.ok) assert.deepStrictEqual(qualified.data, {
+        slug: 'client-events-ingest', repo: 'packages/api', phase: 'P01', stage: 'plan', runId: 'r',
+      });
+      if (planRepo.ok) assert.deepStrictEqual(planRepo.data, {
+        slug: 'client-events-ingest', repo: 'packages/api', phase: 'P01', stage: 'plan', runId: 'r',
+      });
+      if (owner.ok) assert.deepStrictEqual(owner.data, {
+        slug: 'owner-run', phase: 'P01', stage: 'plan', runId: 'r',
+      });
+      assert.deepStrictEqual(queue.calls, [
+        { slug: 'client-events-ingest', phaseId: 'P01', stage: 'plan', repoRoot: childRoot, baitonDir: path.join(childRoot, '.baiton') },
+        { slug: 'client-events-ingest', phaseId: 'P01', stage: 'plan', repoRoot: childRoot, baitonDir: path.join(childRoot, '.baiton') },
+        { slug: 'owner-run', phaseId: 'P01', stage: 'plan' },
+      ]);
+      assert.strictEqual(invalid.ok, false, 'invalid child plan is refused');
+      if (!invalid.ok) assert.match(invalid.error, /invalid/);
+      assert.strictEqual(conflict.ok, false, 'conflicting repo address is refused');
+      if (!conflict.ok) assert.match(conflict.error, /conflicts with qualified slug/);
+      assert.strictEqual(queue.calls.length, 3, 'refused requests never reach the queue');
+    });
   });
 
   describe('draft_plan', () => {
@@ -1646,6 +1706,22 @@ describe('orchestrator registry and control tools', () => {
       };
     }
 
+    it('accepts plan_repo when dispatching a child plan', async () => {
+      const ownerRoot = newRepo();
+      const { childRoot, services } = twoRepoServices(ownerRoot, benignGit(), benignGit());
+      writePlan(childRoot, 'child-run', draftPlanDoc());
+      const queue = spyingQueue();
+      const registry = createToolRegistry({ ...services, runQueue: queue });
+      const definition = registry.definitions().find((tool) => tool.name === 'run')!;
+      const schema = definition.schema as { properties: Record<string, unknown> };
+      assert.ok(Object.hasOwn(schema.properties, 'plan_repo'), 'the run schema advertises plan_repo');
+      const result = await registry.call(
+        'run', { slug: 'child-run', plan_repo: 'packages/api', phase: 'P01', stage: 'plan' },
+        undefined, makeGuard(ownerRoot), 'drive',
+      );
+      assert.strictEqual(result.ok, true, result.ok ? undefined : `plan_repo is accepted: ${result.error}`);
+    });
+
     it('rejects plan-review itself, never reaching the run queue', async () => {
       const repo = newRepo();
       const slug = 'sample';
@@ -2086,6 +2162,47 @@ describe('orchestrator registry and control tools', () => {
       assert.strictEqual(t01.requests.length, 2, 'in-flight state was cleared');
       t01.pending[1](dispatched);
       await again;
+    });
+
+    it('routes child repo dispatches and tracks busy state per owning repo', async () => {
+      const legacySpecsDir = path.join(newRepo(), '.baiton', 'specs');
+      const ownerBaitonDir = path.dirname(legacySpecsDir);
+      const ownerQueue = fakeQueue();
+      const childQueue = fakeQueue();
+      const queues = new Map<string | undefined, FakeQueue>([
+        [undefined, ownerQueue],
+        ['/x/child', childQueue],
+      ]);
+      const queueRepos: Array<string | undefined> = [];
+      const seam = createRunQueueSeam((_slug, _phaseId, repo) => {
+        queueRepos.push(repo);
+        return queues.get(repo)!;
+      }, ownerBaitonDir, () => undefined, path.dirname(ownerBaitonDir));
+
+      const childDispatch = seam.dispatch({
+        slug: 'demo', phaseId: 'T01', stage: 'plan', repoRoot: '/x/child', baitonDir: '/x/child/.baiton',
+      });
+      const ownerDispatch = seam.dispatch({ slug: 'demo', phaseId: 'T01', stage: 'plan' });
+      assert.deepStrictEqual(queueRepos, ['/x/child', undefined]);
+      assert.strictEqual(childQueue.requests.length, 1);
+      assert.strictEqual(ownerQueue.requests.length, 1, 'same slug and phase in another repo is not busy');
+
+      childQueue.pending[0](dispatched);
+      ownerQueue.pending[0](dispatched);
+      assert.strictEqual((await childDispatch).kind, 'dispatched');
+      assert.strictEqual((await ownerDispatch).kind, 'dispatched');
+    });
+
+    it('maps an unknown owning repo to an illegal dispatch outcome', async () => {
+      const legacySpecsDir = path.join(newRepo(), '.baiton', 'specs');
+      const seam = createRunQueueSeam(
+        (_slug, _phaseId, _repo) => { throw new Error('unknown owning repo "bad"'); },
+        path.dirname(legacySpecsDir),
+        () => undefined,
+      );
+      assert.deepStrictEqual(await seam.dispatch({
+        slug: 'demo', phaseId: 'T01', stage: 'plan', repoRoot: '/bad', baitonDir: '/bad/.baiton',
+      }), { kind: 'illegal', reason: 'unknown owning repo "bad"' });
     });
 
     it('answers busy while the queue itself is running and maps refusals to illegal', async () => {
