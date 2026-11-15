@@ -184,6 +184,7 @@ import {
   branchMergedIntoBase,
   treeNodeTarget,
   type BranchMergedChecker,
+  type PlanRepoSource,
   type PrsMergedChecker,
   type TreeNode,
 } from './planExplorer';
@@ -198,7 +199,7 @@ import {
   type RunTreeNode,
 } from './runsExplorer';
 import { openChat } from './openChat';
-import { phasePlanPath } from './planLister';
+import { phasePlanPath, planExplorerSourceSpecs } from './planLister';
 import { setProviderApiKey } from './setApiKey';
 import { ENDPOINTS_KEY, normalizeEndpoints, setProviderEndpoint } from './setEndpoint';
 import { ProviderRouter } from './providerRouter';
@@ -1338,6 +1339,23 @@ export function registerCommands(
   );
 
   // --- plan explorer tree provider + active-plan tracking (Req 2, 6, 7) ---
+  // Re-evaluate discovered sources on refresh so newly loaded repo configs and
+  // Restricted Mode changes update which rows can expose actions.
+  const explorerSources = (): PlanRepoSource[] =>
+    planExplorerSourceSpecs(activation.repos, {
+      ownerRoot: repoRoot,
+      ownerBaitonDir: baitonDir,
+      restricted: workspace.restricted,
+      loaded: (name) => activation.repoConfigs === undefined || activation.repoConfigs.has(name),
+    }).map((spec) => ({
+      repo: spec.repo,
+      baitonDir: spec.baitonDir,
+      topology: spec.topology,
+      actionable: spec.actionable,
+      isApproved: spec.isOwner
+        ? (slug) => planStore.isApproved(slug)
+        : async (slug) => (await phaseQueues.owner(spec.root)?.planStore.isApproved(slug)) ?? false,
+    }));
   // The explorer's root click sets the Chat_View active plan through the
   // controller's sink; the controller also follows the active editor when it is
   // a `plan.md` or the legacy `spec.md` (Req 7.4, 7.5).
@@ -1346,8 +1364,16 @@ export function registerCommands(
     planStore,
     surface,
     workspace.restricted,
-    (slug) => chatController.setActivePlan(slug),
-    { prsMerged: prsMergedForPlan, branchMerged: branchMergedForPlan },
+    (slug, repo) => {
+      // ChatController is still slug-only, so child clicks must not select a
+      // same-named owner plan while the child document opens normally.
+      if (repo === undefined || repo === ownerRepoName()) chatController.setActivePlan(slug);
+    },
+    {
+      sources: explorerSources,
+      prsMerged: prsMergedForPlan,
+      branchMerged: branchMergedForPlan,
+    },
   ).start();
   disposables.push(
     vscode.window.registerTreeDataProvider(PLAN_EXPLORER_VIEW_ID, explorer),

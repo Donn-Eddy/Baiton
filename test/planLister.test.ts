@@ -7,6 +7,7 @@ import {
   listPlans,
   listPlansAcrossRepos,
   phasePlanPath,
+  planExplorerSourceSpecs,
   planListingRepos,
 } from '../src/activation/planLister';
 import type { RepoSet } from '../src/activation/repoDiscovery';
@@ -74,6 +75,7 @@ describe('plan lister', () => {
     const listed = await listPlansAcrossRepos([
       { repo: '.', baitonDir },
       { repo: 'packages/api', baitonDir: childBaitonDir },
+      { repo: 'packages/api', baitonDir: path.join(childBaitonDir, '.') },
       { repo: 'missing', baitonDir: path.join(root, 'missing', '.baiton') },
     ]);
     assert.deepStrictEqual(
@@ -87,6 +89,29 @@ describe('plan lister', () => {
     );
     assert.deepStrictEqual(listed.map((entry) => entry.raw), [
       'root alpha\n', 'root zeta\n', 'api alpha\n', 'api beta\n',
+    ]);
+  });
+
+  it('de-duplicates the same repo and slug across distinct source paths', async () => {
+    const otherBaitonDir = path.join(root, 'other', '.baiton');
+    const thirdBaitonDir = path.join(root, 'third', '.baiton');
+    const writeAt = (directory: string, relative: string, contents: string): void => {
+      const target = path.join(directory, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, contents);
+    };
+    writeAt(baitonDir, 'plans/alpha/plan.md', 'first source\n');
+    writeAt(otherBaitonDir, 'plans/alpha/plan.md', 'second source\n');
+    writeAt(thirdBaitonDir, 'plans/alpha/plan.md', 'third source\n');
+
+    const listed = await listPlansAcrossRepos([
+      { repo: 'duplicate', baitonDir },
+      { repo: 'duplicate', baitonDir: otherBaitonDir },
+      { repo: 'other-repo', baitonDir: thirdBaitonDir },
+    ]);
+    assert.deepStrictEqual(listed.map(({ repo, slug }) => [repo, slug]), [
+      ['duplicate', 'alpha'],
+      ['other-repo', 'alpha'],
     ]);
   });
 
@@ -125,5 +150,58 @@ describe('plan lister', () => {
         topologyRepos: ['.', 'packages/api', 'packages/web'],
       },
     ]);
+  });
+
+  it('projects discovered repos into source specs with owner and action policy', () => {
+    const rootRepo = {
+      name: '.', folderName: 'workspace', relPath: '', root,
+      baitonDir, hasGit: true, children: ['packages/api', 'packages/web'],
+    };
+    const apiRoot = path.join(root, 'packages', 'api');
+    const apiBaitonDir = path.join(apiRoot, '.baiton');
+    const apiRepo = {
+      name: 'packages/api', folderName: 'workspace', relPath: 'packages/api',
+      root: apiRoot, baitonDir: apiBaitonDir, hasGit: true, parent: '.', children: [],
+    };
+    const webRepo = {
+      name: 'packages/web', folderName: 'workspace', relPath: 'packages/web',
+      root: path.join(root, 'packages', 'web'), hasGit: true, parent: '.', children: [],
+    };
+    const set: RepoSet = {
+      repos: [rootRepo, apiRepo, webRepo],
+      folderRoots: [rootRepo],
+      truncated: false,
+    };
+    const deps = {
+      ownerRoot: root,
+      ownerBaitonDir: path.join(root, '.baiton-owner'),
+      restricted: false,
+      loaded: () => true,
+    };
+
+    assert.deepStrictEqual(planExplorerSourceSpecs(undefined, deps), []);
+    const specs = planExplorerSourceSpecs(set, deps);
+    assert.deepStrictEqual(specs.map(({ repo, root: specRoot, baitonDir: directory, isOwner, actionable, topology }) => ({
+      repo, root: specRoot, baitonDir: directory, isOwner, actionable, topologyOwner: topology?.owner,
+    })), [
+      {
+        repo: '.', root, baitonDir: deps.ownerBaitonDir,
+        isOwner: true, actionable: true, topologyOwner: '.',
+      },
+      {
+        repo: 'packages/api', root: apiRoot, baitonDir: apiBaitonDir,
+        isOwner: false, actionable: true, topologyOwner: 'packages/api',
+      },
+    ]);
+    const restricted = planExplorerSourceSpecs(set, { ...deps, restricted: true });
+    assert.deepStrictEqual(restricted.map(({ actionable }) => actionable), [true, false]);
+    const unloaded = planExplorerSourceSpecs(set, {
+      ...deps,
+      loaded: (name) => name !== 'packages/api',
+    });
+    assert.deepStrictEqual(unloaded.map(({ actionable }) => actionable), [true, false]);
+    assert.strictEqual(planExplorerSourceSpecs({
+      repos: [rootRepo], folderRoots: [rootRepo], truncated: false,
+    }, deps).length, 1);
   });
 });
