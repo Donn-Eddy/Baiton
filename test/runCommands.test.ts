@@ -825,6 +825,90 @@ describe('plan command targets (repo, slug)', () => {
     };
   }
 
+  it('parses only plan and legacy spec documents, using the last .baiton segment', () => {
+    const layout = makeLayout();
+    const worktree = path.join(layout.ws, '.baiton', 'worktrees', 's', 'P01');
+    const worktreePlan = path.join(worktree, '.baiton', 'plans', 'x', 'plan.md');
+    writeFile(layout.ws, path.relative(layout.ws, worktreePlan), '# x\n');
+
+    assert.deepStrictEqual(
+      mod.planDocumentFromPath(path.join(layout.ws, '.baiton', 'plans', 'alpha', 'plan.md')),
+      { slug: 'alpha', root: layout.ws, baitonDir: layout.ownerBaiton },
+    );
+    assert.deepStrictEqual(
+      mod.planDocumentFromPath(path.join(layout.child, '.baiton', 'specs', 'old', 'spec.md')),
+      { slug: 'old', root: layout.child, baitonDir: layout.childBaiton },
+    );
+    assert.deepStrictEqual(mod.planDocumentFromPath(worktreePlan), {
+      slug: 'x', root: worktree, baitonDir: path.join(worktree, '.baiton'),
+    });
+    assert.strictEqual(
+      mod.planDocumentFromPath(path.join(layout.ws, '.baiton', 'plans', 'alpha', 'phases', 'P01', 'plan.md')),
+      undefined,
+    );
+    assert.strictEqual(
+      mod.planDocumentFromPath(path.join(layout.ws, '.baiton', 'plans', 'alpha', 'notes.md')),
+      undefined,
+    );
+  });
+
+  it('resolves CodeLens targets to the owning repo and preserves owner worktree plans', async () => {
+    const layout = makeLayout();
+    const single = mod.resolveLensTarget(
+      makeDeps(layout, { discovered: false }),
+      path.join(layout.ws, '.baiton', 'plans', 'alpha', 'plan.md'),
+    );
+    assert.deepStrictEqual(single, { slug: 'alpha', baitonDir: layout.ownerBaiton });
+
+    const deps = makeDeps(layout);
+    const child = mod.resolveLensTarget(
+      deps,
+      path.join(layout.child, '.baiton', 'plans', 'shared', 'plan.md'),
+    );
+    assert.deepStrictEqual(child, {
+      slug: 'shared', baitonDir: layout.childBaiton, repoPath: 'child',
+    });
+
+    const owner = mod.resolveLensTarget(
+      deps,
+      path.join(layout.ws, '.baiton', 'plans', 'shared', 'plan.md'),
+    );
+    assert.deepStrictEqual(owner, {
+      slug: 'shared', baitonDir: layout.ownerBaiton, repoPath: '.',
+    });
+
+    const worktree = path.join(layout.ws, '.baiton', 'worktrees', 's', 'P01');
+    const worktreePlan = path.join(worktree, '.baiton', 'plans', 'x', 'plan.md');
+    writeFile(layout.ws, path.relative(layout.ws, worktreePlan), '# x\n');
+    assert.deepStrictEqual(mod.resolveLensTarget(deps, worktreePlan), {
+      slug: 'x', baitonDir: layout.ownerBaiton, repoPath: '.',
+    });
+
+    const unrelated = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-unrelated-'));
+    tempRoots.push(unrelated);
+    assert.strictEqual(
+      mod.resolveLensTarget(deps, path.join(unrelated, '.baiton', 'plans', 'x', 'plan.md')),
+      undefined,
+    );
+  });
+
+  it('round-trips lens repo paths through plan target resolution without choosing', async () => {
+    const layout = makeLayout();
+    let chooseCalls = 0;
+    const deps = makeDeps(layout, { choose: async () => { chooseCalls++; return undefined; } });
+
+    const childArgs = mod.phaseArgs('shared', 'P01', 'child');
+    const ownerArgs = mod.phaseArgs('shared', 'P01', '.');
+    const child = await mod.resolvePlanTarget(deps, { ...childArgs, slug: childArgs.slug! });
+    const owner = await mod.resolvePlanTarget(deps, { ...ownerArgs, slug: ownerArgs.slug! });
+    assert.ok(child.ok && owner.ok);
+    if (child.ok && owner.ok) {
+      assert.strictEqual(child.target.root, layout.child);
+      assert.strictEqual(owner.target.root, layout.ws);
+    }
+    assert.strictEqual(chooseCalls, 0);
+  });
+
   it('keeps the single-repo picker bare and returns the owner instances', async () => {
     const layout = makeLayout();
     const deps = makeDeps(layout, { discovered: false });
