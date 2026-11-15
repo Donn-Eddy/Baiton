@@ -63,7 +63,7 @@ With no discovery, or a single repo, the seam degenerates to today's synthetic o
 
 # PHASES
 
-- [planning] P01 Widen the plan-repo seam to every discovered .baiton/ repo, with forward lookup, precedence-free locate, and a qualified <repoPath>:<slug> parser (files: src/orchestrator/planRepos.ts, src/orchestrator/seams.ts, src/activation/repoDiscovery.ts, test/planRepos.test.ts)
+- [planned] P01 Widen the plan-repo seam to every discovered .baiton/ repo, with forward lookup, precedence-free locate, and a qualified <repoPath>:<slug> parser (files: src/orchestrator/planRepos.ts, src/orchestrator/seams.ts, src/activation/repoDiscovery.ts, test/planRepos.test.ts)
 - [pending] P02 Add an owning-repo field to plan, phase and error tree nodes, distinct from the phase target repo (files: src/model/treeModel.ts, test/treeModel.property.test.ts)
 - [pending] P03 Make session scopes owner-aware so transcripts resolve against the plan's repo and owner-plan paths and keys stay unchanged (files: src/orchestrator/sessionStore.ts, src/orchestrator/subAgent.ts, src/orchestrator/interventions.ts, test/sessionStore.test.ts, test/sessionStore.property.test.ts)
 - [pending] P04 Re-address the orchestrator plan tools through the mandatory seam: optional owning repo, ambiguity candidates, guard bound to the target repo's .baiton/, plan-repo submit_pr (after P01; files: src/orchestrator/toolServices.ts, src/orchestrator/planWriteTools.ts, src/orchestrator/readTools.ts, src/orchestrator/controlTools.ts, src/orchestrator/guard.ts, src/engine/submitPr.ts, src/activation/commands.ts, test/planWriteTools.repo.test.ts, test/registry.controlTools.test.ts, test/submitPr.multiRepo.test.ts, test/guard.repoBinding.test.ts)
