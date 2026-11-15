@@ -5,7 +5,7 @@
  * model cores, then groups plans as Active, Pending, or Completed (including a
  * plan whose recorded branch is merged into base) and creates
  * phase or validation-error children in file order.
- * Optional repo identity labels the owning plan and a phase's distinct target; non-actionable inputs expose no actions.
+ * Optional repo identity records the owning repo on plan, phase and error nodes (separate from a phase's distinct target repo) and labels the plan; non-actionable inputs expose no actions.
  */
 import { DocumentKind, parsePlan, Phase } from './parser';
 import { resolvePhaseRepo, validatePlan, type RepoTopology } from './validator';
@@ -52,7 +52,9 @@ export function planGroupKind(facts: PlanGroupFacts): PlanGroupKind {
 export interface PhaseNode {
   slug: string;
   id: string;
-  /** Target repo, present only when it differs from the owning repo. */
+  /** Repository that owns the plan document (its `.baiton/`), present only when the caller supplied one. Never the phase target repo. */
+  ownerRepo?: string;
+  /** Target repo from the phase `repo:` hint, present only when it resolves to a repo other than the plan owner. Distinct from `ownerRepo`. */
   repo?: string;
   title: string;
   state: PhaseState;
@@ -64,14 +66,18 @@ export interface PhaseNode {
 
 export interface ErrorNode {
   slug: string;
+  /** Repository that owns the plan document (its `.baiton/`), present only when the caller supplied one. Never the phase target repo. */
+  ownerRepo?: string;
   reason: string;
   line: number;
 }
 
 export interface PlanNode {
   slug: string;
-  /** Repository that owns this plan document, when supplied by the caller. */
+  /** Repository label shown for this plan; supplied only when repo labels are shown. */
   repo?: string;
+  /** Repository that owns the plan document (its `.baiton/`), present only when the caller supplied one. Never the phase target repo. */
+  ownerRepo?: string;
   kind: DocumentKind;
   status: PlanStatus;
   approved: boolean;
@@ -94,8 +100,10 @@ export interface PlanNode {
 /** Input for one plan document and the facts supplied by its store and journal. */
 export interface PlanInput {
   slug: string;
-  /** Repository that owns this plan document. */
+  /** Repository label shown for this plan; supplied only when repo labels are shown. */
   repo?: string;
+  /** Identity of the repository whose `.baiton/` owns this plan document (used for addressing and actions). Independent of `repo`, which only drives the visible repo label, and of any phase `repo:` hint (the phase target). */
+  ownerRepo?: string;
   /** Discovered repository topology used to resolve phase repo hints. */
   topology?: RepoTopology;
   /** Whether this row's actions target a store that understands its repo. Defaults to true. */
@@ -136,6 +144,8 @@ export function buildPlanGroups(nodes: readonly PlanNode[]): PlanGroupNode[] {
 }
 
 function buildPlanNode(input: PlanInput): PlanNode {
+  const owner = owningRepo(input);
+  const ownerFact = owner !== undefined ? { ownerRepo: owner } : {};
   const prsMergedFact = input.prsMerged === true ? { prsMerged: true as const } : {};
   const branchMergedFact = input.branchMerged === true ? { branchMerged: true as const } : {};
   if (input.readError !== undefined || input.raw === undefined) {
@@ -143,6 +153,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
     return {
       slug: input.slug,
       ...(input.repo !== undefined ? { repo: input.repo } : {}),
+      ...ownerFact,
       ...prsMergedFact,
       ...branchMergedFact,
       kind,
@@ -156,6 +167,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
         kind: 'errors',
         errors: [{
           slug: input.slug,
+          ...ownerFact,
           reason: input.readError ?? (kind === 'legacy-spec' ? 'spec.md could not be read' : 'plan.md could not be read'),
           line: 1,
         }],
@@ -172,6 +184,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
     return {
       slug: input.slug,
       ...(input.repo !== undefined ? { repo: input.repo } : {}),
+      ...ownerFact,
       ...prsMergedFact,
       ...branchMergedFact,
       kind: parsed.kind,
@@ -186,6 +199,7 @@ function buildPlanNode(input: PlanInput): PlanNode {
         kind: 'errors',
         errors: errors.map((error) => ({
           slug: input.slug,
+          ...ownerFact,
           reason: error.reason,
           line: error.line,
         })),
@@ -201,12 +215,14 @@ function buildPlanNode(input: PlanInput): PlanNode {
       input.sessions,
       input.plans,
       input.topology,
+      owner,
       input.actionable !== false,
     ),
   );
   return {
     slug: input.slug,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
+    ...ownerFact,
     ...prsMergedFact,
     ...branchMergedFact,
     kind: parsed.kind,
@@ -238,6 +254,7 @@ function buildPhaseNode(
   sessions: ReadonlySet<string>,
   plans: ReadonlySet<string>,
   topology: RepoTopology | undefined,
+  owner: string | undefined,
   actionable: boolean,
 ): PhaseNode {
   const hasSession = sessions.has(phase.id);
@@ -246,6 +263,7 @@ function buildPhaseNode(
   return {
     slug,
     id: phase.id,
+    ...(owner !== undefined ? { ownerRepo: owner } : {}),
     ...(binding.ok && !binding.isOwner ? { repo: binding.target } : {}),
     title: phase.title,
     state: phase.state,
@@ -254,6 +272,11 @@ function buildPhaseNode(
     hasPlan,
     actions: actionable ? legalActions(phase.state, hasSession, hasPlan) : [],
   };
+}
+
+/** The plan's owning repo: the explicit owner, else the label repo, else none (single-repo). */
+function owningRepo(input: PlanInput): string | undefined {
+  return input.ownerRepo ?? input.repo;
 }
 
 function deriveStatus(rawStatus: string | undefined): PlanStatus {

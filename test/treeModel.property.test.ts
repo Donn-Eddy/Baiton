@@ -9,6 +9,8 @@ import {
   planGroupKind,
   legalPlanActions,
   PhaseState,
+  PlanNode,
+  RepoTopology,
 } from '../src/model';
 
 /**
@@ -225,6 +227,31 @@ function validPlanDocument(state: PhaseState = 'pending'): string {
   ].join('\n');
 }
 
+function withoutOwnerRepo(node: PlanNode): PlanNode {
+  const copy: PlanNode = { ...node };
+  delete copy.ownerRepo;
+  if (node.children.kind === 'phases') {
+    copy.children = {
+      kind: 'phases',
+      phases: node.children.phases.map((phase) => {
+        const phaseCopy = { ...phase };
+        delete phaseCopy.ownerRepo;
+        return phaseCopy;
+      }),
+    };
+  } else {
+    copy.children = {
+      kind: 'errors',
+      errors: node.children.errors.map((error) => {
+        const errorCopy = { ...error };
+        delete errorCopy.ownerRepo;
+        return errorCopy;
+      }),
+    };
+  }
+  return copy;
+}
+
 describe('tree model (property)', function () {
   // The generated documents go through parsing, validation and tree building
   // hundreds of times; give the property runs enough room on slower CI hosts.
@@ -252,6 +279,156 @@ describe('tree model (property)', function () {
     if (nodes[0].children.kind === 'phases') {
       assert.deepStrictEqual(nodes[0].children.phases.map((phase) => phase.id), ['P01']);
     }
+  });
+
+  it('omits ownerRepo on every node when no repo identity is supplied', () => {
+    const validRaw = [
+      '## Endstate', 'A working result.',
+      '## What needs changing', 'Implement the behavior.',
+      '## Limitations & constraints', 'Keep the public API stable.',
+      '# PHASES', '- [pending] P01 First phase', '- [pending] P02 Second phase',
+    ].join('\n');
+    const invalidRaw = [
+      '## Endstate', 'A working result.',
+      '## What needs changing', 'Implement the behavior.',
+      '## Limitations & constraints', 'Keep the public API stable.',
+      '# PHASES', '- [pending] P01 First phase', '- [pending] P01 Duplicate phase',
+    ].join('\n');
+    const base = { approved: false, sessions: new Set<string>(), plans: new Set<string>() };
+    const nodes = buildPlanTree([
+      { ...base, slug: 'valid', raw: validRaw },
+      { ...base, slug: 'invalid', raw: invalidRaw },
+      { ...base, slug: 'unreadable', readError: 'boom' },
+    ]);
+
+    for (const node of nodes) {
+      assert.strictEqual('ownerRepo' in node, false);
+      if (node.children.kind === 'phases') {
+        for (const phase of node.children.phases) {
+          assert.strictEqual('ownerRepo' in phase, false);
+          assert.strictEqual('repo' in phase, false);
+        }
+      } else {
+        for (const error of node.children.errors) {
+          assert.strictEqual('ownerRepo' in error, false);
+        }
+      }
+    }
+  });
+
+  it('records ownerRepo on plan, phase and error nodes from ownerRepo or the label repo', () => {
+    const validRaw = [
+      '## Endstate', 'A working result.',
+      '## What needs changing', 'Implement the behavior.',
+      '## Limitations & constraints', 'Keep the public API stable.',
+      '# PHASES', '- [pending] P01 First phase', '- [pending] P02 Second phase',
+    ].join('\n');
+    const invalidRaw = [
+      '## Endstate', 'A working result.',
+      '## What needs changing', 'Implement the behavior.',
+      '## Limitations & constraints', 'Keep the public API stable.',
+      '# PHASES', '- [pending] P01 First phase', '- [pending] P01 Duplicate phase',
+    ].join('\n');
+    const base = { approved: false, sessions: new Set<string>(), plans: new Set<string>() };
+    const buildIdentitySet = (identity: { ownerRepo?: string; repo?: string }) => buildPlanTree([
+      { ...base, ...identity, slug: 'valid', raw: validRaw },
+      { ...base, ...identity, slug: 'invalid', raw: invalidRaw },
+      { ...base, ...identity, slug: 'unreadable', readError: 'boom' },
+    ]);
+    const assertEveryNodeOwner = (nodes: PlanNode[], expected: string) => {
+      for (const node of nodes) {
+        assert.strictEqual(node.ownerRepo, expected);
+        if (node.children.kind === 'phases') {
+          for (const phase of node.children.phases) assert.strictEqual(phase.ownerRepo, expected);
+        } else {
+          for (const error of node.children.errors) assert.strictEqual(error.ownerRepo, expected);
+        }
+      }
+    };
+
+    const explicitOwner = buildIdentitySet({ ownerRepo: 'child' });
+    assertEveryNodeOwner(explicitOwner, 'child');
+    assert.strictEqual('repo' in explicitOwner[0], false);
+
+    const labelFallback = buildIdentitySet({ repo: 'child' });
+    assertEveryNodeOwner(labelFallback, 'child');
+    assert.strictEqual(labelFallback[0].repo, 'child');
+
+    const separateLabel = buildIdentitySet({ ownerRepo: 'child', repo: 'label' });
+    assertEveryNodeOwner(separateLabel, 'child');
+    assert.strictEqual(separateLabel[0].repo, 'label');
+  });
+
+  it('keeps the owning repo separate from the phase target repo', () => {
+    const raw = [
+      '## Endstate', 'A working result.',
+      '## What needs changing', 'Implement the behavior.',
+      '## Limitations & constraints', 'Keep the public API stable.',
+      '# PHASES',
+      '- [pending] P01 Owner phase',
+      '- [pending] P02 Child phase (repo: child)',
+    ].join('\n');
+    const topology: RepoTopology = {
+      owner: 'root',
+      repos: [
+        { name: 'root', root: '/w' },
+        { name: 'child', root: '/w/child', parent: 'root' },
+      ],
+    };
+    const base = {
+      slug: 'topology', raw, topology, approved: false,
+      sessions: new Set<string>(), plans: new Set<string>(),
+    };
+    const withOwner = buildPlanTree([{ ...base, ownerRepo: 'root' }])[0];
+    const withoutOwner = buildPlanTree([base])[0];
+
+    assert.strictEqual(withOwner.invalid, false);
+    assert.strictEqual(withOwner.children.kind, 'phases');
+    if (withOwner.children.kind !== 'phases') return;
+    assert.strictEqual(withOwner.children.phases[0].ownerRepo, 'root');
+    assert.strictEqual('repo' in withOwner.children.phases[0], false);
+    assert.strictEqual(withOwner.children.phases[1].ownerRepo, 'root');
+    assert.strictEqual(withOwner.children.phases[1].repo, 'child');
+    assert.deepStrictEqual(withOwner.actions, withoutOwner.actions);
+    assert.deepStrictEqual(
+      withOwner.children.phases.map(({ title, actions }) => ({ title, actions })),
+      withoutOwner.children.kind === 'phases'
+        ? withoutOwner.children.phases.map(({ title, actions }) => ({ title, actions }))
+        : [],
+    );
+  });
+
+  it('adds ownerRepo without changing any other tree fields', () => {
+    fc.assert(
+      fc.property(
+        legacyDocumentFixtureArb,
+        fc.option(fc.constantFrom('a', 'b/c'), { nil: undefined }),
+        (fixture, ownerRepo) => {
+          const raw = renderLegacyDocument(fixture);
+          const parsed = parsePlan(raw);
+          fc.pre(validatePlan(parsed, raw).length === 0);
+          const input = {
+            slug: 'demo', raw, approved: fixture.approved,
+            sessions: new Set<string>(), plans: new Set<string>(),
+          };
+          const baseline = buildPlanTree([input])[0];
+          const withOwner = buildPlanTree([{ ...input, ownerRepo }])[0];
+
+          assert.deepStrictEqual(withoutOwnerRepo(withOwner), baseline);
+          assert.strictEqual(withOwner.ownerRepo, ownerRepo);
+          if (withOwner.children.kind === 'phases') {
+            for (const phase of withOwner.children.phases) {
+              assert.strictEqual(phase.ownerRepo, ownerRepo);
+            }
+          } else {
+            for (const error of withOwner.children.errors) {
+              assert.strictEqual(error.ownerRepo, ownerRepo);
+            }
+          }
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 
   // Feature: baiton-ui-first-pass, Property 3: Tree model reflects parsed phases
