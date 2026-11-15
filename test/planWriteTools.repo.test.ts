@@ -7,11 +7,11 @@ import { createGitService, type GitService } from '../src/git';
 import { parsePlan } from '../src/model/parser';
 import { approvalHash, computeInputRev } from '../src/model/hash';
 import { validatePlan } from '../src/model/validator';
-import { createPlanRepoSeam } from '../src/orchestrator/planRepos';
+import { createPlanRepoSeam, formatPlanRef } from '../src/orchestrator/planRepos';
 import { GuardContext, type Tool } from '../src/orchestrator/guard';
 import type { PlanRepoSeam } from '../src/orchestrator/seams';
 import { createPlanWriteTools } from '../src/orchestrator/planWriteTools';
-import type { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, type ToolServices } from '../src/orchestrator/toolServices';
 import type { Repo, RepoSet } from '../src/activation/repoDiscovery';
 import { locationFor } from '../src/storage/documentLocation';
 
@@ -59,19 +59,22 @@ function makeFixture(): {
   planRepos: PlanRepoSeam;
   ownerCommits: string[];
   childCommits: string[];
+  siblingCommits: string[];
   services: ToolServices;
   guard: GuardContext;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-planwrite-repos-'));
   const ownerRoot = path.join(root, 'owner');
   const childRoot = path.join(ownerRoot, 'packages', 'api');
+  const nestedRoot = path.join(childRoot, 'service');
   const noBaitonRoot = path.join(ownerRoot, 'packages', 'uninitialized');
   const siblingRoot = path.join(root, 'sibling');
-  for (const dir of [ownerRoot, childRoot, noBaitonRoot, siblingRoot]) fs.mkdirSync(dir, { recursive: true });
+  for (const dir of [ownerRoot, childRoot, nestedRoot, noBaitonRoot, siblingRoot]) fs.mkdirSync(dir, { recursive: true });
   const entries = [
     repo({ name: 'workspace', root, children: ['owner', 'sibling'] }),
     repo({ name: 'owner', root: ownerRoot, parent: 'workspace', children: ['api', 'no-baiton'], baitonDir: path.join(ownerRoot, '.baiton') }),
-    repo({ name: 'api', root: childRoot, parent: 'owner', baitonDir: path.join(childRoot, '.baiton') }),
+    repo({ name: 'api', root: childRoot, parent: 'owner', children: ['service'], baitonDir: path.join(childRoot, '.baiton') }),
+    repo({ name: 'service', root: nestedRoot, parent: 'api' }),
     repo({ name: 'no-baiton', root: noBaitonRoot, parent: 'owner' }),
     repo({ name: 'sibling', root: siblingRoot, parent: 'workspace', baitonDir: path.join(siblingRoot, '.baiton') }),
   ];
@@ -79,13 +82,17 @@ function makeFixture(): {
   const set: RepoSet = { repos: entries, folderRoots: [entries[0]], truncated: false };
   const ownerCommits: string[] = [];
   const childCommits: string[] = [];
+  const siblingCommits: string[] = [];
   const ownerGit = gitStub(ownerCommits);
   const childGit = gitStub(childCommits);
+  const siblingGit = gitStub(siblingCommits);
   const planRepos = createPlanRepoSeam({
     repos: () => set,
     ownerRoot,
     restricted: () => false,
-    gitFor: (repoRoot) => path.resolve(repoRoot) === path.resolve(childRoot) ? childGit : ownerGit,
+    gitFor: (repoRoot) => path.resolve(repoRoot) === path.resolve(childRoot)
+      ? childGit
+      : path.resolve(repoRoot) === path.resolve(siblingRoot) ? siblingGit : ownerGit,
     exists: async (target) => fs.promises.access(target).then(() => true, () => false),
   });
   const services = {
@@ -109,6 +116,7 @@ function makeFixture(): {
     planRepos,
     ownerCommits,
     childCommits,
+    siblingCommits,
     services,
     guard: new GuardContext({ repoRoot: ownerRoot, baitonDir: path.join(ownerRoot, '.baiton'), restricted: false }),
   };
@@ -119,12 +127,12 @@ function clean(root: string): void {
 }
 
 describe('plan-writing tools with repository hints', () => {
-  it('keeps the old hintless line and refuses non-owner hints without a repo seam', async () => {
+  it('keeps the old hintless line and refuses non-owner hints in a single-repo workspace', async () => {
     const fixture = makeFixture();
     try {
       const slug = 'plain';
       const file = writePlan(path.join(fixture.ownerRoot, '.baiton'), slug);
-      const services = { ...fixture.services, planRepos: undefined };
+      const services = { ...fixture.services, planRepos: singleRepoPlanRepos(fixture.ownerRoot, fixture.services.git) };
       const add = toolByName(createPlanWriteTools(services), 'add_phase');
       const normal = await add.run({ slug, id: 'P03', title: 'Third phase' }, { callId: 'plain-1', ctx: fixture.guard });
       assert.strictEqual(normal.ok, true);
@@ -222,6 +230,7 @@ describe('plan-writing tools with repository hints', () => {
 
       parentGit(fixture.childRoot);
       const childFile = writePlan(path.join(fixture.childRoot, '.baiton'), 'child-only');
+      const qualifiedFile = writePlan(path.join(fixture.childRoot, '.baiton'), 'qualified-child');
       execFileSync('git', ['-C', fixture.childRoot, 'add', '.']);
       execFileSync('git', ['-C', fixture.childRoot, 'commit', '-qm', 'child baseline']);
 
@@ -240,12 +249,99 @@ describe('plan-writing tools with repository hints', () => {
       const parentDocument = writePlan(path.join(fixture.ownerRoot, '.baiton'), 'parent-doc');
       assert.strictEqual((await childGuard.target.guard.resolveMutatingPath(parentDocument)).ok, false);
 
-      const result = await edit.run({ slug: 'child-only', id: 'P02', title: 'Edited in child' }, { callId: 'child-edit', ctx: fixture.guard });
+      const result = await edit.run({ slug: 'child-only', plan_repo: 'packages/api', id: 'P02', title: 'Edited in child' }, { callId: 'child-edit', ctx: fixture.guard });
       assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        const data = result.data as { slug: string; repo: string; id: string; commit: string };
+        assert.deepStrictEqual({ slug: data.slug, repo: data.repo, id: data.id }, { slug: 'child-only', repo: 'packages/api', id: 'P02' });
+        assert.match(data.commit, /^[a-f0-9]{40}$/);
+      }
       assert.ok(fs.readFileSync(childFile, 'utf8').includes('P02 Edited in child'));
-      const childSubject = execFileSync('git', ['-C', fixture.childRoot, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).trim();
-      assert.strictEqual(childSubject, 'plan(child-only): P02 edit P02');
+      const qualified = await edit.run({ slug: 'packages/api:qualified-child', id: 'P02', title: 'Qualified edit' }, { callId: 'qualified-edit', ctx: fixture.guard });
+      assert.strictEqual(qualified.ok, true);
+      if (qualified.ok) {
+        const data = qualified.data as { slug: string; repo: string; id: string; commit: string };
+        assert.deepStrictEqual({ slug: data.slug, repo: data.repo, id: data.id }, { slug: 'qualified-child', repo: 'packages/api', id: 'P02' });
+        assert.match(data.commit, /^[a-f0-9]{40}$/);
+      }
+      assert.ok(fs.readFileSync(qualifiedFile, 'utf8').includes('P02 Qualified edit'));
+      const childSubjects = execFileSync('git', ['-C', fixture.childRoot, 'log', '-2', '--format=%s'], { encoding: 'utf8' }).trim().split('\n');
+      assert.deepStrictEqual(childSubjects, ['plan(qualified-child): P02 edit P02', 'plan(child-only): P02 edit P02']);
       assert.strictEqual(execFileSync('git', ['-C', fixture.ownerRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), parentHead);
+      const conflict = await edit.run({ slug: 'packages/api:child-only', plan_repo: '../sibling', id: 'P02' }, { callId: 'qualified-conflict', ctx: fixture.guard });
+      assert.deepStrictEqual(conflict, { ok: false, error: 'plan_repo "../sibling" conflicts with qualified slug "packages/api:child-only"' });
+    } finally {
+      clean(fixture.root);
+    }
+  });
+
+  it('refuses a bare slug that collides between the owner and a child with both candidates', async () => {
+    const fixture = makeFixture();
+    try {
+      const ownerFile = writePlan(path.join(fixture.ownerRoot, '.baiton'), 'dup');
+      const childFile = writePlan(path.join(fixture.childRoot, '.baiton'), 'dup');
+      const ownerBefore = fs.readFileSync(ownerFile, 'utf8');
+      const childBefore = fs.readFileSync(childFile, 'utf8');
+      const edit = toolByName(createPlanWriteTools(fixture.services), 'edit_phase');
+      const result = await edit.run({ slug: 'dup', id: 'P02', title: 'Changed' }, { callId: 'collision', ctx: fixture.guard });
+      assert.deepStrictEqual(result, {
+        ok: false,
+        error: `plan "dup" exists in more than one repo; pass "plan_repo" or use a qualified slug: ${formatPlanRef('.', 'dup')}, ${formatPlanRef('packages/api', 'dup')}`,
+      });
+      assert.strictEqual(fs.readFileSync(ownerFile, 'utf8'), ownerBefore);
+      assert.strictEqual(fs.readFileSync(childFile, 'utf8'), childBefore);
+      assert.deepStrictEqual(fixture.ownerCommits, []);
+      assert.deepStrictEqual(fixture.childCommits, []);
+    } finally {
+      clean(fixture.root);
+    }
+  });
+
+  it('writes and commits a sibling-owned plan in the sibling repo', async () => {
+    const fixture = makeFixture();
+    try {
+      const file = writePlan(path.join(fixture.siblingRoot, '.baiton'), 's');
+      const edit = toolByName(createPlanWriteTools(fixture.services), 'edit_phase');
+      const result = await edit.run({ slug: '../sibling:s', id: 'P02', title: 'Sibling edit' }, { callId: 'sibling-edit', ctx: fixture.guard });
+      assert.strictEqual(result.ok, true);
+      if (result.ok) assert.deepStrictEqual(result.data, { slug: 's', repo: '../sibling', id: 'P02', commit: 'c'.repeat(40) });
+      assert.ok(fs.readFileSync(file, 'utf8').includes('P02 Sibling edit'));
+      assert.deepStrictEqual(fixture.ownerCommits, []);
+      assert.deepStrictEqual(fixture.childCommits, []);
+      assert.deepStrictEqual(fixture.siblingCommits, ['plan(s): P02 edit P02']);
+    } finally {
+      clean(fixture.root);
+    }
+  });
+
+  it('inherits a restricted conversation guard for child writes even when the seam is unrestricted', async () => {
+    const fixture = makeFixture();
+    try {
+      const file = writePlan(path.join(fixture.childRoot, '.baiton'), 'restricted-child');
+      const before = fs.readFileSync(file, 'utf8');
+      const restricted = new GuardContext({ repoRoot: fixture.ownerRoot, baitonDir: path.join(fixture.ownerRoot, '.baiton'), restricted: true });
+      const edit = toolByName(createPlanWriteTools(fixture.services), 'edit_phase');
+      const result = await edit.run({ slug: 'restricted-child', plan_repo: 'packages/api', id: 'P02', title: 'Blocked' }, { callId: 'restricted-child-edit', ctx: restricted });
+      assert.deepStrictEqual(result, { ok: false, error: 'plan writes are disabled in Restricted Mode' });
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
+      assert.deepStrictEqual(fixture.childCommits, []);
+    } finally {
+      clean(fixture.root);
+    }
+  });
+
+  it('validates child phase repo hints against the child repo topology', async () => {
+    const fixture = makeFixture();
+    try {
+      const file = writePlan(path.join(fixture.childRoot, '.baiton'), 'child-hints');
+      const add = toolByName(createPlanWriteTools(fixture.services), 'add_phase');
+      const nested = await add.run({ slug: 'child-hints', plan_repo: 'packages/api', id: 'P03', title: 'Nested target', repo: 'service' }, { callId: 'child-nested-hint', ctx: fixture.guard });
+      assert.strictEqual(nested.ok, true);
+      assert.ok(fs.readFileSync(file, 'utf8').includes('repo: service'));
+      const before = fs.readFileSync(file, 'utf8');
+      const ancestor = await add.run({ slug: 'child-hints', plan_repo: 'packages/api', id: 'P04', title: 'Owner ancestor', repo: '..' }, { callId: 'child-owner-ancestor', ctx: fixture.guard });
+      assert.deepStrictEqual(ancestor, { ok: false, error: 'add_phase: phase "P04" targets repo "owner", which is an ancestor of the owning repo "api"; a phase may only target the owning repo or a repo nested beneath it' });
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
     } finally {
       clean(fixture.root);
     }
@@ -263,7 +359,7 @@ describe('plan-writing tools with repository hints', () => {
       const services = { ...fixture.services, planRepos: ambiguous };
       const edit = toolByName(createPlanWriteTools(services), 'edit_phase');
       const result = await edit.run({ slug: 'ambiguous', id: 'P02', title: 'Changed' }, { callId: 'ambiguous-edit', ctx: fixture.guard });
-      assert.deepStrictEqual(result, { ok: false, error: 'plan "ambiguous" exists in more than one nested repo (packages/api, packages/other); open it from its own repo' });
+      assert.deepStrictEqual(result, { ok: false, error: 'plan "ambiguous" exists in more than one repo; pass "plan_repo" or use a qualified slug: packages/api:ambiguous, packages/other:ambiguous' });
       assert.strictEqual(fs.readFileSync(file, 'utf8'), original);
       assert.deepStrictEqual(fixture.ownerCommits, []);
       assert.deepStrictEqual(fixture.childCommits, []);

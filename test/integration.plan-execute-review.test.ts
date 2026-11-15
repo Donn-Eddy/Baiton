@@ -30,7 +30,7 @@ import { submitPr as submitPrFlow } from '../src/engine/submitPr';
 import type { CreatePrInput, PrTool } from '../src/engine/prTool';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
-import type { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, type ToolServices } from '../src/orchestrator/toolServices';
 import {
   OpenAiModelClient,
   UnreachableEndpointError,
@@ -974,6 +974,7 @@ describe('Integration: plan and legacy document flows through the control tools'
       repoRoot: repo,
       baitonDir,
       git: gitService,
+      planRepos: singleRepoPlanRepos(repo, gitService),
       confirm: { confirm: async () => true },
       runQueue: createRunQueueSeam(queues.queueFor, baitonDir, adapterForRole),
       landPhase: {

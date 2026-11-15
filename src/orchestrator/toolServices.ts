@@ -8,17 +8,23 @@
  * assembles a {@link ToolServices} from its real git service and VS-Code-backed
  * seams; a test assembles one from a temp repo and stubs.
  */
+import * as fs from 'fs';
 import { GitService } from '../git';
+import type { RepoTopology } from '../model/validator';
 import type { InterventionSeam } from './interventions';
+import { formatPlanRef, normalizeRepoPath, parsePlanRef, createPlanRepoSeam } from './planRepos';
+import { planRepoGuard, GuardContext, ToolContext } from './guard';
 import {
   Clock,
   ConfirmSeam,
   DraftPlanSeam,
   IdGenerator,
-  LandPhaseSeam,
+  LandPhaseOutcome,
+  LandPhaseRequest,
   RunPipelineSeam,
   RunQueueSeam,
   PlanRepoSeam,
+  PlanRepoTarget,
   SubAgentSeam,
 } from './seams';
 
@@ -54,6 +60,7 @@ export interface ToolGitSettings {
  * - `clock`     — wall clock for transcript timestamps.
  * - `ids`       — identifier source (reserved for tool-generated ids).
  * - `gitSettings` — the remote and base branch approval fetches/resolves from.
+ * - `gitSettingsFor` — optional settings lookup for a non-owner plan repo.
  */
 export interface ToolServices {
   /** The conversation's OWNING repo root; read containment and file enumeration come from the GuardContext bound to the stage target repo. */
@@ -78,8 +85,8 @@ export interface ToolServices {
    * registry; `draft_plan` then reports it as unavailable.
    */
   draftPlan?: DraftPlanSeam;
-  /** Optional nested-repo plan targets; absent means single-repo behaviour, byte-for-byte as today. */
-  planRepos?: PlanRepoSeam;
+  /** Addresses plans in every discovered `.baiton/` repo. A single-repo host passes `singleRepoPlanRepos`. */
+  planRepos: PlanRepoSeam;
   /**
    * The plan-less run pipeline the `start_run` and `investigate` tools dispatch
    * into. Optional so a host that has not wired the run pipeline still builds a
@@ -90,7 +97,7 @@ export interface ToolServices {
   /**
    * The seam `land_phase` merges a done phase's branch into the plan branch through. Optional so a host that has not wired per-phase worktrees still builds a registry; `land_phase` then reports itself unavailable.
    */
-  landPhase?: LandPhaseSeam;
+  landPhase?: PlanLandPhaseSeam;
   /**
    * The seam spawn_subagent and send_to_subagent go through. Optional so a host that has not wired sub-agents still builds a registry; both tools then report themselves unavailable.
    */
@@ -98,13 +105,137 @@ export interface ToolServices {
   clock: Clock;
   ids: IdGenerator;
   gitSettings: ToolGitSettings;
+  /** Remote and base for a non-owner plan repo; callers fall back to `gitSettings` when absent. */
+  gitSettingsFor?: (repoRoot: string) => ToolGitSettings;
   /**
    * Submit the plan's pull request (design section 8 "PR"): Verify, the
    * pr-writer stage, push, create-or-reuse, record. Optional so a host that
    * has not wired the PR flow still builds a registry; the `submit_pr` tool
    * then reports it as unavailable.
    */
-  submitPr?: (slug: string) => Promise<SubmitPrOutcome>;
+  submitPr?: (slug: string, planRepoRoot?: string) => Promise<SubmitPrOutcome>;
+}
+
+export interface PlanLandPhaseRequest extends LandPhaseRequest {
+  /** Absolute owning-repo root; omitted for the conversation's own repo. */
+  repoRoot?: string;
+}
+
+export interface PlanLandPhaseSeam {
+  land(req: PlanLandPhaseRequest): Promise<LandPhaseOutcome>;
+}
+
+/** A resolved plan address and the repo-specific services used by plan tools. */
+export interface ResolvedPlan {
+  slug: string;
+  repoPath: string;
+  isOwner: boolean;
+  root: string;
+  baitonDir: string;
+  git: GitService;
+  topology: RepoTopology | undefined;
+  guard: GuardContext;
+  label: string;
+}
+
+/** Match the canonical document slug grammar used by the plan tools. */
+export function isPlanSlug(slug: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(slug) && slug !== '.' && slug !== '..';
+}
+
+/** Build the mandatory seam for a host that knows only its conversation repo. */
+export function singleRepoPlanRepos(
+  repoRoot: string,
+  git: GitService,
+  restricted: () => boolean = () => false,
+): PlanRepoSeam {
+  return createPlanRepoSeam({
+    repos: () => undefined,
+    ownerRoot: repoRoot,
+    restricted,
+    gitFor: () => git,
+    exists: (p) => fs.promises.access(p).then(() => true, () => false),
+  });
+}
+
+/** Resolve a bare or qualified plan reference through the shared repo seam. */
+export async function resolvePlanAddress(
+  services: ToolServices,
+  rawSlug: string,
+  planRepo: string | undefined,
+  tc: ToolContext,
+  opts: { mutating: boolean },
+): Promise<{ ok: true; plan: ResolvedPlan } | { ok: false; error: string }> {
+  const parsed = parsePlanRef(rawSlug);
+  if (!parsed.ok) return { ok: false, error: `invalid slug: ${rawSlug}` };
+  const ref = parsed.ref;
+  if (ref.repo !== undefined && planRepo !== undefined && normalizeRepoPath(ref.repo) !== normalizeRepoPath(planRepo)) {
+    return { ok: false, error: `plan_repo "${planRepo}" conflicts with qualified slug "${rawSlug}"` };
+  }
+  if (!isPlanSlug(ref.slug)) return { ok: false, error: `invalid slug: ${rawSlug}` };
+  const repo = planRepo ?? ref.repo;
+  const located = await services.planRepos.locate(ref.slug, repo);
+  let target: PlanRepoTarget | undefined;
+  switch (located.kind) {
+    case 'invalid':
+      return { ok: false, error: located.error };
+    case 'ambiguous':
+      return {
+        ok: false,
+        error: `plan "${ref.slug}" exists in more than one repo; pass "plan_repo" or use a qualified slug: ${located.repos.map((r) => formatPlanRef(r, ref.slug)).join(', ')}`,
+      };
+    case 'found':
+      target = located.target;
+      break;
+    case 'missing':
+      if (repo !== undefined) {
+        const resolved = services.planRepos.target(repo);
+        if (!resolved.ok) return { ok: false, error: resolved.error };
+        target = resolved.target;
+      }
+      break;
+  }
+
+  const ownerTarget = target === undefined || target.info.path === '.'
+    ? services.planRepos.target('.')
+    : undefined;
+  const ownerTopology = target?.info.path === '.'
+    ? target.topology
+    : ownerTarget?.ok === true
+      ? ownerTarget.target.topology
+      : undefined;
+  const plan: ResolvedPlan = target === undefined || target.info.path === '.'
+    ? {
+        slug: ref.slug,
+        repoPath: '.',
+        isOwner: true,
+        root: services.repoRoot,
+        baitonDir: services.baitonDir,
+        git: services.git,
+        topology: ownerTopology !== undefined && ownerTopology.repos.length > 1 ? ownerTopology : undefined,
+        guard: tc.ctx,
+        label: ref.slug,
+      }
+    : {
+        slug: ref.slug,
+        repoPath: target.info.path,
+        isOwner: false,
+        root: target.root,
+        baitonDir: target.baitonDir,
+        git: target.git,
+        topology: target.topology.repos.length > 1 ? target.topology : undefined,
+        guard: planRepoGuard(tc.ctx, target),
+        label: formatPlanRef(target.info.path, ref.slug),
+      };
+  if (opts.mutating && !plan.isOwner && (tc.ctx.restricted || plan.guard.restricted)) {
+    return { ok: false, error: 'plan writes are disabled in Restricted Mode' };
+  }
+  return { ok: true, plan };
+}
+
+/** Whether the plan seam exposes only the conversation repo. */
+export function isSingleRepo(services: ToolServices): boolean {
+  return services.planRepos.owners().length <= 1 && services.planRepos.list().length <= 1;
 }
 
 /** The `submit_pr` tool's view of the flow's result. */

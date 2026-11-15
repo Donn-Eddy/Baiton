@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
-import { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
@@ -230,10 +230,12 @@ function makeServices(
   repoRoot: string,
   queue: { dispatch: (req: RunDispatchRequest) => Promise<RunDispatchOutcome> },
 ): ToolServices {
+  const git = benignGit();
   return {
     repoRoot,
     baitonDir: path.join(repoRoot, '.baiton'),
-    git: benignGit(),
+    git,
+    planRepos: singleRepoPlanRepos(repoRoot, git),
     confirm: { confirm: async () => true },
     runQueue: queue,
     clock: { now: () => '2024-01-01T00:00:00.000Z' },

@@ -13,7 +13,7 @@ import {
   ToolContext,
   ToolResult,
 } from '../src/orchestrator/guard';
-import { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, ToolServices } from '../src/orchestrator/toolServices';
 import { GitService, GitStatus } from '../src/git';
 import { Result, ok } from '../src/model/result';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
@@ -371,10 +371,12 @@ function benignGit(): GitService {
 
 /** Build {@link ToolServices} rooted at `repoRoot` for registry construction. */
 function makeServices(repoRoot: string): ToolServices {
+  const git = benignGit();
   return {
     repoRoot,
     baitonDir: path.join(repoRoot, '.baiton'),
-    git: benignGit(),
+    git,
+    planRepos: singleRepoPlanRepos(repoRoot, git),
     confirm: { confirm: async () => true },
     runQueue: {
       dispatch: async (_req: RunDispatchRequest): Promise<RunDispatchOutcome> => ({

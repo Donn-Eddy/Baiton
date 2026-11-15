@@ -13,6 +13,7 @@ import {
 } from '../src/orchestrator/guard';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos } from '../src/orchestrator/toolServices';
 import { GitService } from '../src/git';
 
 /**
@@ -175,6 +176,7 @@ describe('Guard Restricted Mode disabling (property harness)', () => {
       repoRoot,
       baitonDir: path.join(repoRoot, '.baiton'),
       git,
+      planRepos: singleRepoPlanRepos(repoRoot, git, () => true),
       confirm: { confirm: boom('confirm') },
       runQueue: { dispatch: boom('runQueue.dispatch') },
       draftPlan: { draft: boom('draftPlan.draft') },

@@ -10,7 +10,7 @@ import { Result, ok } from '../src/model/result';
 import { createPlanWriteTools } from '../src/orchestrator/planWriteTools';
 import { GuardContext, Tool, ToolResult } from '../src/orchestrator/guard';
 import { RunDispatchOutcome, RunDispatchRequest } from '../src/orchestrator/seams';
-import { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, ToolServices } from '../src/orchestrator/toolServices';
 
 const PROTECTED: ReadonlySet<PhaseState> = new Set<PhaseState>([
   'done', 'failed', 'planning', 'executing', 'reviewing',
@@ -46,10 +46,12 @@ const noRunQueue = {
 };
 
 function makeServices(repoRoot: string, commits: string[] = []): ToolServices {
+  const git = stubGit(commits);
   return {
     repoRoot,
     baitonDir: path.join(repoRoot, '.baiton'),
-    git: stubGit(commits),
+    git,
+    planRepos: singleRepoPlanRepos(repoRoot, git),
     confirm: alwaysConfirm,
     runQueue: noRunQueue,
     clock: { now: () => '2024-01-01T00:00:00.000Z' },
