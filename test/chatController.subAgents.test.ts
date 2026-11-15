@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ChatController, STOP_DECLINE_REASON } from '../src/activation/chatController';
+import type { ChatPlanOwner } from '../src/activation/chatController';
 import type { ChatWebview } from '../src/activation/chatController';
 import { createInterventionSeam, PendingAskRegistry, readTranscript, systemClock } from '../src/orchestrator';
 import type {
@@ -121,7 +122,10 @@ describe('ChatController sub-agent chats', () => {
   let toolResults: string[];
   let logs: string[];
 
-  function build(memory?: { get(scope: string): string | undefined; set(scope: string, id: string): Promise<void> }): {
+  function build(
+    memory?: { get(scope: string): string | undefined; set(scope: string, id: string): Promise<void> },
+    planOwners?: ChatPlanOwner[],
+  ): {
     controller: ChatController;
     webview: FakeWebview;
   } {
@@ -163,6 +167,7 @@ describe('ChatController sub-agent chats', () => {
       log: (m) => logs.push(m),
       askRegistry,
       ...(memory !== undefined ? { sessionMemory: memory } : {}),
+      ...(planOwners !== undefined ? { planOwners: () => planOwners } : {}),
     });
     present = (ask) => c.presentIntervention(ask);
     holder.seam = c.subAgentInterventionSeam(base);
@@ -380,5 +385,99 @@ describe('ChatController sub-agent chats', () => {
     await waitFor(() => !fs.existsSync(path.join(baitonDir, 'chat', `${id}.children`)), 'the children folder to go');
     assert.ok(!fs.existsSync(path.join(baitonDir, 'chat', `${id}.jsonl`)));
     second.controller.dispose();
+  });
+
+  it('routes a child-plan sub-agent key, transcript and live events through its qualified scope', async function () {
+    this.timeout(15_000);
+    controller.dispose();
+    const childBaitonDir = path.join(tmp, 'child', '.baiton');
+    const childPlan = path.join(childBaitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(childPlan), { recursive: true });
+    fs.writeFileSync(childPlan, '---\nstatus: draft\n---\n# Child Alpha\n');
+    ({ controller, webview } = build(undefined, [{ repo: 'child', baitonDir: childBaitonDir }]));
+    controller.start();
+    await waitFor(() => webview.last('renderConversation') !== undefined, 'the initial child harness paint');
+    controller.setActivePlan({ repo: 'child', slug: 'alpha' });
+    await waitFor(() => webview.last('setActive')?.conversationId === 'child:alpha', 'the child plan conversation');
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    client.parent.push(
+      { result: call('s-child', 'spawn_subagent', { task: 'inspect child plan' }) },
+      { result: { content: 'parent done', tool_calls: [] } },
+    );
+    client.child.push({ gate, result: { content: 'child reply', tool_calls: [] } });
+    await send();
+    await waitFor(() => client.requests >= 2, 'the child model request');
+    await waitFor(() => controller.subAgents.list().length === 1, 'the child chat');
+
+    const planChatDir = path.join(childBaitonDir, 'plans', 'alpha', 'chat');
+    const rootFiles = fs.readdirSync(planChatDir).filter((name) => name.endsWith('.jsonl'));
+    assert.strictEqual(rootFiles.length, 1);
+    const topId = path.basename(rootFiles[0], '.jsonl');
+    const kid = childId();
+    const leaf = kid.split('/').pop()!;
+    assert.ok(toolCalls[0].caller.sessionKey.startsWith('child:alpha/'));
+    await webview.send({ type: 'selectSession', sessionId: kid });
+    await waitFor(() => webview.last('setReadOnly')?.readOnly === true, 'the child chat view');
+    await waitFor(() => webview.last('renderConversation')?.records[0]?.content === 'inspect child plan', 'the child transcript render');
+
+    release();
+    await waitFor(() => idle(), 'the qualified child run to finish');
+    assert.ok(webview.all('streamEnd').length > 0, 'the finished child event should reach the chat in view');
+    assert.ok(webview.all('appendMessage').some((m) => m.record.content === 'child reply'), 'the child append event should reach the chat in view');
+    assert.ok(webview.last('renderConversation')?.records.some((r) => r.content === 'child reply'));
+    assert.ok(fs.existsSync(path.join(planChatDir, `${topId}.children`, `${leaf}.jsonl`)));
+    assert.ok(!fs.existsSync(path.join(baitonDir, 'plans', 'alpha', 'chat')));
+  });
+
+  it('persists an ask from a child-plan conversation in the child repo transcript', async () => {
+    controller.dispose();
+    const childBaitonDir = path.join(tmp, 'child', '.baiton');
+    const childPlan = path.join(childBaitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(childPlan), { recursive: true });
+    fs.writeFileSync(childPlan, '---\nstatus: draft\n---\n# Child Alpha\n');
+    ({ controller, webview } = build(undefined, [{ repo: 'child', baitonDir: childBaitonDir }]));
+    controller.start();
+    await waitFor(() => webview.last('renderConversation') !== undefined, 'the initial child harness paint');
+    controller.setActivePlan({ repo: 'child', slug: 'alpha' });
+    await waitFor(() => webview.last('setActive')?.conversationId === 'child:alpha', 'the child plan conversation');
+
+    client.parent.push(
+      { result: call('q-child', 'ask_user', { question: 'Which option?' }) },
+      { result: { content: 'thanks', tool_calls: [] } },
+    );
+    await send();
+    await waitFor(() => webview.all('showIntervention').length === 1, 'the child-plan ask');
+    const card = webview.last('showIntervention')!.intervention;
+    await webview.send({ type: 'answerIntervention', id: card.id, answer: { kind: 'text', text: 'blue' } });
+    await waitFor(() => idle() && toolResults.length === 1, 'the ask to settle');
+
+    const childChatDir = path.join(childBaitonDir, 'plans', 'alpha', 'chat');
+    const childTranscript = fs.readdirSync(childChatDir).find((name) => name.endsWith('.jsonl'))!;
+    const settled = (await lines(path.join(childChatDir, childTranscript))).filter((r) => r.intervention?.id === card.id);
+    assert.strictEqual(settled.length, 1);
+    assert.strictEqual(settled[0].intervention!.status, 'resolved');
+    assert.ok(!fs.existsSync(path.join(baitonDir, 'plans', 'alpha', 'chat')));
+  });
+
+  it('keeps owner plan session-memory keys and transcripts compatible', async () => {
+    controller.dispose();
+    const plan = path.join(baitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(plan), { recursive: true });
+    fs.writeFileSync(plan, '---\nstatus: draft\n---\n# Alpha\n');
+    const remembered: Array<{ scope: string; id: string }> = [];
+    ({ controller, webview } = build({
+      get: () => undefined,
+      set: async (scope, id) => { remembered.push({ scope, id }); },
+    }));
+    controller.start();
+    await waitFor(() => webview.last('renderConversation') !== undefined, 'the initial owner harness paint');
+    controller.setActivePlan('alpha');
+    await waitFor(() => webview.last('setActive')?.conversationId === 'alpha', 'the owner plan conversation');
+    await send();
+    await waitFor(() => idle(), 'the owner-plan run');
+    assert.ok(remembered.some((entry) => entry.scope === 'alpha'));
+    assert.ok(fs.readdirSync(path.join(baitonDir, 'plans', 'alpha', 'chat')).some((name) => name.endsWith('.jsonl')));
   });
 });

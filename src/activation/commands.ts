@@ -1222,6 +1222,15 @@ export function registerCommands(
     },
     askRegistry,
     baitonDir,
+    planOwners: () => planRepos.owners().flatMap((info) => {
+      const resolved = planRepos.target(info.path);
+      if (!resolved.ok) return [];
+      const isOwner = repoLockKey(resolved.target.root) === repoLockKey(repoRoot);
+      return [{
+        repo: isOwner ? '.' : resolved.target.info.path,
+        baitonDir: isOwner ? baitonDir : resolved.target.baitonDir,
+      }];
+    }),
     roundBound: () => readRoundBound(),
     contextTrimAt: () => orchCfg().get('orchestrator.contextTrimAt'),
     contextSummarizeAt: () => orchCfg().get('orchestrator.contextSummarizeAt'),
@@ -1365,9 +1374,20 @@ export function registerCommands(
     surface,
     workspace.restricted,
     (slug, repo) => {
-      // ChatController is still slug-only, so child clicks must not select a
-      // same-named owner plan while the child document opens normally.
-      if (repo === undefined || repo === ownerRepoName()) chatController.setActivePlan(slug);
+      if (slug === undefined) return;
+      if (repo === undefined || repo === ownerRepoName()) {
+        chatController.setActivePlan(slug);
+        return;
+      }
+      const repoName = repo;
+      if (repoName === undefined) return;
+      const found = activation.repos === undefined ? undefined : repoByName(activation.repos, repoName);
+      const target = found === undefined ? undefined : planRepos.targetAt(found.root);
+      if (target === undefined) {
+        surface.log(`Baiton chat: could not resolve plan repo "${repoName}" for ${formatPlanRef(repoName, slug)}`);
+        return;
+      }
+      chatController.setActivePlan({ repo: target.info.path, slug });
     },
     {
       sources: explorerSources,
@@ -1432,9 +1452,9 @@ export function registerCommands(
       if (editor === undefined) {
         return;
       }
-      const slug = slugFromDocumentUri(editor.document.uri);
-      if (slug !== undefined) {
-        chatController.setActivePlan(slug);
+      const lensTarget = resolveLensTarget(planTargets, editor.document.uri.fsPath);
+      if (lensTarget !== undefined) {
+        chatController.setActivePlan({ repo: lensTarget.repoPath ?? '.', slug: lensTarget.slug });
       }
     }),
   );
@@ -2194,11 +2214,6 @@ function lens(
     command,
     arguments: repoPath === undefined ? [slug, phaseId] : [slug, phaseId, repoPath],
   });
-}
-
-/** The plan slug from a document URI, including the legacy `.baiton/specs/<slug>/spec.md` root. */
-function slugFromDocumentUri(uri: vscode.Uri): string | undefined {
-  return planDocumentFromPath(uri.fsPath)?.slug;
 }
 
 export interface PlanDocumentLocation {

@@ -41,8 +41,10 @@ import {
 } from '../src/activation/chatController';
 import type {
   ChatWebview,
+  ChatPlanOwner,
   ModeMemory,
   RunActivitySource,
+  SessionMemory,
 } from '../src/activation/chatController';
 import { buildSystemPrompt, readTranscript } from '../src/orchestrator';
 import type {
@@ -164,12 +166,16 @@ describe('ChatController conversation mode', () => {
     restricted?: boolean;
     withRuns?: boolean;
     withPipeline?: boolean;
+    tmpDir?: string;
+    planOwners?: ChatPlanOwner[];
+    sessionMemory?: SessionMemory;
   }
 
   /** Build a fresh controller + harness over a temp workspace. */
   function buildHarness(options: HarnessOptions = {}): void {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-mode-'));
+    const tmp = options.tmpDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-mode-'));
     baitonDir = path.join(tmp, '.baiton');
+    fs.mkdirSync(baitonDir, { recursive: true });
     legacySpecsDir = path.join(tmp, '.baiton', 'specs');
     fs.mkdirSync(legacySpecsDir, { recursive: true });
     cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
@@ -218,11 +224,13 @@ describe('ChatController conversation mode', () => {
       },
       guardContext: () => ({ restricted: options.restricted === true }) as GuardContext,
       baitonDir,
+      ...(options.planOwners !== undefined ? { planOwners: () => options.planOwners! } : {}),
       roundBound: () => 4,
       config: { getEndpoint: () => 'http://x', getModel: () => 'm' },
       triggerFix: () => {},
       log: (m) => logs.push(m),
       modeMemory,
+      ...(options.sessionMemory !== undefined ? { sessionMemory: options.sessionMemory } : {}),
       ...(options.withRuns === false ? {} : { runs }),
       ...(options.withPipeline === false
         ? {}
@@ -450,6 +458,87 @@ describe('ChatController conversation mode', () => {
       client.requests[0][0].content,
       buildSystemPrompt({ kind: 'plan', slug: 'beta' }, content),
     );
+  });
+
+  it('keeps owner and child plans with the same slug in separate conversations', async () => {
+    cleanup?.();
+    cleanup = undefined;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-chat-qualified-'));
+    const ownerBaitonDir = path.join(tmp, '.baiton');
+    const childBaitonDir = path.join(tmp, 'child', '.baiton');
+    const ownerContent = '---\nstatus: draft\n---\n# Owner Alpha\n';
+    const childContent = '---\nstatus: draft\n---\n# Child Alpha\n';
+    for (const [dir, content] of [[ownerBaitonDir, ownerContent], [childBaitonDir, childContent]] as const) {
+      const file = path.join(dir, 'plans', 'alpha', 'plan.md');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+    }
+    const memorySets: Array<{ scope: string; id: string }> = [];
+    const sessionMemory: SessionMemory = {
+      get: () => undefined,
+      set: async (scope, id) => { memorySets.push({ scope, id }); },
+    };
+    buildHarness({
+      tmpDir: tmp,
+      planOwners: [
+        { repo: '.', baitonDir: ownerBaitonDir },
+        { repo: 'child', baitonDir: childBaitonDir },
+      ],
+      sessionMemory,
+    });
+    await started();
+    assert.deepStrictEqual(webview.last('setConversations')!.items, [
+      { id: 'workspace', label: 'Workspace' },
+      { id: 'alpha', label: 'alpha' },
+      { id: 'child:alpha', label: 'child:alpha' },
+    ]);
+
+    controller.setActivePlan({ repo: 'child', slug: 'alpha' });
+    await waitFor(() => webview.last('setActive')?.conversationId === 'child:alpha', 'the child conversation');
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 1, 'the child-plan completion');
+    await waitFor(() => webview.last('setBusy')?.busy === false, 'the child-plan run to finish');
+    assert.strictEqual(
+      client.requests[0][0].content,
+      buildSystemPrompt({ kind: 'plan', slug: 'alpha', repo: 'child' }, childContent),
+    );
+    const childChat = path.join(childBaitonDir, 'plans', 'alpha', 'chat');
+    const ownerChat = path.join(ownerBaitonDir, 'plans', 'alpha', 'chat');
+    assert.ok(fs.readdirSync(childChat).some((name) => name.endsWith('.jsonl')));
+    assert.ok(!fs.existsSync(ownerChat));
+    assert.ok(memorySets.some((entry) => entry.scope === 'child:alpha'));
+
+    controller.setActivePlan('alpha');
+    await waitFor(() => webview.last('setActive')?.conversationId === 'alpha', 'the owner conversation');
+    await webview.send({ type: 'sendText', text: 'go' });
+    await waitFor(() => client.requests.length >= 2, 'the owner-plan completion');
+    await waitFor(() => webview.last('setBusy')?.busy === false, 'the owner-plan run to finish');
+    assert.strictEqual(
+      client.requests[1][0].content,
+      buildSystemPrompt({ kind: 'plan', slug: 'alpha' }, ownerContent),
+    );
+    assert.ok(fs.readdirSync(ownerChat).some((name) => name.endsWith('.jsonl')));
+    assert.ok(memorySets.some((entry) => entry.scope === 'alpha'));
+
+    controller.setActivePlan({ repo: '.', slug: 'alpha' });
+    assert.strictEqual(webview.last('setActive')!.conversationId, 'alpha');
+    await webview.send({ type: 'selectConversation', conversationId: 'child:alpha' });
+    await waitFor(() => webview.last('setActive')?.conversationId === 'child:alpha', 'qualified selection');
+    const activePosts = webview.all('setActive').length;
+    controller.setActivePlan({ repo: 'nowhere', slug: 'alpha' });
+    assert.strictEqual(webview.all('setActive').length, activePosts);
+    assert.ok(logs.some((message) => message.includes('unknown plan repo "nowhere"')));
+  });
+
+  it('keeps bare conversation ids when no planOwners dependency is supplied', async () => {
+    const plan = path.join(baitonDir, 'plans', 'alpha', 'plan.md');
+    fs.mkdirSync(path.dirname(plan), { recursive: true });
+    fs.writeFileSync(plan, '# Alpha\n');
+    await started();
+    assert.deepStrictEqual(webview.last('setConversations')!.items, [
+      { id: 'workspace', label: 'Workspace' },
+      { id: 'alpha', label: 'alpha' },
+    ]);
   });
 
   it('echoes and persists a mode picked in the composer', async () => {
