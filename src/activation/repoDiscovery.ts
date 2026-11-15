@@ -315,6 +315,25 @@ export function repoFor(set: RepoSet, absPath: string): Repo | undefined {
   return best;
 }
 
+/** Find a repo by its resolved root path. */
+export function repoByRoot(set: RepoSet, root: string): Repo | undefined {
+  const resolvedRoot = path.resolve(root);
+  return set.repos.find((repo) => path.resolve(repo.root) === resolvedRoot);
+}
+
+/**
+ * Find the deepest repo whose own `.baiton/` directory contains `absPath`.
+ * This maps a plan document back to the repo that owns it.
+ */
+export function planOwnerRepoFor(set: RepoSet, absPath: string): Repo | undefined {
+  const repo = repoFor(set, absPath);
+  if (repo?.baitonDir === undefined) return undefined;
+  const relative = path.relative(repo.baitonDir, absPath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+    ? repo
+    : undefined;
+}
+
 /** Whether `target` is `owner` or descends from it in the repo tree. */
 export function isWithinSubtree(
   set: RepoSet,
