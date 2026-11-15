@@ -10,7 +10,7 @@ import {
   ToolCaller,
 } from '../src/orchestrator/guard';
 import { subAgentDepthRefusal } from '../src/orchestrator/controlTools';
-import { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, ToolServices } from '../src/orchestrator/toolServices';
 import { createRunQueueSeam } from '../src/activation/engineFacade';
 import { createPlanRepoSeam } from '../src/orchestrator/planRepos';
 import type { Repo, RepoSet } from '../src/activation/repoDiscovery';
@@ -255,6 +255,7 @@ function makeServices(
     repoRoot,
     baitonDir: path.join(repoRoot, '.baiton'),
     git,
+    planRepos: singleRepoPlanRepos(repoRoot, git),
     confirm,
     runQueue,
     submitPr: async (): Promise<never> => {
@@ -403,6 +404,27 @@ describe('orchestrator registry and control tools', () => {
     return repo;
   }
 
+  function twoRepoServices(ownerRoot: string, ownerGit: GitService, childGit: GitService, confirm = recordingConfirm(true)) {
+    const childRoot = path.join(ownerRoot, 'packages', 'api');
+    fs.mkdirSync(childRoot, { recursive: true });
+    const entries: Repo[] = [
+      { name: '.', folderName: 'workspace', relPath: '', root: ownerRoot, baitonDir: path.join(ownerRoot, '.baiton'), hasGit: false, children: ['api'] },
+      { name: 'api', folderName: 'workspace', relPath: 'packages/api', root: childRoot, baitonDir: path.join(childRoot, '.baiton'), hasGit: false, parent: '.', children: [] },
+    ];
+    const set: RepoSet = { repos: entries, folderRoots: [entries[0]], truncated: false };
+    const planRepos = createPlanRepoSeam({
+      repos: () => set,
+      ownerRoot,
+      restricted: () => false,
+      gitFor: (root) => path.resolve(root) === path.resolve(childRoot) ? childGit : ownerGit,
+      exists: async (target) => fs.promises.access(target).then(() => true, () => false),
+    });
+    return {
+      childRoot,
+      services: { ...makeServices(ownerRoot, ownerGit, confirm), planRepos },
+    };
+  }
+
   afterEach(() => {
     while (repos.length > 0) {
       const repo = repos.pop()!;
@@ -479,13 +501,99 @@ describe('orchestrator registry and control tools', () => {
       const preferred = await registry.call('read_plan', { slug: 'both' }, undefined, makeGuard(repo), 'gather');
       assert.strictEqual(preferred.ok, true);
       if (preferred.ok) {
-        assert.strictEqual((preferred.data as { kind: string }).kind, 'plan');
-        assert.ok((preferred.data as { text: string }).text.includes('# PHASES'));
+        assert.deepStrictEqual(preferred.data, {
+          slug: 'both', kind: 'plan', text: fs.readFileSync(path.join(repo, '.baiton/plans/both/plan.md'), 'utf8'), truncated: false,
+        });
       }
 
       const legacy = await registry.call('read_plan', { slug: 'legacy-only' }, undefined, makeGuard(repo), 'gather');
       assert.strictEqual(legacy.ok, true);
-      if (legacy.ok) assert.strictEqual((legacy.data as { kind: string }).kind, 'legacy-spec');
+      if (legacy.ok) assert.deepStrictEqual(legacy.data, {
+        slug: 'legacy-only', kind: 'legacy-spec', text: fs.readFileSync(path.join(repo, '.baiton/specs/legacy-only/spec.md'), 'utf8'), truncated: false,
+      });
+    });
+
+    it('lists colliding plans across repos and reads a qualified child plan', async () => {
+      const ownerRoot = newRepo();
+      const ownerGit = benignGit();
+      const childGit = benignGit();
+      const { childRoot, services } = twoRepoServices(ownerRoot, ownerGit, childGit);
+      writePlan(ownerRoot, 'dup', draftPlanDoc());
+      writePlan(ownerRoot, 'unique-owner', draftPlanDoc());
+      const childFile = writePlan(childRoot, 'dup', draftPlanDoc().replace('A complete greeting module.', 'Child-owned text.'));
+      const registry = createToolRegistry(services);
+
+      const listed = await registry.call('list_plans', {}, undefined, makeGuard(ownerRoot), 'gather');
+      assert.deepStrictEqual(listed, { ok: true, data: {
+        plans: ['.:dup', 'unique-owner', 'packages/api:dup'],
+        entries: [
+          { repo: '.', slug: 'dup', ref: '.:dup' },
+          { repo: '.', slug: 'unique-owner', ref: '.:unique-owner' },
+          { repo: 'packages/api', slug: 'dup', ref: 'packages/api:dup' },
+        ],
+      } });
+      const read = await registry.call('read_plan', { slug: 'packages/api:dup' }, undefined, makeGuard(ownerRoot), 'gather');
+      assert.deepStrictEqual(read, { ok: true, data: {
+        slug: 'dup', kind: 'plan', text: fs.readFileSync(childFile, 'utf8'), truncated: false, repo: 'packages/api',
+      } });
+    });
+
+    it('approves a child plan with child git settings and routes land/submit to the selected plan repo', async () => {
+      const ownerRoot = newRepo();
+      const ownerCommits: string[] = [];
+      const childCommits: string[] = [];
+      const ownerGit = benignGit(ownerCommits);
+      const fetches: string[] = [];
+      const bases: string[] = [];
+      const childGit: GitService = {
+        ...benignGit(childCommits),
+        fetch: async (remote) => { fetches.push(remote); },
+        resolveBaseCommit: async (base) => { bases.push(base); return 'b'.repeat(40); },
+      };
+      const confirm = recordingConfirm(true);
+      const { childRoot, services: base } = twoRepoServices(ownerRoot, ownerGit, childGit, confirm);
+      const settingsRoots: string[] = [];
+      const planFile = writePlan(childRoot, 'child-approval', draftPlanDoc());
+      const services: ToolServices = {
+        ...base,
+        gitSettingsFor: (root) => {
+          settingsRoots.push(root);
+          return { remote: 'child-remote', base: 'child-base' };
+        },
+      };
+      const registry = createToolRegistry(services);
+      const approved = await registry.call('approve_plan', { slug: 'child-approval', plan_repo: 'packages/api' }, 'child-approve', makeGuard(ownerRoot), 'gather');
+      assert.strictEqual(approved.ok, true);
+      if (approved.ok) assert.strictEqual((approved.data as { repo: string }).repo, 'packages/api');
+      assert.deepStrictEqual(fetches, ['child-remote']);
+      assert.deepStrictEqual(bases, ['child-base']);
+      assert.deepStrictEqual(settingsRoots, [childRoot]);
+      assert.deepStrictEqual(ownerCommits, []);
+      assert.deepStrictEqual(childCommits, ['plan(child-approval): approve']);
+      assert.match(fs.readFileSync(planFile, 'utf8'), /^base: child-base$/m);
+
+      const landCalls: Array<{ slug: string; phaseId: string; repoRoot?: string }> = [];
+      const submitCalls: Array<[string, string?]> = [];
+      const done = draftPlanDoc().replace('- [pending] P01', '- [done] P01');
+      writePlan(childRoot, 'child-land', done);
+      writePlan(ownerRoot, 'owner-land', done);
+      const controlRegistry = createToolRegistry({
+        ...base,
+        landPhase: { land: async (req) => { landCalls.push(req); return { kind: 'already-landed' }; } },
+        submitPr: async (...args: [string, string?]) => {
+          submitCalls.push(args);
+          return { ok: true, url: 'https://example.test/pr/1', reused: false, title: 'Plan PR' };
+        },
+      });
+      assert.strictEqual((await controlRegistry.call('land_phase', { slug: 'child-land', phase: 'P01', plan_repo: 'packages/api' }, 'land-child', makeGuard(ownerRoot), 'drive')).ok, true);
+      assert.strictEqual((await controlRegistry.call('land_phase', { slug: 'owner-land', phase: 'P01' }, 'land-owner', makeGuard(ownerRoot), 'drive')).ok, true);
+      assert.strictEqual((await controlRegistry.call('submit_pr', { slug: 'child-land', plan_repo: 'packages/api' }, 'submit-child', makeGuard(ownerRoot), 'drive')).ok, true);
+      assert.strictEqual((await controlRegistry.call('submit_pr', { slug: 'owner-land' }, 'submit-owner', makeGuard(ownerRoot), 'drive')).ok, true);
+      assert.deepStrictEqual(landCalls, [
+        { slug: 'child-land', phaseId: 'P01', repoRoot: childRoot },
+        { slug: 'owner-land', phaseId: 'P01' },
+      ]);
+      assert.deepStrictEqual(submitCalls, [['child-land', childRoot], ['owner-land']]);
     });
   });
 
@@ -598,7 +706,7 @@ describe('orchestrator registry and control tools', () => {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     });
 
-    it('refuses invalid child targets before confirmation and refuses child targets without a seam', async () => {
+    it('refuses invalid child targets before confirmation and preserves the single-repo refusal', async () => {
       const repoRoot = newRepo();
       const childRoot = path.join(repoRoot, 'packages', 'api');
       const noBaitonRoot = path.join(repoRoot, 'packages', 'uninitialized');

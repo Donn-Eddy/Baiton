@@ -89,6 +89,7 @@ import {
   submitPr,
   phaseBranchFor,
   phaseWorktreeDirFor,
+  repoLockKey,
   unlandedPhasesAcross,
   documentKindFor,
 } from '../engine';
@@ -134,7 +135,8 @@ import type {
   EvaluationTaskContext,
   Intervention,
   InterventionSeam,
-  LandPhaseSeam,
+  PlanLandPhaseSeam,
+  PlanRepoTarget,
   ConversationStep,
   PresentIntervention,
   RunPipelineSeam,
@@ -144,6 +146,7 @@ import type {
   ToolServices,
   ToolSpec,
   PlanRepoSeam,
+  ToolGitSettings,
 } from '../orchestrator';
 import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
@@ -441,14 +444,15 @@ export function registerCommands(
     log: (message) => surface.log(message),
   });
   const git = createGitService(repoRoot);
+  const gitFor = (root: string) =>
+    path.resolve(root) === path.resolve(repoRoot)
+      ? git
+      : activation.git?.forRepo(root) ?? createGitService(root);
   const planRepos = createPlanRepoSeam({
     repos: () => activation.repos,
     ownerRoot: repoRoot,
     restricted: () => workspace.restricted,
-    gitFor: (root) =>
-      path.resolve(root) === path.resolve(repoRoot)
-        ? git
-        : activation.git?.forRepo(root) ?? createGitService(root),
+    gitFor,
     exists: async (targetPath) => {
       try {
         await fs.promises.access(targetPath);
@@ -462,6 +466,14 @@ export function registerCommands(
     const repos = activation.repos;
     return repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(repoRoot))?.name;
   };
+  const repoGitSettingsFor = (root: string): ToolGitSettings => {
+    const name = activation.repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(root))?.name;
+    const repoGit = name === undefined ? undefined : activation.repoConfigs?.get(name)?.git;
+    return {
+      remote: repoGit?.remote ?? readGitSettings().remote,
+      base: repoGit?.base ?? cfg().git.base,
+    };
+  };
   const phaseTargets = createPhaseTargetResolver({
     baitonDir,
     ownerRoot: repoRoot,
@@ -470,15 +482,32 @@ export function registerCommands(
       const owner = ownerRepoName();
       return repos === undefined || owner === undefined ? undefined : repoTopologyFor(repos, owner);
     },
-    gitFor: (root) =>
-      path.resolve(root) === path.resolve(repoRoot)
-        ? git
-        : activation.git?.forRepo(root) ?? createGitService(root),
+    gitFor,
   });
   // One writer shared by the store, the queues and the worktree seam so state
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
   const planWriter = createPlanBranchWriter({ baitonDir, git });
+  const planRepoRuntimes = new Map<string, { target: PlanRepoTarget; phaseTargets: ReturnType<typeof createPhaseTargetResolver>; planWriter: ReturnType<typeof createPlanBranchWriter> }>();
+  const planRepoRuntimeFor = (root: string) => {
+    const key = repoLockKey(root);
+    const cached = planRepoRuntimes.get(key);
+    if (cached !== undefined) return cached;
+    const target = planRepos.targetAt(root);
+    if (target === undefined) return undefined;
+    const runtime = {
+      target,
+      phaseTargets: createPhaseTargetResolver({
+        baitonDir: target.baitonDir,
+        ownerRoot: target.root,
+        topology: () => target.topology,
+        gitFor,
+      }),
+      planWriter: createPlanBranchWriter({ baitonDir: target.baitonDir, git: target.git as ReturnType<typeof createGitService> }),
+    };
+    planRepoRuntimes.set(key, runtime);
+    return runtime;
+  };
   const planStore = createPlanStore(baitonDir, git, planWriter);
   // Roles may mix agents, so each dispatch site selects its adapter from the
   // role's configured `agent` id instead of sharing one instance (Req 14.1).
@@ -616,21 +645,31 @@ export function registerCommands(
   // queue. One in-flight submission per plan; it also refuses while that
   // plan's queue is running a stage, and while any phase of the plan is
   // unlanded (checked inside submitPr).
-  const prKeyFor = (slug: string): string => `${repoRoot}\u0000${slug}`;
+  const prKeyFor = (slug: string, root = repoRoot): string => `${root}\u0000${slug}`;
   const prInFlight = new Set<string>();
-  const submitPrForSlug = async (slug: string): Promise<SubmitPrOutcome> => {
-    const prKey = prKeyFor(slug);
-    if (prInFlight.has(prKey) || phaseQueues.isRunning(slug, repoRoot)) {
+  const submitPrIn = async (
+    slug: string,
+    ctx: {
+      root: string;
+      baitonDir: string;
+      git: ReturnType<typeof createGitService>;
+      phaseTargets: ReturnType<typeof createPhaseTargetResolver>;
+      repoName?: string;
+      defaultRemote: string;
+    },
+  ): Promise<SubmitPrOutcome> => {
+    const prKey = prKeyFor(slug, ctx.root);
+    if (prInFlight.has(prKey) || phaseQueues.isRunning(slug, ctx.root)) {
       return { ok: false, error: `plan "${slug}" already has a run in progress` };
     }
     const selection = cfg().pr?.tool ?? DEFAULT_PR_TOOL;
     if (!isPrToolSelection(selection)) {
       return { ok: false, error: `unsupported pr.tool "${selection}" in config.json; use "auto", "gh" or "glab"` };
     }
-    const remote = readGitSettings().remote;
+    const remote = ctx.defaultRemote;
     let remoteUrl = '';
     try {
-      remoteUrl = await git.remoteUrl(remote);
+      remoteUrl = await ctx.git.remoteUrl(remote);
     } catch {
       return { ok: false, error: `git remote "${remote}" is not configured; add it before submitting a PR` };
     }
@@ -647,21 +686,22 @@ export function registerCommands(
     prInFlight.add(prKey);
     try {
       const result = await submitPr(slug, {
-        workspaceRoot: repoRoot,
-        baitonDir,
+        workspaceRoot: ctx.root,
+        baitonDir: ctx.baitonDir,
         terminalHost,
         watcherFactory,
-        git,
-        pr: createPrTool({ kind, executable, repoRoot }),
+        git: ctx.git,
+        pr: createPrTool({ kind, executable, repoRoot: ctx.root }),
+        ...(ctx.repoName !== undefined ? { planRepoName: ctx.repoName } : {}),
         remote,
         verify: cfg().git.verify,
         modelForRole: (role) => modelForRole(cfg(), role),
         adapterForRole: adapterFor,
         unlandedPhases: async (s) =>
-          unlandedPhasesAcross({ workspaceRoot: repoRoot, git }, s, await phaseTargets.forPlan(s)),
-        prsMerged: (urls, repoForUrl) => prsMergedForPlan({ slug, urls, repoForUrl }),
+          unlandedPhasesAcross({ workspaceRoot: ctx.root, git: ctx.git }, s, await ctx.phaseTargets.forPlan(s)),
+        prsMerged: (urls, repoForUrl) => prsMergedForPlan({ slug, urls, repoForUrl, ...(ctx.repoName !== undefined ? { repo: ctx.repoName } : {}) }),
         phaseTarget: async (s, id) => {
-          const target = await phaseTargets.forPhase(s, id);
+          const target = await ctx.phaseTargets.forPhase(s, id);
           return target.ok ? { ok: true, value: target.value } : { ok: false, error: target.error };
         },
         repoSettings: async (target) => {
@@ -704,11 +744,68 @@ export function registerCommands(
     }
   };
 
+  const submitPrForSlug = async (slug: string, planRepoRoot?: string): Promise<SubmitPrOutcome> => {
+    if (planRepoRoot === undefined || path.resolve(planRepoRoot) === path.resolve(repoRoot)) {
+      return submitPrIn(slug, {
+        root: repoRoot,
+        baitonDir,
+        git,
+        phaseTargets,
+        defaultRemote: readGitSettings().remote,
+      });
+    }
+    const runtime = planRepoRuntimeFor(planRepoRoot);
+    if (runtime === undefined) {
+      return { ok: false, error: `repo "${planRepoRoot}" is not a discovered repo with a .baiton/ directory` };
+    }
+    return submitPrIn(slug, {
+      root: runtime.target.root,
+      baitonDir: runtime.target.baitonDir,
+      git: runtime.target.git as ReturnType<typeof createGitService>,
+      phaseTargets: runtime.phaseTargets,
+      repoName: runtime.target.info.name,
+      defaultRemote: repoGitSettingsFor(runtime.target.root).remote,
+    });
+  };
+
   // land_phase (per-phase worktrees): merge a done phase's branch into the plan
   // branch in the main checkout. It goes through the plan-branch writer so a
   // land never interleaves with a state commit for another phase of the plan.
-  const landPhaseSeam: LandPhaseSeam = {
-    land: async ({ slug, phaseId }) => {
+  const landPhaseSeam: PlanLandPhaseSeam = {
+    land: async ({ slug, phaseId, repoRoot: planRepoRoot }) => {
+      if (planRepoRoot !== undefined && path.resolve(planRepoRoot) !== path.resolve(repoRoot)) {
+        const runtime = planRepoRuntimeFor(planRepoRoot);
+        if (runtime === undefined) {
+          return { kind: 'refused', reason: `repo "${planRepoRoot}" is not a discovered repo with a .baiton/ directory` };
+        }
+        if (prInFlight.has(prKeyFor(slug, runtime.target.root))) {
+          return { kind: 'refused', reason: `a pull request is being submitted for plan "${slug}"` };
+        }
+        if (phaseQueues.find(slug, phaseId, runtime.target.root)?.isRunning()) {
+          return { kind: 'refused', reason: `a stage is still running for phase "${phaseId}"` };
+        }
+        try {
+          return await runtime.planWriter.apply(slug, async () => {
+            const target = await runtime.phaseTargets.forPhase(slug, phaseId);
+            if (!target.ok) return { kind: 'refused' as const, reason: target.error };
+            if ((await target.value.git.branchHead(phaseBranchFor(slug, phaseId, documentKindFor(runtime.target.root, slug)))) === undefined) {
+              return { kind: 'already-landed' as const };
+            }
+            const landed = await landPhaseWorktree(
+              { workspaceRoot: runtime.target.root, git: runtime.target.git as ReturnType<typeof createGitService>, target: target.value },
+              { slug, phaseId },
+            );
+            if (landed.ok) {
+              return { kind: 'landed' as const, commit: landed.value.commit, noop: landed.value.noop, cleanup: landed.value.cleanup };
+            }
+            if (landed.error.reason === 'missing-branch') return { kind: 'already-landed' as const };
+            const detail = landed.error.reason === 'dirty-tree' ? ` (${landed.error.changes.join(', ')})` : '';
+            return { kind: 'refused' as const, reason: `${landed.error.message}${detail}` };
+          });
+        } catch (e) {
+          return { kind: 'refused', reason: e instanceof Error ? e.message : String(e) };
+        }
+      }
       if (prInFlight.has(prKeyFor(slug))) {
         return { kind: 'refused', reason: `a pull request is being submitted for plan "${slug}"` };
       }
@@ -778,6 +875,7 @@ export function registerCommands(
     interventionSeam,
     runPipelineSeam,
     landPhaseSeam,
+    repoGitSettingsFor,
     undefined,
     planRepos,
   );
@@ -797,7 +895,7 @@ export function registerCommands(
   // The tool registry (read + plan-write + control tools) over the same seams
   // (Req 10.1–10.7). Restricted Mode disables writes/dispatch inside the guard.
   const registry = createToolRegistry({
-    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, subAgents, planRepos),
+    ...buildToolServices(repoRoot, baitonDir, git, queueFor, adapterFor, submitPrForSlug, confirm, interventionSeam, runPipelineSeam, landPhaseSeam, repoGitSettingsFor, subAgents, planRepos),
     draftPlan: {
       draft: async (req) => {
         let runner = planDraftRunner;
@@ -2110,13 +2208,14 @@ function buildToolServices(
   git: ReturnType<typeof createGitService>,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
-  submitPrForSlug: (slug: string) => Promise<SubmitPrOutcome>,
+  submitPrForSlug: (slug: string, planRepoRoot?: string) => Promise<SubmitPrOutcome>,
   confirm: ConfirmSeam,
   intervention: InterventionSeam,
   runPipeline: RunPipelineSeam,
-  landPhase: LandPhaseSeam,
-  subAgents?: SubAgentSeam,
-  planRepos?: PlanRepoSeam,
+  landPhase: PlanLandPhaseSeam,
+  gitSettingsFor: (root: string) => ToolGitSettings,
+  subAgents: SubAgentSeam | undefined,
+  planRepos: PlanRepoSeam,
 ): ToolServices {
   return {
     repoRoot,
@@ -2130,9 +2229,10 @@ function buildToolServices(
     clock: systemClock,
     ids: { next: () => `id-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     gitSettings: readGitSettings(),
+    gitSettingsFor,
     submitPr: submitPrForSlug,
     ...(subAgents !== undefined ? { subAgents } : {}),
-    ...(planRepos !== undefined ? { planRepos } : {}),
+    planRepos,
   };
 }
 

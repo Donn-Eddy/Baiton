@@ -26,7 +26,7 @@ import {
 import { createRunPipelineSeam, createStageLock } from '../src/activation/engineFacade';
 import { createToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
-import type { ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, type ToolServices } from '../src/orchestrator/toolServices';
 import type { InterventionAnswer, InterventionRequest } from '../src/orchestrator/interventions';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
@@ -610,6 +610,7 @@ describe('Integration: plan-less run modes over a temp git repo', () => {
         repoRoot: repo,
         baitonDir: path.join(repo, '.baiton'),
         git: h.service,
+        planRepos: singleRepoPlanRepos(repo, h.service),
         confirm: { confirm: async () => false },
         intervention: {
           ask: async (req: InterventionRequest) => {

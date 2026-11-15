@@ -32,7 +32,7 @@ import { PhaseState } from '../model/phaseState';
 import type { GitService } from '../git';
 import { resolveDocument } from '../storage/documentLocation';
 import { Tool, ToolContext, ToolResult } from './guard';
-import { ToolServices } from './toolServices';
+import { resolvePlanAddress, ToolServices, type ResolvedPlan } from './toolServices';
 
 /** The states a phase cannot be edited or removed from (Req 9.8). */
 const PROTECTED_STATES: ReadonlySet<PhaseState> = new Set<PhaseState>([
@@ -60,12 +60,12 @@ export function createPlanWriteTools(services: ToolServices): Tool[] {
 function updateOverviewTool(services: ToolServices): Tool {
   return {
     name: 'update_overview',
-    description: "Rewrite a plan's preamble (Endstate, What needs changing, Limitations & constraints; or a legacy spec's OVERVIEW), leaving frontmatter and phases untouched.",
+    description: "Rewrite a plan's preamble (Endstate, What needs changing, Limitations & constraints; or a legacy spec's OVERVIEW), leaving frontmatter and phases untouched. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.",
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' }, text: { type: 'string' } },
+      properties: { slug: { type: 'string' }, text: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug', 'text'],
       additionalProperties: false,
     },
@@ -75,7 +75,7 @@ function updateOverviewTool(services: ToolServices): Tool {
       if (slug === undefined || text === undefined) {
         return { ok: false, error: 'update_overview requires a string "slug" and a string "text"' };
       }
-      const loaded = await loadPlanForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, readString(args, 'plan_repo'), tc);
       if (!loaded.ok) {
         return loaded.error;
       }
@@ -87,15 +87,15 @@ function updateOverviewTool(services: ToolServices): Tool {
         return {
           ok: false,
           error: loaded.kind === 'plan'
-            ? `plan "${slug}" has no preamble/PHASES structure to update`
-            : `plan "${slug}" has no preamble/PHASES (or legacy OVERVIEW/TODOS) structure to update`,
+            ? `plan "${loaded.plan.label}" has no preamble/PHASES structure to update`
+            : `plan "${loaded.plan.label}" has no preamble/PHASES (or legacy OVERVIEW/TODOS) structure to update`,
         };
       }
-      const write = await writeAndCommit(services, loaded.absolute, rewritten, slug, slug, 'update overview', loaded.target.git);
+      const write = await writeAndCommit(services, loaded.absolute, rewritten, loaded.plan.slug, loaded.plan.slug, 'update overview', loaded.plan.git);
       if (!write.ok) {
         return write;
       }
-      return { ok: true, data: { slug, commit: write.commit } };
+      return { ok: true, data: { slug: loaded.plan.slug, ...(loaded.plan.isOwner ? {} : { repo: loaded.plan.repoPath }), commit: write.commit } };
     },
   };
 }
@@ -108,7 +108,7 @@ function updateOverviewTool(services: ToolServices): Tool {
 function addPhaseTool(services: ToolServices): Tool {
   return {
     name: 'add_phase',
-    description: 'Append a pending phase with an id, title and optional hints. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase\'s input rev.',
+    description: 'Append a pending phase with an id, title and optional hints. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase\'s input rev. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
@@ -120,6 +120,7 @@ function addPhaseTool(services: ToolServices): Tool {
         after: { type: 'array', items: { type: 'string' } },
         files: { type: 'array', items: { type: 'string' } },
         repo: { type: 'string' },
+        plan_repo: { type: 'string' },
       },
       required: ['slug', 'id', 'title'],
       additionalProperties: false,
@@ -134,26 +135,26 @@ function addPhaseTool(services: ToolServices): Tool {
       if (slug === undefined || id === undefined || title === undefined) {
         return { ok: false, error: 'add_phase requires a string "slug", "id", and "title"' };
       }
-      const loaded = await loadPlanForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, readString(args, 'plan_repo'), tc);
       if (!loaded.ok) {
         return loaded.error;
       }
-      const repoError = checkRepoHint(repo, loaded.target.topology, id, 'add_phase');
+      const repoError = checkRepoHint(repo, loaded.plan.topology, id, 'add_phase');
       if (repoError !== undefined) return { ok: false, error: repoError };
       if (!phaseIdPattern(loaded.kind).test(id)) {
         return { ok: false, error: `add_phase "id" must be "${phaseIdPrefix(loaded.kind)}" followed by two or more digits: ${id}` };
       }
       const plan = parsePlan(loaded.content, loaded.kind);
       if (plan.phases.some((phase) => phase.id === id)) {
-        return { ok: false, error: `add_phase: phase "${id}" already exists in plan "${slug}"` };
+        return { ok: false, error: `add_phase: phase "${id}" already exists in plan "${loaded.plan.label}"` };
       }
       const line = renderPhaseLine('pending', id, title, after, files, repo);
       const updated = appendPhaseLine(loaded.content, line, loaded.kind);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `add ${id}`, loaded.target.git);
+      const write = await writeAndCommit(services, loaded.absolute, updated, loaded.plan.slug, id, `add ${id}`, loaded.plan.git);
       if (!write.ok) {
         return write;
       }
-      return { ok: true, data: { slug, id, commit: write.commit } };
+      return { ok: true, data: { slug: loaded.plan.slug, ...(loaded.plan.isOwner ? {} : { repo: loaded.plan.repoPath }), id, commit: write.commit } };
     },
   };
 }
@@ -166,7 +167,7 @@ function addPhaseTool(services: ToolServices): Tool {
 function editPhaseTool(services: ToolServices): Tool {
   return {
     name: 'edit_phase',
-    description: "Rewrite a phase's title and hints, preserving its state; refuses protected states. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase's input rev.",
+    description: "Rewrite a phase's title and hints, preserving its state; refuses protected states. `repo` is a path relative to the plan owner; omit it for the owner. Changing it invalidates approval and that phase's input rev. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.",
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
@@ -178,6 +179,7 @@ function editPhaseTool(services: ToolServices): Tool {
         after: { type: 'array', items: { type: 'string' } },
         files: { type: 'array', items: { type: 'string' } },
         repo: { type: 'string' },
+        plan_repo: { type: 'string' },
       },
       required: ['slug', 'id'],
       additionalProperties: false,
@@ -188,14 +190,14 @@ function editPhaseTool(services: ToolServices): Tool {
       if (slug === undefined || id === undefined) {
         return { ok: false, error: 'edit_phase requires a string "slug" and "id"' };
       }
-      const loaded = await loadPlanForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, readString(args, 'plan_repo'), tc);
       if (!loaded.ok) {
         return loaded.error;
       }
       const plan = parsePlan(loaded.content, loaded.kind);
       const phase = plan.phases.find((item) => item.id === id);
       if (phase === undefined) {
-        return { ok: false, error: `edit_phase: phase "${id}" was not found in plan "${slug}"` };
+        return { ok: false, error: `edit_phase: phase "${id}" was not found in plan "${loaded.plan.label}"` };
       }
       if (PROTECTED_STATES.has(phase.state)) {
         return {
@@ -214,7 +216,7 @@ function editPhaseTool(services: ToolServices): Tool {
         if (repoArg === '' || trimmedRepo === '.') {
           repo = undefined;
         } else {
-          const repoError = checkRepoHint(repoArg, loaded.target.topology, id, 'edit_phase');
+          const repoError = checkRepoHint(repoArg, loaded.plan.topology, id, 'edit_phase');
           if (repoError !== undefined) return { ok: false, error: repoError };
           repo = trimmedRepo;
         }
@@ -222,11 +224,11 @@ function editPhaseTool(services: ToolServices): Tool {
       // Preserve the existing state; only the title and hints may change.
       const newLine = renderPhaseLine(phase.state, id, title, after, files, repo);
       const updated = replaceLine(loaded.content, phase.lineIndex, newLine);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `edit ${id}`, loaded.target.git);
+      const write = await writeAndCommit(services, loaded.absolute, updated, loaded.plan.slug, id, `edit ${id}`, loaded.plan.git);
       if (!write.ok) {
         return write;
       }
-      return { ok: true, data: { slug, id, commit: write.commit } };
+      return { ok: true, data: { slug: loaded.plan.slug, ...(loaded.plan.isOwner ? {} : { repo: loaded.plan.repoPath }), id, commit: write.commit } };
     },
   };
 }
@@ -238,12 +240,12 @@ function editPhaseTool(services: ToolServices): Tool {
 function removePhaseTool(services: ToolServices): Tool {
   return {
     name: 'remove_phase',
-    description: 'Delete a phase line from a plan; refuses when the phase is in a protected state.',
+    description: 'Delete a phase line from a plan; refuses when the phase is in a protected state. `slug` may be qualified as `<repoPath>:<slug>`, or pass `plan_repo` (a repo path relative to this repo) to address a plan owned by another repo.',
     mutating: true,
     steps: ['gather', 'drive'],
     schema: {
       type: 'object',
-      properties: { slug: { type: 'string' }, id: { type: 'string' } },
+      properties: { slug: { type: 'string' }, id: { type: 'string' }, plan_repo: { type: 'string' } },
       required: ['slug', 'id'],
       additionalProperties: false,
     },
@@ -253,14 +255,14 @@ function removePhaseTool(services: ToolServices): Tool {
       if (slug === undefined || id === undefined) {
         return { ok: false, error: 'remove_phase requires a string "slug" and "id"' };
       }
-      const loaded = await loadPlanForWrite(services, slug, tc);
+      const loaded = await loadPlanForWrite(services, slug, readString(args, 'plan_repo'), tc);
       if (!loaded.ok) {
         return loaded.error;
       }
       const plan = parsePlan(loaded.content, loaded.kind);
       const phase = plan.phases.find((item) => item.id === id);
       if (phase === undefined) {
-        return { ok: false, error: `remove_phase: phase "${id}" was not found in plan "${slug}"` };
+        return { ok: false, error: `remove_phase: phase "${id}" was not found in plan "${loaded.plan.label}"` };
       }
       if (PROTECTED_STATES.has(phase.state)) {
         return {
@@ -269,11 +271,11 @@ function removePhaseTool(services: ToolServices): Tool {
         };
       }
       const updated = deleteLine(loaded.content, phase.lineIndex);
-      const write = await writeAndCommit(services, loaded.absolute, updated, slug, id, `remove ${id}`, loaded.target.git);
+      const write = await writeAndCommit(services, loaded.absolute, updated, loaded.plan.slug, id, `remove ${id}`, loaded.plan.git);
       if (!write.ok) {
         return write;
       }
-      return { ok: true, data: { slug, id, commit: write.commit } };
+      return { ok: true, data: { slug: loaded.plan.slug, ...(loaded.plan.isOwner ? {} : { repo: loaded.plan.repoPath }), id, commit: write.commit } };
     },
   };
 }
@@ -288,6 +290,7 @@ function removePhaseTool(services: ToolServices): Tool {
 async function loadPlanForWrite(
   services: ToolServices,
   slug: string,
+  planRepo: string | undefined,
   tc: ToolContext,
 ): Promise<
   | {
@@ -295,46 +298,15 @@ async function loadPlanForWrite(
       absolute: string;
       content: string;
       kind: DocumentKind;
-      target: { baitonDir: string; git: GitService; topology?: RepoTopology; repoPath: string };
+      plan: ResolvedPlan;
     }
   | { ok: false; error: ToolResult }
 > {
-  if (!isSlug(slug)) {
-    return { ok: false, error: { ok: false, error: `invalid slug: ${slug}` } };
-  }
-  let target: { baitonDir: string; git: GitService; topology?: RepoTopology; repoPath: string } = {
-    baitonDir: services.baitonDir,
-    git: services.git,
-    topology: undefined,
-    repoPath: '.',
-  };
-  let guard = tc.ctx;
-  if (services.planRepos !== undefined) {
-    const located = await services.planRepos.locate(slug);
-    if (located.kind === 'ambiguous') {
-      return {
-        ok: false,
-        error: {
-          ok: false,
-          error: `plan "${slug}" exists in more than one nested repo (${located.repos.join(', ')}); open it from its own repo`,
-        },
-      };
-    }
-    if (located.kind === 'found') {
-      if (tc.ctx.restricted) {
-        return { ok: false, error: { ok: false, error: 'plan writes are disabled in Restricted Mode' } };
-      }
-      target = {
-        baitonDir: located.target.baitonDir,
-        git: located.target.git,
-        topology: located.target.topology,
-        repoPath: located.target.info.path,
-      };
-      if (located.target.info.path !== '.') guard = located.target.guard;
-    }
-  }
-  const location = resolveDocument(target.baitonDir, slug);
-  const resolved = await guard.resolveMutatingPath(location.documentPath);
+  const address = await resolvePlanAddress(services, slug, planRepo, tc, { mutating: true });
+  if (!address.ok) return { ok: false, error: { ok: false, error: address.error } };
+  const plan = address.plan;
+  const location = resolveDocument(plan.baitonDir, plan.slug);
+  const resolved = await plan.guard.resolveMutatingPath(location.documentPath);
   if (!resolved.ok) {
     return { ok: false, error: { ok: false, error: resolved.error.message } };
   }
@@ -342,9 +314,9 @@ async function loadPlanForWrite(
   try {
     content = await fs.readFile(resolved.resolved, 'utf8');
   } catch {
-    return { ok: false, error: { ok: false, error: `plan "${slug}" was not found` } };
+    return { ok: false, error: { ok: false, error: `plan "${plan.label}" was not found` } };
   }
-  return { ok: true, absolute: resolved.resolved, content, kind: location.kind, target };
+  return { ok: true, absolute: resolved.resolved, content, kind: location.kind, plan };
 }
 
 /**
@@ -523,11 +495,6 @@ function deleteLine(content: string, lineIndex: number): string {
 function isHeader(line: string, name: string): boolean {
   const m = /^#+\s+(.*)$/.exec(line);
   return m !== null && m[1].trim() === name;
-}
-
-/** A slug is a simple directory-safe name (no separators or traversal). */
-function isSlug(slug: string): boolean {
-  return /^[A-Za-z0-9._-]+$/.test(slug) && slug !== '.' && slug !== '..';
 }
 
 /** Read a required string field from an args object, or undefined. */

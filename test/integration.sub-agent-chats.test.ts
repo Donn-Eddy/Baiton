@@ -32,7 +32,7 @@ import type { Role } from '../src/model/role';
 import type { PlanStore } from '../src/engine/runQueue';
 import { createToolRegistry, type ToolRegistry } from '../src/orchestrator/registry';
 import { GuardContext } from '../src/orchestrator/guard';
-import type { SubmitPrOutcome, ToolServices } from '../src/orchestrator/toolServices';
+import { singleRepoPlanRepos, type SubmitPrOutcome, type ToolServices } from '../src/orchestrator/toolServices';
 import type { LandPhaseSeam } from '../src/orchestrator/seams';
 import { systemClock } from '../src/orchestrator/seams';
 import { SessionStore, type SessionScope } from '../src/orchestrator/sessionStore';
@@ -563,6 +563,7 @@ function makeHarness(repo: string, factory: ResultWatcherFactory): Harness {
     repoRoot: repo,
     baitonDir,
     git: gitService,
+    planRepos: singleRepoPlanRepos(repo, gitService),
     confirm: {
       confirm: async (m) => {
         confirmCalls.push(m);
