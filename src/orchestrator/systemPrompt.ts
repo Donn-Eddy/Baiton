@@ -50,16 +50,51 @@
  * (Req 11.7).
  * Optional repository context describes the owning repo and its descendants to
  * gather/drive prompts; absent or single-repo context preserves the old prompt.
+ * A plan conversation kind may also carry its owning repo when the plan belongs
+ * to a repository other than the conversation's repo.
  */
 import { isPlanless, RunMode } from '../model/mode';
 import { parsePlan } from '../model/parser';
+import { formatPlanRef, normalizeRepoPath } from './planRepos';
 import type { ConversationStep } from './guard';
 import { MAX_SUBAGENT_DEPTH } from './seams';
 
 /** Which conversation the prompt is being built for. */
 export type ConversationKind =
   | { kind: 'workspace' }
-  | { kind: 'plan'; slug: string };
+  | {
+      kind: 'plan';
+      slug: string;
+      /** Owning repo of the plan, as a path relative to the conversation owner (PlanRepoInfo.path) or an absolute root. Absent or '.' = this conversation's own repo. */
+      repo?: string;
+    };
+
+/** Return a normalized repo path when this plan belongs to another repo. */
+function ownedElsewhere(kind: ConversationKind): string | undefined {
+  if (kind.kind !== 'plan' || kind.repo === undefined) return undefined;
+  const repo = normalizeRepoPath(kind.repo);
+  return repo !== undefined && repo !== '.' ? repo : undefined;
+}
+
+/** The plan-owning repo context for a conversation whose plan lives elsewhere. */
+export function planOwnerText(slug: string, repo: string): string {
+  return [
+    `This conversation's plan \`${slug}\` is owned by the repo \`${repo}\`, not by this conversation's repo.`,
+    `Address it as \`${formatPlanRef(repo, slug)}\` (or pass \`plan_repo: "${repo}"\`) whenever a plan tool takes a slug.`,
+    `Its phases' \`repo:\` hints and \`files\` are relative to \`${repo}\`, and its approval, journal and pull requests live in that repo.`,
+    `The read tools (\`read_file\`, \`list_files\`, \`search\`, \`git_*\`) still read this conversation's repo, not \`${repo}\`.`,
+  ].join('\n');
+}
+
+/** Guidance for naming a plan when its owning repo must be specified. */
+export const PLAN_ADDRESSING_TEXT = [
+  'Addressing plans across repos:',
+  '- A plan is identified by its owning repo and its slug. Write a qualified plan as `<repoPath>:<slug>`, where `<repoPath>` is the repo\'s path relative to this repo (`.` for this repo), for example `packages/api:my-plan`.',
+  '- `list_plans`, `read_plan`, `update_overview`, `add_phase`, `edit_phase`, `remove_phase`, `approve_plan`, `land_phase` and `submit_pr` accept a qualified `slug`, or a bare `slug` plus an optional `plan_repo`. Each acts on the plan\'s own repo: its `.baiton/`, its branch and its pull requests.',
+  '- A bare slug works only when exactly one repo has a plan with that slug. Nothing picks a repo for you.',
+  '- When a tool refuses because the slug exists in more than one repo, it lists the candidates as `<repoPath>:<slug>`. This is the one refusal you do not just quote: ask the user which plan they mean with `ask_user`, offering each candidate as an option, then retry with the qualified slug they chose. Never choose a candidate yourself.',
+  '- `list_plans` shows qualified names wherever a slug appears in more than one repo; use those names as given.',
+].join('\n');
 
 /** Repositories visible to a workspace conversation, with paths relative to its owner. */
 export interface PromptRepoContext {
@@ -439,8 +474,19 @@ export function buildSystemPrompt(
   // for a new (or still draft) plan, or driving an approved one (Req 11.1).
   sections.push(step === 'drive' ? DRIVE_TEXT : FLOW_TEXT);
   const hasMultipleRepos = repos !== undefined && repos.repos.length > 1;
+  const owner = ownedElsewhere(kind);
+  const addressingNeeded = hasMultipleRepos || owner !== undefined;
   if (hasMultipleRepos) {
-    sections.push([repoListText(repos), step === 'drive' ? REPO_DRIVE_TEXT : REPO_GATHER_TEXT].join('\n\n'));
+    sections.push([
+      repoListText(repos),
+      step === 'drive' ? REPO_DRIVE_TEXT : REPO_GATHER_TEXT,
+      PLAN_ADDRESSING_TEXT,
+    ].join('\n\n'));
+  } else if (addressingNeeded) {
+    sections.push(PLAN_ADDRESSING_TEXT);
+  }
+  if (owner !== undefined && kind.kind === 'plan') {
+    sections.push(planOwnerText(kind.slug, owner));
   }
   const grammar = hasMultipleRepos
     ? `${PHASE_GRAMMAR_TEXT}\n${REPO_HINT_GRAMMAR_LINE}`
@@ -495,6 +541,10 @@ export function buildSubAgentPrompt(
   const sections = [SUBAGENT_ROLE_TEXT, PROHIBITION_LINES.join('\n'), REFUSAL_TEXT, ASK_USER_TEXT];
   if (step === 'drive') {
     sections.push(SUBAGENT_DRIVE_TEXT);
+  }
+  const owner = ownedElsewhere(kind);
+  if (owner !== undefined && kind.kind === 'plan') {
+    sections.push(PLAN_ADDRESSING_TEXT, planOwnerText(kind.slug, owner));
   }
   sections.push(subAgentSpawnText(depth), STYLE_TEXT);
   if (kind.kind === 'plan' && documentContent !== undefined) {

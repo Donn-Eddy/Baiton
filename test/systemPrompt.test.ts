@@ -440,4 +440,31 @@ describe('buildSystemPrompt', () => {
       assert.ok(!driving.includes('plan-review'), 'plan-review is not a stage the orchestrator runs');
     });
   });
+
+  describe('owning repo in ConversationKind', () => {
+    it('preserves the single-repo prompt when repo is absent or the owner is dot', () => {
+      for (const content of [undefined, DRAFT_PLAN, APPROVED_PLAN]) {
+        assert.strictEqual(
+          buildSystemPrompt({ kind: 'plan', slug: 'x', repo: '.' }, content),
+          buildSystemPrompt({ kind: 'plan', slug: 'x' }, content),
+        );
+      }
+    });
+
+    it('does not add cross-repo addressing to the default single-repo prompt', () => {
+      const prompt = buildSystemPrompt(PLAN);
+      assert.ok(!prompt.includes('Addressing plans across repos:'));
+      assert.ok(!prompt.includes('<repoPath>:<slug>'));
+    });
+
+    it('keeps conversationStepFor independent of the owning repo', () => {
+      const ownedPlan: ConversationKind = { kind: 'plan', slug: 'my-plan', repo: 'packages/api' };
+      for (const content of [DRAFT_PLAN, APPROVED_PLAN]) {
+        assert.strictEqual(
+          conversationStepFor(ownedPlan, content),
+          conversationStepFor(PLAN, content),
+        );
+      }
+    });
+  });
 });
