@@ -1,1 +1,2 @@
 {"type":"start","runId":"child-repo-plans-first-class-P01-plan-1-1794710534681","todoId":"P01","stage":"plan","attempt":1,"startHead":"3ccf96981a750f3e44d659546a0e4efbabfabd95","inputRev":"d3ab00cdfbb79971147b7afe4017b60086dcba7e00fdcfeb6c5ddfcae7795aea","terminalPid":1359699,"fromState":"pending","sessionId":"b26adb35-0775-4cc4-afa2-4c0a4e60aa96"}
+{"type":"completion","runId":"child-repo-plans-first-class-P01-plan-1-1794710534681","result":"completed"}
