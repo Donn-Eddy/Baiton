@@ -39,12 +39,12 @@ import type {
   PendingAskRegistry,
 } from './interventions';
 
-/** A chat's session key: `<scopeId>/<sessionId>` — the same shape ChatController uses for runningKey. */
+/** A chat's session key: `<scopeId>/<sessionId>`; scopeId never contains '/', so same-slug plans in different repos cannot collide. */
 export function chatSessionKey(scope: SessionScope, sessionId: string): string {
   return `${scopeId(scope)}/${sessionId}`;
 }
 
-/** The session id inside a key of `scope`, or undefined when the key belongs to another scope. */
+/** The session id inside a key of `scope`, or undefined when the key belongs to another scope; `<scopeId>` never contains '/'. */
 export function sessionIdFromKey(scope: SessionScope, key: string): string | undefined {
   const p = `${scopeId(scope)}/`;
   return key.startsWith(p) && key.length > p.length ? key.slice(p.length) : undefined;
@@ -93,8 +93,8 @@ export interface SubAgentRunnerDeps {
   guardContext(): GuardContext;
   /** Resolved with resolveRoundBound per turn. */
   roundBound(): unknown;
-  /** Re-read every round for a plan scope. */
-  readPlan(slug: string): Promise<string | undefined>;
+  /** Re-read every round for a plan scope; the scope carries the owning repo. */
+  readPlan(slug: string, scope?: SessionScope): Promise<string | undefined>;
   /** To decline a stopped sub-agent's pending forwarded asks. */
   asks?: PendingAskRegistry;
   /** For ChatTranscript timestamps; default systemClock. */
@@ -151,6 +151,7 @@ export class SubAgentRunner implements SubAgentSeam {
     if (caller.signal.aborted) {
       return { kind: 'refused', reason: 'the calling chat was stopped' };
     }
+    // ToolCaller.kind carries the original scope object, including repo and baitonDir, unchanged.
     const scope = caller.kind;
     const parentId = sessionIdFromKey(scope, caller.sessionKey);
     if (parentId === undefined) {
@@ -339,7 +340,7 @@ export class SubAgentRunner implements SubAgentSeam {
               entry.scope,
               entry.step,
               entry.depth,
-              entry.scope.kind === 'plan' ? await this.deps.readPlan(entry.scope.slug) : undefined,
+              entry.scope.kind === 'plan' ? await this.deps.readPlan(entry.scope.slug, entry.scope) : undefined,
             ),
           append: async (m) => {
             await entry.transcript.append(m);

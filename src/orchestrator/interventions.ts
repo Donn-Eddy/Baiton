@@ -69,11 +69,11 @@ export type InterventionRequest = QuestionRequest | ConfirmRequest | PermissionR
 
 /** Where a forwarded sub-agent ask came from: the card is shown on `rootKey`'s chat; `chatId`/`chatKey` name the sub-agent chat that asked. */
 export interface InterventionOrigin {
-  /** Session key of the top-level chat (`<scopeId>/<rootSessionId>`). */
+  /** Session key of the top-level chat (`<scopeId>/<rootSessionId>`), where `<scopeId>` follows the same rule. */
   rootKey: string;
   /** The sub-agent's session id (`<root>/<leaf>[/<leaf>]`). */
   chatId: string;
-  /** The sub-agent's session key (`<scopeId>/<chatId>`). */
+  /** The sub-agent's session key (`<scopeId>/<chatId>`), where `<scopeId>` follows the same rule. */
   chatKey: string;
   /** The sub-agent's depth (1 or 2). */
   depth: number;
@@ -85,7 +85,7 @@ export type Intervention = InterventionRequest & {
   id: string;
   /** ISO-8601 creation time from the injected Clock. */
   createdAt: string;
-  /** Conversation scope the card belongs to ('workspace' or a plan slug). */
+  /** Conversation scope the card belongs to: the `scopeId()` of its session scope ('workspace', a bare slug for an owner-repo plan, or `<encoded repo>:<slug>` for a plan in another repo). */
   scopeId?: string;
   /** Present only for an ask a sub-agent raised. */
   origin?: InterventionOrigin;
