@@ -71,6 +71,7 @@ import type { Stage } from '../model/stage';
 import { initialize } from '../config';
 import type { Config } from '../config';
 import { createGitService } from '../git';
+import type { GitService } from '../git';
 import {
   createPrTool,
   describeRepoPrs,
@@ -148,6 +149,7 @@ import type {
   PlanRepoSeam,
   ToolGitSettings,
 } from '../orchestrator';
+import { formatPlanRef, parsePlanRef, normalizeRepoPath } from '../orchestrator/planRepos';
 import { createAdapterRegistry, agentAllowList } from '../adapter';
 import type { Adapter, AdapterRegistry } from '../adapter';
 import { canonicalizeRoot } from './workspace';
@@ -155,7 +157,7 @@ import type { WorkspaceContext } from './workspace';
 import type { AgentExecutables } from './executable';
 import { Surface } from './surface';
 import { createPhaseTargetResolver, createPlanStore } from './planStore';
-import { repoTopologyFor } from './repoDiscovery';
+import { repoByName, repoTopologyFor } from './repoDiscovery';
 import type { RepoSet } from './repoDiscovery';
 import type { GitServiceRegistry } from '../git';
 import { createVscodeTerminalHost } from './vscodeTerminalHost';
@@ -165,6 +167,7 @@ import {
   createRunPipelineSeam,
   createRunQueueSeam,
   createPhaseQueues,
+  createPhaseQueueOwners,
   dispatchTrigger,
   STAGE_ROLE,
   type AdapterForRole,
@@ -462,6 +465,21 @@ export function registerCommands(
       }
     },
   });
+  const choose = async (items: string[], placeHolder: string) =>
+    await vscode.window.showQuickPick(items, { placeHolder });
+  const planTargets: PlanTargetDeps & {
+    quickPick: (items: string[], placeHolder: string) => Promise<string | undefined>;
+    input: (prompt: string) => Promise<string | undefined>;
+  } = {
+    planRepos,
+    repos: () => activation.repos,
+    ownerRoot: repoRoot,
+    ownerBaitonDir: baitonDir,
+    ownerGit: git,
+    choose,
+    quickPick: choose,
+    input: async (prompt) => await vscode.window.showInputBox({ prompt }),
+  };
   const ownerRepoName = (): string | undefined => {
     const repos = activation.repos;
     return repos?.repos.find((repo) => path.resolve(repo.root) === path.resolve(repoRoot))?.name;
@@ -488,25 +506,15 @@ export function registerCommands(
   // commits, artifact writes, journal appends and worktree creation serialize
   // per slug.
   const planWriter = createPlanBranchWriter({ baitonDir, git });
-  const planRepoRuntimes = new Map<string, { target: PlanRepoTarget; phaseTargets: ReturnType<typeof createPhaseTargetResolver>; planWriter: ReturnType<typeof createPlanBranchWriter> }>();
   const planRepoRuntimeFor = (root: string) => {
-    const key = repoLockKey(root);
-    const cached = planRepoRuntimes.get(key);
-    if (cached !== undefined) return cached;
     const target = planRepos.targetAt(root);
     if (target === undefined) return undefined;
-    const runtime = {
-      target,
-      phaseTargets: createPhaseTargetResolver({
-        baitonDir: target.baitonDir,
-        ownerRoot: target.root,
-        topology: () => target.topology,
-        gitFor,
-      }),
-      planWriter: createPlanBranchWriter({ baitonDir: target.baitonDir, git: target.git as ReturnType<typeof createGitService> }),
-    };
-    planRepoRuntimes.set(key, runtime);
-    return runtime;
+    // The phase queue owner is also the one writer used by land_phase and
+    // submit_pr, so these operations serialize with queue state commits.
+    // This closure is called only after phaseQueues has been initialized.
+    const owner = phaseQueues.owner(root);
+    if (owner === undefined || owner.targets === undefined) return undefined;
+    return { target, phaseTargets: owner.targets, planWriter: owner.planWriter };
   };
   const planStore = createPlanStore(baitonDir, git, planWriter);
   // Roles may mix agents, so each dispatch site selects its adapter from the
@@ -527,6 +535,20 @@ export function registerCommands(
   // the queue refuses a second while one is running (Req 19.1, 20.1). Every
   // refusal/halt is surfaced through the shared Surface (Req 5.3, 10.3, 14.5,
   // 19.1). Phase queues sit outside the per-repo stage lock.
+  const queueOwners = createPhaseQueueOwners({
+    sourceAt: (root) => {
+      const target = planRepos.targetAt(root);
+      return target === undefined
+        ? undefined
+        : {
+            root: target.root,
+            baitonDir: target.baitonDir,
+            git: target.git as ReturnType<typeof createGitService>,
+            topology: target.topology,
+          };
+    },
+    gitFor: (root) => gitFor(root),
+  });
   const phaseQueues: PhaseQueues = createPhaseQueues({
     workspaceRoot: repoRoot,
     baitonDir,
@@ -540,8 +562,10 @@ export function registerCommands(
     modelForRole: (role) => modelForRole(cfg(), role),
     adapterForRole: adapterFor,
     report: (error) => surface.reportDispatchError(error),
+    owners: (root) => queueOwners.ownerFor(root),
   });
-  const queueFor = (slug: string, phaseId: string): RunQueue => phaseQueues.queueFor(slug, phaseId, repoRoot);
+  const queueFor: QueueFor = (slug, phaseId, root = repoRoot) =>
+    phaseQueues.queueFor(slug, phaseId, root);
 
   // One stage-lock per repo, shared by every plan-draft runner and run pipeline;
   // phase queues never take it.
@@ -1090,16 +1114,15 @@ export function registerCommands(
 
   // --- per-stage triggers + control actions (Req 10.3, 19.1, 22.1, 22.2) --
   disposables.push(
-    registerStageCommand(COMMANDS.plan, 'plan', activation, baitonDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.execute, 'execute', activation, baitonDir, queueFor, adapterFor, surface),
-    registerStageCommand(COMMANDS.review, 'review', activation, baitonDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.replan, 'replan', activation, baitonDir, queueFor, adapterFor, surface),
-    registerActionCommand(COMMANDS.stop, 'stop', activation, baitonDir, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.plan, 'plan', activation, planTargets, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.execute, 'execute', activation, planTargets, queueFor, adapterFor, surface),
+    registerStageCommand(COMMANDS.review, 'review', activation, planTargets, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.replan, 'replan', activation, planTargets, queueFor, adapterFor, surface),
+    registerActionCommand(COMMANDS.stop, 'stop', activation, planTargets, queueFor, adapterFor, surface),
     registerViewCommand(
       activation,
-      baitonDir,
-      repoRoot,
-      (slug, phaseId) => phaseQueues.find(slug, phaseId, repoRoot),
+      planTargets,
+      (slug, phaseId, root) => phaseQueues.find(slug, phaseId, root ?? repoRoot),
       adapterFor,
       terminalHost,
       surface,
@@ -1113,7 +1136,8 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.approve,
-      (arg?: TreeNode | string) => runApprove(registry, workspace, surface, slugArg(arg)),
+      (arg?: TreeNode | string, repo?: string) =>
+        runApprove(registry, workspace, surface, planTargets, planArg(arg, repo)),
     ),
   );
 
@@ -1121,8 +1145,8 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.submitPr,
-      (arg?: TreeNode | string) =>
-        runSubmitPr(activation, baitonDir, surface, submitPrForSlug, slugArg(arg)),
+      (arg?: TreeNode | string, repo?: string) =>
+        runSubmitPr(activation, planTargets, surface, submitPrForSlug, planArg(arg, repo)),
     ),
   );
 
@@ -1133,7 +1157,8 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.showPr,
-      (arg?: TreeNode | string) => runShowPr(baitonDir, surface, slugArg(arg)),
+      (arg?: TreeNode | string, repo?: string) =>
+        runShowPr(planTargets, surface, planArg(arg, repo)),
     ),
   );
 
@@ -1144,9 +1169,8 @@ export function registerCommands(
   disposables.push(
     vscode.commands.registerCommand(
       COMMANDS.viewPlan,
-      async (a?: TreeNode | string, b?: string) => {
-        const { slug, phaseId } = phaseArgs(a, b);
-        await runViewPlan(baitonDir, surface, slug, phaseId);
+      async (a?: TreeNode | string, b?: string, c?: string) => {
+        await runViewPlan(planTargets, surface, phaseArgs(a, b, c));
       },
     ),
   );
@@ -1535,26 +1559,25 @@ function directoryExists(p: string): boolean {
 
 // --- stage / action triggers ----------------------------------------------
 
-/** A per-slug run-queue accessor: builds (and caches) the queue for a plan. */
-type QueueFor = (slug: string, phaseId: string) => RunQueue;
+/** A per-repo phase queue accessor; omitted root selects the workspace owner. */
+type QueueFor = (slug: string, phaseId: string, repoRoot?: string) => RunQueue;
 /** Looks up a phase's queue without creating one. */
-type FindQueue = (slug: string, phaseId: string) => RunQueue | undefined;
+type FindQueue = (slug: string, phaseId: string, repoRoot?: string) => RunQueue | undefined;
 
 /** Register a stage-trigger command (plan/execute/review). */
 function registerStageCommand(
   commandId: string,
   stage: Stage,
   activation: CommandActivation,
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     commandId,
-    (a?: TreeNode | string, b?: string) => {
-      const { slug, phaseId } = phaseArgs(a, b);
-      return runStage(activation, baitonDir, queueFor, adapterForRole, surface, stage, slug, phaseId);
+    (a?: TreeNode | string, b?: string, c?: string) => {
+      return runStage(activation, planTargets, queueFor, adapterForRole, surface, stage, phaseArgs(a, b, c));
     },
   );
 }
@@ -1564,14 +1587,14 @@ function registerActionCommand(
   commandId: string,
   action: 'replan' | 'stop',
   activation: CommandActivation,
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     commandId,
-    async (a?: TreeNode | string, b?: string) => {
+    async (a?: TreeNode | string, b?: string, c?: string) => {
       // replan/stop launch no sub-agent (they dispatch through the facade with
       // a placeholder role), so they are gated on Restricted Mode alone —
       // gating `stop` on a binary being present would block cancelling a run
@@ -1579,8 +1602,7 @@ function registerActionCommand(
       if (!ensureNotRestricted(activation, surface)) {
         return;
       }
-      const { slug: slugArg, phaseId: phaseArg } = phaseArgs(a, b);
-      const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
+      const target = await resolvePhaseTarget(planTargets, phaseArgs(a, b, c), surface);
       if (target === undefined) {
         return;
       }
@@ -1591,10 +1613,10 @@ function registerActionCommand(
       // running the transition table's revert path applies instead (Req 2.1, 2.2, 2.3,
       // 20.4–20.6).
       if (action === 'stop') {
-        const queue = queueFor(target.slug, target.phaseId);
+        const queue = queueFor(target.slug, target.phaseId, target.root);
         if (queue.currentRun() !== undefined) {
           queue.stop();
-          surface.log(`Baiton: stop ${target.slug}/${target.phaseId}`);
+          surface.log(`Baiton: stop ${target.label}/${target.phaseId}`);
           return;
         }
         const trigger: EngineTrigger = {
@@ -1603,11 +1625,11 @@ function registerActionCommand(
           phaseId: target.phaseId,
           action: 'stop',
         };
-        const result = await dispatchAndReport(queue, baitonDir, trigger, adapterForRole, surface);
+        const result = await dispatchAndReport(queue, target.baitonDir, trigger, adapterForRole, surface, target.label);
         if (!result.ok && result.error.kind === 'illegal-transition') {
           // The queue's reporter already surfaced the generic transition-table
           // message; this friendlier wording is the one Req 2.3 asks for.
-          surface.warn(`Baiton: nothing to stop for ${target.slug}/${target.phaseId}`);
+          surface.warn(`Baiton: nothing to stop for ${target.label}/${target.phaseId}`);
         }
         return;
       }
@@ -1617,7 +1639,14 @@ function registerActionCommand(
         phaseId: target.phaseId,
         action,
       };
-      await dispatchAndReport(queueFor(target.slug, target.phaseId), baitonDir, trigger, adapterForRole, surface);
+      await dispatchAndReport(
+        queueFor(target.slug, target.phaseId, target.root),
+        target.baitonDir,
+        trigger,
+        adapterForRole,
+        surface,
+        target.label,
+      );
     },
   );
 }
@@ -1630,8 +1659,7 @@ function registerActionCommand(
  */
 function registerViewCommand(
   activation: CommandActivation,
-  baitonDir: string,
-  repoRoot: string,
+  planTargets: PickPlanTargetDeps,
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
@@ -1639,13 +1667,12 @@ function registerViewCommand(
 ): vscode.Disposable {
   return vscode.commands.registerCommand(
     COMMANDS.view,
-    async (a?: TreeNode | string, b?: string) => {
-      const { slug: slugArg, phaseId: phaseArg } = phaseArgs(a, b);
-      const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
+    async (a?: TreeNode | string, b?: string, c?: string) => {
+      const target = await resolvePhaseTarget(planTargets, phaseArgs(a, b, c), surface);
       if (target === undefined) {
         return;
       }
-      await runView(activation, target.slug, target.phaseId, baitonDir, repoRoot, findQueue, adapterForRole, terminalHost, surface);
+      await runView(activation, target, findQueue, adapterForRole, terminalHost, surface);
     },
   );
 }
@@ -1667,24 +1694,22 @@ function registerViewCommand(
  */
 async function runView(
   activation: CommandActivation,
-  slug: string,
-  phaseId: string,
-  baitonDir: string,
-  repoRoot: string,
+  target: PlanCommandTarget & { phaseId: string },
   findQueue: FindQueue,
   adapterForRole: AdapterForRole,
   terminalHost: TerminalHost,
   surface: Surface,
 ): Promise<void> {
-  const live = findQueue(slug, phaseId)?.currentRun();
+  const { slug, phaseId } = target;
+  const live = findQueue(slug, phaseId, target.root)?.currentRun();
   if (live !== undefined) {
     live.terminal.show();
     return;
   }
 
-  const entry = latestStart(readPlanJournal(baitonDir, slug), phaseId);
+  const entry = latestStart(readPlanJournal(target.baitonDir, slug), phaseId);
   if (entry === undefined) {
-    surface.warn(`Baiton: no session recorded for ${slug}/${phaseId}`);
+    surface.warn(`Baiton: no session recorded for ${target.label}/${phaseId}`);
     return;
   }
 
@@ -1703,11 +1728,11 @@ async function runView(
   // below), while codex/antigravity minted their own — for those only an id
   // discovered after the run can be reopened (Req 3.2).
   // Attach in the directory the session was created in.
-  const worktreeDir = phaseWorktreeDirFor(repoRoot, slug, phaseId);
-  const cwd = fs.existsSync(worktreeDir) ? worktreeDir : repoRoot;
+  const worktreeDir = phaseWorktreeDirFor(target.root, slug, phaseId);
+  const cwd = fs.existsSync(worktreeDir) ? worktreeDir : target.root;
   let sessionId = resumableSessionId(entry, adapter.acceptsSessionId);
   if (sessionId === undefined) {
-    surface.warn(`Baiton: no session recorded for ${slug}/${phaseId}`);
+    surface.warn(`Baiton: no session recorded for ${target.label}/${phaseId}`);
     return;
   }
   // CLIs that mint their own session ids (opencode) map the journaled Baiton
@@ -1716,7 +1741,7 @@ async function runView(
   if (adapter.resolveSessionId !== undefined) {
     const resolved = await adapter.resolveSessionId(sessionId, cwd);
     if (resolved === undefined) {
-      surface.warn(`Baiton: ${adapter.id} has no session for ${slug}/${phaseId}; opening its most recent session instead`);
+      surface.warn(`Baiton: ${adapter.id} has no session for ${target.label}/${phaseId}; opening its most recent session instead`);
     } else {
       sessionId = resolved;
     }
@@ -1728,7 +1753,7 @@ async function runView(
     sessionId,
   });
   const terminal = terminalHost.createTerminal({
-    name: `Baiton view ${slug}/${phaseId}`,
+    name: `Baiton view ${target.label}/${phaseId}`,
     shellPath: adapterSpec.shellPath,
     shellArgs: adapterSpec.shellArgs,
     cwd,
@@ -1740,18 +1765,17 @@ async function runView(
 /** Dispatch a stage trigger, gated under Restricted Mode and the stage's role executable. */
 async function runStage(
   activation: CommandActivation,
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   queueFor: QueueFor,
   adapterForRole: AdapterForRole,
   surface: Surface,
   stage: Stage,
-  slugArg: string | undefined,
-  phaseArg: string | undefined,
+  arg: PlanArg & { phaseId?: string },
 ): Promise<void> {
   if (!ensureCanDispatch(activation, surface, STAGE_ROLE[stage])) {
     return;
   }
-  const target = await resolveTarget(baitonDir, slugArg, phaseArg, surface);
+  const target = await resolvePhaseTarget(planTargets, arg, surface);
   if (target === undefined) {
     return;
   }
@@ -1761,7 +1785,14 @@ async function runStage(
     phaseId: target.phaseId,
     stage,
   };
-  await dispatchAndReport(queueFor(target.slug, target.phaseId), baitonDir, trigger, adapterForRole, surface);
+  await dispatchAndReport(
+    queueFor(target.slug, target.phaseId, target.root),
+    target.baitonDir,
+    trigger,
+    adapterForRole,
+    surface,
+    target.label,
+  );
 }
 
 /**
@@ -1820,20 +1851,21 @@ async function dispatchAndReport(
   trigger: EngineTrigger,
   adapterForRole: AdapterForRole,
   surface: Surface,
+  displayLabel: string = trigger.slug,
 ): Promise<DispatchResult> {
   const result = await dispatchTrigger(queue, baitonDir, trigger, adapterForRole);
   if (result.ok) {
     surface.log(
-      `Baiton: ${describeTrigger(trigger)} → ${result.outcome.kind}`,
+      `Baiton: ${describeTrigger(trigger, displayLabel)} → ${result.outcome.kind}`,
     );
   }
   return result;
 }
 
 /** A short description of a trigger for the running log. */
-function describeTrigger(trigger: EngineTrigger): string {
+function describeTrigger(trigger: EngineTrigger, displayLabel: string = trigger.slug): string {
   const what = trigger.kind === 'stage' ? trigger.stage : trigger.action;
-  return `${what} ${trigger.slug}/${trigger.phaseId}`;
+  return `${what} ${displayLabel}/${trigger.phaseId}`;
 }
 
 // --- approve ---------------------------------------------------------------
@@ -1848,21 +1880,26 @@ async function runApprove(
   registry: ToolRegistry,
   workspace: WorkspaceContext<vscode.Uri>,
   surface: Surface,
-  slugArg: string | undefined,
+  planTargets: PickPlanTargetDeps,
+  arg: PlanArg,
 ): Promise<void> {
-  const slug = slugArg ?? (await promptForSlug(workspace, 'Plan slug to approve'));
-  if (slug === undefined) {
-    return;
-  }
+  const target = await resolvePlanTargetOrPick(planTargets, arg, surface);
+  if (target === undefined) return;
   const ctx = guardContextFor(workspace);
-  const callId = `approve-${slug}-${Date.now()}`;
+  const callId = `approve-${target.label}-${Date.now()}`;
   // `approve_plan` belongs to both orchestrator phases; a plan approved from
   // the UI is by definition still being gathered rather than driven (Req 11.1).
-  const result = await registry.call('approve_plan', { slug }, callId, ctx, 'gather');
+  const result = await registry.call(
+    'approve_plan',
+    target.isOwner ? { slug: target.slug } : { slug: target.slug, plan_repo: target.repoPath },
+    callId,
+    ctx,
+    'gather',
+  );
   if (result.ok) {
-    surface.info(`Baiton: approved plan "${slug}".`);
+    surface.info(`Baiton: approved plan "${target.label}".`);
   } else {
-    surface.warn(`Baiton: ${result.error}`);
+    surface.warn(`Baiton: could not approve plan "${target.label}": ${result.error}`);
   }
 }
 
@@ -1896,39 +1933,37 @@ function toolSpecsForStep(
  */
 async function runSubmitPr(
   activation: CommandActivation,
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   surface: Surface,
-  submit: (slug: string) => Promise<SubmitPrOutcome>,
-  slugArg: string | undefined,
+  submit: (slug: string, root?: string) => Promise<SubmitPrOutcome>,
+  arg: PlanArg,
 ): Promise<void> {
   if (!ensureCanDispatch(activation, surface, 'pr-writer')) {
     return;
   }
-  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
-  if (slug === undefined) {
-    return;
-  }
+  const target = await resolvePlanTargetOrPick(planTargets, arg, surface);
+  if (target === undefined) return;
   const answer = await vscode.window.showWarningMessage(
-    `Submit a pull request for plan "${slug}"? This pushes its branch and opens the PR.`,
+    `Submit a pull request for plan "${target.label}"? This pushes its branch and opens the PR.`,
     { modal: true },
     'Submit PR',
   );
   if (answer !== 'Submit PR') {
     return;
   }
-  surface.log(`Baiton: submit PR ${slug}`);
-  const outcome = await submit(slug);
+  surface.log(`Baiton: submit PR ${target.label}`);
+  const outcome = await submit(target.slug, target.isOwner ? undefined : target.root);
   if (!outcome.ok) {
-    surface.error(`Baiton: ${outcome.error}`);
+    surface.error(`Baiton: submit PR for "${target.label}" failed: ${outcome.error}`);
     return;
   }
   const verb = outcome.reused ? 'reused' : 'opened';
   const perRepo = outcome.prs === undefined
     ? `${verb} PR ${outcome.url}`
     : describeRepoPrs(outcome.prs.map((pr) => ({ repo: pr.repo, pr: { url: pr.url }, reused: pr.reused })));
-  surface.log(`Baiton: ${perRepo} for "${slug}"`);
+  surface.log(`Baiton: ${perRepo} for "${target.label}"`);
   const open = await vscode.window.showInformationMessage(
-    `Baiton: ${verb} pull request${outcome.prs !== undefined && outcome.prs.length > 1 ? 's' : ''} for "${slug}": ${outcome.title}\n${perRepo}`,
+    `Baiton: ${verb} pull request${outcome.prs !== undefined && outcome.prs.length > 1 ? 's' : ''} for "${target.label}": ${outcome.title}\n${perRepo}`,
     'Open PR',
   );
   if (open === 'Open PR') {
@@ -1946,27 +1981,25 @@ async function runSubmitPr(
  * warning, not an error: the user has simply not submitted one yet.
  */
 async function runShowPr(
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   surface: Surface,
-  slugArg: string | undefined,
+  arg: PlanArg,
 ): Promise<void> {
-  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
-  if (slug === undefined) {
-    return;
-  }
+  const target = await resolvePlanTargetOrPick(planTargets, arg, surface);
+  if (target === undefined) return;
   let raw: string;
   try {
-    raw = fs.readFileSync(resolveDocument(baitonDir, slug).documentPath, 'utf8');
+    raw = fs.readFileSync(resolveDocument(target.baitonDir, target.slug).documentPath, 'utf8');
   } catch (e) {
     surface.error(
-      `Baiton: could not read plan "${slug}": ${e instanceof Error ? e.message : String(e)}.`,
+      `Baiton: could not read plan "${target.label}": ${e instanceof Error ? e.message : String(e)}.`,
     );
     return;
   }
   const url = parsePlan(raw).frontmatter.get('pr')?.trim();
   if (url === undefined || url === '') {
     surface.warn(
-      `Baiton: plan "${slug}" has no recorded pull request; submit one first.`,
+      `Baiton: plan "${target.label}" has no recorded pull request; submit one first.`,
     );
     return;
   }
@@ -1986,25 +2019,22 @@ async function runShowPr(
  * the `executing` state commit (which stages the whole plan folder).
  */
 async function runViewPlan(
-  baitonDir: string,
+  planTargets: PickPlanTargetDeps,
   surface: Surface,
-  slugArg: string | undefined,
-  phaseArg: string | undefined,
+  arg: PlanArg & { phaseId?: string },
 ): Promise<void> {
-  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
-  if (slug === undefined) {
-    surface.warn('Baiton: no plan selected.');
-    return;
-  }
-  const phaseId = phaseArg ?? (await pickPlannedPhaseId(baitonDir, slug, surface));
+  const target = await resolvePlanTargetOrPick(planTargets, arg, surface);
+  if (target === undefined) return;
+  const { slug } = target;
+  const phaseId = arg.phaseId ?? (await pickPlannedPhaseId(target.baitonDir, slug, surface));
   if (phaseId === undefined || phaseId.trim().length === 0) {
     surface.warn('Baiton: no phase selected.');
     return;
   }
-  const file = phasePlanPath(baitonDir, slug, phaseId);
+  const file = phasePlanPath(target.baitonDir, slug, phaseId);
   if (!fs.existsSync(file)) {
     surface.warn(
-      `Baiton: no plan on file for "${phaseId}" in plan "${slug}"; run Plan first.`,
+      `Baiton: no plan on file for "${phaseId}" in plan "${target.label}"; run Plan first.`,
     );
     return;
   }
@@ -2141,6 +2171,192 @@ function slugFromDocumentUri(uri: vscode.Uri): string | undefined {
 
 // --- shared helpers --------------------------------------------------------
 
+/** A plan addressed by its owning repo, with that repo's `.baiton/` and git resolved. */
+export interface PlanCommandTarget {
+  slug: string;
+  /** Absolute owning-repo root (`repoLockKey` comparable). */
+  root: string;
+  baitonDir: string;
+  git: GitService;
+  /** Repo path relative to the conversation owner (`.` for the owner). */
+  repoPath: string;
+  /** True when the plan lives in the workspace owner repo. */
+  isOwner: boolean;
+  /** Bare slug for owner plans; `<repoPath>:<slug>` otherwise. */
+  label: string;
+}
+
+/** A slug (bare or qualified) and an optional owner repo name or path. */
+export interface PlanArg {
+  slug?: string;
+  repoName?: string;
+  repoPath?: string;
+}
+
+export interface PlanTargetDeps {
+  planRepos: PlanRepoSeam;
+  repos: () => RepoSet | undefined;
+  ownerRoot: string;
+  ownerBaitonDir: string;
+  ownerGit: GitService;
+  /** Chooser used on ambiguity; returns the chosen qualified ref or undefined. */
+  choose: (items: string[], placeHolder: string) => Promise<string | undefined>;
+}
+
+export type PickPlanTargetDeps = PlanTargetDeps & {
+  quickPick: (items: string[], placeHolder: string) => Promise<string | undefined>;
+  input: (prompt: string) => Promise<string | undefined>;
+};
+
+type PlanTargetResolution =
+  | { ok: true; target: PlanCommandTarget }
+  | { ok: false; error: string }
+  | { ok: false; cancelled: true };
+
+/** Resolve a bare or qualified plan reference to its owning repository. */
+export async function resolvePlanTarget(
+  deps: PlanTargetDeps,
+  arg: PlanArg & { slug: string },
+): Promise<PlanTargetResolution> {
+  const parsed = parsePlanRef(arg.slug);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  const slug = parsed.ref.slug;
+  const explicitTargets: PlanRepoTarget[] = [];
+
+  if (arg.repoName !== undefined) {
+    const set = deps.repos();
+    let namedTarget: PlanRepoTarget | undefined;
+    if (set !== undefined) {
+      const repo = repoByName(set, arg.repoName);
+      if (repo !== undefined) namedTarget = deps.planRepos.targetAt(repo.root);
+    } else {
+      const ownerName = deps.planRepos.owners().find((info) => {
+        const resolved = deps.planRepos.target(info.path);
+        return resolved.ok && repoLockKey(resolved.target.root) === repoLockKey(deps.ownerRoot);
+      })?.name;
+      if (arg.repoName === '.' || arg.repoName === ownerName) {
+        const resolved = deps.planRepos.target('.');
+        if (resolved.ok) namedTarget = resolved.target;
+      }
+    }
+    if (namedTarget === undefined) {
+      return {
+        ok: false,
+        error: `repo "${arg.repoName}" is not a discovered repo with a .baiton/ directory`,
+      };
+    }
+    explicitTargets.push(namedTarget);
+  }
+
+  const repoAddresses = [parsed.ref.repo, arg.repoPath]
+    .filter((repoPath): repoPath is string => repoPath !== undefined)
+    .filter((repoPath, index, all) =>
+      all.findIndex((candidate) => normalizeRepoPath(candidate) === normalizeRepoPath(repoPath)) === index,
+    );
+  for (const repoPath of repoAddresses) {
+    const resolved = deps.planRepos.target(repoPath);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    explicitTargets.push(resolved.target);
+  }
+
+  if (explicitTargets.length > 1) {
+    const firstRoot = repoLockKey(explicitTargets[0].root);
+    if (explicitTargets.some((target) => repoLockKey(target.root) !== firstRoot)) {
+      return { ok: false, error: `plan reference "${arg.slug}" names conflicting repos` };
+    }
+  }
+
+  let target: PlanRepoTarget;
+  if (explicitTargets.length > 0) {
+    target = explicitTargets[0];
+  } else {
+    const located = await deps.planRepos.locate(slug);
+    if (located.kind === 'found') {
+      target = located.target;
+    } else if (located.kind === 'ambiguous') {
+      const candidates = located.repos.map((repoPath) => formatPlanRef(repoPath, slug));
+      const picked = await deps.choose(candidates, `Plan "${slug}" exists in more than one repo`);
+      if (picked === undefined) {
+        return {
+          ok: false,
+          error: `plan "${slug}" exists in more than one repo: ${candidates.join(', ')}; pick one as <repoPath>:<slug>`,
+        };
+      }
+      const chosen = parsePlanRef(picked);
+      if (!chosen.ok) return { ok: false, error: chosen.error };
+      if (chosen.ref.repo === undefined || chosen.ref.slug !== slug) {
+        return { ok: false, error: `invalid plan choice "${picked}"` };
+      }
+      const resolved = deps.planRepos.target(chosen.ref.repo);
+      if (!resolved.ok) return { ok: false, error: resolved.error };
+      target = resolved.target;
+    } else if (located.kind === 'missing') {
+      const owner = deps.planRepos.target('.');
+      if (!owner.ok) return { ok: false, error: owner.error };
+      target = owner.target;
+    } else {
+      return { ok: false, error: located.error };
+    }
+  }
+
+  const isOwner = repoLockKey(target.root) === repoLockKey(deps.ownerRoot);
+  return {
+    ok: true,
+    target: {
+      slug,
+      root: target.root,
+      baitonDir: isOwner ? deps.ownerBaitonDir : target.baitonDir,
+      git: isOwner ? deps.ownerGit : target.git,
+      repoPath: target.info.path,
+      isOwner,
+      label: isOwner ? slug : formatPlanRef(target.info.path, slug),
+    },
+  };
+}
+
+/** Pick an existing plan across discovered repositories, qualifying multi-repo choices. */
+export async function pickPlanTarget(deps: PickPlanTargetDeps): Promise<PlanCommandTarget | undefined> {
+  const infos = deps.planRepos.owners();
+  const choices: string[] = [];
+  for (const info of infos) {
+    const resolved = deps.planRepos.target(info.path);
+    if (!resolved.ok) continue;
+    const isOwner = repoLockKey(resolved.target.root) === repoLockKey(deps.ownerRoot);
+    const baitonDir = isOwner ? deps.ownerBaitonDir : resolved.target.baitonDir;
+    const slugs = listDocumentSlugs(baitonDir).filter((slug) =>
+      fs.existsSync(resolveDocument(baitonDir, slug).documentPath),
+    );
+    choices.push(...slugs.map((slug) =>
+      infos.length <= 1 ? slug : formatPlanRef(info.path, slug),
+    ));
+  }
+
+  const picked = choices.length === 0
+    ? await deps.input('Plan slug')
+    : await deps.quickPick(choices, 'Select a plan');
+  if (picked === undefined) return undefined;
+  const resolved = await resolvePlanTarget(deps, { slug: picked });
+  return resolved.ok ? resolved.target : undefined;
+}
+
+/** Resolve an explicit plan argument or ask the user to pick one. */
+async function resolvePlanTargetOrPick(
+  deps: PickPlanTargetDeps,
+  arg: PlanArg,
+  surface: Surface,
+): Promise<PlanCommandTarget | undefined> {
+  if (arg.slug === undefined) {
+    const target = await pickPlanTarget(deps);
+    if (target === undefined) surface.warn('Baiton: no plan selected.');
+    return target;
+  }
+  const resolved = await resolvePlanTarget(deps, { ...arg, slug: arg.slug });
+  if (resolved.ok) return resolved.target;
+  if ('error' in resolved) surface.warn(`Baiton: ${resolved.error}`);
+  else surface.warn('Baiton: no plan selected.');
+  return undefined;
+}
+
 /** Build the guard context (repo root, legacy session root, restricted flag) for a call. */
 function guardContextFor(workspace: WorkspaceContext<vscode.Uri>): GuardContext {
   return new GuardContext({
@@ -2154,43 +2370,19 @@ function guardContextFor(workspace: WorkspaceContext<vscode.Uri>): GuardContext 
  * Resolve the `{slug, phaseId}` a trigger acts on from the command arguments,
  * prompting the user for anything a CodeLens/palette invocation did not supply.
  */
-async function resolveTarget(
-  baitonDir: string,
-  slugArg: string | undefined,
-  phaseArg: string | undefined,
+export async function resolvePhaseTarget(
+  deps: PickPlanTargetDeps,
+  arg: PlanArg & { phaseId?: string },
   surface: Surface,
-): Promise<{ slug: string; phaseId: string } | undefined> {
-  const slug = slugArg ?? (await pickPlanSlug(baitonDir));
-  if (slug === undefined) {
-    surface.warn('Baiton: no plan selected.');
-    return undefined;
-  }
-  const phaseId =
-    phaseArg ?? (await vscode.window.showInputBox({ prompt: 'Phase id (e.g. P01)' }));
+): Promise<(PlanCommandTarget & { phaseId: string }) | undefined> {
+  const target = await resolvePlanTargetOrPick(deps, arg, surface);
+  if (target === undefined) return undefined;
+  const phaseId = arg.phaseId ?? (await vscode.window.showInputBox({ prompt: 'Phase id (e.g. P01)' }));
   if (phaseId === undefined || phaseId.trim().length === 0) {
     surface.warn('Baiton: no phase id provided.');
     return undefined;
   }
-  return { slug, phaseId };
-}
-
-/** Present plan slugs under both document roots (including legacy `.baiton/specs/`) for the user to choose from. */
-async function pickPlanSlug(baitonDir: string): Promise<string | undefined> {
-  const slugs = listDocumentSlugs(baitonDir).filter((slug) =>
-    fs.existsSync(resolveDocument(baitonDir, slug).documentPath),
-  );
-  if (slugs.length === 0) {
-    return vscode.window.showInputBox({ prompt: 'Plan slug' });
-  }
-  return vscode.window.showQuickPick(slugs, { placeHolder: 'Select a plan' });
-}
-
-/** Prompt for a plan slug, defaulting to a quick pick of existing plans. */
-async function promptForSlug(
-  workspace: WorkspaceContext<vscode.Uri>,
-  _prompt: string,
-): Promise<string | undefined> {
-  return pickPlanSlug(workspace.baitonDir.fsPath);
+  return { ...target, phaseId };
 }
 
 /**
@@ -2343,19 +2535,19 @@ function triggerFix(
   );
 }
 
-/**
- * Normalize the first argument a stage/approve command receives into a plan
- * slug. The tree's inline actions invoke the command with the clicked
- * {@link TreeNode}; the CodeLens and palette invoke it with a slug string (or
- * nothing). A tree node yields its slug through {@link treeNodeTarget}
- * (Req 5.5, 18.4).
- */
-function slugArg(arg: TreeNode | string | undefined): string | undefined {
-  if (typeof arg === 'string' || arg === undefined) {
-    return arg;
+/** Normalize a plan command argument while preserving its owning repo identity. */
+export function planArg(arg: TreeNode | string | undefined, repo?: string): PlanArg {
+  if (typeof arg === 'string') {
+    return { slug: arg, ...(repo ? { repoPath: repo } : {}) };
   }
+  if (arg === undefined) return {};
   const target = treeNodeTarget(arg);
-  return target?.[0];
+  const ownerRepo = 'ownerRepo' in arg.node ? arg.node.ownerRepo : undefined;
+  const slug = target?.[0] ?? (arg.kind === 'error' ? arg.node.slug : undefined);
+  return {
+    ...(slug !== undefined ? { slug } : {}),
+    ...(ownerRepo !== undefined ? { repoName: ownerRepo } : {}),
+  };
 }
 
 /**
@@ -2365,15 +2557,20 @@ function slugArg(arg: TreeNode | string | undefined): string | undefined {
  * it with `(slug, phaseId)`. A phase tree node yields both through
  * {@link treeNodeTarget} (Req 5.2, 18.4).
  */
-function phaseArgs(
+export function phaseArgs(
   a: TreeNode | string | undefined,
-  b: string | undefined,
-): { slug?: string; phaseId?: string } {
+  b?: string,
+  c?: string,
+): PlanArg & { phaseId?: string } {
   if (a !== undefined && typeof a !== 'string') {
     const target = treeNodeTarget(a);
-    return { slug: target?.[0], phaseId: target?.[1] };
+    return { ...planArg(a), ...(target?.[1] !== undefined ? { phaseId: target[1] } : {}) };
   }
-  return { slug: a, phaseId: b };
+  return {
+    ...(a !== undefined ? { slug: a } : {}),
+    ...(b !== undefined ? { phaseId: b } : {}),
+    ...(c ? { repoPath: c } : {}),
+  };
 }
 
 /**

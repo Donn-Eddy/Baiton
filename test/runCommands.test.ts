@@ -12,6 +12,9 @@ import { createGitService } from '../src/git/gitService';
 import { createRunStore, type RunStore } from '../src/engine/runStore';
 import { createRunWorktree } from '../src/engine/runWorktree';
 import { createRunPipeline } from '../src/engine/runPipeline';
+import { createPlanRepoSeam } from '../src/orchestrator/planRepos';
+import type { GitService } from '../src/git';
+import type { RepoSet } from '../src/activation/repoDiscovery';
 import type { ResultWatcherFactory } from '../src/engine/runQueue';
 import type { ResultWatcher, Unsubscribe } from '../src/engine/resultWatcher';
 import type {
@@ -703,6 +706,249 @@ describe('run commands (design "dispatch modes")', () => {
       const lock = createStageLock({ planDraftRunning: () => false, runRunning: () => false });
       assert.strictEqual(lock.runPipelineBusy(), false);
       assert.strictEqual(lock.planDraftBusy(), false);
+    });
+  });
+});
+
+describe('plan command targets (repo, slug)', () => {
+  type CommandsModule = typeof import('../src/activation/commands');
+  let mod: CommandsModule;
+  const tempRoots: string[] = [];
+
+  before(async () => {
+    const root = process.cwd();
+    register(
+      pathToFileURL(join(root, 'test/fixtures/vscodeLoader.mjs')).href,
+      pathToFileURL(join(root, '/')).href,
+    );
+    await import('./fixtures/vscodeLoader.mjs');
+    (globalThis as unknown as { __vscodeFake: unknown }).__vscodeFake = {
+      window: { showQuickPick: async () => undefined, showInputBox: async () => undefined },
+      commands: {},
+      workspace: {},
+      languages: {},
+      env: {},
+      Uri: {},
+      Disposable: class {},
+    };
+    mod = await import('../src/activation/commands');
+  });
+
+  afterEach(() => {
+    while (tempRoots.length > 0) {
+      fs.rmSync(tempRoots.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  function makeLayout(): {
+    ws: string;
+    child: string;
+    ownerBaiton: string;
+    childBaiton: string;
+    set: RepoSet;
+    ownerGit: GitService;
+    childGit: GitService;
+  } {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'baiton-plan-target-'));
+    tempRoots.push(ws);
+    const child = path.join(ws, 'child');
+    const ownerBaiton = path.join(ws, '.baiton');
+    const childBaiton = path.join(child, '.baiton');
+    for (const [baiton, slug] of [
+      [ownerBaiton, 'alpha'],
+      [ownerBaiton, 'shared'],
+      [childBaiton, 'beta'],
+      [childBaiton, 'shared'],
+    ] as const) {
+      writeFile(ws, path.relative(ws, path.join(baiton, 'plans', slug, 'plan.md')), `# ${slug}\n`);
+    }
+    const owner = {
+      name: '.',
+      folderName: path.basename(ws),
+      relPath: '',
+      root: ws,
+      baitonDir: ownerBaiton,
+      hasGit: false,
+      children: ['child'],
+    };
+    const childRepo = {
+      name: 'child',
+      folderName: path.basename(ws),
+      relPath: 'child',
+      root: child,
+      baitonDir: childBaiton,
+      hasGit: false,
+      parent: '.',
+      children: [],
+    };
+    const set: RepoSet = { repos: [owner, childRepo], folderRoots: [owner], truncated: false };
+    return {
+      ws,
+      child,
+      ownerBaiton,
+      childBaiton,
+      set,
+      ownerGit: {} as GitService,
+      childGit: {} as GitService,
+    };
+  }
+
+  function makeDeps(
+    layout: ReturnType<typeof makeLayout>,
+    options: {
+      discovered?: boolean;
+      choose?: (items: string[], placeHolder: string) => Promise<string | undefined>;
+    } = {},
+  ) {
+    const repos = options.discovered === false ? undefined : layout.set;
+    const planRepos = createPlanRepoSeam({
+      repos: () => repos,
+      ownerRoot: layout.ws,
+      restricted: () => false,
+      gitFor: (root) => path.resolve(root) === path.resolve(layout.ws) ? layout.ownerGit : layout.childGit,
+      exists: async (p) => {
+        try {
+          await fs.promises.access(p);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    return {
+      planRepos,
+      repos: () => repos,
+      ownerRoot: layout.ws,
+      ownerBaitonDir: layout.ownerBaiton,
+      ownerGit: layout.ownerGit,
+      choose: options.choose ?? (async () => undefined),
+    };
+  }
+
+  it('keeps the single-repo picker bare and returns the owner instances', async () => {
+    const layout = makeLayout();
+    const deps = makeDeps(layout, { discovered: false });
+    let offered: string[] = [];
+    const target = await mod.pickPlanTarget({
+      ...deps,
+      quickPick: async (items) => { offered = items; return 'alpha'; },
+      input: async () => undefined,
+    });
+    assert.deepStrictEqual(offered, ['alpha', 'shared']);
+    assert.ok(target);
+    assert.strictEqual(target.slug, 'alpha');
+    assert.strictEqual(target.root, layout.ws);
+    assert.strictEqual(target.baitonDir, layout.ownerBaiton);
+    assert.strictEqual(target.isOwner, true);
+    assert.strictEqual(target.label, 'alpha');
+    assert.strictEqual(target.git, layout.ownerGit);
+  });
+
+  it('qualifies every picker item when multiple repos own plans', async () => {
+    const layout = makeLayout();
+    const deps = makeDeps(layout);
+    let offered: string[] = [];
+    const target = await mod.pickPlanTarget({
+      ...deps,
+      quickPick: async (items) => { offered = items; return 'child:beta'; },
+      input: async () => undefined,
+    });
+    assert.deepStrictEqual(offered, [
+      '.:alpha', '.:shared', 'child:beta', 'child:shared',
+    ]);
+    assert.ok(target);
+    assert.strictEqual(target.slug, 'beta');
+    assert.strictEqual(target.root, layout.child);
+    assert.strictEqual(target.baitonDir, layout.childBaiton);
+    assert.strictEqual(target.isOwner, false);
+    assert.strictEqual(target.label, 'child:beta');
+    assert.strictEqual(target.git, layout.childGit);
+  });
+
+  it('locates unique and qualified refs and asks before resolving an ambiguous bare slug', async () => {
+    const layout = makeLayout();
+    let chosen: string[] = [];
+    const choice: { selected?: string } = {};
+    const deps = makeDeps(layout, {
+      choose: async (items) => { chosen = items; return choice.selected; },
+    });
+
+    const unique = await mod.resolvePlanTarget(deps, { slug: 'beta' });
+    assert.ok(unique.ok);
+    if (unique.ok) assert.strictEqual(unique.target.root, layout.child);
+
+    const qualified = await mod.resolvePlanTarget(deps, { slug: 'child:shared' });
+    assert.ok(qualified.ok);
+    if (qualified.ok) assert.strictEqual(qualified.target.root, layout.child);
+
+    const dismissed = await mod.resolvePlanTarget(deps, { slug: 'shared' });
+    assert.deepStrictEqual(chosen, ['.:shared', 'child:shared']);
+    assert.ok(!dismissed.ok && 'error' in dismissed);
+    if (!dismissed.ok && 'error' in dismissed) {
+      assert.ok(dismissed.error.includes('.:shared, child:shared'));
+    }
+
+    choice.selected = 'child:shared';
+    const selected = await mod.resolvePlanTarget(deps, { slug: 'shared' });
+    assert.ok(selected.ok);
+    if (selected.ok) assert.strictEqual(selected.target.root, layout.child);
+  });
+
+  it('resolves tree repo names and explicit paths without choosing and reports unknown names', async () => {
+    const layout = makeLayout();
+    let chooseCalls = 0;
+    const deps = makeDeps(layout, { choose: async () => { chooseCalls++; return undefined; } });
+    const byName = await mod.resolvePlanTarget(deps, { slug: 'shared', repoName: 'child' });
+    const byPath = await mod.resolvePlanTarget(deps, { slug: 'shared', repoPath: 'child' });
+    assert.ok(byName.ok && byPath.ok);
+    if (byName.ok) assert.strictEqual(byName.target.root, layout.child);
+    if (byPath.ok) assert.strictEqual(byPath.target.root, layout.child);
+    assert.strictEqual(chooseCalls, 0);
+
+    const unknown = await mod.resolvePlanTarget(deps, { slug: 'shared', repoName: 'missing' });
+    assert.ok(!unknown.ok && 'error' in unknown);
+    if (!unknown.ok && 'error' in unknown) {
+      assert.strictEqual(unknown.error, 'repo "missing" is not a discovered repo with a .baiton/ directory');
+    }
+  });
+
+  it('falls back to the owner when a bare slug does not exist in any repo', async () => {
+    const layout = makeLayout();
+    const result = await mod.resolvePlanTarget(makeDeps(layout), { slug: 'nope' });
+    assert.ok(result.ok);
+    if (result.ok) {
+      assert.strictEqual(result.target.root, layout.ws);
+      assert.strictEqual(result.target.baitonDir, layout.ownerBaiton);
+      assert.strictEqual(result.target.isOwner, true);
+    }
+  });
+
+  it('normalizes TreeNode and CodeLens arguments with the plan owner repo', () => {
+    const phaseNode = {
+      kind: 'phase' as const,
+      node: {
+        slug: 's',
+        id: 'P01',
+        ownerRepo: 'child',
+        repo: 'other',
+        title: 'Phase',
+        state: 'pending' as const,
+        blocked: false,
+        hasSession: false,
+        hasPlan: false,
+        actions: [],
+      },
+    };
+    assert.deepStrictEqual(mod.planArg(phaseNode), { slug: 's', repoName: 'child' });
+    assert.deepStrictEqual(mod.phaseArgs(phaseNode), { slug: 's', phaseId: 'P01', repoName: 'child' });
+
+    const ownerless = {
+      ...phaseNode,
+      node: { ...phaseNode.node, ownerRepo: undefined, repo: 'other' },
+    };
+    assert.deepStrictEqual(mod.planArg(ownerless), { slug: 's' });
+    assert.deepStrictEqual(mod.phaseArgs('s', 'P01', 'child'), {
+      slug: 's', phaseId: 'P01', repoPath: 'child',
     });
   });
 });
