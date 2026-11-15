@@ -11,10 +11,11 @@
  *
  * A watcher over `{plans,specs}/**` coalesces filesystem changes; the legacy
  * `specs` root is the legacy document root. The three top-level roots are
- * Active, Pending, and Completed groups, with plans beneath them. Multiple
- * repository sources are labeled by owner, while phase labels identify a
- * distinct target repo. Plan clicks open the owning repository's document and
- * update the active plan when that source is actionable. Inline actions are
+ * Active, Pending, and Completed groups, with plans beneath them. It uses one
+ * source per discovered `.baiton/` repository and de-duplicates plans by
+ * (repo, slug). Multiple repository sources are labeled by owner, while phase
+ * labels identify a distinct target repo. Plan clicks pass the owning repo to
+ * the active-plan sink and open that repository's document. Inline actions are
  * hidden in Restricted Mode through package.json context clauses.
  */
 import * as vscode from 'vscode';
@@ -37,10 +38,8 @@ import { planContextValue, PR_PARTIAL_STATUS, PR_STATUS } from '../model/planAct
 import { readPlanJournal, type JournalEntry } from '../journal';
 import type { RepoTopology } from '../model/validator';
 import {
-  listPlans,
   listPlansAcrossRepos,
   listPhasePlans,
-  type RepoListedPlan,
 } from './planLister';
 import type { Surface } from './surface';
 
@@ -49,7 +48,7 @@ import type { Surface } from './surface';
  * active plan follows the explorer selection. The sink is optional when no chat
  * surface is wired.
  */
-export type SetActivePlan = (slug: string | undefined) => void;
+export type SetActivePlan = (slug: string | undefined, repo?: string) => void;
 
 /** A repository source for listing plan documents and their approval facts. */
 export interface PlanRepoSource {
@@ -57,7 +56,7 @@ export interface PlanRepoSource {
   baitonDir: string;
   topology?: RepoTopology;
   isApproved(slug: string): Promise<boolean>;
-  /** False for repos whose commands are not yet repo-aware. */
+  /** False in Restricted Mode for non-owner repos and for a repo whose .baiton/ cannot be loaded. */
   actionable: boolean;
 }
 
@@ -184,7 +183,8 @@ export type TreeNode =
  * matching `baiton.*` command from a clicked {@link TreeNode} (Req 5.2, 5.5,
  * 18.4). A plan root yields `[slug]` (Approve/Submit PR/Show PR), a phase
  * yields `[slug, phaseId]` (Plan/Execute/Review/Re-plan/Stop), and group or
- * error nodes have no action.
+ * error nodes have no action. The owning repo travels on the node's
+ * `ownerRepo` for command handlers to resolve.
  */
 export function treeNodeTarget(node: TreeNode): string[] | undefined {
   switch (node.kind) {
@@ -357,21 +357,15 @@ export class PlanExplorer
     const seq = ++this.refreshSeq;
     const sources = this.sources();
     const showRepoLabels = this.showRepoLabels;
-    const multiSource = showRepoLabels;
-    const listed = multiSource
-      ? await listPlansAcrossRepos(sources.map((source) => ({
-        repo: source.repo as string,
-        baitonDir: source.baitonDir,
-        topology: source.topology,
-      })))
-      : await listPlans(this.baitonDir);
+    const listed = await listPlansAcrossRepos(sources.map((source) => ({
+      repo: source.repo ?? '',
+      baitonDir: source.baitonDir,
+      topology: source.topology,
+    })));
     const inputs = await Promise.all(
       listed.map(async (entry) => {
-        const repoEntry = multiSource ? entry as RepoListedPlan : undefined;
-        const source = multiSource
-          ? sources.find((candidate) => candidate.repo === repoEntry?.repo) ?? sources[0]
-          : sources[0];
-        const ownerBaitonDir = repoEntry?.baitonDir ?? this.baitonDir;
+        const source = sources.find((candidate) => candidate.baitonDir === entry.baitonDir) ?? sources[0];
+        const ownerBaitonDir = entry.baitonDir;
         return {
           slug: entry.slug,
           raw: entry.raw,
@@ -392,6 +386,7 @@ export class PlanExplorer
           sessions: sessionSet(readPlanJournal(ownerBaitonDir, entry.slug)),
           plans: await listPhasePlans(ownerBaitonDir, entry.slug),
           ...(showRepoLabels && source.repo !== undefined ? { repo: source.repo } : {}),
+          ...(source.repo !== undefined ? { ownerRepo: source.repo } : {}),
           topology: source.topology,
           actionable: source.actionable,
         };
@@ -600,13 +595,14 @@ export class PlanExplorer
     item.contextValue = node.invalid ? CONTEXT_ERROR : planContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.invalid ? 'warning' : 'file');
     item.tooltip = this.planTooltip(node);
+    const owner = node.repo === undefined ? undefined : node.ownerRepo ?? node.repo;
     item.command = {
       command: OPEN_PLAN_COMMAND,
       title: 'Open Plan',
-      arguments: node.repo === undefined ? [node.slug] : [node.slug, node.repo],
+      arguments: owner === undefined ? [node.slug] : [node.slug, owner],
     };
-    if (node.repo !== undefined) {
-      item.id = `${node.repo}:${node.slug}`;
+    if (owner !== undefined) {
+      item.id = `${owner}:${node.slug}`;
     }
     return item;
   }
@@ -661,6 +657,9 @@ export class PlanExplorer
     // tokens with `\b<action>\b` so the tree and the menu cannot disagree.
     item.contextValue = phaseContextValue(node.actions);
     item.iconPath = new vscode.ThemeIcon(node.blocked ? 'circle-slash' : 'circle-outline');
+    if (node.ownerRepo !== undefined && this.showRepoLabels) {
+      item.id = `${node.ownerRepo}:${node.slug}/${node.id}`;
+    }
     item.tooltip = `${node.id} ${node.title}\nState: ${node.state}\nBlocked: ${node.blocked ? 'yes' : 'no'}` +
       (node.repo !== undefined ? `\nRepo: ${node.repo}` : '');
     return item;
@@ -689,12 +688,17 @@ export class PlanExplorer
    */
   private async openPlan(slug: string, repo?: string): Promise<void> {
     const sources = this.sources();
-    const source = sources.find((candidate) => candidate.repo === repo) ??
-      sources.find((candidate) => candidate.baitonDir === this.baitonDir) ?? {
+    const source = repo !== undefined
+      ? sources.find((candidate) => candidate.repo === repo)
+      : sources.find((candidate) => candidate.baitonDir === this.baitonDir) ?? {
         baitonDir: this.baitonDir,
         isApproved: (name: string) => this.planStore.isApproved(name),
         actionable: true,
       };
+    if (source === undefined) {
+      this.surface.error(`Baiton: could not open plan "${slug}" in ${repo}: that repo is not a discovered .baiton/ repo.`);
+      return;
+    }
     const documentPath = resolveDocument(source.baitonDir, slug).documentPath;
     try {
       const doc = await vscode.workspace.openTextDocument(documentPath);
@@ -706,7 +710,7 @@ export class PlanExplorer
       return; // Leave the active plan unchanged (Req 2.7).
     }
     if (source.actionable) {
-      this.setActivePlan?.(slug);
+      this.setActivePlan?.(slug, source.repo);
     }
   }
 }
