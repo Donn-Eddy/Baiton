@@ -1,12 +1,12 @@
 ---
 version: 1
 name: child-repo-plans-first-class
-status: draft
+status: approved
 mode: manual
-base:
-base_commit:
-branch:
-approved_rev:
+base: main
+base_commit: 8fbbb806e56c3d4c65a73110713bb0370db588d6
+branch: baiton/child-repo-plans-first-class
+approved_rev: 0a46fc1b3426ccf70e66ce983c1cc93616614972a1849acdc67dc66695c3e370
 ---
 
 # Endstate
