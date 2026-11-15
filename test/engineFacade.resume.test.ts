@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  createPhaseQueueOwners,
   createPhaseQueues,
   dispatchTrigger,
   phaseQueueKey,
@@ -39,6 +40,8 @@ import {
   phaseJournalPathFor,
 } from '../src/journal';
 import { ok } from '../src/model/result';
+import { approvalHash } from '../src/model/hash';
+import { parsePlan } from '../src/model/parser';
 
 /**
  * The engine facade resumes the executor by Session_Id.
@@ -408,6 +411,205 @@ describe('phase queues keyed by owning repo', () => {
     resultListener?.(JSON.stringify({ summary: 'done', files_changed: [], commands_run: [], notes: [] }));
     await dispatch;
     assert.strictEqual(queues.isRunning('demo', otherRoot), false);
+  });
+});
+
+describe('per-repo owner registry', () => {
+  const roots: string[] = [];
+
+  function makeRepo(label: string): { root: string; baitonDir: string; git: GitWorktreeService } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `baiton-${label}-`));
+    roots.push(root);
+    const baitonDir = path.join(root, '.baiton');
+    fs.mkdirSync(baitonDir, { recursive: true });
+    const git = { ...makeGit(), commitPaths: async () => 'commit' } as unknown as GitWorktreeService;
+    return { root, baitonDir, git };
+  }
+
+  function writePlan(baitonDir: string, approved = false): void {
+    const documentPath = path.join(baitonDir, 'plans', 'demo', 'plan.md');
+    fs.mkdirSync(path.dirname(documentPath), { recursive: true });
+    let contents = [
+      '---',
+      'status: approved',
+      'approved_rev:',
+      '---',
+      '',
+      '# PHASES',
+      '- [planned] P01 Owner phase',
+      '',
+    ].join('\n');
+    if (approved) {
+      const hash = approvalHash(parsePlan(contents));
+      contents = contents.replace('approved_rev:', `approved_rev: ${hash}`);
+    }
+    fs.writeFileSync(documentPath, contents, 'utf8');
+    const phasePlanPath = path.join(baitonDir, 'plans', 'demo', 'phases', 'P01', 'plan.md');
+    fs.mkdirSync(path.dirname(phasePlanPath), { recursive: true });
+    fs.writeFileSync(phasePlanPath, '# Plan P01\n', 'utf8');
+  }
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('caches discovered owners by canonical repo root and retries unknown roots', () => {
+    const childA = makeRepo('owner-cache-a');
+    const childB = makeRepo('owner-cache-b');
+    const sources = new Map([
+      [path.resolve(childA.root), { ...childA }],
+      [path.resolve(childB.root), { ...childB }],
+    ]);
+    const lookups = new Map<string, number>();
+    const registry = createPhaseQueueOwners({
+      sourceAt(repoRoot) {
+        const key = path.resolve(repoRoot);
+        lookups.set(key, (lookups.get(key) ?? 0) + 1);
+        return sources.get(key);
+      },
+      gitFor(repoRoot) {
+        return sources.get(path.resolve(repoRoot))?.git ?? childA.git;
+      },
+    });
+
+    const ownerA = registry.ownerFor(childA.root);
+    const ownerAAgain = registry.ownerFor(`${childA.root}/./`);
+    const ownerB = registry.ownerFor(childB.root);
+    assert.ok(ownerA && ownerB);
+    assert.strictEqual(ownerA, ownerAAgain);
+    assert.notStrictEqual(ownerA, ownerB);
+    assert.notStrictEqual(ownerA.planWriter, ownerB.planWriter);
+    assert.notStrictEqual(ownerA.planStore, ownerB.planStore);
+    assert.notStrictEqual(ownerA.baitonDir, ownerB.baitonDir);
+    assert.strictEqual(ownerA.baitonDir, childA.baitonDir);
+    assert.strictEqual(ownerB.baitonDir, childB.baitonDir);
+    assert.strictEqual(lookups.get(path.resolve(childA.root)), 1);
+
+    assert.strictEqual(registry.ownerFor('/nowhere'), undefined);
+    assert.strictEqual(registry.ownerFor('/nowhere'), undefined);
+    assert.strictEqual(lookups.get(path.resolve('/nowhere')), 2);
+  });
+
+  it('reads plan documents from each owner’s own .baiton directory', async () => {
+    const childA = makeRepo('owner-store-a');
+    const childB = makeRepo('owner-store-b');
+    writePlan(childA.baitonDir);
+    const sources = new Map([
+      [path.resolve(childA.root), { ...childA }],
+      [path.resolve(childB.root), { ...childB }],
+    ]);
+    const registry = createPhaseQueueOwners({
+      sourceAt: (repoRoot) => sources.get(path.resolve(repoRoot)),
+      gitFor: (repoRoot) => sources.get(path.resolve(repoRoot))?.git ?? childA.git,
+    });
+
+    const planA = await registry.ownerFor(childA.root)?.planStore.readPlan('demo');
+    const planB = await registry.ownerFor(childB.root)?.planStore.readPlan('demo');
+    assert.deepStrictEqual(planA?.phases.map((phase) => phase.id), ['P01']);
+    assert.strictEqual(planB, undefined);
+  });
+
+  it('runs the same slug and phase concurrently with owner-specific journals and lookups', async () => {
+    const defaultRepo = makeRepo('owner-concurrent-default');
+    const childA = makeRepo('owner-concurrent-a');
+    const childB = makeRepo('owner-concurrent-b');
+    writePlan(childA.baitonDir, true);
+    writePlan(childB.baitonDir, true);
+    const sources = new Map([
+      [path.resolve(childA.root), { ...childA }],
+      [path.resolve(childB.root), { ...childB }],
+    ]);
+    const registry = createPhaseQueueOwners({
+      sourceAt: (repoRoot) => sources.get(path.resolve(repoRoot)),
+      gitFor: (repoRoot) => sources.get(path.resolve(repoRoot))?.git ?? defaultRepo.git,
+    });
+    const worktreesFor = (root: string, git: GitWorktreeService): QueueWorktreeSeam => ({
+      ensure: async () => ok({ dir: root, git }),
+      unlanded: async () => [],
+    });
+
+    const listeners: Array<(raw: string) => void> = [];
+    let resolveBothRegistered!: () => void;
+    const bothRegistered = new Promise<void>((resolve) => {
+      resolveBothRegistered = resolve;
+    });
+    const watcherFactory: ResultWatcherFactory = {
+      create(): ResultWatcher {
+        return {
+          onResult(listener): () => void {
+            listeners.push(listener);
+            if (listeners.length === 2) resolveBothRegistered();
+            return () => {};
+          },
+          onTerminalClose(): () => void {
+            return () => {};
+          },
+          dispose(): void {},
+        };
+      },
+    };
+    const defaultWriter = createPlanBranchWriter({ baitonDir: defaultRepo.baitonDir, git: defaultRepo.git });
+    const queues = createPhaseQueues({
+      workspaceRoot: defaultRepo.root,
+      baitonDir: defaultRepo.baitonDir,
+      git: defaultRepo.git,
+      planWriter: defaultWriter,
+      worktrees: worktreesFor(defaultRepo.root, defaultRepo.git),
+      planStore,
+      terminalHost: makeTerminalHost(),
+      watcherFactory,
+      modelForRole: () => ({ model: 'test-model' }),
+      adapterForRole: () => withStubbedProbe(new ClaudeAdapter()),
+      report: () => {},
+      owners: (repoRoot) => {
+        const owner = registry.ownerFor(repoRoot);
+        return owner === undefined
+          ? undefined
+          : { ...owner, worktrees: worktreesFor(owner.workspaceRoot, owner.git) };
+      },
+    });
+
+    assert.strictEqual(queues.owner()?.baitonDir, defaultRepo.baitonDir);
+    assert.strictEqual(queues.owner(childA.root)?.baitonDir, childA.baitonDir);
+    assert.strictEqual(queues.owner('/unknown'), undefined);
+    assert.throws(() => queues.queueFor('demo', 'P01', '/unknown'), /unknown owning repo/);
+
+    const dispatchA = queues.queueFor('demo', 'P01', childA.root).dispatch({
+      slug: 'demo', phaseId: 'P01', action: 'execute', role: 'executor', attempt: 1, resume: false,
+    });
+    const dispatchB = queues.queueFor('demo', 'P01', childB.root).dispatch({
+      slug: 'demo', phaseId: 'P01', action: 'execute', role: 'executor', attempt: 1, resume: false,
+    });
+    const dispatches = Promise.all([dispatchA, dispatchB]);
+    const launchState = await Promise.race([
+      bothRegistered.then(() => ({ registered: true as const })),
+      dispatches.then((results) => ({ registered: false as const, results })),
+      new Promise<{ registered: false; timeout: true }>((resolve) => {
+        setTimeout(() => resolve({ registered: false, timeout: true }), 2000);
+      }),
+    ]);
+    assert.strictEqual(
+      launchState.registered,
+      true,
+      `both child runs should reach their watchers before completing: ${JSON.stringify({ launchState, running: queues.running().map((run) => run.repo) })}`,
+    );
+
+    assert.strictEqual(queues.isRunning('demo', childA.root), true);
+    assert.strictEqual(queues.isRunning('demo', childB.root), true);
+    assert.deepStrictEqual(
+      queues.running().map((run) => run.repo).sort(),
+      [path.resolve(childA.root), path.resolve(childB.root)].sort(),
+    );
+    assert.ok(fs.existsSync(phaseJournalPathFor(childA.baitonDir, 'demo', 'P01')));
+    assert.ok(fs.existsSync(phaseJournalPathFor(childB.baitonDir, 'demo', 'P01')));
+    assert.ok(!fs.existsSync(phaseJournalPathFor(defaultRepo.baitonDir, 'demo', 'P01')));
+
+    const result = JSON.stringify({ summary: 'done', files_changed: [], commands_run: [], notes: [] });
+    listeners[0](result);
+    listeners[1](result);
+    const [resultA, resultB] = await dispatches;
+    assert.strictEqual(resultA.ok, true);
+    assert.strictEqual(resultB.ok, true);
   });
 });
 

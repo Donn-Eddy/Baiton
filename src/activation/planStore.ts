@@ -124,6 +124,21 @@ export function createPlanStore(
   };
 }
 
+/** Plan state for ONE owning repo: a writer and a store that shares it, so per-slug writes in that repo serialize. */
+export interface OwnerPlanState {
+  readonly baitonDir: string;
+  readonly planWriter: PlanBranchWriter;
+  readonly planStore: PlanStore;
+}
+
+export function createOwnerPlanState(
+  baitonDir: string,
+  git: GitWorktreeService,
+  writer: PlanBranchWriter = createPlanBranchWriter({ baitonDir, git }),
+): OwnerPlanState {
+  return { baitonDir, planWriter: writer, planStore: createPlanStore(baitonDir, git, writer) };
+}
+
 /** Dependencies for resolving phase targets while reading the owner's plan document. */
 export interface PhaseTargetResolverDeps {
   /** The OWNING repo's `.baiton/`; the plan document is read from here. */
